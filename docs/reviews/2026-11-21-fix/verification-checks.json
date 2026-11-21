@@ -6,12 +6,12 @@
         "step": "init_1366x768",
         "vw": 1366,
         "vh": 768,
-        "hostW": 593,
-        "hostH": 366,
-        "canvasAttrW": 593,
-        "canvasAttrH": 366,
-        "canvasCssW": 593,
-        "canvasCssH": 366,
+        "hostW": 1146,
+        "hostH": 459,
+        "canvasAttrW": 1146,
+        "canvasAttrH": 459,
+        "canvasCssW": 1146,
+        "canvasCssH": 459,
         "match": true
       },
       {
@@ -19,11 +19,11 @@
         "vw": 390,
         "vh": 844,
         "hostW": 356,
-        "hostH": 266,
+        "hostH": 226,
         "canvasAttrW": 356,
-        "canvasAttrH": 266,
+        "canvasAttrH": 226,
         "canvasCssW": 356,
-        "canvasCssH": 266,
+        "canvasCssH": 226,
         "match": true
       },
       {
@@ -42,24 +42,24 @@
         "step": "switch_844x390",
         "vw": 844,
         "vh": 390,
-        "hostW": 393,
-        "hostH": 178,
-        "canvasAttrW": 393,
-        "canvasAttrH": 178,
-        "canvasCssW": 393,
-        "canvasCssH": 178,
+        "hostW": 822,
+        "hostH": 408,
+        "canvasAttrW": 822,
+        "canvasAttrH": 408,
+        "canvasCssW": 822,
+        "canvasCssH": 408,
         "match": true
       },
       {
         "step": "switch_back_1366x768",
         "vw": 1366,
         "vh": 768,
-        "hostW": 593,
-        "hostH": 366,
-        "canvasAttrW": 593,
-        "canvasAttrH": 366,
-        "canvasCssW": 593,
-        "canvasCssH": 366,
+        "hostW": 1146,
+        "hostH": 459,
+        "canvasAttrW": 1146,
+        "canvasAttrH": 459,
+        "canvasCssW": 1146,
+        "canvasCssH": 459,
         "match": true
       }
     ]
@@ -109,13 +109,13 @@
         "scrollHeight": 640,
         "sceneCollapsed": true,
         "grid": {
-          "top": 205,
-          "bottom": 439,
+          "top": 179,
+          "bottom": 413,
           "w": 234
         },
         "returnBtn": {
-          "top": 545,
-          "bottom": 589
+          "top": 519,
+          "bottom": 563
         },
         "gridAndReturnInViewport": true,
         "smallFontCount": 0,
