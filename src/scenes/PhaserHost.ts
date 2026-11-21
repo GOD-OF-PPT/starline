@@ -3,26 +3,27 @@ import type { BuildingId } from '../data/buildings';
 import type { GameSettings } from '../domain/progression';
 import { BaseScene, type BaseSceneState, type ReturnDockingPlayback } from './BaseScene';
 import { CombatScene, type CombatScenePlayback } from './CombatScene';
+import { V2CombatScene, type V2StagePlayback } from '../v2/scenes/V2CombatScene';
 
-export type ActiveSceneMode = 'base' | 'combat';
+export type ActiveSceneMode = 'base' | 'combat' | 'v2_stage';
 
 /**
  * Single authoritative lifecycle & viewport bridge between responsive DOM container
- * and Phaser scenes (F07 fix).
- * Uses Phaser.Scale.NONE + ResizeObserver so the canvas NEVER lags behind container
- * reflows or crops on orientation/viewport transitions.
+ * and Phaser scenes (F07 fix + V2 multi-unit combat & event backdrop support).
  */
 export class PhaserHost {
   private readonly container: HTMLElement;
   private game: Phaser.Game;
   private baseScene: BaseScene;
   private combatScene: CombatScene;
+  private v2CombatScene: V2CombatScene;
   private resizeObserver: ResizeObserver | null = null;
   private rafHandle: number | null = null;
 
   private currentMode: ActiveSceneMode | null = null;
   private pendingBase: BaseSceneState | null = null;
   private pendingCombat: CombatScenePlayback | null = null;
+  private pendingV2Stage: V2StagePlayback | null = null;
   private buildingClickHandler: ((id: BuildingId) => void) | null = null;
   private ready = false;
   private lastW = 0;
@@ -32,6 +33,7 @@ export class PhaserHost {
     this.container = container;
     this.baseScene = new BaseScene();
     this.combatScene = new CombatScene();
+    this.v2CombatScene = new V2CombatScene();
 
     const initRect = container.getBoundingClientRect();
     const initW = Math.max(200, Math.round(initRect.width) || 390);
@@ -56,7 +58,7 @@ export class PhaserHost {
         mode: Phaser.Scale.NONE,
         autoCenter: Phaser.Scale.NO_CENTER,
       },
-      scene: [this.baseScene, this.combatScene],
+      scene: [this.baseScene, this.combatScene, this.v2CombatScene],
     });
 
     this.game.events.once(Phaser.Core.Events.READY, () => {
@@ -74,6 +76,10 @@ export class PhaserHost {
         this.game.scene.stop('BaseScene');
         this.game.scene.start('CombatScene', { playback: this.pendingCombat });
         this.currentMode = 'combat';
+      } else if (targetMode === 'v2_stage' && this.pendingV2Stage) {
+        this.game.scene.stop('BaseScene');
+        this.game.scene.start('V2CombatScene', { playback: this.pendingV2Stage });
+        this.currentMode = 'v2_stage';
       } else {
         this.game.scene.stop('BaseScene');
       }
@@ -135,6 +141,9 @@ export class PhaserHost {
       if (this.game.scene.isActive('CombatScene')) {
         this.combatScene.syncViewport(w, h);
       }
+      if (this.game.scene.isActive('V2CombatScene')) {
+        this.v2CombatScene.syncViewport(w, h);
+      }
     }
   }
 
@@ -150,9 +159,8 @@ export class PhaserHost {
     if (!this.ready) return;
 
     if (switching) {
-      if (this.game.scene.isActive('CombatScene')) {
-        this.game.scene.stop('CombatScene');
-      }
+      if (this.game.scene.isActive('CombatScene')) this.game.scene.stop('CombatScene');
+      if (this.game.scene.isActive('V2CombatScene')) this.game.scene.stop('V2CombatScene');
       this.game.scene.start('BaseScene', {
         state,
         onBuildingClick: this.buildingClickHandler ?? undefined,
@@ -175,9 +183,8 @@ export class PhaserHost {
     if (!this.ready) return;
 
     if (switching) {
-      if (this.game.scene.isActive('BaseScene')) {
-        this.game.scene.stop('BaseScene');
-      }
+      if (this.game.scene.isActive('BaseScene')) this.game.scene.stop('BaseScene');
+      if (this.game.scene.isActive('V2CombatScene')) this.game.scene.stop('V2CombatScene');
       this.game.scene.start('CombatScene', { playback });
     } else if (this.game.scene.isActive('CombatScene')) {
       this.combatScene.setPlayback(playback);
@@ -187,19 +194,44 @@ export class PhaserHost {
     this.scheduleResize();
   }
 
+  showV2Stage(playback: V2StagePlayback): void {
+    this.pendingV2Stage = playback;
+    const switching = this.currentMode !== 'v2_stage';
+    this.currentMode = 'v2_stage';
+    if (!this.ready) return;
+
+    if (switching) {
+      if (this.game.scene.isActive('BaseScene')) this.game.scene.stop('BaseScene');
+      if (this.game.scene.isActive('CombatScene')) this.game.scene.stop('CombatScene');
+      this.game.scene.start('V2CombatScene', { playback });
+    } else if (this.game.scene.isActive('V2CombatScene')) {
+      this.v2CombatScene.setPlayback(playback);
+    } else {
+      this.game.scene.start('V2CombatScene', { playback });
+    }
+    this.scheduleResize();
+  }
+
   updateCombatSettings(settings: GameSettings): void {
     if (this.ready && this.game.scene.isActive('CombatScene')) {
       this.combatScene.updateSettings(settings);
+    }
+    if (this.ready && this.game.scene.isActive('V2CombatScene')) {
+      this.v2CombatScene.updateSettings(settings);
     }
   }
 
   setCombatPaused(paused: boolean): void {
     this.combatScene.setPaused(paused);
+    this.v2CombatScene.setPaused(paused);
   }
 
   skipCombatPlayback(): void {
     if (this.ready && this.game.scene.isActive('CombatScene')) {
       this.combatScene.skipPlayback();
+    }
+    if (this.ready && this.game.scene.isActive('V2CombatScene')) {
+      this.v2CombatScene.skipPlayback();
     }
   }
 
