@@ -1,0 +1,112 @@
+[
+  {
+    "label": "arrange-360x640",
+    "vw": 360,
+    "vh": 640,
+    "scrollWidth": 360,
+    "scrollHeight": 640,
+    "sceneCollapsed": true,
+    "grid": {
+      "top": 205,
+      "bottom": 439,
+      "w": 234
+    },
+    "returnBtn": {
+      "top": 545,
+      "bottom": 589
+    },
+    "gridAndReturnInViewport": true,
+    "smallFontCount": 0,
+    "smallFonts": [],
+    "cellBorderColor": "rgb(103, 122, 146)",
+    "cellBgColor": "rgb(21, 32, 48)"
+  },
+  {
+    "label": "arrange-390x844",
+    "vw": 390,
+    "vh": 844,
+    "scrollWidth": 390,
+    "scrollHeight": 894,
+    "sceneCollapsed": true,
+    "grid": {
+      "top": 289,
+      "bottom": 625,
+      "w": 336
+    },
+    "returnBtn": {
+      "top": 829,
+      "bottom": 873
+    },
+    "gridAndReturnInViewport": false,
+    "smallFontCount": 0,
+    "smallFonts": [],
+    "cellBorderColor": "rgb(103, 122, 146)",
+    "cellBgColor": "rgb(21, 32, 48)"
+  },
+  {
+    "label": "arrange-430x932",
+    "vw": 430,
+    "vh": 932,
+    "scrollWidth": 430,
+    "scrollHeight": 932,
+    "sceneCollapsed": true,
+    "grid": {
+      "top": 272,
+      "bottom": 648,
+      "w": 376
+    },
+    "returnBtn": {
+      "top": 851,
+      "bottom": 895
+    },
+    "gridAndReturnInViewport": true,
+    "smallFontCount": 0,
+    "smallFonts": [],
+    "cellBorderColor": "rgb(103, 122, 146)",
+    "cellBgColor": "rgb(21, 32, 48)"
+  },
+  {
+    "label": "arrange-844x390",
+    "vw": 844,
+    "vh": 390,
+    "scrollWidth": 844,
+    "scrollHeight": 469,
+    "sceneCollapsed": true,
+    "grid": {
+      "top": 121,
+      "bottom": 373,
+      "w": 252
+    },
+    "returnBtn": {
+      "top": 158,
+      "bottom": 202
+    },
+    "gridAndReturnInViewport": true,
+    "smallFontCount": 0,
+    "smallFonts": [],
+    "cellBorderColor": "rgb(103, 122, 146)",
+    "cellBgColor": "rgb(21, 32, 48)"
+  },
+  {
+    "label": "arrange-1366x768",
+    "vw": 1366,
+    "vh": 768,
+    "scrollWidth": 1366,
+    "scrollHeight": 768,
+    "sceneCollapsed": false,
+    "grid": {
+      "top": 224,
+      "bottom": 608,
+      "w": 384
+    },
+    "returnBtn": {
+      "top": 396,
+      "bottom": 440
+    },
+    "gridAndReturnInViewport": true,
+    "smallFontCount": 0,
+    "smallFonts": [],
+    "cellBorderColor": "rgb(103, 122, 146)",
+    "cellBgColor": "rgb(21, 32, 48)"
+  }
+]

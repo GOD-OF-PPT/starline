@@ -1,0 +1,20 @@
+{
+  "cargoGridBorderVsCellBg": {
+    "fg": "rgb(103, 122, 146)",
+    "bg": "rgb(21, 32, 48)",
+    "ratio": 3.73,
+    "targetMin": 3
+  },
+  "primaryTextVsPanelBg": {
+    "fg": "rgb(233, 237, 242)",
+    "bg": "rgb(28, 41, 58)",
+    "ratio": 12.51,
+    "targetMin": 4.5
+  },
+  "primaryBtnTextVsBg": {
+    "fg": "rgb(17, 26, 41)",
+    "bg": "rgb(246, 184, 82)",
+    "ratio": 9.88,
+    "targetMin": 4.5
+  }
+}

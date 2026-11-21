@@ -1,0 +1,282 @@
+{
+  "F07_viewport_sync": {
+    "pass": true,
+    "detail": [
+      {
+        "step": "init_1366x768",
+        "vw": 1366,
+        "vh": 768,
+        "hostW": 593,
+        "hostH": 366,
+        "canvasAttrW": 593,
+        "canvasAttrH": 366,
+        "canvasCssW": 593,
+        "canvasCssH": 366,
+        "match": true
+      },
+      {
+        "step": "switch_390x844",
+        "vw": 390,
+        "vh": 844,
+        "hostW": 356,
+        "hostH": 266,
+        "canvasAttrW": 356,
+        "canvasAttrH": 266,
+        "canvasCssW": 356,
+        "canvasCssH": 266,
+        "match": true
+      },
+      {
+        "step": "switch_360x640",
+        "vw": 360,
+        "vh": 640,
+        "hostW": 338,
+        "hostH": 183,
+        "canvasAttrW": 338,
+        "canvasAttrH": 183,
+        "canvasCssW": 338,
+        "canvasCssH": 183,
+        "match": true
+      },
+      {
+        "step": "switch_844x390",
+        "vw": 844,
+        "vh": 390,
+        "hostW": 393,
+        "hostH": 178,
+        "canvasAttrW": 393,
+        "canvasAttrH": 178,
+        "canvasCssW": 393,
+        "canvasCssH": 178,
+        "match": true
+      },
+      {
+        "step": "switch_back_1366x768",
+        "vw": 1366,
+        "vh": 768,
+        "hostW": 593,
+        "hostH": 366,
+        "canvasAttrW": 593,
+        "canvasAttrH": 366,
+        "canvasCssW": 593,
+        "canvasCssH": 366,
+        "match": true
+      }
+    ]
+  },
+  "F10_keyboard_place_and_rotate": {
+    "pass": true,
+    "detail": {
+      "stagingCount": 0,
+      "placedCount": 6,
+      "statsText": "总攻击\n10\n基础 4\n每战护盾\n0\n上限 18\n胜后维修\n+0\n上限 4\n舱内估值\n72\n15/16 格"
+    }
+  },
+  "F01_modal_input_isolation": {
+    "pass": true,
+    "detail": {
+      "modalAttrs": {
+        "hasDialog": true,
+        "ariaModal": "true",
+        "shellInert": true,
+        "activeInDialog": true
+      },
+      "rotBeforeModal": 0,
+      "rotDuringModal": 0,
+      "afterEsc": {
+        "dialogStillOpen": false,
+        "shellInert": false,
+        "focusedId": "btn-open-help"
+      }
+    }
+  },
+  "F05_tutorial_node3_space_dilemma": {
+    "pass": true,
+    "detail": {
+      "occupiedText": "16/16 格",
+      "stagingLen": 1,
+      "returnDisabled": true
+    }
+  },
+  "F06_compact_one_viewport_arrange": {
+    "pass": true,
+    "detail": {
+      "portrait360": {
+        "label": "arrange-360x640",
+        "vw": 360,
+        "vh": 640,
+        "scrollWidth": 360,
+        "scrollHeight": 640,
+        "sceneCollapsed": true,
+        "grid": {
+          "top": 205,
+          "bottom": 439,
+          "w": 234
+        },
+        "returnBtn": {
+          "top": 545,
+          "bottom": 589
+        },
+        "gridAndReturnInViewport": true,
+        "smallFontCount": 0,
+        "smallFonts": [],
+        "cellBorderColor": "rgb(103, 122, 146)",
+        "cellBgColor": "rgb(21, 32, 48)"
+      },
+      "landscape844": {
+        "label": "arrange-844x390",
+        "vw": 844,
+        "vh": 390,
+        "scrollWidth": 844,
+        "scrollHeight": 469,
+        "sceneCollapsed": true,
+        "grid": {
+          "top": 121,
+          "bottom": 373,
+          "w": 252
+        },
+        "returnBtn": {
+          "top": 158,
+          "bottom": 202
+        },
+        "gridAndReturnInViewport": true,
+        "smallFontCount": 0,
+        "smallFonts": [],
+        "cellBorderColor": "rgb(103, 122, 146)",
+        "cellBgColor": "rgb(21, 32, 48)"
+      }
+    }
+  },
+  "F08_min_12px_and_grid_contrast": {
+    "pass": true,
+    "detail": {
+      "smallFontCounts": [
+        {
+          "label": "arrange-360x640",
+          "count": 0
+        },
+        {
+          "label": "arrange-390x844",
+          "count": 0
+        },
+        {
+          "label": "arrange-430x932",
+          "count": 0
+        },
+        {
+          "label": "arrange-844x390",
+          "count": 0
+        },
+        {
+          "label": "arrange-1366x768",
+          "count": 0
+        }
+      ],
+      "contrastReport": {
+        "cargoGridBorderVsCellBg": {
+          "fg": "rgb(103, 122, 146)",
+          "bg": "rgb(21, 32, 48)",
+          "ratio": 3.73,
+          "targetMin": 3
+        },
+        "primaryTextVsPanelBg": {
+          "fg": "rgb(233, 237, 242)",
+          "bg": "rgb(28, 41, 58)",
+          "ratio": 12.51,
+          "targetMin": 4.5
+        },
+        "primaryBtnTextVsBg": {
+          "fg": "rgb(17, 26, 41)",
+          "bg": "rgb(246, 184, 82)",
+          "ratio": 9.88,
+          "targetMin": 4.5
+        }
+      }
+    }
+  },
+  "F09_discard_manifest_confirm": {
+    "pass": true,
+    "detail": {
+      "discardModal": {
+        "open": true,
+        "title": "确认舍弃清单（1 件）"
+      },
+      "afterCancel": {
+        "stillArrange": true,
+        "undoText": "撤销舍弃 (1)"
+      },
+      "enteredSettlement": true
+    }
+  },
+  "F12_safe_return_hud_sync": {
+    "pass": true,
+    "detail": {
+      "hudVal": "+118",
+      "bodyVal": "+118"
+    }
+  },
+  "F11_docking_presentation_and_idempotency": {
+    "pass": true,
+    "detail": {
+      "dockingVisible": true,
+      "creditsAfterSkip": 118,
+      "creditsAfterReload": 118
+    }
+  },
+  "F12_defeat_40pct_hud_sync": {
+    "pass": true,
+    "detail": {
+      "hudLabel": "本次实得",
+      "hudVal": "+38",
+      "bodyVal": "+38"
+    }
+  },
+  "F12_relic_keep_toggle_hud_sync": {
+    "pass": true,
+    "detail": {
+      "beforeKeep": {
+        "hud": "+96",
+        "body": "+96"
+      },
+      "afterKeep": {
+        "hud": "+18",
+        "body": "+18"
+      }
+    }
+  },
+  "F13_final_node6_flow": {
+    "pass": true,
+    "detail": {
+      "hasNextNodeBtn": false,
+      "returnBtnText": "完成整理 · 自动返航 (+96)"
+    }
+  },
+  "F02_readonly_lock_and_takeover": {
+    "pass": true,
+    "detail": {
+      "roState": {
+        "hasTakeoverBtn": true,
+        "launchDisabled": true
+      },
+      "afterTakeover": {
+        "hasTakeoverBtn": false,
+        "launchDisabled": false,
+        "credits": 777
+      }
+    }
+  },
+  "F03_semantic_corrupt_backup_recovery": {
+    "pass": true,
+    "detail": {
+      "f03Modal": {
+        "modalOpen": true,
+        "hasRestoreBtn": true
+      },
+      "restoredCredits": 555
+    }
+  },
+  "zero_console_or_runtime_errors": {
+    "pass": true,
+    "detail": []
+  }
+}
