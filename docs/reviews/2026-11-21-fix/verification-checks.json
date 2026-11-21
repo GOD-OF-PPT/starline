@@ -1,4 +1,38 @@
 {
+  "v3_title_screen_and_modal": {
+    "pass": true,
+    "detail": {
+      "titleDesktop": {
+        "visible": true,
+        "bgLoaded": true,
+        "shellInert": true,
+        "scrollW": 1366,
+        "scrollH": 768
+      },
+      "titleMobile": {
+        "visible": true,
+        "scrollW": 390,
+        "scrollH": 844
+      },
+      "titleModalState": {
+        "dialogOpen": true,
+        "titleHostInert": true,
+        "shellInert": true
+      },
+      "afterTitleModalEsc": {
+        "dialogOpen": false,
+        "titleHostInert": false,
+        "shellStillInert": true,
+        "focusedId": "btn-title-help"
+      },
+      "afterEnterGame": {
+        "titleHidden": true,
+        "shellInert": false,
+        "hasReturnTitleBtn": true,
+        "sessionSaved": true
+      }
+    }
+  },
   "F07_viewport_sync": {
     "pass": true,
     "detail": [
@@ -7,11 +41,11 @@
         "vw": 1366,
         "vh": 768,
         "hostW": 1146,
-        "hostH": 459,
+        "hostH": 428,
         "canvasAttrW": 1146,
-        "canvasAttrH": 459,
+        "canvasAttrH": 428,
         "canvasCssW": 1146,
-        "canvasCssH": 459,
+        "canvasCssH": 428,
         "match": true
       },
       {
@@ -43,11 +77,11 @@
         "vw": 844,
         "vh": 390,
         "hostW": 822,
-        "hostH": 408,
+        "hostH": 378,
         "canvasAttrW": 822,
-        "canvasAttrH": 408,
+        "canvasAttrH": 378,
         "canvasCssW": 822,
-        "canvasCssH": 408,
+        "canvasCssH": 378,
         "match": true
       },
       {
@@ -55,11 +89,11 @@
         "vw": 1366,
         "vh": 768,
         "hostW": 1146,
-        "hostH": 459,
+        "hostH": 428,
         "canvasAttrW": 1146,
-        "canvasAttrH": 459,
+        "canvasAttrH": 428,
         "canvasCssW": 1146,
-        "canvasCssH": 459,
+        "canvasCssH": 428,
         "match": true
       }
     ]
@@ -223,6 +257,28 @@
       "creditsAfterReload": 118
     }
   },
+  "v3_relic_gallery_and_4_of_4_base": {
+    "pass": true,
+    "detail": {
+      "galleryAfterRestore": {
+        "title": "星际藏品陈列馆 (4/4)",
+        "litBadges": 4,
+        "remainingCredits": 240
+      },
+      "desktopBaseFit": {
+        "scrollW": 1366,
+        "scrollH": 768,
+        "relicDockText": "藏品 4/4",
+        "litPips": 4,
+        "regionBtns": 2
+      },
+      "progressedTitle": {
+        "visible": true,
+        "pillsText": "信用点\n240\n藏品\n4/4\n图鉴\n48%\n最深\n6/6",
+        "ctaText": "▶ 进入拆解站"
+      }
+    }
+  },
   "F12_defeat_40pct_hud_sync": {
     "pass": true,
     "detail": {
@@ -249,6 +305,53 @@
     "detail": {
       "hasNextNodeBtn": false,
       "returnBtnText": "完成整理 · 自动返航 (+96)"
+    }
+  },
+  "v3_boss_routes_and_combat_spectacle": {
+    "pass": true,
+    "detail": {
+      "bossRouteInfo": {
+        "header": "星图跃迁 · 古代星门核心 (6/6)",
+        "bossBeacons": 2,
+        "enemyNames": [
+          "铁壁无畏旗舰",
+          "黑曜利维坦"
+        ],
+        "enemyImgsLoaded": true
+      },
+      "dreadCombatInfo": {
+        "bossMiniBadge": "BOSS",
+        "bossControlTag": "BOSS 战",
+        "enemyText": "BOSS 铁壁无畏旗舰\n            ♥38/58"
+      },
+      "leviathanCombatInfo": {
+        "bossMiniBadge": "BOSS",
+        "bossControlTag": "BOSS 战",
+        "enemyText": "BOSS 黑曜利维坦\n            ♥56/76"
+      }
+    }
+  },
+  "v3_new_sectors_and_abyssal_region": {
+    "pass": true,
+    "detail": {
+      "abyssalBtnText": "▶ 深入「星渊禁区」· 护盾工程艇",
+      "abyssalRouteInfo": {
+        "header": "星图跃迁 · 晶化静默外带 (1/6)",
+        "hasAbyssalTag": true,
+        "enemyNames": [
+          "冰渊侦察艇",
+          "赤翼截击艇"
+        ],
+        "imgsLoaded": true
+      }
+    }
+  },
+  "v3_new_relics_in_cargo_grid": {
+    "pass": true,
+    "detail": {
+      "itemCount": 4,
+      "allImgsLoaded": true,
+      "occupiedText": "12/16 格"
     }
   },
   "F02_readonly_lock_and_takeover": {
