@@ -1,10 +1,17 @@
-import { BUILDING_ORDER, BUILDINGS, RELICS, type BuildingId } from '../data/buildings';
+import {
+  BUILDING_ORDER,
+  BUILDINGS,
+  RELICS,
+  RELIC_ORDER,
+  type BuildingId,
+} from '../data/buildings';
 import {
   CARGO_DEFINITIONS,
   EQUIPMENT_DEFINITIONS,
   LOADOUTS,
   type LoadoutId,
 } from '../data/items';
+import type { RegionId } from '../data/nodes';
 
 export const SAVE_SCHEMA_VERSION = 1;
 export const RULES_VERSION = 'v1.0.0';
@@ -28,6 +35,7 @@ export interface BaseProgression {
   readonly discoveredItems: readonly string[]; // defIds seen or obtained
   readonly relics: Record<string, RelicProgress>;
   readonly selectedLoadout: LoadoutId;
+  readonly selectedRegion?: RegionId;
   readonly tutorialCompleted: boolean;
   readonly settledExpeditionIds: readonly string[];
   readonly totalExpeditions: number;
@@ -44,6 +52,14 @@ export const DEFAULT_SETTINGS: GameSettings = {
   bgmMuted: false,
 };
 
+export function createInitialRelics(): Record<string, RelicProgress> {
+  const relics: Record<string, RelicProgress> = {};
+  for (const id of RELIC_ORDER) {
+    relics[id] = { storedCount: 0, restored: false };
+  }
+  return relics;
+}
+
 export function createInitialProgression(): BaseProgression {
   return {
     credits: 0,
@@ -53,13 +69,9 @@ export function createInitialProgression(): BaseProgression {
       drydock: false,
     },
     discoveredItems: ['equipment.laser.common'],
-    relics: {
-      ancient_navigator: {
-        storedCount: 0,
-        restored: false,
-      },
-    },
+    relics: createInitialRelics(),
     selectedLoadout: 'cannon_skiff',
+    selectedRegion: 'standard',
     tutorialCompleted: false,
     settledExpeditionIds: [],
     totalExpeditions: 0,
@@ -73,6 +85,11 @@ export function isLoadoutUnlocked(progression: BaseProgression, loadoutId: Loado
   const def = LOADOUTS[loadoutId];
   if (!def.unlockBuildingId) return true;
   return Boolean(progression.buildings[def.unlockBuildingId as BuildingId]);
+}
+
+export function isRegionUnlocked(progression: BaseProgression, regionId: RegionId): boolean {
+  if (regionId === 'standard') return true;
+  return Boolean(progression.buildings.workbench || progression.deepestNodeReached >= 3);
 }
 
 export function canBuildFacility(
@@ -112,6 +129,33 @@ export function canRestoreRelic(
     return { canRestore: false, reason: `还差 ${def.restoreCost - progression.credits} 信用点` };
   }
   return { canRestore: true };
+}
+
+export interface RelicCollectionSummary {
+  readonly restoredCount: number;
+  readonly storedTotal: number;
+  readonly restorableIds: readonly string[];
+  readonly totalCount: number;
+}
+
+export function getRelicCollectionSummary(progression: BaseProgression): RelicCollectionSummary {
+  let restoredCount = 0;
+  let storedTotal = 0;
+  const restorableIds: string[] = [];
+  for (const id of RELIC_ORDER) {
+    const st = progression.relics[id];
+    if (st?.restored) restoredCount += 1;
+    if (st?.storedCount) storedTotal += st.storedCount;
+    if (canRestoreRelic(progression, id).canRestore) {
+      restorableIds.push(id);
+    }
+  }
+  return {
+    restoredCount,
+    storedTotal,
+    restorableIds,
+    totalCount: RELIC_ORDER.length,
+  };
 }
 
 export function mergeDiscoveries(

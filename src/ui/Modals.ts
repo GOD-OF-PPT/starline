@@ -1,10 +1,12 @@
 import { getItemImageUrl } from '../assets/itemArt';
-import { RELICS } from '../data/buildings';
+import { RELICS, RELIC_ORDER } from '../data/buildings';
 import { CARGO_DEFINITIONS, EQUIPMENT_DEFINITIONS, getItemDef } from '../data/items';
 import { SHAPES } from '../data/shapes';
 import type { DiscardedRecord } from '../domain/inventory';
 import {
+  canRestoreRelic,
   getCodexSummary,
+  getRelicCollectionSummary,
   type BaseProgression,
   type GameSettings,
 } from '../domain/progression';
@@ -19,14 +21,14 @@ interface ActiveModalEntry {
 }
 
 const modalStack: ActiveModalEntry[] = [];
-let appBackgroundEl: HTMLElement | null = null;
+let appBackgroundEls: HTMLElement[] = [];
 let globalKeyListenerAttached = false;
 
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-export function registerModalBackgroundRoot(el: HTMLElement): void {
-  appBackgroundEl = el;
+export function registerModalBackgroundRoot(el: HTMLElement | HTMLElement[]): void {
+  appBackgroundEls = Array.isArray(el) ? el : [el];
 }
 
 export function hasOpenModal(): boolean {
@@ -40,15 +42,17 @@ function getFocusableElements(container: HTMLElement): HTMLElement[] {
 }
 
 function syncBackgroundInert(): void {
-  if (!appBackgroundEl) return;
-  const locked = modalStack.length > 0;
-  if ('inert' in appBackgroundEl) {
-    (appBackgroundEl as HTMLElement & { inert: boolean }).inert = locked;
-  }
-  if (locked) {
-    appBackgroundEl.setAttribute('aria-hidden', 'true');
-  } else {
-    appBackgroundEl.removeAttribute('aria-hidden');
+  const modalLocked = modalStack.length > 0;
+  for (const el of appBackgroundEls) {
+    const locked = modalLocked || el.dataset.titleLocked === '1';
+    if ('inert' in el) {
+      (el as HTMLElement & { inert: boolean }).inert = locked;
+    }
+    if (locked) {
+      el.setAttribute('aria-hidden', 'true');
+    } else {
+      el.removeAttribute('aria-hidden');
+    }
   }
 }
 
@@ -263,20 +267,23 @@ export function openCodexModal(
     </div>
 
     <div style="font-size:13px;font-weight:700;color:var(--accent-action);margin-top:4px;">展台藏品 (${summary.relicsRestored}/${summary.relicsTotal})</div>
-    ${Object.values(RELICS)
+    ${RELIC_ORDER.map((rid) => RELICS[rid])
       .map((relic) => {
         const st = progression.relics[relic.id] ?? { storedCount: 0, restored: false };
         const seen = discovered.has(relic.cargoDefId);
         return `
           <div class="facility-card ${st.restored ? 'built' : ''}">
-            <div class="facility-info">
-              <div class="facility-name-row">
-                <span>${relic.name}</span>
-                <span class="tag ${st.restored ? 'tag-energy' : st.storedCount > 0 ? 'tag-amber' : ''}">
-                  ${st.restored ? '已修复展示' : st.storedCount > 0 ? `已入库 ${st.storedCount} 件` : seen ? '已发现（未带回实物）' : '未发现'}
-                </span>
+            <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+              <img class="relic-codex-thumb ${st.restored || seen ? '' : 'dim'}" src="${getItemImageUrl(relic.cargoDefId)}" alt="${relic.name}" />
+              <div class="facility-info">
+                <div class="facility-name-row">
+                  <span>${relic.name}</span>
+                  <span class="tag ${st.restored ? 'tag-energy' : st.storedCount > 0 ? 'tag-amber' : ''}">
+                    ${st.restored ? '已修复展示' : st.storedCount > 0 ? `已入库 ${st.storedCount} 件` : seen ? '已发现（未带回实物）' : '未发现'}
+                  </span>
+                </div>
+                <div style="font-size:12px;color:var(--text-secondary);">${st.restored ? relic.lore : relic.description}</div>
               </div>
-              <div style="font-size:12px;color:var(--text-secondary);">${st.restored ? relic.lore : relic.description}</div>
             </div>
           </div>
         `;
@@ -285,6 +292,102 @@ export function openCodexModal(
   `;
 
   modal.card.querySelector('#btn-close-codex')?.addEventListener('click', modal.close);
+  return modal;
+}
+
+export function openRelicGalleryModal(
+  host: HTMLElement,
+  initialProgression: BaseProgression,
+  readOnly: boolean,
+  onRestoreRelic: (relicId: string) => BaseProgression | null,
+  onClose?: () => void
+): ManagedModalHandle {
+  const modal = openManagedModal(host, {
+    titleId: 'modal-title-relic-gallery',
+    dismissible: true,
+    onClose,
+  });
+
+  const renderGallery = (prog: BaseProgression, focusId?: string) => {
+    const sum = getRelicCollectionSummary(prog);
+    const discovered = new Set(prog.discoveredItems);
+
+    modal.card.innerHTML = `
+      <div class="panel-header">
+        <div>
+          <h2 class="panel-title" id="modal-title-relic-gallery">星际藏品陈列馆 (${sum.restoredCount}/${sum.totalCount})</h2>
+          <p class="panel-subtitle">安全返航留存稀有废宝即可入库修复，永久点亮拆解站玻璃展台。</p>
+        </div>
+        <button type="button" class="btn btn-compact" id="btn-close-relic-gallery">关闭</button>
+      </div>
+
+      ${
+        readOnly
+          ? `<div class="system-banner banner-warn"><span>当前处于只读模式，请先接管控制权再修复藏品。</span></div>`
+          : ''
+      }
+
+      <div class="relic-gallery-grid">
+        ${RELIC_ORDER.map((rid) => {
+          const def = RELICS[rid];
+          const cargoDef = getItemDef(def.cargoDefId);
+          const st = prog.relics[rid] ?? { storedCount: 0, restored: false };
+          const check = canRestoreRelic(prog, rid);
+          const canDo = check.canRestore && !readOnly;
+          const seen = discovered.has(def.cargoDefId) || st.storedCount > 0 || st.restored;
+
+          return `
+            <div class="relic-showcase-card ${st.restored ? 'restored' : canDo ? 'affordable' : ''}" style="--relic-accent:${def.accentColor};">
+              <div class="relic-showcase-art">
+                <img src="${getItemImageUrl(def.cargoDefId)}" alt="${def.name}" class="${st.restored || seen ? '' : 'silhouette'}" />
+              </div>
+              <div class="relic-showcase-head">
+                <strong>${def.name}</strong>
+                <span class="tag ${st.restored ? 'tag-energy' : st.storedCount > 0 ? 'tag-amber' : ''}">
+                  ${st.restored ? '展示中 ✦' : st.storedCount > 0 ? `库存 ${st.storedCount}` : SHAPES[cargoDef.shapeId].label}
+                </span>
+              </div>
+              <p class="relic-showcase-desc">${st.restored ? def.lore : def.description}</p>
+              ${
+                st.restored
+                  ? `<div class="relic-showcase-foot"><span class="tag tag-energy">已点亮展柜 ✓</span></div>`
+                  : `<div class="relic-showcase-foot">
+                      <button type="button" class="btn ${canDo ? 'btn-primary' : ''} btn-compact" id="btn-restore-relic-${rid}" data-restore-relic="${rid}" ${
+                        canDo ? '' : 'disabled'
+                      }>
+                        ${
+                          readOnly
+                            ? '只读锁定'
+                            : st.storedCount <= 0
+                            ? '待深空打捞'
+                            : `${def.restoreCost}¤ 修复展示`
+                        }
+                      </button>
+                    </div>`
+              }
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+
+    modal.card.querySelector('#btn-close-relic-gallery')?.addEventListener('click', modal.close);
+    modal.card.querySelectorAll<HTMLButtonElement>('[data-restore-relic]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const rid = btn.dataset.restoreRelic!;
+        const updated = onRestoreRelic(rid);
+        if (updated) {
+          renderGallery(updated, 'btn-close-relic-gallery');
+        }
+      });
+    });
+
+    if (focusId) {
+      modal.card.querySelector<HTMLElement>(`#${focusId}`)?.focus();
+    }
+  };
+
+  renderGallery(initialProgression);
   return modal;
 }
 

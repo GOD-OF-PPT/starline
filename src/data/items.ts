@@ -9,7 +9,10 @@ export type CargoKind =
   | 'coolant_tank'
   | 'old_engine'
   | 'folding_antenna'
-  | 'ancient_navigator';
+  | 'ancient_navigator'
+  | 'quantum_core'
+  | 'cryo_amber'
+  | 'obsidian_crown';
 
 export type LoadoutId = 'cannon_skiff' | 'shield_cruiser';
 
@@ -67,13 +70,24 @@ export const EQUIPMENT_KINDS: readonly EquipmentKind[] = [
   'drone',
 ];
 
-export const CARGO_KINDS: readonly CargoKind[] = [
+export const REGULAR_CARGO_KINDS: readonly CargoKind[] = [
   'data_box',
   'alloy_bar',
   'coolant_tank',
   'old_engine',
   'folding_antenna',
+];
+
+export const COLLECTIBLE_CARGO_KINDS: readonly CargoKind[] = [
   'ancient_navigator',
+  'quantum_core',
+  'cryo_amber',
+  'obsidian_crown',
+];
+
+export const CARGO_KINDS: readonly CargoKind[] = [
+  ...REGULAR_CARGO_KINDS,
+  ...COLLECTIBLE_CARGO_KINDS,
 ];
 
 export const EQUIPMENT_DEFINITIONS: Record<string, EquipmentDefinition> = {
@@ -273,6 +287,39 @@ export const CARGO_DEFINITIONS: Record<string, CargoDefinition> = {
     isCollectible: true,
     summary: '稀有废宝 · 可收藏',
     detail: '带有独特环形星图核心的古老导航仪。安全返航后可高价卖出，或留存至基地收藏展台修复。',
+  },
+  'cargo.quantum_core': {
+    defId: 'cargo.quantum_core',
+    category: 'cargo',
+    kind: 'quantum_core',
+    name: '量子星核',
+    shapeId: '2x2',
+    valueCoeff: 1.4,
+    isCollectible: true,
+    summary: '稀有废宝 · 可收藏',
+    detail: '封存着悬浮零点晶体的双环容器，2×2 高价藏品，可高价出售或在展台点亮展示。',
+  },
+  'cargo.cryo_amber': {
+    defId: 'cargo.cryo_amber',
+    category: 'cargo',
+    kind: 'cryo_amber',
+    name: '星渊琥珀匣',
+    shapeId: '1x3',
+    valueCoeff: 1.42,
+    isCollectible: true,
+    summary: '稀有废宝 · 可收藏',
+    detail: '冰晶残骸带封存的远古星蕨琥珀管，1×3 细长高密藏品，可在基地展台永久陈列。',
+  },
+  'cargo.obsidian_crown': {
+    defId: 'cargo.obsidian_crown',
+    category: 'cargo',
+    kind: 'obsidian_crown',
+    name: '黑曜舰桥冠徽',
+    shapeId: 'L3',
+    valueCoeff: 1.45,
+    isCollectible: true,
+    summary: 'BOSS 藏品 · 可收藏',
+    detail: '主力舰指挥塔卸下的 L 形镀金曜钢旗徽，深空核心与 BOSS 战高概率打捞。',
   },
 };
 

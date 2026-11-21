@@ -62,12 +62,20 @@ export class PhaserHost {
     this.game.events.once(Phaser.Core.Events.READY, () => {
       this.ready = true;
       this.enforceCanvasCss();
-      this.game.scene.stop('BaseScene');
-      this.game.scene.stop('CombatScene');
-      if (this.currentMode === 'base' && this.pendingBase) {
-        this.showBase(this.pendingBase);
-      } else if (this.currentMode === 'combat' && this.pendingCombat) {
-        this.showCombat(this.pendingCombat);
+      const targetMode = this.currentMode;
+      this.currentMode = null;
+      if (targetMode === 'base' && this.pendingBase) {
+        this.game.scene.start('BaseScene', {
+          state: this.pendingBase,
+          onBuildingClick: this.buildingClickHandler ?? undefined,
+        });
+        this.currentMode = 'base';
+      } else if (targetMode === 'combat' && this.pendingCombat) {
+        this.game.scene.stop('BaseScene');
+        this.game.scene.start('CombatScene', { playback: this.pendingCombat });
+        this.currentMode = 'combat';
+      } else {
+        this.game.scene.stop('BaseScene');
       }
       this.scheduleResize();
     });

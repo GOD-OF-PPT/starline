@@ -1,18 +1,22 @@
 import {
-  CARGO_KINDS,
+  COLLECTIBLE_CARGO_KINDS,
   EQUIPMENT_KINDS,
   LOADOUTS,
+  REGULAR_CARGO_KINDS,
   SHIP_CORE,
   getCargoDef,
   getEquipmentDef,
+  type CargoKind,
   type EquipmentKind,
   type EquipmentQuality,
   type LoadoutId,
 } from '../data/items';
 import {
   MAX_EXPEDITION_NODES,
+  REGIONS,
   computeCargoPrice,
   getRouteSpec,
+  type RegionId,
   type RouteSpec,
   type RouteType,
 } from '../data/nodes';
@@ -58,6 +62,7 @@ export interface ActiveCombatState {
 export interface ExpeditionState {
   readonly expeditionId: string;
   readonly loadoutId: LoadoutId;
+  readonly regionId?: RegionId;
   readonly isTutorial: boolean;
   readonly maxNodes: number;
   readonly currentNode: number; // 1..maxNodes
@@ -79,6 +84,7 @@ export interface ExpeditionState {
 
 export interface StartExpeditionOptions {
   readonly loadoutId: LoadoutId;
+  readonly regionId?: RegionId;
   readonly isTutorial?: boolean;
   readonly seed?: number;
   readonly maxNodes?: number;
@@ -89,6 +95,7 @@ export function startExpedition(options: StartExpeditionOptions): ExpeditionStat
   const loadout = LOADOUTS[options.loadoutId];
   const seed = options.seed ?? createRandomSeed();
   const maxNodes = options.maxNodes ?? MAX_EXPEDITION_NODES;
+  const regionId: RegionId = options.isTutorial ? 'standard' : options.regionId ?? 'standard';
   const expeditionId =
     options.expeditionId ?? `exp_${Date.now().toString(36)}_${(seed >>> 0).toString(36)}`;
 
@@ -140,6 +147,7 @@ export function startExpedition(options: StartExpeditionOptions): ExpeditionStat
   return {
     expeditionId,
     loadoutId: options.loadoutId,
+    regionId,
     isTutorial: Boolean(options.isTutorial),
     maxNodes,
     currentNode: 1,
@@ -168,7 +176,8 @@ export function getRoutePreview(
   readonly stats: BuildStats;
   readonly prediction: CombatSimulationResult;
 } {
-  const routeSpec = getRouteSpec(expedition.currentNode, routeType);
+  const regionId: RegionId = expedition.regionId ?? 'standard';
+  const routeSpec = getRouteSpec(expedition.currentNode, routeType, regionId);
   const stats = calculateBuildStats(expedition.bay);
   const prediction = simulateCombat(stats, expedition.currentHp, routeSpec.enemy, routeSpec.bounty);
   return { routeSpec, stats, prediction };
@@ -213,12 +222,19 @@ function generateRewards(
 } {
   let seq = expedition.nextInstanceSeq;
   const makeId = () => `${expedition.expeditionId}_item_${seq++}`;
+  const regionId: RegionId = expedition.regionId ?? 'standard';
+  const region = REGIONS[regionId] ?? REGIONS.standard;
 
   const tutorialStep = expedition.isTutorial ? TUTORIAL_SCRIPT[routeSpec.node] : undefined;
   if (tutorialStep) {
     const eqDef = getEquipmentDef(tutorialStep.equipment.kind, tutorialStep.equipment.quality);
     const cargoDef = getCargoDef(tutorialStep.cargo);
-    const cargoPrice = computeCargoPrice(tutorialStep.cargo, routeSpec.node, routeSpec.routeType);
+    const cargoPrice = computeCargoPrice(
+      tutorialStep.cargo,
+      routeSpec.node,
+      routeSpec.routeType,
+      regionId
+    );
 
     const eqItem: ItemInstance = {
       instanceId: makeId(),
@@ -264,9 +280,55 @@ function generateRewards(
     qualityRoll < routeSpec.improvedEquipmentProb ? 'improved' : 'common';
   const eqDef = getEquipmentDef(eqKind, eqQuality);
 
-  const cargoKind = rng.pick(CARGO_KINDS);
+  // Single-draw depth-progressive cargo & 4-relic loot table (exact 1 RNG draw keeps equipment stream stable!)
+  const isBoss = Boolean(routeSpec.enemy.isBoss);
+  const cargoRoll = rng.nextFloat();
+  let cargoKind: CargoKind;
+
+  if (regionId === 'standard' && routeSpec.node <= 2) {
+    // Nodes 1-2 standard: exact blueprint 6-way uniform distribution (5 regular + ancient_navigator)
+    const pool: readonly CargoKind[] = [...REGULAR_CARGO_KINDS, 'ancient_navigator'];
+    cargoKind = pool[Math.min(pool.length - 1, Math.floor(cargoRoll * pool.length))];
+  } else {
+    const relicProb = isBoss
+      ? region.bossRelicChance
+      : routeSpec.node === 3 && regionId === 'standard'
+      ? 1 / 6
+      : regionId === 'abyssal'
+      ? region.relicChance
+      : 0.28;
+
+    if (cargoRoll < relicProb) {
+      const t = cargoRoll / Math.max(0.0001, relicProb);
+      if (isBoss) {
+        // BOSS victory spotlights Obsidian Crown (45%) + all 3 other relics
+        const bossRelics: readonly CargoKind[] = [
+          'obsidian_crown',
+          'obsidian_crown',
+          'quantum_core',
+          'cryo_amber',
+          'ancient_navigator',
+        ];
+        cargoKind = bossRelics[Math.min(bossRelics.length - 1, Math.floor(t * bossRelics.length))];
+      } else if (routeSpec.node === 3 && regionId === 'standard') {
+        const midRelics: readonly CargoKind[] = ['ancient_navigator', 'cryo_amber'];
+        cargoKind = midRelics[Math.min(midRelics.length - 1, Math.floor(t * midRelics.length))];
+      } else {
+        cargoKind =
+          COLLECTIBLE_CARGO_KINDS[
+            Math.min(COLLECTIBLE_CARGO_KINDS.length - 1, Math.floor(t * COLLECTIBLE_CARGO_KINDS.length))
+          ];
+      }
+    } else {
+      const t = (cargoRoll - relicProb) / Math.max(0.0001, 1 - relicProb);
+      cargoKind =
+        REGULAR_CARGO_KINDS[
+          Math.min(REGULAR_CARGO_KINDS.length - 1, Math.floor(t * REGULAR_CARGO_KINDS.length))
+        ];
+    }
+  }
   const cargoDef = getCargoDef(cargoKind);
-  const cargoPrice = computeCargoPrice(cargoKind, routeSpec.node, routeSpec.routeType);
+  const cargoPrice = computeCargoPrice(cargoKind, routeSpec.node, routeSpec.routeType, regionId);
 
   const eqItem: ItemInstance = {
     instanceId: makeId(),

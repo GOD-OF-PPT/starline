@@ -8,6 +8,8 @@ export type SfxKind =
   | 'shieldHit'
   | 'hullHit'
   | 'enemyDestroy'
+  | 'bossAlarm'
+  | 'relicRestore'
   | 'repairPulse'
   | 'warpJump'
   | 'creditTick'
@@ -115,6 +117,19 @@ export class SoundEngine {
           this.tone(ctx, 'sawtooth', 120, 34, 0.38, 0.16, now);
           this.noiseBurst(ctx, 0.34, 480, 0.14, now);
           this.tone(ctx, 'triangle', 523, 784, 0.16, 0.07, now + 0.18);
+          break;
+        case 'bossAlarm':
+          // Deep ominous capital-ship horn sweep
+          this.tone(ctx, 'sawtooth', 88, 62, 0.45, 0.13, now);
+          this.tone(ctx, 'triangle', 131, 98, 0.42, 0.09, now + 0.08);
+          this.tone(ctx, 'sawtooth', 82, 55, 0.48, 0.12, now + 0.28);
+          break;
+        case 'relicRestore':
+          // Shimmering museum artifact restoration arpeggio
+          this.tone(ctx, 'sine', 523.25, 523.25, 0.24, 0.08, now);
+          this.tone(ctx, 'sine', 659.25, 659.25, 0.26, 0.08, now + 0.1);
+          this.tone(ctx, 'triangle', 783.99, 783.99, 0.3, 0.09, now + 0.2);
+          this.tone(ctx, 'sine', 1046.5, 1318.5, 0.45, 0.1, now + 0.32);
           break;
         case 'repairPulse':
           this.tone(ctx, 'sine', 440, 660, 0.14, 0.08, now);

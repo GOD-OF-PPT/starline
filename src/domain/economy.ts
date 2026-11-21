@@ -2,6 +2,7 @@ import {
   BUILDINGS,
   FIRST_EXPEDITION_BONUS_CREDITS,
   RELICS,
+  getRelicByCargoDefId,
   type BuildingId,
 } from '../data/buildings';
 import { getItemDef } from '../data/items';
@@ -36,6 +37,7 @@ export interface SettlementSummary {
   readonly collectibleCandidates: readonly ItemInstance[];
   readonly keptCollectibleIds: readonly string[];
   readonly keptRelicCount: number;
+  readonly keptRelicById: Readonly<Record<string, number>>;
   readonly newlyDiscoveredDefIds: readonly string[];
 }
 
@@ -58,6 +60,7 @@ export function calculateSettlement(
 
   const lineItems: SettlementLineItem[] = [];
   const collectibleCandidates: ItemInstance[] = [];
+  const keptRelicById: Record<string, number> = {};
 
   let cargoCredits = 0;
   let equipmentRecycleCredits = 0;
@@ -79,6 +82,10 @@ export function calculateSettlement(
 
     if (kept) {
       keptRelicCount += 1;
+      const relicDef = getRelicByCargoDefId(item.defId);
+      if (relicDef) {
+        keptRelicById[relicDef.id] = (keptRelicById[relicDef.id] ?? 0) + 1;
+      }
     } else if (def.category === 'cargo') {
       cargoCredits += creditsValue;
     } else {
@@ -124,6 +131,7 @@ export function calculateSettlement(
     collectibleCandidates,
     keptCollectibleIds: Array.from(keptSet),
     keptRelicCount,
+    keptRelicById,
     newlyDiscoveredDefIds,
   };
 }
@@ -151,17 +159,15 @@ export function applyExpeditionSettlement(
     return { progression, summary, alreadySettled: true };
   }
 
-  const prevNav = progression.relics.ancient_navigator ?? { storedCount: 0, restored: false };
-  const nextRelics =
-    summary.keptRelicCount > 0
-      ? {
-          ...progression.relics,
-          ancient_navigator: {
-            ...prevNav,
-            storedCount: prevNav.storedCount + summary.keptRelicCount,
-          },
-        }
-      : progression.relics;
+  const nextRelics = { ...progression.relics };
+  for (const [relicId, count] of Object.entries(summary.keptRelicById)) {
+    if (count <= 0) continue;
+    const prev = nextRelics[relicId] ?? { storedCount: 0, restored: false };
+    nextRelics[relicId] = {
+      ...prev,
+      storedCount: prev.storedCount + count,
+    };
+  }
 
   const nextProgression: BaseProgression = {
     ...progression,

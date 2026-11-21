@@ -1,8 +1,19 @@
-import { getEnemyShipImageUrl, getItemImageUrl, getPlayerShipImageUrl } from '../assets/itemArt';
+import {
+  getEnemyShipImageUrl,
+  getItemImageUrl,
+  getPlayerShipImageUrl,
+  getTitleKeyArtUrl,
+} from '../assets/itemArt';
 import { soundEngine } from '../audio/soundEngine';
-import { BUILDINGS, RELICS, type BuildingId } from '../data/buildings';
+import { BUILDINGS, RELICS, RELIC_ORDER, type BuildingId } from '../data/buildings';
 import { LOADOUTS, getItemDef, type LoadoutId } from '../data/items';
-import { type RouteType } from '../data/nodes';
+import {
+  REGIONS,
+  getNodeConfig,
+  type RegionId,
+  type RouteType,
+  type SectorBgIndex,
+} from '../data/nodes';
 import { SHAPES } from '../data/shapes';
 import { TUTORIAL_MAX_RECOMMENDED_NODE, TUTORIAL_SCRIPT } from '../data/tutorial';
 import { calculateBuildStats } from '../domain/buildStats';
@@ -36,23 +47,28 @@ import {
 } from '../domain/persistence';
 import {
   canBuildFacility,
-  canRestoreRelic,
   getCodexSummary,
+  getRelicCollectionSummary,
   getVisibleBuildings,
   isLoadoutUnlocked,
+  isRegionUnlocked,
   type GameSettings,
 } from '../domain/progression';
 import { MultiTabGuard } from '../domain/tabLock';
 import { PhaserHost } from '../scenes/PhaserHost';
 import { CargoGridComponent, renderMiniMaskHtml } from './CargoGrid';
 import {
+  hasOpenModal,
   openBackupRecoveryModal,
   openCodexModal,
   openDiscardConfirmModal,
   openHelpModal,
+  openRelicGalleryModal,
   openSettingsModal,
   registerModalBackgroundRoot,
 } from './Modals';
+
+const TITLE_SESSION_KEY = 'starline_title_entered_v3';
 
 interface ReturnDockingNotice {
   readonly creditsBefore: number;
@@ -81,6 +97,8 @@ export class AppController {
   private sceneCollapseOverride: boolean | null = null;
   /** Pure presentation state for F11 return-to-port docking & unloading (never owns payout!) */
   private activeDockingNotice: ReturnDockingNotice | null = null;
+  /** True once the player enters from the Title Screen in the current browser session */
+  private titleEntered = false;
 
   // Live combat playback display values
   private liveCombatPlayerHp = 30;
@@ -91,6 +109,7 @@ export class AppController {
 
   // Persistent DOM containers so Phaser canvas stays mounted without flicker!
   private appShellEl!: HTMLElement;
+  private titleHostEl!: HTMLElement;
   private topHudEl!: HTMLElement;
   private bannersEl!: HTMLElement;
   private mainLayoutEl!: HTMLElement;
@@ -125,14 +144,34 @@ export class AppController {
     return this.isCompactViewport();
   }
 
+  private readTitleEnteredSession(): boolean {
+    try {
+      return window.sessionStorage.getItem(TITLE_SESSION_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  private writeTitleEnteredSession(entered: boolean): void {
+    try {
+      if (entered) window.sessionStorage.setItem(TITLE_SESSION_KEY, '1');
+      else window.sessionStorage.removeItem(TITLE_SESSION_KEY);
+    } catch {
+      // Ignore restricted sessionStorage
+    }
+  }
+
   init(): void {
     this.buildShellDom();
+    this.titleEntered = this.readTitleEnteredSession();
 
     const loaded = loadSaveData(window.localStorage);
     if (loaded.status === 'loaded' || loaded.status === 'fresh') {
       this.save = loaded.data;
     } else if (loaded.status === 'corrupt_with_backup') {
       this.save = loaded.backup;
+      // Never hide F03 backup recovery dialog behind Title Screen
+      this.titleEntered = true;
       openBackupRecoveryModal(
         this.modalHostEl,
         loaded.error,
@@ -233,13 +272,19 @@ export class AppController {
     shell.appendChild(this.bannersEl);
     shell.appendChild(mainLayout);
 
+    // Full-viewport Title Screen overlay sibling (does not unmount Phaser canvas!)
+    this.titleHostEl = document.createElement('div');
+    this.titleHostEl.id = 'title-host';
+    this.titleHostEl.hidden = true;
+
     // Mount modalHostEl as a SIBLING of app-shell so making app-shell inert isolates background cleanly!
     this.modalHostEl = document.createElement('div');
     this.modalHostEl.id = 'modal-host';
 
     this.mountEl.appendChild(shell);
+    this.mountEl.appendChild(this.titleHostEl);
     this.mountEl.appendChild(this.modalHostEl);
-    registerModalBackgroundRoot(this.appShellEl);
+    registerModalBackgroundRoot([this.appShellEl, this.titleHostEl]);
   }
 
   private applyBodySettings(settings: GameSettings): void {
@@ -271,17 +316,22 @@ export class AppController {
         return `距「${def.name}」还差 ${def.cost - prog.credits} 信用点`;
       }
     }
-    const nav = prog.relics.ancient_navigator;
-    if (prog.buildings.display && !nav?.restored) {
-      if ((nav?.storedCount ?? 0) > 0) {
-        const cost = RELICS.ancient_navigator.restoreCost;
-        return prog.credits >= cost
-          ? `可修复展台藏品「古代导航仪」(${cost} 信用点)！`
-          : `距修复「古代导航仪」还差 ${cost - prog.credits} 信用点`;
+    const relicSum = getRelicCollectionSummary(prog);
+    if (prog.buildings.display && relicSum.restoredCount < relicSum.totalCount) {
+      if (relicSum.restorableIds.length > 0) {
+        const first = RELICS[relicSum.restorableIds[0]];
+        return `陈列馆可修复「${first.name}」(${first.restoreCost}¤)！`;
       }
-      return '带回 T 形「古代导航仪」可在展台修复展示';
+      for (const rid of RELIC_ORDER) {
+        const st = prog.relics[rid];
+        if (st && !st.restored && st.storedCount > 0) {
+          const def = RELICS[rid];
+          return `距修复「${def.name}」还差 ${def.restoreCost - prog.credits} 信用点`;
+        }
+      }
+      return `深空打捞稀有废宝可点亮展台 (${relicSum.restoredCount}/${relicSum.totalCount})`;
     }
-    return '拆解站首版设施已全部就绪！';
+    return '拆解站设施与 4 件深空藏品已全部点亮！';
   }
 
   private renderDockingOverlay(): void {
@@ -343,16 +393,198 @@ export class AppController {
     if (fillEl) fillEl.style.width = `${Math.round(p * 100)}%`;
   }
 
-  private getSectorIndex(node: number): 1 | 2 | 3 {
-    if (node <= 2) return 1;
-    if (node <= 4) return 2;
-    return 3;
+  private getSectorIndex(exp: ExpeditionState): SectorBgIndex {
+    const cfg = getNodeConfig(exp.currentNode);
+    return (exp.regionId ?? 'standard') === 'abyssal' ? cfg.abyssalSectorBg : cfg.sectorBg;
+  }
+
+  private performTabTakeover(): void {
+    this.tabGuard.takeOver();
+    this.isReadOnlyTab = false;
+    this.activeCombatPlaybackKey = null;
+    this.keptCollectibleIds.clear();
+    // Reload latest persisted valid state from storage on takeover (F02)
+    const reloaded = loadSaveData(window.localStorage);
+    if (reloaded.status === 'loaded' || reloaded.status === 'fresh') {
+      this.save = reloaded.data;
+    } else if (reloaded.status === 'corrupt_with_backup') {
+      this.save = reloaded.backup;
+      this.titleEntered = true;
+      openBackupRecoveryModal(
+        this.modalHostEl,
+        reloaded.error,
+        reloaded.backup.progression.credits,
+        () => {
+          this.save = reloaded.backup;
+          this.persist();
+          this.syncAll();
+        },
+        () => {
+          this.save = createFreshSaveData();
+          this.persist();
+          this.syncAll();
+        }
+      );
+    }
+    this.applyBodySettings(this.save.settings);
+    this.phaserHost?.setCombatPaused(false);
+    this.syncAll();
+  }
+
+  private renderTitleScreen(): void {
+    const shell = this.appShellEl as HTMLElement & { inert?: boolean };
+    if (this.titleEntered) {
+      delete this.appShellEl.dataset.titleLocked;
+      if (!hasOpenModal()) {
+        if ('inert' in shell) shell.inert = false;
+        this.appShellEl.removeAttribute('aria-hidden');
+      }
+      this.titleHostEl.hidden = true;
+      this.titleHostEl.innerHTML = '';
+      return;
+    }
+
+    this.appShellEl.dataset.titleLocked = '1';
+    if ('inert' in shell) shell.inert = true;
+    this.appShellEl.setAttribute('aria-hidden', 'true');
+
+    const prog = this.save.progression;
+    const exp = this.save.activeExpedition;
+    const codex = getCodexSummary(prog);
+    const relicSum = getRelicCollectionSummary(prog);
+    const hasProgress =
+      Boolean(exp) ||
+      prog.totalExpeditions > 0 ||
+      prog.credits > 0 ||
+      prog.buildings.workbench;
+
+    const primaryLabel = exp
+      ? `▶ 恢复航次（第 ${exp.currentNode}/${exp.maxNodes} 站）`
+      : hasProgress
+      ? '▶ 进入拆解站'
+      : '▶ 启动打捞航程';
+
+    this.titleHostEl.hidden = false;
+    this.titleHostEl.innerHTML = `
+      <div class="title-screen" role="region" aria-label="游戏开场标题界面">
+        <img class="title-bg-art" src="${getTitleKeyArtUrl()}" alt="星际拆解站轨道港湾与出航打捞船" />
+        <div class="title-scrim"></div>
+        <div class="title-content">
+          <div class="title-top-bar">
+            <span class="title-edition-badge">STARLINE · 深空拓荒版</span>
+            <div class="title-top-actions">
+              ${
+                prog.buildings.workbench
+                  ? `<button type="button" class="btn btn-compact title-ghost-btn" id="btn-title-codex">图鉴</button>`
+                  : ''
+              }
+              <button type="button" class="btn btn-compact title-ghost-btn" id="btn-title-help">说明</button>
+              <button type="button" class="btn btn-compact title-ghost-btn" id="btn-title-settings">设置</button>
+            </div>
+          </div>
+
+          <div class="title-hero-block">
+            <div class="title-kicker">ORBITAL SALVAGE · 4×4 TACTICAL BAY</div>
+            <h1 class="title-main-heading">星际拆解站</h1>
+            <p class="title-tagline">拼装 4×4 船舱 · 穿梭六大残骸星域 · 击溃旗舰 BOSS · 点亮深空藏品馆</p>
+
+            ${
+              this.isReadOnlyTab
+                ? `<div class="system-banner banner-warn title-ro-banner" role="status">
+                    <span>检测到另一标签页运行中（当前为只读模式）</span>
+                    <button type="button" class="btn btn-primary btn-compact" id="btn-title-takeover">接管控制权</button>
+                  </div>`
+                : ''
+            }
+
+            ${
+              hasProgress
+                ? `<div class="title-archive-pills num">
+                    <span class="title-stat-pill accent">信用点 <strong>${prog.credits}</strong></span>
+                    <span class="title-stat-pill energy">藏品 <strong>${relicSum.restoredCount}/${relicSum.totalCount}</strong></span>
+                    <span class="title-stat-pill">图鉴 <strong>${codex.completionPercent}%</strong></span>
+                    <span class="title-stat-pill">最深 <strong>${prog.deepestNodeReached}/6</strong></span>
+                  </div>`
+                : `<div class="title-feature-chips">
+                    <span>6 大手绘星域</span>
+                    <span>双 BOSS 旗舰</span>
+                    <span>4 件稀有藏品</span>
+                    <span>离线本地存档</span>
+                  </div>`
+            }
+
+            <div class="title-cta-row">
+              <button type="button" class="btn btn-primary title-start-btn" id="btn-enter-game">
+                ${primaryLabel}
+              </button>
+            </div>
+          </div>
+
+          <div class="title-footer-meta">
+            <span>支持触控 / 鼠标 / 纯键盘操作</span>
+            <span>点击「进入」即开启深空环境音</span>
+          </div>
+        </div>
+      </div>
+    `;
+
+    this.titleHostEl.querySelector('#btn-enter-game')?.addEventListener('click', () => {
+      soundEngine.unlock();
+      soundEngine.play('warpJump');
+      this.titleEntered = true;
+      this.writeTitleEnteredSession(true);
+      this.syncAll();
+    });
+
+    this.titleHostEl.querySelector('#btn-title-takeover')?.addEventListener('click', () => {
+      this.performTabTakeover();
+    });
+
+    this.titleHostEl.querySelector('#btn-title-codex')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      this.openCodexModal();
+    });
+
+    this.titleHostEl.querySelector('#btn-title-help')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      openHelpModal(this.modalHostEl);
+    });
+
+    this.titleHostEl.querySelector('#btn-title-settings')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      this.openSettings();
+    });
+  }
+
+  private openSettings(): void {
+    openSettingsModal(
+      this.modalHostEl,
+      this.save.settings,
+      !this.canMutate(),
+      (nextSettings) => {
+        if (!this.canMutate()) return;
+        this.save = { ...this.save, settings: nextSettings };
+        this.applyBodySettings(nextSettings);
+        this.persist();
+        this.syncAll();
+      },
+      () => {
+        if (!this.canMutate()) return;
+        clearSaveData(window.localStorage);
+        this.save = createFreshSaveData();
+        this.recentlyBuiltId = null;
+        this.keptCollectibleIds.clear();
+        this.persist();
+        this.syncAll();
+      }
+    );
   }
 
   private syncAll(): void {
+    this.renderTitleScreen();
     this.renderTopHud();
     this.renderBanners();
-    this.phaserHost?.setCombatPaused(this.isReadOnlyTab);
+    this.phaserHost?.setCombatPaused(this.isReadOnlyTab || !this.titleEntered);
 
     const exp = this.save.activeExpedition;
     this.mainLayoutEl.classList.toggle('phase-base', !exp);
@@ -360,7 +592,7 @@ export class AppController {
     this.mainLayoutEl.classList.toggle('phase-combat', Boolean(exp && exp.phase === 'COMBAT'));
     this.mainLayoutEl.classList.toggle('phase-route', Boolean(exp && exp.phase === 'ROUTE_SELECT'));
     if (!exp) {
-      soundEngine.setTrack('base');
+      if (this.titleEntered) soundEngine.setTrack('base');
       this.activeCombatPlaybackKey = null;
       this.sceneCollapseOverride = null;
       this.sceneWrapEl.className = 'scene-stage-wrap mode-base';
@@ -373,7 +605,7 @@ export class AppController {
       this.renderDockingOverlay();
       this.renderBasePanels();
     } else {
-      soundEngine.setTrack('expedition');
+      if (this.titleEntered) soundEngine.setTrack('expedition');
       this.renderExpeditionView(exp);
     }
   }
@@ -441,7 +673,11 @@ export class AppController {
     const arrangeCollapsed = this.isArrangeSceneCollapsed();
 
     this.topHudEl.innerHTML = `
-      <h1 class="hud-brand">星际拆解站</h1>
+      ${
+        !exp
+          ? `<button type="button" class="hud-brand-btn" id="btn-return-title" title="返回标题界面">星际拆解站</button>`
+          : `<h1 class="hud-brand">星际拆解站</h1>`
+      }
       <div class="hud-pills">
         ${leftPills}
       </div>
@@ -463,6 +699,12 @@ export class AppController {
       </div>
     `;
 
+    this.topHudEl.querySelector('#btn-return-title')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      this.titleEntered = false;
+      this.writeTitleEnteredSession(false);
+      this.syncAll();
+    });
     this.topHudEl.querySelector('#btn-toggle-scene')?.addEventListener('click', () => {
       this.sceneCollapseOverride = !this.isArrangeSceneCollapsed();
       soundEngine.play('click');
@@ -478,27 +720,7 @@ export class AppController {
     });
     this.topHudEl.querySelector('#btn-open-settings')?.addEventListener('click', () => {
       soundEngine.play('click');
-      openSettingsModal(
-        this.modalHostEl,
-        this.save.settings,
-        !this.canMutate(),
-        (nextSettings) => {
-          if (!this.canMutate()) return;
-          this.save = { ...this.save, settings: nextSettings };
-          this.applyBodySettings(nextSettings);
-          this.persist();
-          this.syncAll();
-        },
-        () => {
-          if (!this.canMutate()) return;
-          clearSaveData(window.localStorage);
-          this.save = createFreshSaveData();
-          this.recentlyBuiltId = null;
-          this.keptCollectibleIds.clear();
-          this.persist();
-          this.syncAll();
-        }
-      );
+      this.openSettings();
     });
   }
 
@@ -514,35 +736,7 @@ export class AppController {
         <button type="button" class="btn btn-primary btn-compact" id="btn-takeover-tab">接管控制权</button>
       `;
       b.querySelector('#btn-takeover-tab')?.addEventListener('click', () => {
-        this.tabGuard.takeOver();
-        this.isReadOnlyTab = false;
-        this.activeCombatPlaybackKey = null;
-        this.keptCollectibleIds.clear();
-        // Reload latest persisted valid state from storage on takeover (F02)
-        const reloaded = loadSaveData(window.localStorage);
-        if (reloaded.status === 'loaded' || reloaded.status === 'fresh') {
-          this.save = reloaded.data;
-        } else if (reloaded.status === 'corrupt_with_backup') {
-          this.save = reloaded.backup;
-          openBackupRecoveryModal(
-            this.modalHostEl,
-            reloaded.error,
-            reloaded.backup.progression.credits,
-            () => {
-              this.save = reloaded.backup;
-              this.persist();
-              this.syncAll();
-            },
-            () => {
-              this.save = createFreshSaveData();
-              this.persist();
-              this.syncAll();
-            }
-          );
-        }
-        this.applyBodySettings(this.save.settings);
-        this.phaserHost?.setCombatPaused(false);
-        this.syncAll();
+        this.performTabTakeover();
       });
       this.bannersEl.appendChild(b);
     }
@@ -567,7 +761,7 @@ export class AppController {
         <span>
           <strong>${n.wasDefeat ? '已拖回基地' : '满载返航入账'}</strong>
           <strong class="num" style="color:var(--accent-action);margin:0 4px;">+${n.earnedCredits}</strong>信用点
-          ${n.hasKeptRelic ? ' · 古代导航仪已存入展台仓库' : ''}
+          ${n.hasKeptRelic ? ' · 稀有藏品已存入展台仓库' : ''}
           · ${n.goalHint}
         </span>
         <button type="button" class="btn btn-compact" id="btn-dismiss-docking-receipt">知道了</button>
@@ -607,8 +801,11 @@ export class AppController {
     const activeLoadout = isLoadoutUnlocked(prog, prog.selectedLoadout)
       ? prog.selectedLoadout
       : 'cannon_skiff';
+    const rawRegion: RegionId = prog.selectedRegion ?? 'standard';
+    const activeRegion: RegionId =
+      !isFirstRun && isRegionUnlocked(prog, rawRegion) ? rawRegion : 'standard';
 
-    // Sleek Ship Switcher & Launch Command Dock (Zero prose!)
+    // Sleek Ship Switcher + Star Region Toggle + Launch Command Dock (Zero prose!)
     this.leftPanelEl.innerHTML = `
       <div class="panel panel-game-dock">
         <div class="ship-picker-row">
@@ -639,7 +836,30 @@ export class AppController {
             .join('')}
         </div>
 
-        <button type="button" class="btn btn-primary btn-launch-hero" id="btn-launch-expedition" ${
+        ${
+          !isFirstRun
+            ? `
+            <div class="region-picker-row" role="group" aria-label="选择出航星域">
+              ${(['standard', 'abyssal'] as RegionId[])
+                .map((rid) => {
+                  const rdef = REGIONS[rid];
+                  const unlocked = isRegionUnlocked(prog, rid);
+                  const selected = activeRegion === rid;
+                  return `
+                    <button type="button" class="region-pill-btn ${selected ? 'selected' : ''} ${rid === 'abyssal' ? 'abyssal' : ''} ${unlocked ? '' : 'locked'}"
+                      data-region="${rid}" ${unlocked && !readOnly ? '' : 'disabled'} title="${unlocked ? rdef.badge : rdef.unlockHint}">
+                      <strong>${rdef.shortName}</strong>
+                      <span class="region-pill-sub">${unlocked ? rdef.badge : '需工作台/3站'}</span>
+                    </button>
+                  `;
+                })
+                .join('')}
+            </div>
+          `
+            : ''
+        }
+
+        <button type="button" class="btn btn-primary btn-launch-hero ${activeRegion === 'abyssal' ? 'btn-launch-abyssal' : ''}" id="btn-launch-expedition" ${
           readOnly ? 'disabled' : ''
         }>
           ${
@@ -647,6 +867,8 @@ export class AppController {
               ? '只读模式 · 请先接管控制权'
               : isFirstRun
               ? '▶ 第一次打捞（新手航次）'
+              : activeRegion === 'abyssal'
+              ? `▶ 深入「星渊禁区」· ${LOADOUTS[activeLoadout].name}`
               : `▶ 驾驶「${LOADOUTS[activeLoadout].name}」出发打捞`
           }
         </button>
@@ -668,6 +890,21 @@ export class AppController {
       });
     });
 
+    this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-region]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (!this.canMutate()) return;
+        const rid = btn.dataset.region as RegionId;
+        if (!isRegionUnlocked(this.save.progression, rid)) return;
+        soundEngine.play('click');
+        this.save = {
+          ...this.save,
+          progression: { ...this.save.progression, selectedRegion: rid },
+        };
+        this.persist();
+        this.syncAll();
+      });
+    });
+
     this.leftPanelEl.querySelector('#btn-launch-expedition')?.addEventListener('click', () => {
       if (!this.canMutate()) return;
       soundEngine.unlock();
@@ -678,6 +915,7 @@ export class AppController {
       this.keptCollectibleIds.clear();
       const exp = startExpedition({
         loadoutId: activeLoadout,
+        regionId: activeRegion,
         isTutorial: !this.save.progression.tutorialCompleted,
       });
       this.save = { ...this.save, activeExpedition: exp };
@@ -685,11 +923,10 @@ export class AppController {
       this.syncAll();
     });
 
-    // Compact Facility Upgrade Strip (Clicking station diorama pins ALSO triggers these!)
+    // Compact Facility Upgrade Strip + 4-Relic Museum Showcase Card (Clicking station diorama pins ALSO triggers these!)
     const visibleBuildings = getVisibleBuildings(prog);
-    const navRelic = RELICS.ancient_navigator;
-    const navState = prog.relics.ancient_navigator ?? { storedCount: 0, restored: false };
-    const restoreCheck = canRestoreRelic(prog, 'ancient_navigator');
+    const relicSum = getRelicCollectionSummary(prog);
+    const hasRestorableRelic = relicSum.restorableIds.length > 0 && !readOnly;
 
     const iconForBuilding: Record<BuildingId, string> = {
       workbench: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4l-5.6 5.6a1.5 1.5 0 0 0 2.1 2.1l5.6-5.6a4 4 0 0 0 5.4-5.4l-2.1 2.1-2.1-2.1z"/></svg>`,
@@ -697,8 +934,8 @@ export class AppController {
       drydock: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-6 9 6v9a1 1 0 0 1-1 1h-3v-6H7v6H4a1 1 0 0 1-1-1z"/><path d="M9 17h6"/></svg>`,
     };
     const tagForBuilding: Record<BuildingId, string> = {
-      workbench: '解锁图鉴与建设',
-      display: '展示古代藏品',
+      workbench: '解锁图鉴与星渊禁区',
+      display: '展示 4 件深空藏品',
       drydock: '解锁护盾工程艇',
     };
 
@@ -724,6 +961,8 @@ export class AppController {
                     built
                       ? bid === 'workbench'
                         ? `<button type="button" class="btn btn-energy btn-compact" data-open-codex="1">图鉴</button>`
+                        : bid === 'display'
+                        ? `<button type="button" class="btn btn-energy btn-compact" data-open-gallery="1">陈列馆</button>`
                         : `<span class="tag tag-energy">已运转 ✓</span>`
                       : `<button type="button" class="btn ${affordable ? 'btn-primary' : ''} btn-compact" data-build="${bid}" ${
                           affordable ? '' : 'disabled'
@@ -737,27 +976,37 @@ export class AppController {
           ${
             prog.buildings.display
               ? `
-                <div class="facility-chip relic-chip ${navState.restored ? 'built' : restoreCheck.canRestore && !readOnly ? 'affordable' : ''}">
+                <div class="facility-chip relic-chip ${
+                  relicSum.restoredCount >= relicSum.totalCount
+                    ? 'built'
+                    : hasRestorableRelic
+                    ? 'affordable'
+                    : ''
+                }">
                   <div class="facility-chip-head">
-                    <img class="relic-mini-thumb" src="${getItemImageUrl('cargo.ancient_navigator')}" alt="${navRelic.name}" />
+                    <div class="relic-dock-strip" aria-label="藏品进度">
+                      ${RELIC_ORDER.map((rid) => {
+                        const rdef = RELICS[rid];
+                        const st = prog.relics[rid] ?? { storedCount: 0, restored: false };
+                        return `<img class="relic-dock-pip ${st.restored ? 'lit' : st.storedCount > 0 ? 'stored' : 'dim'}" src="${getItemImageUrl(rdef.cargoDefId)}" alt="${rdef.name}" title="${rdef.name}" />`;
+                      }).join('')}
+                    </div>
                     <div class="facility-chip-title">
-                      <strong>${navRelic.name}</strong>
+                      <strong>藏品 ${relicSum.restoredCount}/${relicSum.totalCount}</strong>
                       <span class="facility-chip-sub">${
-                        navState.restored
-                          ? '星仪已点亮展示'
-                          : navState.storedCount > 0
-                          ? `库存 ${navState.storedCount} 件待修复`
-                          : '深空带回后可修复'
+                        relicSum.restoredCount >= relicSum.totalCount
+                          ? '全藏品已点亮 ✦'
+                          : hasRestorableRelic
+                          ? `${relicSum.restorableIds.length} 件可立即修复`
+                          : relicSum.storedTotal > 0
+                          ? `库存 ${relicSum.storedTotal} 件待筹款`
+                          : '深空打捞收集'
                       }</span>
                     </div>
                   </div>
-                  ${
-                    navState.restored
-                      ? `<span class="tag tag-energy">展示中 ✦</span>`
-                      : `<button type="button" class="btn ${restoreCheck.canRestore && !readOnly ? 'btn-primary' : ''} btn-compact" id="btn-restore-nav" ${
-                          restoreCheck.canRestore && !readOnly ? '' : 'disabled'
-                        }>${navRelic.restoreCost}¤ 修复</button>`
-                  }
+                  <button type="button" class="btn ${hasRestorableRelic ? 'btn-primary' : 'btn-energy'} btn-compact" id="btn-open-relic-gallery">
+                    ${hasRestorableRelic ? '修复' : '查看'}
+                  </button>
                 </div>
               `
               : ''
@@ -777,23 +1026,36 @@ export class AppController {
       this.openCodexModal();
     });
 
-    this.rightPanelEl.querySelector('#btn-restore-nav')?.addEventListener('click', () => {
-      this.handleRestoreRelic();
+    this.rightPanelEl.querySelectorAll('[data-open-gallery], #btn-open-relic-gallery').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        soundEngine.play('click');
+        this.openRelicGallery();
+      });
     });
   }
 
-  private handleRestoreRelic(): void {
-    if (!this.canMutate()) return;
-    const res = restoreRelic(this.save.progression, 'ancient_navigator');
+  private handleRestoreRelic(relicId: string) {
+    if (!this.canMutate()) return null;
+    const res = restoreRelic(this.save.progression, relicId);
     if (res.ok) {
-      soundEngine.play('buildComplete');
+      soundEngine.play('relicRestore');
       this.recentlyBuiltId = 'display';
       this.save = { ...this.save, progression: res.progression };
       this.persist();
       this.syncAll();
-    } else {
-      soundEngine.play('invalid');
+      return res.progression;
     }
+    soundEngine.play('invalid');
+    return null;
+  }
+
+  private openRelicGallery(): void {
+    openRelicGalleryModal(
+      this.modalHostEl,
+      this.save.progression,
+      !this.canMutate(),
+      (relicId) => this.handleRestoreRelic(relicId)
+    );
   }
 
   private handleBuildingInteract(buildingId: BuildingId): void {
@@ -802,8 +1064,9 @@ export class AppController {
       if (buildingId === 'workbench') {
         soundEngine.play('click');
         this.openCodexModal();
-      } else if (buildingId === 'display' && canRestoreRelic(prog, 'ancient_navigator').canRestore) {
-        this.handleRestoreRelic();
+      } else if (buildingId === 'display') {
+        soundEngine.play('click');
+        this.openRelicGallery();
       }
       return;
     }
@@ -828,7 +1091,7 @@ export class AppController {
   }
 
   private renderExpeditionView(exp: ExpeditionState): void {
-    const sectorIdx = this.getSectorIndex(exp.currentNode);
+    const sectorIdx = this.getSectorIndex(exp);
     if (exp.phase === 'ARRANGE') {
       const collapsed = this.isArrangeSceneCollapsed();
       this.sceneWrapEl.className = `scene-stage-wrap mode-arrange ${collapsed ? 'collapsed' : ''}`;
@@ -848,7 +1111,7 @@ export class AppController {
       this.phaserHost?.showCombat({
         loadoutId: exp.loadoutId,
         enemy: normalPrev.routeSpec.enemy,
-        sectorIndex: sectorIdx,
+        sectorIndex: normalPrev.routeSpec.sectorBg ?? sectorIdx,
         simulation: null,
         settings: this.save.settings,
       });
@@ -929,6 +1192,7 @@ export class AppController {
     const normal = getRoutePreview(exp, 'normal');
     const danger = getRoutePreview(exp, 'danger');
     const tutorialOnlyNormal = exp.isTutorial && exp.currentNode === 1;
+    const isAbyssal = (exp.regionId ?? 'standard') === 'abyssal';
 
     const renderRouteCard = (
       routeType: RouteType,
@@ -937,16 +1201,32 @@ export class AppController {
     ) => {
       const { routeSpec, prediction } = data;
       const isDanger = routeType === 'danger';
+      const isBoss = Boolean(routeSpec.enemy.isBoss);
       const lethal = prediction.outcome === 'defeat';
+      const hasBespokeDangerArt =
+        routeSpec.enemy.archetype === 'interceptor' ||
+        routeSpec.enemy.archetype === 'boss_dreadnought' ||
+        routeSpec.enemy.archetype === 'boss_leviathan';
+
+      const badgeClass = isBoss ? 'tag-boss' : isDanger ? 'tag-danger' : 'tag-energy';
+      const badgeLabel = isBoss
+        ? isDanger
+          ? '★ 终极 BOSS'
+          : '★ 旗舰 BOSS'
+        : isDanger
+        ? '⚠ 危险航道'
+        : '✦ 普通航道';
 
       return `
-        <div class="route-beacon ${isDanger ? 'danger' : ''}">
+        <div class="route-beacon ${isDanger ? 'danger' : ''} ${isBoss ? 'boss' : ''}">
           <div class="route-beacon-head">
-            <span class="tag ${isDanger ? 'tag-danger' : 'tag-energy'}">${isDanger ? '⚠ 危险航道' : '✦ 普通航道'}</span>
+            <span class="tag ${badgeClass}">${badgeLabel}</span>
             <strong class="route-enemy-name">${routeSpec.enemy.name}</strong>
           </div>
 
-          <div class="route-enemy-visual ${isDanger ? 'danger' : ''}">
+          <div class="route-enemy-visual ${isDanger ? 'danger' : ''} ${isBoss ? 'boss' : ''} ${
+            hasBespokeDangerArt ? 'bespoke-art' : ''
+          }">
             <img src="${getEnemyShipImageUrl(routeSpec.enemy.archetype)}" alt="${routeSpec.enemy.name}" />
           </div>
 
@@ -967,7 +1247,7 @@ export class AppController {
             }
           </div>
 
-          <button type="button" class="btn ${isDanger ? 'btn-danger' : 'btn-primary'}"
+          <button type="button" class="btn ${isDanger || isBoss ? 'btn-danger' : 'btn-primary'}"
             data-select-route="${routeType}" ${lockedForTutorial || readOnly ? 'disabled' : ''}>
             ${
               readOnly
@@ -976,6 +1256,8 @@ export class AppController {
                 ? '第 2 站解锁'
                 : lethal
                 ? '冒险跃迁 →'
+                : isBoss
+                ? '挑战 BOSS →'
                 : '跃迁交火 →'
             }
           </button>
@@ -987,7 +1269,10 @@ export class AppController {
       <div class="panel panel-game-dock">
         <div class="panel-header">
           <h2 class="panel-title">星图跃迁 · ${normal.routeSpec.sectorName} (${exp.currentNode}/${exp.maxNodes})</h2>
-          <span class="tag tag-amber">悬赏 +${exp.accumulatedBounty}¤</span>
+          <div style="display:flex;gap:5px;align-items:center;">
+            ${isAbyssal ? `<span class="tag tag-danger">星渊禁区</span>` : ''}
+            <span class="tag tag-amber">悬赏 +${exp.accumulatedBounty}¤</span>
+          </div>
         </div>
         <div class="route-grid">
           ${renderRouteCard('normal', normal, false)}
@@ -1016,7 +1301,7 @@ export class AppController {
     const readOnly = !this.canMutate();
     const combat = exp.activeCombat!;
     const playbackKey = `${exp.expeditionId}_${exp.currentNode}_${combat.routeSpec.routeType}`;
-    const sectorIdx = this.getSectorIndex(exp.currentNode);
+    const sectorIdx = combat.routeSpec.sectorBg ?? this.getSectorIndex(exp);
 
     if (this.activeCombatPlaybackKey !== playbackKey) {
       this.activeCombatPlaybackKey = playbackKey;
@@ -1047,7 +1332,7 @@ export class AppController {
           this.syncAll();
         },
       });
-      this.phaserHost?.setCombatPaused(readOnly);
+      this.phaserHost?.setCombatPaused(readOnly || !this.titleEntered);
     }
 
     this.updateCombatOverlayBars(exp);
@@ -1057,6 +1342,7 @@ export class AppController {
         <div class="combat-bar-status">
           <span class="tag tag-energy" id="combat-round-tag">第 ${this.liveCombatRound}/${combat.simulation.roundsCount} 轮</span>
           <span class="combat-stat-inline num">攻${combat.statsSnapshot.totalAttack} · 盾${combat.statsSnapshot.effectiveShield}</span>
+          ${combat.routeSpec.enemy.isBoss ? `<span class="tag tag-boss">BOSS 战</span>` : ''}
           ${readOnly ? `<span class="tag tag-danger">已暂停</span>` : ''}
         </div>
         <div class="combat-bar-btns">
@@ -1105,6 +1391,7 @@ export class AppController {
       0,
       Math.min(100, (this.liveCombatEnemyHp / combat.routeSpec.enemy.maxHp) * 100)
     );
+    const isBoss = Boolean(combat.routeSpec.enemy.isBoss);
 
     this.sceneOverlayEl.innerHTML = `
       <div class="combat-hud-bars">
@@ -1124,12 +1411,12 @@ export class AppController {
               : ''
           }
         </div>
-        <div class="unit-bar-card">
+        <div class="unit-bar-card ${isBoss ? 'boss-bar-card' : ''}">
           <div class="unit-bar-header">
-            <span class="name">${combat.routeSpec.enemy.name}</span>
+            <span class="name">${isBoss ? `<span class="boss-mini-badge">BOSS</span> ` : ''}${combat.routeSpec.enemy.name}</span>
             <span class="unit-bar-vals num">♥${this.liveCombatEnemyHp}/${combat.routeSpec.enemy.maxHp}</span>
           </div>
-          <div class="hp-track"><div class="hp-fill enemy" style="width:${eHpPct}%"></div></div>
+          <div class="hp-track"><div class="hp-fill enemy ${isBoss ? 'boss' : ''}" style="width:${eHpPct}%"></div></div>
         </div>
       </div>
     `;

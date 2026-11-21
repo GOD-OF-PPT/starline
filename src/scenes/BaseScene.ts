@@ -1,7 +1,12 @@
 import Phaser from 'phaser';
 import { getBaseLayerImageUrl, getPlayerShipImageUrl } from '../assets/itemArt';
-import { BUILDINGS, RELICS, type BuildingId } from '../data/buildings';
-import { canBuildFacility, canRestoreRelic, type BaseProgression, type GameSettings } from '../domain/progression';
+import { BUILDINGS, RELICS, RELIC_ORDER, type BuildingId } from '../data/buildings';
+import {
+  canBuildFacility,
+  getRelicCollectionSummary,
+  type BaseProgression,
+  type GameSettings,
+} from '../domain/progression';
 
 export interface BaseSceneState {
   readonly progression: BaseProgression;
@@ -340,12 +345,13 @@ export class BaseScene extends Phaser.Scene {
 
     const wbBuilt = progression.buildings.workbench;
     const dispBuilt = progression.buildings.display;
-    const relicRestored = Boolean(progression.relics.ancient_navigator?.restored);
+    const relicSum = getRelicCollectionSummary(progression);
+    const anyRelicRestored = relicSum.restoredCount > 0;
     const dockBuilt = progression.buildings.drydock;
 
     this.wbOverlay.setVisible(wbBuilt);
-    this.dispEmptyOverlay.setVisible(dispBuilt && !relicRestored);
-    this.dispRelicOverlay.setVisible(dispBuilt && relicRestored);
+    this.dispEmptyOverlay.setVisible(dispBuilt && !anyRelicRestored);
+    this.dispRelicOverlay.setVisible(dispBuilt && anyRelicRestored);
     this.drydockOverlay.setVisible(dockBuilt);
 
     // Update diegetic station pins directly above each facility!
@@ -356,17 +362,19 @@ export class BaseScene extends Phaser.Scene {
       const wbCheck = canBuildFacility(progression, 'workbench');
       const dispCheck = canBuildFacility(progression, 'display');
       const dockCheck = canBuildFacility(progression, 'drydock');
-      const relicCheck = canRestoreRelic(progression, 'ancient_navigator');
+      const hasRestorable = relicSum.restorableIds.length > 0;
 
       const wbText = wbBuilt
         ? '工作台 · 图鉴'
         : `修复工作台 · ${BUILDINGS.workbench.cost}¤`;
       const dispText = !dispBuilt
         ? `展台 · ${BUILDINGS.display.cost}¤`
-        : relicRestored
-        ? '展台 · 星仪 ✓'
-        : relicCheck.canRestore
-        ? `修复星仪 · ${RELICS.ancient_navigator.restoreCost}¤`
+        : hasRestorable
+        ? `展台 · 可修复 (${relicSum.restorableIds.length})`
+        : relicSum.restoredCount >= relicSum.totalCount
+        ? `藏品馆 ${relicSum.restoredCount}/${relicSum.totalCount} ★`
+        : relicSum.restoredCount > 0
+        ? `藏品馆 ${relicSum.restoredCount}/${relicSum.totalCount}`
         : '展台 · 待藏品';
       const dockText = dockBuilt ? '双泊位 ✓' : `扩建船坞 · ${BUILDINGS.drydock.cost}¤`;
 
@@ -383,14 +391,22 @@ export class BaseScene extends Phaser.Scene {
           pos: L.display,
           pinY: Math.max(18, L.pt(0.50, 0.045).y),
           text: dispText,
-          accent: relicRestored
+          accent: hasRestorable
+            ? 0xf6b852
+            : relicSum.restoredCount >= relicSum.totalCount
+            ? 0xf6b852
+            : anyRelicRestored
             ? 0x62d6df
-            : (!dispBuilt && dispCheck.canBuild) || relicCheck.canRestore
+            : !dispBuilt && dispCheck.canBuild
             ? 0xf6b852
             : 0x5d728a,
-          textColor: relicRestored
+          textColor: hasRestorable
+            ? '#F6B852'
+            : relicSum.restoredCount >= relicSum.totalCount
+            ? '#F6B852'
+            : anyRelicRestored
             ? '#62D6DF'
-            : (!dispBuilt && dispCheck.canBuild) || relicCheck.canRestore
+            : !dispBuilt && dispCheck.canBuild
             ? '#F6B852'
             : '#D5E0EC',
           visible: wbBuilt,
@@ -482,25 +498,45 @@ export class BaseScene extends Phaser.Scene {
       this.animGraphics.fillCircle(botX + 2 * s, botY, Math.max(1.5, 2.4 * s));
     }
 
-    // 3. Restored Ancient Navigator: subtle cyan-gold orbital halo inside glass vitrine
-    if (progression.buildings.display && progression.relics.ancient_navigator?.restored) {
+    // 3. Restored Museum Relics: multi-relic orbital halo + color-coded floating relic pips!
+    const relicSum = getRelicCollectionSummary(progression);
+    if (progression.buildings.display && relicSum.restoredCount > 0) {
       const rp = L.displayRelic;
       const pulse = 1 + Math.sin(t * 2.5) * 0.08;
-      this.animGraphics.lineStyle(Math.max(1.2, 2.2 * s), 0x62d6df, 0.72);
+      const isComplete = relicSum.restoredCount >= relicSum.totalCount;
+      this.animGraphics.lineStyle(Math.max(1.2, 2.2 * s), isComplete ? 0xf6b852 : 0x62d6df, 0.78);
       this.animGraphics.strokeCircle(rp.x, rp.y, 34 * s * pulse);
-      this.animGraphics.lineStyle(Math.max(1, 1.4 * s), 0xf6b852, 0.5);
-      this.animGraphics.strokeEllipse(rp.x, rp.y, 82 * s * pulse, 28 * s * pulse);
+      this.animGraphics.lineStyle(Math.max(1, 1.5 * s), isComplete ? 0x62d6df : 0xf6b852, 0.58);
+      this.animGraphics.strokeEllipse(rp.x, rp.y, 84 * s * pulse, 28 * s * pulse);
+      if (isComplete) {
+        this.animGraphics.lineStyle(Math.max(1, 1.4 * s), 0xf6b852, 0.42);
+        this.animGraphics.strokeEllipse(rp.x, rp.y, 108 * s * pulse, 42 * s * pulse);
+      }
+
+      // Orbiting color-coded holographic relic markers for each restored relic (1..4)
+      const restoredIds = RELIC_ORDER.filter((id) => progression.relics[id]?.restored);
+      restoredIds.forEach((id, idx) => {
+        const def = RELICS[id];
+        const hex = Number.parseInt((def?.accentColor ?? '#62D6DF').replace('#', ''), 16);
+        const ang = t * 1.15 + (idx / restoredIds.length) * Math.PI * 2;
+        const ox = rp.x + Math.cos(ang) * 42 * s;
+        const oy = rp.y + Math.sin(ang) * 14 * s;
+        this.animGraphics.fillStyle(hex, 0.35);
+        this.animGraphics.fillCircle(ox, oy, Math.max(3.5, 7 * s));
+        this.animGraphics.fillStyle(hex, 0.96);
+        this.animGraphics.fillCircle(ox, oy, Math.max(2, 3.6 * s));
+      });
     }
 
-    // 4. Affordable facility pulse ring (diegetic visual callout without text walls!)
+    // 4. Affordable facility / restorable relic pulse ring (diegetic visual callout!)
     if (!settings.reducedMotion) {
       const pulseR = (Math.sin(t * 3.5) + 1) * 0.5;
       if (!progression.buildings.workbench && canBuildFacility(progression, 'workbench').canBuild) {
         this.animGraphics.lineStyle(2, 0xf6b852, 0.45 + pulseR * 0.4);
         this.animGraphics.strokeCircle(L.workbench.x, L.workbench.y, (32 + pulseR * 16) * s);
       }
-      if (progression.buildings.display && canRestoreRelic(progression, 'ancient_navigator').canRestore) {
-        this.animGraphics.lineStyle(2, 0x62d6df, 0.45 + pulseR * 0.45);
+      if (progression.buildings.display && relicSum.restorableIds.length > 0) {
+        this.animGraphics.lineStyle(2, 0xf6b852, 0.45 + pulseR * 0.45);
         this.animGraphics.strokeCircle(L.display.x, L.display.y, (32 + pulseR * 16) * s);
       }
     }

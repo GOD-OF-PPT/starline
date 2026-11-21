@@ -694,3 +694,87 @@ describe('§11 规则边界 — 存档备份恢复与存储异常提示', () => 
   });
 });
 
+describe('v3.0 扩充验证 — 六大星域、BOSS 舰体、星渊禁区、四藏品与旧档兼容', () => {
+  it('标准航线 6 节点映射 6 张不重复星域背景，第 6 节点配置双 BOSS 舰体', () => {
+    const bgs = new Set<number>();
+    for (let n = 1; n <= 6; n++) {
+      const r = getRouteSpec(n, 'normal', 'standard');
+      expect(r.sectorBg).toBeDefined();
+      bgs.add(r.sectorBg!);
+    }
+    expect(bgs.size).toBe(6);
+
+    const n6Normal = getRouteSpec(6, 'normal', 'standard');
+    const n6Danger = getRouteSpec(6, 'danger', 'standard');
+    expect(n6Normal.enemy.archetype).toBe('boss_dreadnought');
+    expect(n6Normal.enemy.isBoss).toBe(true);
+    expect(n6Danger.enemy.archetype).toBe('boss_leviathan');
+    expect(n6Danger.enemy.isBoss).toBe(true);
+
+    // Abyssal Frontier scales enemy HP/DMG/bounty and spawns Node 3 Danger mini-BOSS
+    const ab3Danger = getRouteSpec(3, 'danger', 'abyssal');
+    const std3Danger = getRouteSpec(3, 'danger', 'standard');
+    expect(ab3Danger.enemy.isBoss).toBe(true);
+    expect(ab3Danger.enemy.archetype).toBe('boss_dreadnought');
+    expect(ab3Danger.bounty).toBeGreaterThan(std3Danger.bounty);
+    expect(ab3Danger.enemy.maxHp).toBeGreaterThan(std3Danger.enemy.maxHp);
+  });
+
+  it('4 件深空藏品均可独立留存入库与展台修复，且兼容旧版单藏品存档', () => {
+    let prog = { ...createInitialProgression(), credits: 600 };
+    prog = purchaseBuilding(prog, 'workbench').progression;
+    prog = purchaseBuilding(prog, 'display').progression;
+
+    let exp = startExpedition({ loadoutId: 'cannon_skiff', regionId: 'abyssal', seed: 3030 });
+    exp = completeCombat(selectRoute(exp, 'normal'));
+    exp = selectReward(exp, 'repair');
+
+    // Place 3 new relics simultaneously in bay: quantum_core (2x2 at 0,0), cryo_amber (1x3 at 3,0), obsidian_crown (L3 at 0,2)
+    const bayWithRelics: CargoBayState = {
+      placed: [
+        { item: makeItem('r_qc', 'cargo.quantum_core', 80), x: 0, y: 0, rotation: 0 },
+        { item: makeItem('r_ca', 'cargo.cryo_amber', 70), x: 3, y: 0, rotation: 0 },
+        { item: makeItem('r_oc', 'cargo.obsidian_crown', 90), x: 0, y: 2, rotation: 0 },
+      ],
+      staging: [],
+      discardedThisArrange: [],
+    };
+    exp = updateArrangeBay(exp, bayWithRelics);
+    exp = initiateSafeReturn(exp);
+
+    const settled = applyExpeditionSettlement(prog, exp, ['r_qc', 'r_ca', 'r_oc']);
+    expect(settled.summary.keptRelicCount).toBe(3);
+    expect(settled.progression.relics.quantum_core.storedCount).toBe(1);
+    expect(settled.progression.relics.cryo_amber.storedCount).toBe(1);
+    expect(settled.progression.relics.obsidian_crown.storedCount).toBe(1);
+    expect(settled.progression.relics.ancient_navigator.storedCount).toBe(0);
+
+    // Restore all 3 new relics cleanly
+    let cur = settled.progression;
+    for (const rid of ['quantum_core', 'cryo_amber', 'obsidian_crown']) {
+      const r = restoreRelic(cur, rid);
+      expect(r.ok).toBe(true);
+      cur = r.progression;
+      expect(cur.relics[rid].restored).toBe(true);
+    }
+
+    // Legacy v1 save with ONLY ancient_navigator and NO selectedRegion loads cleanly & backfills all 4 relics
+    const storage = new MemoryStorage();
+    const legacy = JSON.parse(JSON.stringify(createFreshSaveData())) as Record<string, unknown>;
+    const legacyProg = legacy.progression as Record<string, unknown>;
+    delete legacyProg.selectedRegion;
+    legacyProg.relics = { ancient_navigator: { storedCount: 1, restored: false } };
+    storage.setItem(PRIMARY_SAVE_KEY, JSON.stringify(legacy));
+
+    const loaded = loadSaveData(storage);
+    expect(loaded.status).toBe('loaded');
+    if (loaded.status === 'loaded') {
+      expect(loaded.data.progression.selectedRegion).toBe('standard');
+      expect(loaded.data.progression.relics.ancient_navigator.storedCount).toBe(1);
+      expect(loaded.data.progression.relics.quantum_core).toEqual({ storedCount: 0, restored: false });
+      expect(loaded.data.progression.relics.cryo_amber).toEqual({ storedCount: 0, restored: false });
+      expect(loaded.data.progression.relics.obsidian_crown).toEqual({ storedCount: 0, restored: false });
+    }
+  });
+});
+

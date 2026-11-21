@@ -7,14 +7,14 @@ import {
 import { getShipHardpoints } from '../assets/manifest';
 import { soundEngine } from '../audio/soundEngine';
 import type { LoadoutId } from '../data/items';
-import type { EnemySpec } from '../data/nodes';
+import type { EnemySpec, SectorBgIndex } from '../data/nodes';
 import type { CombatRoundEvent, CombatSimulationResult } from '../domain/combat';
 import type { GameSettings } from '../domain/progression';
 
 export interface CombatScenePlayback {
   readonly loadoutId: LoadoutId;
   readonly enemy: EnemySpec | null;
-  readonly sectorIndex?: 1 | 2 | 3;
+  readonly sectorIndex?: SectorBgIndex;
   readonly simulation: CombatSimulationResult | null;
   readonly settings: GameSettings;
   readonly onRoundStep?: (roundIndex: number, event: CombatRoundEvent) => void;
@@ -38,6 +38,7 @@ interface BeamEffect {
   x2: number;
   y2: number;
   color: number;
+  thickness?: number;
   life: number;
   maxLife: number;
 }
@@ -72,10 +73,10 @@ const BG_TEX_W = 1280;
 const BG_TEX_H = 720;
 
 /**
- * Illustrated Side-View Space Combat & Flight Scene (v2.0).
- * Combines hand-painted deep-space sector backdrops & illustrated transparent ships with
- * juicy combat choreography: recoil kickback, white hit-flash, floating damage/shield/repair numbers,
- * pulsing ion thrusters, shield energy flares, breakup explosions, and deterministic simulation playback.
+ * Illustrated Side-View Space Combat & Flight Scene (v3.0).
+ * Combines 6 hand-painted deep-space sector backdrops & 8 illustrated ships (including 2 BOSS dreadnoughts)
+ * with juicy combat choreography: BOSS horn & heavy-mass entry, dual-salvo railguns, recoil kickback,
+ * white hit-flash, floating damage/shield/repair popups, pulsing thrusters, shield flares, and shockwaves.
  */
 export class CombatScene extends Phaser.Scene {
   private playback: CombatScenePlayback | null = null;
@@ -113,6 +114,7 @@ export class CombatScene extends Phaser.Scene {
   private playerFlashMs = 0;
   private enemyFlashMs = 0;
   private entrySwoop = 0;
+  private enemyEntrySwoop = 0;
   private playerDamaged = false;
   private enemyDamaged = false;
   private smokeTimer = 0;
@@ -148,11 +150,17 @@ export class CombatScene extends Phaser.Scene {
       ['bg.sector.1', getSectorBgImageUrl(1)],
       ['bg.sector.2', getSectorBgImageUrl(2)],
       ['bg.sector.3', getSectorBgImageUrl(3)],
+      ['bg.sector.4', getSectorBgImageUrl(4)],
+      ['bg.sector.5', getSectorBgImageUrl(5)],
+      ['bg.sector.6', getSectorBgImageUrl(6)],
       ['ship.player.cannon_skiff', getPlayerShipImageUrl('cannon_skiff')],
       ['ship.player.shield_cruiser', getPlayerShipImageUrl('shield_cruiser')],
       ['ship.enemy.scout', getEnemyShipImageUrl('scout')],
+      ['ship.enemy.interceptor', getEnemyShipImageUrl('interceptor')],
       ['ship.enemy.frigate', getEnemyShipImageUrl('frigate')],
       ['ship.enemy.hulk', getEnemyShipImageUrl('hulk')],
+      ['ship.enemy.boss_dreadnought', getEnemyShipImageUrl('boss_dreadnought')],
+      ['ship.enemy.boss_leviathan', getEnemyShipImageUrl('boss_leviathan')],
     ];
     for (const [key, url] of queue) {
       if (!this.textures.exists(key)) {
@@ -253,7 +261,10 @@ export class CombatScene extends Phaser.Scene {
     this.enemyFlashMs = 0;
     this.playerDamaged = false;
     this.enemyDamaged = false;
-    this.entrySwoop = this.playback?.settings.reducedMotion ? 0 : 1;
+    const reduced = Boolean(this.playback?.settings.reducedMotion);
+    this.entrySwoop = reduced ? 0 : 1;
+    this.enemyEntrySwoop =
+      !reduced && this.playback?.enemy?.isBoss && this.playback?.simulation ? 1 : 0;
 
     if (this.playerSprite) {
       this.playerSprite.destroy();
@@ -266,25 +277,26 @@ export class CombatScene extends Phaser.Scene {
 
     if (!this.playback) return;
 
-    // Pick illustrated sector backdrop matching sector depth or danger route
-    const secIdx: 1 | 2 | 3 =
-      this.playback.enemy?.isDanger && (this.playback.sectorIndex ?? 1) >= 2
-        ? 3
-        : this.playback.sectorIndex ?? 1;
+    // Pick exact hand-painted sector backdrop (1..6)
+    const secIdx: SectorBgIndex = this.playback.sectorIndex ?? 1;
     if (this.bgImage) {
       this.bgImage.setTexture(`bg.sector.${secIdx}`);
-      this.bgImage.setAlpha(this.playback.enemy?.isDanger ? 0.94 : 0.88);
+      this.bgImage.setAlpha(this.playback.enemy?.isBoss ? 0.96 : this.playback.enemy?.isDanger ? 0.94 : 0.88);
     }
 
     const playerKey = `ship.player.${this.playback.loadoutId}`;
     this.playerSprite = this.add.image(0, 0, playerKey).setOrigin(0.5, 0.5).setDepth(3);
 
     if (this.playback.enemy) {
-      const enemyKey = `ship.enemy.${this.playback.enemy.archetype}`;
+      const arch = this.playback.enemy.archetype;
+      const enemyKey = `ship.enemy.${arch}`;
       this.enemySprite = this.add.image(0, 0, enemyKey).setOrigin(0.5, 0.5).setDepth(3);
-      if (this.playback.enemy.isDanger) {
-        // Subtle warm crimson elite glaze for danger-route variants
+      // Only add subtle crimson glaze to shared non-crimson archetypes; interceptor & boss_leviathan are bespoke crimson/obsidian!
+      if (this.playback.enemy.isDanger && (arch === 'scout' || arch === 'frigate' || arch === 'hulk')) {
         this.enemySprite.setTint(0xffcfc8);
+      }
+      if (this.playback.enemy.isBoss && this.playback.simulation) {
+        soundEngine.play('bossAlarm');
       }
     }
 
@@ -308,16 +320,24 @@ export class CombatScene extends Phaser.Scene {
       this.bgImage.setPosition(w * 0.5, h * 0.5).setScale(bgScale);
     }
 
-    const shipScale = Math.min((w * 0.41) / SHIP_TEX_W, (h * 0.62) / SHIP_TEX_H);
+    const shipScale = Math.min((w * 0.4) / SHIP_TEX_W, (h * 0.6) / SHIP_TEX_H);
     this.shipBaseY = this.playback?.simulation ? h * 0.62 : h * 0.56;
-    this.playerBaseX = this.enemySprite ? w * 0.25 : w * 0.5;
-    this.enemyBaseX = w * 0.75;
+    this.playerBaseX = this.enemySprite ? w * 0.24 : w * 0.5;
+    this.enemyBaseX = this.playback?.enemy?.isBoss ? w * 0.74 : w * 0.75;
 
     if (this.playerSprite) {
       this.playerSprite.setPosition(this.playerBaseX, this.shipBaseY).setScale(shipScale);
     }
     if (this.enemySprite) {
-      const bossBoost = this.playback?.enemy?.archetype === 'hulk' ? 1.12 : 1.0;
+      const arch = this.playback?.enemy?.archetype;
+      const bossBoost =
+        arch === 'boss_leviathan'
+          ? 1.24
+          : arch === 'boss_dreadnought'
+          ? 1.22
+          : arch === 'hulk'
+          ? 1.12
+          : 1.0;
       this.enemySprite.setPosition(this.enemyBaseX, this.shipBaseY).setScale(shipScale * bossBoost);
     }
   }
@@ -384,21 +404,26 @@ export class CombatScene extends Phaser.Scene {
       this.bgGraphics.fillCircle(st.nx * w, st.ny * h, st.r);
     }
 
-    // 2. Smooth spring physics for entry swoop, recoil kickback, and idle hover
+    // 2. Smooth spring physics for entry swoop, heavy BOSS glide, recoil kickback, and idle hover
     if (this.entrySwoop > 0) {
       this.entrySwoop = Math.max(0, this.entrySwoop - dt * 2.8);
+    }
+    if (this.enemyEntrySwoop > 0) {
+      this.enemyEntrySwoop = Math.max(0, this.enemyEntrySwoop - dt * 1.9);
     }
     this.playerRecoilX *= Math.pow(0.001, dt);
     this.enemyRecoilX *= Math.pow(0.001, dt);
 
     const swoopOffset = this.entrySwoop * this.entrySwoop * -w * 0.25;
+    const bossGlideOffset = this.enemyEntrySwoop * this.enemyEntrySwoop * w * 0.22;
     if (this.playerSprite) {
       this.playerSprite.x = this.playerBaseX + this.playerRecoilX + swoopOffset;
       this.playerSprite.y = this.shipBaseY + (reduced ? 0 : Math.sin(this.elapsed * 2.4) * 3.0);
     }
     if (this.enemySprite) {
-      this.enemySprite.x = this.enemyBaseX + this.enemyRecoilX;
-      this.enemySprite.y = this.shipBaseY + (reduced ? 0 : Math.cos(this.elapsed * 2.1) * 3.0);
+      const hoverAmp = this.playback?.enemy?.isBoss ? 1.8 : 3.0;
+      this.enemySprite.x = this.enemyBaseX + this.enemyRecoilX + bossGlideOffset;
+      this.enemySprite.y = this.shipBaseY + (reduced ? 0 : Math.cos(this.elapsed * 2.1) * hoverAmp);
     }
 
     // Hit flash decay
@@ -411,8 +436,12 @@ export class CombatScene extends Phaser.Scene {
     if (this.enemyFlashMs > 0) {
       this.enemyFlashMs -= dtMs;
       if (this.enemyFlashMs <= 0 && this.enemySprite) {
-        if (this.playback?.enemy?.isDanger) this.enemySprite.setTint(0xffcfc8);
-        else this.enemySprite.clearTint();
+        const arch = this.playback?.enemy?.archetype;
+        if (this.playback?.enemy?.isDanger && (arch === 'scout' || arch === 'frigate' || arch === 'hulk')) {
+          this.enemySprite.setTint(0xffcfc8);
+        } else {
+          this.enemySprite.clearTint();
+        }
       }
     }
 
@@ -476,7 +505,7 @@ export class CombatScene extends Phaser.Scene {
       this.cameras.main.setScroll(0, 0);
     }
 
-    // 5. Render dynamic thruster glow + beams + shield arcs + shockwaves + sparks
+    // 5. Render dynamic thruster glow + BOSS core pulse + beams + shield arcs + shockwaves + sparks
     this.fxGraphics.clear();
 
     // Animated pulsing ion thruster plumes behind live ships
@@ -497,9 +526,19 @@ export class CombatScene extends Phaser.Scene {
         const eng = this.getSpritePoint(this.enemySprite, eHp.engine);
         const len = Math.max(12, this.enemySprite.displayWidth * 0.13) * flicker;
         const rad = Math.max(5, this.enemySprite.displayHeight * 0.12);
-        const isDanger = Boolean(this.playback?.enemy?.isDanger);
+        const isDanger = Boolean(this.playback?.enemy?.isDanger || this.playback?.enemy?.isBoss);
         this.fxGraphics.fillStyle(isDanger ? 0xf27564 : 0xf6b852, 0.44 * flicker);
         this.fxGraphics.fillTriangle(eng.x, eng.y - rad, eng.x, eng.y + rad, eng.x + len, eng.y);
+
+        // Pulsing siege plasma core glow inside Obsidian Leviathan's jaws!
+        if (this.playback?.enemy?.archetype === 'boss_leviathan') {
+          const core = this.getSpritePoint(this.enemySprite, { x: 0.14, y: 0.49 });
+          const pulseR = Math.max(4, this.enemySprite.displayHeight * 0.08) * (0.85 + Math.sin(this.elapsed * 9) * 0.25);
+          this.fxGraphics.fillStyle(0xff5b45, 0.42);
+          this.fxGraphics.fillCircle(core.x, core.y, pulseR * 1.8);
+          this.fxGraphics.fillStyle(0xffe7b8, 0.85);
+          this.fxGraphics.fillCircle(core.x, core.y, pulseR * 0.72);
+        }
       }
     }
 
@@ -512,16 +551,17 @@ export class CombatScene extends Phaser.Scene {
       }
       const alpha = Math.max(0, b.life / b.maxLife);
       const expand = 1 - alpha;
+      const thick = b.thickness ?? 1;
       // Muzzle emitter burst
-      this.fxGraphics.fillStyle(b.color, alpha * 0.8);
-      this.fxGraphics.fillCircle(b.x1, b.y1, 7 * alpha + 2);
+      this.fxGraphics.fillStyle(b.color, alpha * 0.82);
+      this.fxGraphics.fillCircle(b.x1, b.y1, (7 * alpha + 2) * thick);
       // Impact shock ring
-      this.fxGraphics.lineStyle(2.4, b.color, alpha * 0.88);
-      this.fxGraphics.strokeCircle(b.x2, b.y2, 6 + expand * 18);
+      this.fxGraphics.lineStyle(2.4 * thick, b.color, alpha * 0.88);
+      this.fxGraphics.strokeCircle(b.x2, b.y2, (6 + expand * 18) * thick);
       // Outer plasma glow + bright core laser
-      this.fxGraphics.lineStyle(8, b.color, alpha * 0.34);
+      this.fxGraphics.lineStyle(8 * thick, b.color, alpha * 0.36);
       this.fxGraphics.lineBetween(b.x1, b.y1, b.x2, b.y2);
-      this.fxGraphics.lineStyle(3.2, 0xf2fbff, alpha);
+      this.fxGraphics.lineStyle(3.2 * thick, 0xf2fbff, alpha);
       this.fxGraphics.lineBetween(b.x1, b.y1, b.x2, b.y2);
     }
 
@@ -593,6 +633,7 @@ export class CombatScene extends Phaser.Scene {
     const reduced = this.playback.settings.reducedMotion;
     const playerHp = getShipHardpoints(this.playerSprite.texture.key);
     const enemyHp = getShipHardpoints(this.enemySprite.texture.key);
+    const arch = this.playback.enemy?.archetype;
 
     const pMuzzle = this.getSpritePoint(this.playerSprite, playerHp.muzzle);
     const pHit = this.getSpritePoint(this.playerSprite, playerHp.hit);
@@ -603,7 +644,7 @@ export class CombatScene extends Phaser.Scene {
     // Recoil kickback & hit flash
     if (!reduced) {
       this.playerRecoilX = -10;
-      this.enemyRecoilX = 10;
+      this.enemyRecoilX = this.playback.enemy?.isBoss ? 6 : 10;
       this.enemySprite.setTintFill(0xffffff);
       this.enemyFlashMs = 75;
       if (ev.hpLoss > 0) {
@@ -633,16 +674,53 @@ export class CombatScene extends Phaser.Scene {
       '#F6B852'
     );
 
-    // Enemy plasma bolt -> player
-    this.beams.push({
-      x1: eMuzzle.x,
-      y1: eMuzzle.y,
-      x2: pHit.x,
-      y2: pHit.y,
-      color: 0xf27564,
-      life: 0.24,
-      maxLife: 0.24,
-    });
+    // Enemy / BOSS signature weapon fire -> player
+    if (arch === 'boss_dreadnought') {
+      // Twin stacked upper + lower Hammerhead siege railguns!
+      const eMuzzleLower = this.getSpritePoint(this.enemySprite, { x: 0.07, y: 0.72 });
+      this.beams.push({
+        x1: eMuzzle.x,
+        y1: eMuzzle.y,
+        x2: pHit.x,
+        y2: pHit.y - 6,
+        color: 0xf6b852,
+        thickness: 1.25,
+        life: 0.28,
+        maxLife: 0.28,
+      });
+      this.beams.push({
+        x1: eMuzzleLower.x,
+        y1: eMuzzleLower.y,
+        x2: pHit.x,
+        y2: pHit.y + 6,
+        color: 0xf27564,
+        thickness: 1.25,
+        life: 0.28,
+        maxLife: 0.28,
+      });
+    } else if (arch === 'boss_leviathan') {
+      // Colossal crimson plasma siege lance!
+      this.beams.push({
+        x1: eMuzzle.x,
+        y1: eMuzzle.y,
+        x2: pHit.x,
+        y2: pHit.y,
+        color: 0xff4b3e,
+        thickness: 1.75,
+        life: 0.32,
+        maxLife: 0.32,
+      });
+    } else {
+      this.beams.push({
+        x1: eMuzzle.x,
+        y1: eMuzzle.y,
+        x2: pHit.x,
+        y2: pHit.y,
+        color: 0xf27564,
+        life: 0.24,
+        maxLife: 0.24,
+      });
+    }
 
     if (ev.shieldAbsorbed > 0) {
       this.shieldArcs.push({
@@ -675,30 +753,41 @@ export class CombatScene extends Phaser.Scene {
     this.playerDamaged = ev.playerHpAfter > 0 && ev.playerHpAfter <= 15;
 
     if (!this.playback.settings.lowQuality && !reduced) {
-      this.spawnSparks(eHit.x, eHit.y, ev.enemyHpAfter <= 0 ? 22 : 10, 0xf6b852);
+      const killSparks = this.playback.enemy?.isBoss ? 24 : 20;
+      this.spawnSparks(eHit.x, eHit.y, ev.enemyHpAfter <= 0 ? killSparks : 10, 0xf6b852);
       this.spawnSparks(pHit.x, pHit.y, ev.hpLoss > 0 ? 10 : 6, ev.hpLoss > 0 ? 0xf27564 : 0x62d6df);
     }
 
-    // Dramatic breakup shockwave when enemy or player is destroyed!
+    // Dramatic breakup shockwave when enemy or BOSS is destroyed!
     if (ev.enemyHpAfter <= 0 && this.enemySprite) {
       soundEngine.play('enemyDestroy');
       this.shakeTimerMs = 120;
       this.shockwaves.push({
         x: eHit.x,
         y: eHit.y,
-        maxRadius: Math.max(54, this.enemySprite.displayWidth * 0.55),
+        maxRadius: Math.max(54, this.enemySprite.displayWidth * (this.playback.enemy?.isBoss ? 0.68 : 0.55)),
         color: 0xf6b852,
-        life: 0.42,
-        maxLife: 0.42,
+        life: 0.45,
+        maxLife: 0.45,
       });
       this.shockwaves.push({
         x: eHit.x,
         y: eHit.y,
-        maxRadius: Math.max(36, this.enemySprite.displayWidth * 0.36),
+        maxRadius: Math.max(36, this.enemySprite.displayWidth * 0.38),
         color: 0xfff0c2,
-        life: 0.28,
-        maxLife: 0.28,
+        life: 0.3,
+        maxLife: 0.3,
       });
+      if (this.playback.enemy?.isBoss) {
+        this.shockwaves.push({
+          x: eHit.x,
+          y: eHit.y,
+          maxRadius: Math.max(76, this.enemySprite.displayWidth * 0.85),
+          color: 0xf27564,
+          life: 0.55,
+          maxLife: 0.55,
+        });
+      }
       this.enemySprite.setAlpha(0.18);
     }
     if (ev.playerHpAfter <= 0 && this.playerSprite) {

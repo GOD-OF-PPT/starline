@@ -1,13 +1,13 @@
 /// <reference types="vite/client" />
 import { getItemDef, type LoadoutId } from '../data/items';
-import type { EnemyArchetype } from '../data/nodes';
+import type { EnemyArchetype, SectorBgIndex } from '../data/nodes';
 import { SHAPES } from '../data/shapes';
 
 /**
- * Illustrated high-craft game asset URL resolver (v2.0).
- * Serves pre-extracted hand-painted industrial sci-fi WebP sprites from /assets/
- * (192px/cell items with 100% transparent L3/T4 cutouts, 512x256 POT side-view ships,
- * 1280x720 base diorama + overlays, and 1280x720 deep-space sector backdrops).
+ * Illustrated high-craft game asset URL resolver (v3.0).
+ * Serves 37 pre-extracted hand-painted industrial sci-fi WebP assets from /assets/
+ * (17 items, 8 POT side-view ships including 2 BOSS warships, 5 base diorama layers,
+ * 6 distinct deep-space sector backdrops, and 16:9 title screen key art).
  */
 
 const BASE = (typeof import.meta !== 'undefined' && import.meta.env?.BASE_URL) || '/';
@@ -32,6 +32,9 @@ const KNOWN_ITEM_IDS = new Set([
   'cargo.old_engine',
   'cargo.folding_antenna',
   'cargo.ancient_navigator',
+  'cargo.quantum_core',
+  'cargo.cryo_amber',
+  'cargo.obsidian_crown',
 ]);
 
 export function getItemImageUrl(defId: string): string {
@@ -52,8 +55,12 @@ export function getEnemyShipImageUrl(archetype: EnemyArchetype): string {
   return assetUrl(`ships/enemy_${archetype}.webp`);
 }
 
-export function getSectorBgImageUrl(sectorIndex: 1 | 2 | 3): string {
+export function getSectorBgImageUrl(sectorIndex: SectorBgIndex): string {
   return assetUrl(`bg/sector_${sectorIndex}.webp`);
+}
+
+export function getTitleKeyArtUrl(): string {
+  return assetUrl('ui/title_key_art.webp');
 }
 
 export function getBaseLayerImageUrl(

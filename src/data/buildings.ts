@@ -51,9 +51,17 @@ export interface RelicDefinition {
   readonly cargoDefId: string;
   readonly name: string;
   readonly restoreCost: number;
+  readonly accentColor: string;
   readonly description: string;
   readonly lore: string;
 }
+
+export const RELIC_ORDER: readonly string[] = [
+  'ancient_navigator',
+  'quantum_core',
+  'cryo_amber',
+  'obsidian_crown',
+];
 
 export const RELICS: Record<string, RelicDefinition> = {
   ancient_navigator: {
@@ -61,9 +69,41 @@ export const RELICS: Record<string, RelicDefinition> = {
     cargoDefId: 'cargo.ancient_navigator',
     name: '古代导航仪',
     restoreCost: 60,
+    accentColor: '#62D6DF',
     description: '从深空残骸带回的古老环形星图仪，可在收藏展台支付修复费永久展示。',
     lore: '外壳刻有早已废弃的旧航线标尺，通电后内部星环仍能稳定指向星门坐标。',
   },
+  quantum_core: {
+    id: 'quantum_core',
+    cargoDefId: 'cargo.quantum_core',
+    name: '量子星核',
+    restoreCost: 80,
+    accentColor: '#7BE8FF',
+    description: '失落科研舰遗留的 2×2 零点晶核容器，可在展台点亮悬浮折射光环。',
+    lore: '即便脱离反应堆千年，双层黄铜陀螺环内的晶格仍在低功耗自旋，映出星云微光。',
+  },
+  cryo_amber: {
+    id: 'cryo_amber',
+    cargoDefId: 'cargo.cryo_amber',
+    name: '星渊琥珀匣',
+    restoreCost: 70,
+    accentColor: '#F6B852',
+    description: '冰晶残骸带封存的 1×3 远古生态样本罐，内部保存着星光晶蕨。',
+    lore: '琥珀色稳态液将星门纪元前的微光植物完整定格，仪表指针至今微微跳动。',
+  },
+  obsidian_crown: {
+    id: 'obsidian_crown',
+    cargoDefId: 'cargo.obsidian_crown',
+    name: '黑曜舰桥冠徽',
+    restoreCost: 90,
+    accentColor: '#F27564',
+    description: '主力舰 BOSS 舰桥专属 L 形镀金指挥冠徽，深空核心高概率打捞。',
+    lore: '暗黑曜钢与鎏金翼纹铸就的旧舰队旗徽，激活后能重构整片残骸带的全息防线。',
+  },
 };
+
+export function getRelicByCargoDefId(cargoDefId: string): RelicDefinition | undefined {
+  return Object.values(RELICS).find((r) => r.cargoDefId === cargoDefId);
+}
 
 export const FIRST_EXPEDITION_BONUS_CREDITS = 15;

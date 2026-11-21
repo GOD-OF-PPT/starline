@@ -1,4 +1,4 @@
-import { BUILDING_ORDER, type BuildingId } from '../data/buildings';
+import { BUILDING_ORDER, RELIC_ORDER, type BuildingId } from '../data/buildings';
 import {
   ALL_ITEM_DEFINITIONS,
   EQUIPMENT_KINDS,
@@ -234,6 +234,9 @@ function validateExpedition(raw: unknown): { ok: true; exp: ExpeditionState } | 
   if (typeof raw.expeditionId !== 'string' || raw.expeditionId.trim().length === 0) {
     return { ok: false, error: '出航 ID 缺失' };
   }
+  if (raw.regionId !== undefined && raw.regionId !== 'standard' && raw.regionId !== 'abyssal') {
+    return { ok: false, error: '出航星域区域标识非法' };
+  }
   if (!isLoadoutId(raw.loadoutId)) return { ok: false, error: '出航舰船方案非法' };
   if (typeof raw.isTutorial !== 'boolean') return { ok: false, error: '教学标志缺失' };
 
@@ -348,11 +351,21 @@ function validateProgression(
     }
     relics[k] = { storedCount: v.storedCount, restored: v.restored };
   }
-  if (!relics.ancient_navigator) {
-    relics.ancient_navigator = { storedCount: 0, restored: false };
+  for (const relicId of RELIC_ORDER) {
+    if (!relics[relicId]) {
+      relics[relicId] = { storedCount: 0, restored: false };
+    }
   }
 
   if (!isLoadoutId(raw.selectedLoadout)) return { ok: false, error: '默认舰船方案无效' };
+  const selectedRegion =
+    raw.selectedRegion === undefined
+      ? 'standard'
+      : raw.selectedRegion === 'standard' || raw.selectedRegion === 'abyssal'
+      ? raw.selectedRegion
+      : null;
+  if (!selectedRegion) return { ok: false, error: '默认星域选择无效' };
+
   if (typeof raw.tutorialCompleted !== 'boolean') return { ok: false, error: '教学完成标志无效' };
   if (
     !Array.isArray(raw.settledExpeditionIds) ||
@@ -378,6 +391,7 @@ function validateProgression(
       discoveredItems: Array.from(new Set(raw.discoveredItems as string[])),
       relics,
       selectedLoadout: raw.selectedLoadout,
+      selectedRegion,
       tutorialCompleted: raw.tutorialCompleted,
       settledExpeditionIds: Array.from(new Set(raw.settledExpeditionIds as string[])),
       totalExpeditions: raw.totalExpeditions,

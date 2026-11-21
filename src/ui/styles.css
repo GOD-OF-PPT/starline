@@ -1762,7 +1762,7 @@ body.low-quality .placed-item-node {
 
   .main-layout.phase-base .scene-stage-wrap.mode-base {
     grid-column: 1 / -1;
-    height: clamp(410px, 60dvh, 520px);
+    height: clamp(380px, 56dvh, 500px);
   }
 
   .main-layout.phase-base .left-panel-slot {
@@ -1795,6 +1795,506 @@ body.low-quality .placed-item-node {
   }
 }
 
+/* ============================================================================
+   v3.0 Expansion: Cinematic Title Screen, Star Regions, BOSS UI & 4-Relic Gallery
+   ============================================================================ */
+.hud-brand-btn {
+  grid-area: brand;
+  margin: 0;
+  padding: 4px 8px;
+  min-height: 44px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 100ms ease, background-color 100ms ease, color 100ms ease;
+}
+
+.hud-brand-btn:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-raised);
+  color: var(--accent-action);
+}
+
+.hud-brand-btn:focus-visible {
+  outline: 2.5px solid var(--accent-action);
+  outline-offset: 2px;
+}
+
+/* Full-Viewport Illustrated Title Screen (z-index 800 < modal 1000!) */
+#title-host[hidden] {
+  display: none !important;
+}
+
+#title-host {
+  position: fixed;
+  inset: 0;
+  z-index: 800;
+  background: #09111e;
+}
+
+.title-screen {
+  position: relative;
+  width: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.title-bg-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 62% 52%;
+  transform: scale(1.03);
+  animation: titleDrift 24s ease-in-out infinite alternate;
+}
+
+@keyframes titleDrift {
+  0% {
+    transform: scale(1.03) translate3d(0, 0, 0);
+  }
+  100% {
+    transform: scale(1.07) translate3d(-1.2%, -0.8%, 0);
+  }
+}
+
+.title-scrim {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(96deg, rgba(8, 14, 25, 0.88) 0%, rgba(10, 17, 30, 0.56) 44%, rgba(10, 17, 30, 0.08) 100%),
+    linear-gradient(180deg, rgba(8, 14, 25, 0.45) 0%, rgba(8, 14, 25, 0.04) 38%, rgba(8, 14, 25, 0.72) 100%);
+}
+
+.title-content {
+  position: relative;
+  z-index: 2;
+  width: min(100%, 1180px);
+  height: 100%;
+  margin: 0 auto;
+  padding: calc(14px + env(safe-area-inset-top, 0px)) 20px calc(16px + env(safe-area-inset-bottom, 0px)) 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.title-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.title-edition-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(17, 26, 41, 0.82);
+  border: 1px solid rgba(98, 214, 223, 0.55);
+  color: var(--accent-energy);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.title-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.title-ghost-btn {
+  background: rgba(17, 26, 41, 0.82);
+  border-color: rgba(136, 164, 194, 0.55);
+}
+
+.title-hero-block {
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: auto 0;
+}
+
+.title-kicker {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: var(--accent-action);
+  text-transform: uppercase;
+}
+
+.title-main-heading {
+  margin: 0;
+  font-size: clamp(36px, 6.4vw, 64px);
+  line-height: 1.08;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  color: #f4f8fc;
+  text-shadow: 0 6px 26px rgba(4, 9, 17, 0.88), 0 0 28px rgba(98, 214, 223, 0.25);
+}
+
+.title-tagline {
+  margin: 0;
+  font-size: clamp(14px, 2vw, 16px);
+  color: #d6e2ef;
+  text-shadow: 0 2px 10px rgba(4, 9, 17, 0.9);
+}
+
+.title-ro-banner {
+  background: rgba(34, 27, 16, 0.92);
+}
+
+.title-archive-pills,
+.title-feature-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.title-stat-pill,
+.title-feature-chips span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(15, 24, 38, 0.86);
+  border: 1px solid rgba(107, 128, 153, 0.55);
+  font-size: 13px;
+  color: #dbe6f2;
+}
+
+.title-stat-pill.accent strong {
+  color: var(--accent-action);
+}
+
+.title-stat-pill.energy strong {
+  color: var(--accent-energy);
+}
+
+.title-cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.title-start-btn {
+  min-width: 240px;
+  min-height: 52px;
+  padding: 0 24px;
+  font-size: 17px;
+  letter-spacing: 0.04em;
+  box-shadow: 0 8px 28px rgba(246, 184, 82, 0.36);
+}
+
+.title-footer-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #b4c4d6;
+  text-shadow: 0 1px 6px rgba(4, 9, 17, 0.9);
+}
+
+@media (max-width: 639px) {
+  .title-bg-art {
+    object-position: 68% 45%;
+  }
+  .title-scrim {
+    background:
+      linear-gradient(180deg, rgba(8, 14, 25, 0.72) 0%, rgba(8, 14, 25, 0.36) 36%, rgba(8, 14, 25, 0.93) 76%, rgba(8, 14, 25, 0.97) 100%);
+  }
+  .title-hero-block {
+    margin: auto 0 8px 0;
+  }
+  .title-start-btn {
+    width: 100%;
+  }
+}
+
+@media (max-height: 500px) {
+  .title-main-heading {
+    font-size: 32px;
+  }
+  .title-hero-block {
+    gap: 6px;
+  }
+  .title-start-btn {
+    min-height: 44px;
+    font-size: 15px;
+  }
+}
+
+/* Star Region Switcher inside Base Launch Dock */
+.region-picker-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.region-pill-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 44px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  background: #121c2a;
+  border: 1.5px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 110ms ease, background-color 110ms ease;
+}
+
+.region-pill-btn:hover:not(:disabled) {
+  border-color: #88a4c2;
+  background: #1a283c;
+}
+
+.region-pill-btn.selected {
+  border-color: var(--accent-energy);
+  background: rgba(98, 214, 223, 0.14);
+}
+
+.region-pill-btn.abyssal.selected {
+  border-color: var(--state-danger);
+  background: rgba(242, 117, 100, 0.18);
+}
+
+.region-pill-btn.locked {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.region-pill-btn:focus-visible {
+  outline: 2.5px solid var(--accent-action);
+  outline-offset: 2px;
+}
+
+.region-pill-btn strong {
+  white-space: nowrap;
+}
+
+.region-pill-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.region-pill-btn.abyssal.selected .region-pill-sub {
+  color: #ffc2b8;
+}
+
+@media (max-width: 720px) {
+  .region-pill-btn {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 2px;
+    padding: 6px 9px;
+  }
+  .region-pill-sub {
+    max-width: 100%;
+  }
+}
+
+.btn-launch-abyssal {
+  background: linear-gradient(90deg, #e86b5a 0%, #f6b852 100%);
+  border-color: #f6b852;
+  color: #111a29;
+  box-shadow: 0 4px 18px rgba(242, 117, 100, 0.34);
+}
+
+/* 4-Relic Mini Dock Strip & Museum Gallery Modal */
+.relic-dock-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.relic-dock-pip {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  border-radius: 5px;
+  background: #101927;
+  border: 1px solid #354b66;
+  padding: 2px;
+}
+
+.relic-dock-pip.lit {
+  border-color: var(--accent-action);
+  background: rgba(246, 184, 82, 0.16);
+  box-shadow: 0 0 6px rgba(246, 184, 82, 0.35);
+}
+
+.relic-dock-pip.stored {
+  border-color: var(--accent-energy);
+  opacity: 0.92;
+}
+
+.relic-dock-pip.dim {
+  filter: grayscale(1) brightness(0.32);
+  opacity: 0.6;
+}
+
+.relic-codex-thumb {
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+  border-radius: 7px;
+  background: #101927;
+  border: 1px solid #354b66;
+  padding: 3px;
+  flex-shrink: 0;
+}
+
+.relic-codex-thumb.dim {
+  filter: grayscale(1) brightness(0.28);
+}
+
+.relic-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
+  gap: 10px;
+}
+
+.relic-showcase-card {
+  background: linear-gradient(180deg, #172436 0%, #101a28 100%);
+  border: 1.5px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.relic-showcase-card.restored {
+  border-color: var(--relic-accent, var(--accent-energy));
+  box-shadow: 0 0 16px rgba(98, 214, 223, 0.16);
+}
+
+.relic-showcase-card.affordable {
+  border-color: var(--accent-action);
+  box-shadow: 0 0 14px rgba(246, 184, 82, 0.22);
+}
+
+.relic-showcase-art {
+  height: 96px;
+  border-radius: var(--radius-sm);
+  background: radial-gradient(circle at center, rgba(246, 184, 82, 0.16) 0%, #0c1422 76%);
+  border: 1px solid #2b3f57;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+}
+
+.relic-showcase-art img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.6));
+}
+
+.relic-showcase-art img.silhouette {
+  filter: grayscale(1) brightness(0.24);
+  opacity: 0.72;
+}
+
+.relic-showcase-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.relic-showcase-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.relic-showcase-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.relic-showcase-foot .btn {
+  width: 100%;
+}
+
+/* BOSS Route Beacons & Combat HUD */
+.tag-boss {
+  background: linear-gradient(90deg, rgba(242, 117, 100, 0.28) 0%, rgba(246, 184, 82, 0.28) 100%);
+  border-color: #f6b852;
+  color: #ffe3a8;
+  font-weight: 800;
+}
+
+.route-beacon.boss {
+  border-color: #f6b852;
+  background: linear-gradient(180deg, #2b1d24 0%, #141926 100%);
+  box-shadow: 0 0 18px rgba(246, 184, 82, 0.18);
+}
+
+.route-enemy-visual.boss {
+  height: 76px;
+  background: radial-gradient(circle at center, rgba(246, 184, 82, 0.24) 0%, rgba(242, 117, 100, 0.12) 45%, #12101a 82%);
+  border-color: rgba(246, 184, 82, 0.6);
+}
+
+.route-enemy-visual.danger.bespoke-art img {
+  filter: drop-shadow(0 4px 8px rgba(242, 117, 100, 0.48));
+}
+
+.boss-bar-card {
+  border-color: #f6b852;
+  background: rgba(34, 18, 26, 0.92);
+}
+
+.boss-mini-badge {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #f27564;
+  color: #111a29;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.hp-fill.enemy.boss {
+  background: linear-gradient(90deg, #f27564 0%, #f6b852 100%);
+}
+
 /* Compact Portrait protection (e.g. 360x640, F06): keep COMPLETE 4x4 board + action dock in 1 viewport! */
 @media (max-height: 700px) and (max-width: 819px) {
   .app-shell {
@@ -1806,7 +2306,8 @@ body.low-quality .placed-item-node {
     padding: 4px 8px;
     gap: 4px 6px;
   }
-  .hud-brand {
+  .hud-brand,
+  .hud-brand-btn {
     font-size: 14px;
   }
   .tutorial-banner {
