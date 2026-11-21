@@ -780,12 +780,12 @@ export class V2AppController {
             : '首航后免费启用工作台',
           dispText: p.buildings.display
             ? `藏品馆 ${relicSum.restoredCount}/${relicSum.totalCount}`
-            : '收藏展台 · 120¤',
+            : `收藏展台 · ${V2_FACILITIES.display.cost}¤`,
           dockText: p.buildings.drydock_tier2
             ? '船坞二阶 · 3/3 舰 ✓'
             : p.buildings.drydock
             ? '船坞一阶 · 2/3 舰'
-            : '船坞一阶 · 80¤',
+            : `船坞一阶 · ${V2_FACILITIES.drydock.cost}¤`,
           showAllPins: true,
         },
       });

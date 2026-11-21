@@ -151,9 +151,9 @@ export class V2CombatScene extends Phaser.Scene {
       ['event.merchant', getEventBackdropImageUrl('merchant')],
       ['event.anomaly', getEventBackdropImageUrl('anomaly')],
       ['event.distress', getEventBackdropImageUrl('distress')],
-      ['ship.player.cannon_skiff', getPlayerShipImageUrl('cannon_skiff')],
-      ['ship.player.shield_cruiser', getPlayerShipImageUrl('shield_cruiser')],
-      ['ship.player.heavy_freighter', getPlayerShipImageUrl('heavy_freighter')],
+      ['v2.ship.player.cannon_skiff', getPlayerShipImageUrl('cannon_skiff')],
+      ['v2.ship.player.shield_cruiser', getPlayerShipImageUrl('shield_cruiser')],
+      ['v2.ship.player.heavy_freighter', getPlayerShipImageUrl('heavy_freighter')],
       ['ship.enemy.scout', getEnemyShipImageUrl('scout')],
       ['ship.enemy.interceptor', getEnemyShipImageUrl('interceptor')],
       ['ship.enemy.frigate', getEnemyShipImageUrl('frigate')],
@@ -276,7 +276,7 @@ export class V2CombatScene extends Phaser.Scene {
     }
 
     // Player ship sprite
-    const pKey = `ship.player.${pb.shipId}`;
+    const pKey = `v2.ship.player.${pb.shipId}`;
     if (!this.playerSprite) {
       this.playerSprite = this.add.image(0, 0, pKey).setOrigin(0.5, 0.5).setDepth(3);
     } else if (this.textures.exists(pKey)) {
@@ -415,8 +415,7 @@ export class V2CombatScene extends Phaser.Scene {
     if (!pb || !this.playerSprite) return;
     const reduced = pb.settings.reducedMotion;
 
-    const pKey = `ship.player.${pb.shipId}`;
-    const pHp = getShipHardpoints(pKey);
+    const pHp = getShipHardpoints(`ship.player.${pb.shipId}`);
     const pMuzzle = this.getSpritePoint(this.playerSprite, pHp.muzzle);
     const pHit = this.getSpritePoint(this.playerSprite, pHp.hit);
 

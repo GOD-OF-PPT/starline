@@ -1,0 +1,79 @@
+{
+  "timestamp": "2026-11-21T13:37:18.966Z",
+  "url": "http://127.0.0.1:4178/",
+  "summary": {
+    "total": 17,
+    "passed": 17,
+    "failed": 0
+  },
+  "checks": {
+    "01_title_screen": {
+      "pass": true,
+      "detail": "{\"hasBtn\":true,\"hasBg\":true,\"locked\":true}"
+    },
+    "02_tutorial_spatial_conflict": {
+      "pass": true,
+      "detail": "{\"hasReactor\":true,\"stagingCount\":2,\"leaveDisabled\":true}"
+    },
+    "03_modal_input_isolation": {
+      "pass": true,
+      "detail": "open=1, closedAfterEsc=0, bayMutated=false"
+    },
+    "04_tutorial_complete_kb_discard_settle": {
+      "pass": true,
+      "detail": "{\"kbFocusedCoord\":{\"cx\":\"1\",\"cy\":\"1\"},\"undoExists\":true,\"discardModalOpened\":true,\"stayedInArrange\":true,\"settleCheck\":{\"hudTotal\":\"+46¤\",\"recTotal\":\"+46¤\",\"phase\":\"SETTLEMENT\"},\"postTut\":{\"tutDone\":true,\"wb\":true,\"hub\":true,\"credits\":46}}"
+    },
+    "05_warehouse_research_blueprint": {
+      "pass": true,
+      "detail": "{\"credits\":470,\"hasHeavyBp\":true,\"whCount\":1}"
+    },
+    "06_relic_restore": {
+      "pass": true,
+      "detail": "restored=true"
+    },
+    "07_heavy_freighter_5x4_bulkheads": {
+      "pass": true,
+      "detail": "{\"totalCells\":20,\"c40Disabled\":true,\"c03Disabled\":true}"
+    },
+    "08_preset_missing_owned_warning": {
+      "pass": true,
+      "detail": "{\"hasMissingWarning\":true,\"placedCount\":1}"
+    },
+    "09_6layer_dag_and_refresh_recovery": {
+      "pass": true,
+      "detail": "{\"mapBeforeReload\":{\"runId\":\"v2run_1hyxjb4_2\",\"maxLayers\":6,\"fuel\":9,\"navBadge\":true},\"mapAfterReload\":{\"runId\":\"v2run_1hyxjb4_2\",\"phase\":\"MAP\",\"fuel\":9}}"
+    },
+    "10_navigator_zero_first_jump": {
+      "pass": true,
+      "detail": "{\"fuel\":9,\"phase\":\"ENCOUNTER\",\"nodeType\":\"combat\"}"
+    },
+    "10b_merchant_shop_limits_and_no_loan_sell": {
+      "pass": true,
+      "detail": "{\"shopCheck\":{\"sellBtns\":0,\"fuelBefore\":6},\"shopAfter\":{\"fuelAfter\":8,\"walletAfter\":68,\"fuelBtnDisabled\":true}}"
+    },
+    "11_responsive_5viewports_and_resize_sync": {
+      "pass": true,
+      "detail": "{\"vpMetrics\":{\"360x640\":{\"overflow\":0,\"boardW\":324,\"boardRight\":342,\"sceneCollapsed\":true,\"canvasDeltaW\":0,\"canvasDeltaH\":0,\"minFont\":12},\"390x844\":{\"overflow\":0,\"boardW\":344,\"boardRight\":367,\"sceneCollapsed\":true,\"canvasDeltaW\":0,\"canvasDeltaH\":0,\"minFont\":12},\"430x932\":{\"overflow\":0,\"boardW\":344,\"boardRight\":387,\"sceneCollapsed\":true,\"canvasDeltaW\":0,\"canvasDeltaH\":0,\"minFont\":12},\"844x390\":{\"overflow\":0,\"boardW\":290,\"boardRight\":786,\"sceneCollapsed\":true,\"canvasDeltaW\":0,\"canvasDeltaH\":0,\"minFont\":12},\"1366x768\":{\"overflow\":-15,\"boardW\":375,\"boardRight\":1196,\"sceneCollapsed\":false,\"canvasDeltaW\":0,\"canvasDeltaH\":0,\"minFont\":12}},\"resizeSync\":{\"canvasW\":372,\"hostW\":372,\"canvasH\":174,\"hostH\":174}}"
+    },
+    "12_settings_accessibility_persist": {
+      "pass": true,
+      "detail": "{\"sfxMuted\":true,\"reducedMotion\":true,\"lowQuality\":true,\"bodyReduced\":true}"
+    },
+    "13_corrupt_backup_recovery": {
+      "pass": true,
+      "detail": "shown=true, expected=410, restored=410"
+    },
+    "14_multitab_readonly_and_takeover": {
+      "pass": true,
+      "detail": "tab2Locked=true, tab1LockedAfterTab2Takeover=true, tab1Reclaimed=true"
+    },
+    "15_v1_migration_and_rollback": {
+      "pass": true,
+      "detail": "{\"migResult\":{\"v1Untouched\":true,\"v2Credits\":260,\"v2HasDrydock\":true,\"v2Relic1Restored\":true,\"v2Relic2Stored\":1,\"v2Relic3Restored\":true,\"v2WhCount\":0},\"v1ModeCheck\":{\"href\":\"http://127.0.0.1:4178/?mode=v1\",\"hasReturnV2Btn\":true,\"v1StillIntact\":true}}"
+    },
+    "16_zero_runtime_errors": {
+      "pass": true,
+      "detail": "{\"pageErrors\":[],\"consoleErrors\":[]}"
+    }
+  }
+}
