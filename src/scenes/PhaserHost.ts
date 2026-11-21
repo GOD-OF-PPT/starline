@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import type { BuildingId } from '../data/buildings';
 import type { GameSettings } from '../domain/progression';
-import { BaseScene, type BaseSceneState } from './BaseScene';
+import { BaseScene, type BaseSceneState, type ReturnDockingPlayback } from './BaseScene';
 import { CombatScene, type CombatScenePlayback } from './CombatScene';
 
 export type ActiveSceneMode = 'base' | 'combat';
@@ -45,8 +45,13 @@ export class PhaserHost {
       width: initW,
       height: initH,
       backgroundColor: '#111A29',
-      antialias: true,
-      pixelArt: false,
+      render: {
+        antialias: true,
+        antialiasGL: true,
+        pixelArt: false,
+        roundPixels: false,
+        mipmapFilter: 'LINEAR_MIPMAP_LINEAR',
+      },
       scale: {
         mode: Phaser.Scale.NONE,
         autoCenter: Phaser.Scale.NO_CENTER,
@@ -188,6 +193,14 @@ export class PhaserHost {
     if (this.ready && this.game.scene.isActive('CombatScene')) {
       this.combatScene.skipPlayback();
     }
+  }
+
+  playBaseReturnDocking(playback: ReturnDockingPlayback): void {
+    this.baseScene.startReturnDocking(playback);
+  }
+
+  skipBaseReturnDocking(): void {
+    this.baseScene.skipReturnDocking();
   }
 
   resize(): void {

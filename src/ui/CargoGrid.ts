@@ -596,6 +596,7 @@ export class CargoGridComponent {
     // When nothing is selected in compact arrange mode, show a single-line hint instead of a tall box (F06)
     if (!this.selected) {
       const hint = document.createElement('div');
+      hint.className = 'inspector-idle-hint';
       hint.style.fontSize = '12px';
       hint.style.color = 'var(--text-secondary)';
       hint.style.width = '100%';

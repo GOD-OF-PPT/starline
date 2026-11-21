@@ -111,29 +111,25 @@ body {
   color: var(--text-on-accent);
 }
 
-/* Top HUD bar — compact 1-2 rows max across all mobile/landscape widths (F06) */
+/* Top HUD bar — balanced 2-row grid on narrow phones, sleek 1-row bar on >=640px (F06) */
 .top-hud {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas:
+    'brand actions'
+    'pills pills';
   align-items: center;
-  justify-content: space-between;
-  gap: 6px;
+  gap: 5px 8px;
   padding: 6px 10px;
   background: var(--surface-panel);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+  box-shadow: inset 0 1px 0 rgba(205, 224, 245, 0.08);
   margin-top: 6px;
-  flex-wrap: wrap;
-}
-
-.hud-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  min-width: 0;
 }
 
 .hud-brand {
+  grid-area: brand;
   margin: 0;
   font-size: 15px;
   font-weight: 800;
@@ -142,11 +138,20 @@ body {
   white-space: nowrap;
 }
 
+.hud-pills {
+  grid-area: pills;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: 5px;
+  min-width: 0;
+}
+
 .hud-pill {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
-  padding: 3px 8px;
+  padding: 3px 7px;
   border-radius: var(--radius-sm);
   background: var(--surface-deep);
   border: 1px solid var(--border-subtle);
@@ -179,10 +184,37 @@ body {
 }
 
 .hud-actions {
+  grid-area: actions;
+  justify-self: end;
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-left: auto;
+  gap: 5px;
+}
+
+@media (min-width: 640px) {
+  .top-hud {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: nowrap;
+    gap: 10px;
+  }
+
+  .hud-pills {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+  }
+
+  .hud-pill {
+    padding: 3px 9px;
+  }
+
+  .hud-actions {
+    margin-left: auto;
+    gap: 6px;
+  }
 }
 
 /* Buttons (strictly >= 44x44px hit targets, 4 states) */
@@ -754,6 +786,9 @@ body {
   background: var(--grid-cell-bg);
   border: 2px solid #7d93ac;
   border-radius: var(--radius-sm);
+  box-shadow:
+    inset 0 2px 8px rgba(4, 9, 17, 0.72),
+    0 0 0 1px rgba(138, 162, 187, 0.2);
   touch-action: none;
   overflow: visible;
 }
@@ -771,6 +806,9 @@ body {
   border-bottom: 1px solid var(--grid-cell-border);
   position: relative;
   background: var(--grid-cell-bg);
+  box-shadow:
+    inset 1px 1px 0 rgba(205, 224, 245, 0.04),
+    inset -1px -1px 0 rgba(4, 9, 17, 0.34);
   outline: none;
 }
 
@@ -1131,16 +1169,18 @@ body {
   font-weight: 700;
 }
 
-/* Return-to-Port Docking Sequence Overlay (F11) */
+/* Return-to-Port Docking Sequence Overlay (F11) — bottom-anchored so ship glide & crates stay unobstructed */
 .docking-overlay {
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, rgba(17, 26, 41, 0.35) 0%, rgba(17, 26, 41, 0.85) 100%);
+  background: linear-gradient(180deg, rgba(17, 26, 41, 0) 42%, rgba(17, 26, 41, 0.88) 100%);
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  padding: 10px 12px;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px 10px;
   z-index: 12;
+  pointer-events: none;
 }
 
 .docking-banner {
@@ -1148,10 +1188,11 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  background: rgba(17, 26, 41, 0.92);
+  background: rgba(17, 26, 41, 0.94);
   border: 1px solid var(--accent-action);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
+  padding: 6px 10px;
+  pointer-events: auto;
 }
 
 .docking-progress-track {
@@ -1280,24 +1321,35 @@ body.low-quality .placed-item-node {
   }
 }
 
-/* Compact Portrait protection (e.g. 360x640, F06): keep 4x4 board + action dock in 1 viewport! */
+/* Compact Portrait protection (e.g. 360x640, F06): keep COMPLETE 4x4 board + action dock in 1 viewport! */
 @media (max-height: 700px) and (max-width: 819px) {
   .app-shell {
-    gap: 6px;
-    padding-left: 12px;
-    padding-right: 12px;
+    gap: 5px;
+    padding: 4px 10px 8px 10px;
   }
   .top-hud {
-    margin-top: 4px;
+    margin-top: 0;
     padding: 4px 8px;
-    gap: 4px;
+    gap: 4px 6px;
   }
   .hud-brand {
     font-size: 14px;
   }
+  .tutorial-banner {
+    padding: 4px 8px;
+    font-size: 12px;
+    line-height: 1.25;
+  }
   .panel {
-    padding: 8px;
-    gap: 6px;
+    padding: 7px 8px;
+    gap: 5px;
+  }
+  .panel-compact {
+    padding: 6px 8px;
+    gap: 5px;
+  }
+  .main-layout {
+    gap: 5px;
   }
   .scene-stage-wrap.mode-base {
     height: 185px;
@@ -1306,56 +1358,115 @@ body.low-quality .placed-item-node {
     height: 108px;
   }
   .scene-stage-wrap.mode-arrange {
-    height: 82px;
+    height: 80px;
   }
   .scene-stage-wrap {
     height: 148px;
   }
-  .cargo-board-outer {
-    width: min(100%, 284px);
+  .main-layout.phase-arrange .work-column > .panel > .panel-header,
+  .main-layout.phase-arrange .left-panel-slot > .panel > .panel-header,
+  .main-layout.phase-arrange .inspector-idle-hint {
+    display: none;
+  }
+  .main-layout.phase-arrange .bay-section {
+    gap: 4px;
+  }
+  .main-layout.phase-arrange .stats-strip {
+    gap: 4px;
+  }
+  .main-layout.phase-arrange .stat-chip {
+    flex-direction: column;
+    justify-content: center;
+    gap: 0;
+    padding: 2px 2px;
+  }
+  .main-layout.phase-arrange .stat-chip .k {
+    white-space: nowrap;
+  }
+  .main-layout.phase-arrange .stat-chip .v {
+    font-size: 14px;
+    line-height: 1.15;
+  }
+  .main-layout.phase-arrange .stat-chip .sub {
+    display: none;
+  }
+  .main-layout.phase-arrange .cargo-board-outer {
+    width: min(100%, 234px);
+  }
+  .main-layout.phase-arrange .staging-bar {
+    padding: 3px 6px;
+    gap: 4px;
+  }
+  .main-layout.phase-arrange .route-prediction {
+    padding: 4px 8px;
+    font-size: 12px;
+    line-height: 1.25;
   }
 }
 
 /* Short Landscape protection (e.g. 844x390, F06): fit BOTH complete 4x4 grid AND decision buttons in 390px height! */
 @media (max-height: 500px) and (min-width: 600px) {
   .app-shell {
-    gap: 6px;
-    padding: 4px 12px 8px 12px;
+    gap: 4px;
+    padding: 4px 10px 6px 10px;
   }
   .top-hud {
     margin-top: 0;
-    padding: 4px 8px;
+    padding: 2px 8px;
     flex-wrap: nowrap;
+  }
+  .tutorial-banner {
+    padding: 3px 8px;
+    font-size: 12px;
+    line-height: 1.2;
+  }
+  .tutorial-banner > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .main-layout {
     display: grid;
     grid-template-columns: 1fr auto;
     align-items: start;
-    gap: 10px;
+    gap: 8px;
   }
-  .panel {
-    padding: 8px;
-    gap: 6px;
+  .panel,
+  .panel-compact {
+    padding: 6px 8px;
+    gap: 5px;
   }
   .scene-stage-wrap.mode-base {
     height: 180px;
   }
   .scene-stage-wrap.mode-arrange {
-    height: 84px;
+    height: 80px;
   }
   .scene-stage-wrap {
-    height: 124px;
+    height: 122px;
   }
-  .cargo-board-outer {
-    width: min(256px, calc(100dvh - 126px));
+  .main-layout.phase-arrange .work-column > .panel > .panel-header {
+    display: none;
   }
-  .stats-strip {
+  .main-layout.phase-arrange .bay-section {
     gap: 4px;
   }
-  .stat-chip {
+  .main-layout.phase-arrange .stats-strip {
+    gap: 4px;
+  }
+  .main-layout.phase-arrange .stat-chip {
+    flex-direction: row;
+    justify-content: center;
+    gap: 3px;
     padding: 2px 4px;
   }
-  .stat-chip .v {
+  .main-layout.phase-arrange .stat-chip .v {
     font-size: 14px;
+  }
+  .main-layout.phase-arrange .stat-chip .sub {
+    display: none;
+  }
+  .cargo-board-outer {
+    width: min(252px, calc(100dvh - 134px));
   }
 }

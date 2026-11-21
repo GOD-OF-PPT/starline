@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 import { getShipHardpoints } from '../assets/manifest';
-import { registerCombatShipTextures } from '../assets/sceneArt';
+import { COMBAT_SHIP_TEX_H, COMBAT_SHIP_TEX_W, registerCombatShipTextures } from '../assets/sceneArt';
 import { soundEngine } from '../audio/soundEngine';
 import type { LoadoutId } from '../data/items';
 import type { EnemySpec } from '../data/nodes';
@@ -212,14 +212,14 @@ export class CombatScene extends Phaser.Scene {
   private layoutSprites(): void {
     const w = this.viewW || this.scale.width || 390;
     const h = this.viewH || this.scale.height || 180;
-    const shipScale = Math.min((w * 0.42) / 768, (h * 0.78) / 384);
+    const shipScale = Math.min((w * 0.44) / COMBAT_SHIP_TEX_W, (h * 0.78) / COMBAT_SHIP_TEX_H);
 
     if (this.playerSprite) {
       const px = this.enemySprite ? w * 0.26 : w * 0.5;
-      this.playerSprite.setPosition(px, h * 0.54).setScale(shipScale);
+      this.playerSprite.setPosition(px, h * 0.56).setScale(shipScale);
     }
     if (this.enemySprite) {
-      this.enemySprite.setPosition(w * 0.74, h * 0.54).setScale(shipScale);
+      this.enemySprite.setPosition(w * 0.74, h * 0.56).setScale(shipScale);
     }
   }
 
@@ -245,12 +245,24 @@ export class CombatScene extends Phaser.Scene {
     const reduced = Boolean(settings?.reducedMotion);
     const lowQ = Boolean(settings?.lowQuality);
 
-    // 1. Background star parallax
+    // 1. Atmospheric deep-space backdrop + layered star parallax
     const w = this.viewW || this.scale.width || 390;
     const h = this.viewH || this.scale.height || 180;
     this.bgGraphics.clear();
     this.bgGraphics.fillStyle(0x111a29, 1);
     this.bgGraphics.fillRect(0, 0, w, h);
+
+    // Subtle deep-space horizon band & distant planet rim (low-contrast so ships pop cleanly)
+    if (!lowQ) {
+      const isDanger = Boolean(this.playback?.enemy?.isDanger);
+      this.bgGraphics.fillStyle(isDanger ? 0x261a24 : 0x162538, 0.55);
+      this.bgGraphics.fillCircle(w * 0.86, h * 1.38, Math.max(w * 0.42, h * 0.95));
+      this.bgGraphics.lineStyle(1.4, isDanger ? 0x6b3a44 : 0x2a4562, 0.45);
+      this.bgGraphics.strokeCircle(w * 0.86, h * 1.38, Math.max(w * 0.42, h * 0.95) + 4);
+      // Faint orbital docking lane vector grid
+      this.bgGraphics.lineStyle(1, 0x1d2e44, 0.4);
+      this.bgGraphics.lineBetween(0, h * 0.86, w, h * 0.86);
+    }
 
     for (const st of this.stars) {
       if (!reduced) {
@@ -261,13 +273,27 @@ export class CombatScene extends Phaser.Scene {
       this.bgGraphics.fillCircle(st.nx * w, st.ny * h, st.r);
     }
 
+    // Subtle low-contrast orbital salvage field silhouettes in deep background (off in lowQuality)
+    if (!lowQ) {
+      const drift = reduced ? 0 : (this.elapsed * 8) % (w + 180);
+      this.bgGraphics.fillStyle(0x192638, 0.6);
+      const gx = w + 80 - drift;
+      this.bgGraphics.fillRect(gx, h * 0.74, 68, 12);
+      this.bgGraphics.fillRect(gx + 14, h * 0.68, 12, 24);
+      this.bgGraphics.fillRect(gx + 46, h * 0.7, 8, 20);
+      const gx2 = ((w + 260 - drift * 0.6) % (w + 220)) - 60;
+      this.bgGraphics.fillStyle(0x172334, 0.5);
+      this.bgGraphics.fillRect(gx2, h * 0.28, 52, 8);
+      this.bgGraphics.fillRect(gx2 + 20, h * 0.24, 10, 16);
+    }
+
     // Subtle ship idle hover (disabled in reduced motion)
     if (!reduced) {
       if (this.playerSprite) {
-        this.playerSprite.y = h * 0.54 + Math.sin(this.elapsed * 2.2) * 2.5;
+        this.playerSprite.y = h * 0.56 + Math.sin(this.elapsed * 2.2) * 2.4;
       }
       if (this.enemySprite && this.enemySprite.visible) {
-        this.enemySprite.y = h * 0.54 + Math.cos(this.elapsed * 2.0) * 2.5;
+        this.enemySprite.y = h * 0.56 + Math.cos(this.elapsed * 2.0) * 2.4;
       }
     }
 
@@ -307,7 +333,7 @@ export class CombatScene extends Phaser.Scene {
       this.cameras.main.setScroll(0, 0);
     }
 
-    // 4. Update & draw beams, shield arcs, sparks
+    // 4. Update & draw beams, muzzle flashes, impact rings, shield arcs, sparks
     this.fxGraphics.clear();
 
     for (let i = this.beams.length - 1; i >= 0; i--) {
@@ -318,7 +344,15 @@ export class CombatScene extends Phaser.Scene {
         continue;
       }
       const alpha = Math.max(0, b.life / b.maxLife);
-      this.fxGraphics.lineStyle(5, b.color, alpha * 0.35);
+      const expand = 1 - alpha;
+      // Muzzle emitter glow
+      this.fxGraphics.fillStyle(b.color, alpha * 0.72);
+      this.fxGraphics.fillCircle(b.x1, b.y1, 5.5 * alpha + 2);
+      // Impact shock ring at target hardpoint
+      this.fxGraphics.lineStyle(2, b.color, alpha * 0.85);
+      this.fxGraphics.strokeCircle(b.x2, b.y2, 5 + expand * 14);
+      // Outer energy beam + crisp white core
+      this.fxGraphics.lineStyle(5.5, b.color, alpha * 0.42);
       this.fxGraphics.lineBetween(b.x1, b.y1, b.x2, b.y2);
       this.fxGraphics.lineStyle(2.2, 0xe9edf2, alpha);
       this.fxGraphics.lineBetween(b.x1, b.y1, b.x2, b.y2);
@@ -332,9 +366,13 @@ export class CombatScene extends Phaser.Scene {
         continue;
       }
       const alpha = Math.max(0, a.life / a.maxLife);
-      this.fxGraphics.lineStyle(3.5, 0x62d6df, alpha * 0.9);
+      this.fxGraphics.lineStyle(4, 0x62d6df, alpha * 0.9);
       this.fxGraphics.beginPath();
-      this.fxGraphics.arc(a.x, a.y, a.radius, -0.75, 0.75);
+      this.fxGraphics.arc(a.x, a.y, a.radius, -0.78, 0.78);
+      this.fxGraphics.strokePath();
+      this.fxGraphics.lineStyle(1.8, 0xe9edf2, alpha * 0.7);
+      this.fxGraphics.beginPath();
+      this.fxGraphics.arc(a.x, a.y, a.radius - 3, -0.65, 0.65);
       this.fxGraphics.strokePath();
     }
 

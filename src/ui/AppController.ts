@@ -54,6 +54,18 @@ import {
   registerModalBackgroundRoot,
 } from './Modals';
 
+interface ReturnDockingNotice {
+  readonly creditsBefore: number;
+  readonly creditsAfter: number;
+  readonly earnedCredits: number;
+  readonly crateCount: number;
+  readonly hasKeptRelic: boolean;
+  readonly wasDefeat: boolean;
+  readonly goalHint: string;
+  animating: boolean;
+  progress: number;
+}
+
 export class AppController {
   private readonly mountEl: HTMLElement;
   private save: SaveData;
@@ -67,6 +79,8 @@ export class AppController {
   private keptCollectibleIds = new Set<string>();
   /** null = automatic responsive default (collapsed on compact viewports during ARRANGE, F06) */
   private sceneCollapseOverride: boolean | null = null;
+  /** Pure presentation state for F11 return-to-port docking & unloading (never owns payout!) */
+  private activeDockingNotice: ReturnDockingNotice | null = null;
 
   // Live combat playback display values
   private liveCombatPlayerHp = 30;
@@ -245,6 +259,90 @@ export class AppController {
     }
   }
 
+  private computeNextBuildGoalHint(): string {
+    const prog = this.save.progression;
+    const order: BuildingId[] = ['workbench', 'display', 'drydock'];
+    for (const id of order) {
+      if (!prog.buildings[id]) {
+        const def = BUILDINGS[id];
+        if (prog.credits >= def.cost) {
+          return `余额已够修复「${def.name}」(${def.cost} 信用点)！`;
+        }
+        return `距「${def.name}」还差 ${def.cost - prog.credits} 信用点`;
+      }
+    }
+    const nav = prog.relics.ancient_navigator;
+    if (prog.buildings.display && !nav?.restored) {
+      if ((nav?.storedCount ?? 0) > 0) {
+        const cost = RELICS.ancient_navigator.restoreCost;
+        return prog.credits >= cost
+          ? `可修复展台藏品「古代导航仪」(${cost} 信用点)！`
+          : `距修复「古代导航仪」还差 ${cost - prog.credits} 信用点`;
+      }
+      return '带回 T 形「古代导航仪」可在展台修复展示';
+    }
+    return '拆解站首版设施已全部就绪！';
+  }
+
+  private renderDockingOverlay(): void {
+    const notice = this.activeDockingNotice;
+    if (!notice || !notice.animating || this.save.activeExpedition) {
+      if (!this.save.activeExpedition) {
+        this.sceneOverlayEl.innerHTML = '';
+      }
+      return;
+    }
+
+    const p = Math.max(0, Math.min(1, notice.progress));
+    const stageText =
+      p < 0.48
+        ? notice.wasDefeat
+          ? '救援拖船护送进港中…'
+          : '打捞船正在靠泊停机坪…'
+        : p < 0.86
+        ? '自动卸载货物并清点入账…'
+        : '信用点已汇入基地账户！';
+    const displayCredits = Math.round(
+      notice.creditsBefore + (notice.creditsAfter - notice.creditsBefore) * Math.min(1, p / 0.9)
+    );
+
+    const hudCredits = this.topHudEl.querySelector('#hud-credits');
+    if (hudCredits) {
+      hudCredits.textContent = String(displayCredits);
+    }
+
+    let overlay = this.sceneOverlayEl.querySelector<HTMLElement>('.docking-overlay');
+    if (!overlay) {
+      this.sceneOverlayEl.innerHTML = `
+        <div class="docking-overlay" role="status" aria-live="polite">
+          <div class="docking-banner">
+            <div>
+              <div id="docking-stage-text" style="font-weight:700;font-size:13px;color:var(--accent-action);"></div>
+              <div style="font-size:12px;color:var(--text-primary);">
+                本次入账 <strong class="num" style="color:var(--accent-action);">+${notice.earnedCredits}</strong>${
+                  notice.hasKeptRelic ? ' · 藏品已转入展台仓库' : ''
+                } · ${notice.goalHint}
+              </div>
+            </div>
+            <button type="button" class="btn btn-compact" id="btn-skip-docking">跳过演出</button>
+          </div>
+          <div class="docking-progress-track">
+            <div class="docking-progress-fill" id="docking-progress-fill" style="width:0%"></div>
+          </div>
+        </div>
+      `;
+      this.sceneOverlayEl.querySelector('#btn-skip-docking')?.addEventListener('click', () => {
+        this.phaserHost?.skipBaseReturnDocking();
+      });
+      overlay = this.sceneOverlayEl.querySelector<HTMLElement>('.docking-overlay');
+    }
+
+    const stageEl = overlay?.querySelector<HTMLElement>('#docking-stage-text');
+    if (stageEl) stageEl.textContent = stageText;
+    const fillEl = overlay?.querySelector<HTMLElement>('#docking-progress-fill');
+    if (fillEl) fillEl.style.width = `${Math.round(p * 100)}%`;
+  }
+
   private syncAll(): void {
     this.renderTopHud();
     this.renderBanners();
@@ -257,13 +355,13 @@ export class AppController {
       this.activeCombatPlaybackKey = null;
       this.sceneCollapseOverride = null;
       this.sceneWrapEl.className = 'scene-stage-wrap mode-base';
-      this.sceneOverlayEl.innerHTML = '';
       this.phaserHost?.resize();
       this.phaserHost?.showBase({
         progression: this.save.progression,
         settings: this.save.settings,
         recentlyBuiltId: this.recentlyBuiltId,
       });
+      this.renderDockingOverlay();
       this.renderBasePanels();
     } else {
       soundEngine.setTrack('expedition');
@@ -334,8 +432,8 @@ export class AppController {
     const arrangeCollapsed = this.isArrangeSceneCollapsed();
 
     this.topHudEl.innerHTML = `
-      <div class="hud-group">
-        <h1 class="hud-brand">星际拆解站</h1>
+      <h1 class="hud-brand">星际拆解站</h1>
+      <div class="hud-pills">
         ${leftPills}
       </div>
       <div class="hud-actions">
@@ -448,8 +546,31 @@ export class AppController {
       this.bannersEl.appendChild(b);
     }
 
-    // First-5-minute tutorial contextual hint (non-blocking, disappears once tutorial completes)
+    // F11 static receipt banner (shown immediately in reducedMotion or after docking animation finishes)
     const exp = this.save.activeExpedition;
+    if (!exp && this.activeDockingNotice && !this.activeDockingNotice.animating) {
+      const n = this.activeDockingNotice;
+      const b = document.createElement('div');
+      b.className = 'system-banner';
+      b.style.borderColor = n.wasDefeat ? 'var(--state-danger)' : 'var(--accent-action)';
+      b.setAttribute('role', 'status');
+      b.innerHTML = `
+        <span>
+          <strong>${n.wasDefeat ? '已拖回基地' : '满载返航入账'}</strong>
+          <strong class="num" style="color:var(--accent-action);margin:0 4px;">+${n.earnedCredits}</strong>信用点
+          ${n.hasKeptRelic ? ' · 古代导航仪已存入展台仓库' : ''}
+          · ${n.goalHint}
+        </span>
+        <button type="button" class="btn btn-compact" id="btn-dismiss-docking-receipt">知道了</button>
+      `;
+      b.querySelector('#btn-dismiss-docking-receipt')?.addEventListener('click', () => {
+        this.activeDockingNotice = null;
+        this.renderBanners();
+      });
+      this.bannersEl.appendChild(b);
+    }
+
+    // First-5-minute tutorial contextual hint (non-blocking, disappears once tutorial completes)
     if (exp && exp.isTutorial) {
       const step = TUTORIAL_SCRIPT[exp.currentNode];
       if (step) {
@@ -545,6 +666,8 @@ export class AppController {
       if (!this.canMutate()) return;
       soundEngine.unlock();
       soundEngine.play('click');
+      this.phaserHost?.skipBaseReturnDocking();
+      this.activeDockingNotice = null;
       this.recentlyBuiltId = null;
       this.keptCollectibleIds.clear();
       const exp = startExpedition({
@@ -1420,20 +1543,60 @@ export class AppController {
     this.leftPanelEl.querySelector('#btn-confirm-settlement')?.addEventListener('click', () => {
       if (!this.canMutate()) return;
       if (!this.save.activeExpedition || this.save.activeExpedition.phase !== 'SETTLEMENT') return;
-      soundEngine.play('returnDock');
+
+      const creditsBefore = this.save.progression.credits;
       const result = applyExpeditionSettlement(
         this.save.progression,
         this.save.activeExpedition,
         Array.from(this.keptCollectibleIds)
       );
       this.keptCollectibleIds.clear();
+
+      // Authoritative payout & persistence happen IMMEDIATELY BEFORE any animation (F11)
       this.save = {
         ...this.save,
         progression: result.progression,
         activeExpedition: null,
       };
       this.persist();
+      soundEngine.play('returnDock');
+
+      const reduced = this.save.settings.reducedMotion;
+      const notice: ReturnDockingNotice = {
+        creditsBefore,
+        creditsAfter: result.progression.credits,
+        earnedCredits: result.summary.finalCreditsEarned,
+        crateCount: Math.max(1, result.summary.lineItems.length),
+        hasKeptRelic: result.summary.keptRelicCount > 0,
+        wasDefeat: result.summary.reason === 'defeat',
+        goalHint: this.computeNextBuildGoalHint(),
+        animating: !reduced,
+        progress: reduced ? 1 : 0,
+      };
+      this.activeDockingNotice = notice;
       this.syncAll();
+
+      if (!reduced) {
+        this.phaserHost?.playBaseReturnDocking({
+          earnedCredits: notice.earnedCredits,
+          crateCount: notice.crateCount,
+          hasKeptRelic: notice.hasKeptRelic,
+          wasDefeat: notice.wasDefeat,
+          onProgress: (p) => {
+            if (this.activeDockingNotice !== notice) return;
+            notice.progress = p;
+            this.renderDockingOverlay();
+          },
+          onFinish: () => {
+            if (this.activeDockingNotice !== notice) return;
+            notice.animating = false;
+            notice.progress = 1;
+            this.renderTopHud();
+            this.renderDockingOverlay();
+            this.renderBanners();
+          },
+        });
+      }
     });
 
     this.mountCargoBayPanel(exp, isSafe ? '返航船舱清点' : '战败前最终船舱布局');
