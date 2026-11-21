@@ -1,8 +1,8 @@
-import { getItemImageUrl } from '../assets/itemArt';
+import { getEnemyShipImageUrl, getItemImageUrl, getPlayerShipImageUrl } from '../assets/itemArt';
 import { soundEngine } from '../audio/soundEngine';
 import { BUILDINGS, RELICS, type BuildingId } from '../data/buildings';
 import { LOADOUTS, getItemDef, type LoadoutId } from '../data/items';
-import { MAX_EXPEDITION_NODES, type RouteType } from '../data/nodes';
+import { type RouteType } from '../data/nodes';
 import { SHAPES } from '../data/shapes';
 import { TUTORIAL_MAX_RECOMMENDED_NODE, TUTORIAL_SCRIPT } from '../data/tutorial';
 import { calculateBuildStats } from '../domain/buildStats';
@@ -343,13 +343,22 @@ export class AppController {
     if (fillEl) fillEl.style.width = `${Math.round(p * 100)}%`;
   }
 
+  private getSectorIndex(node: number): 1 | 2 | 3 {
+    if (node <= 2) return 1;
+    if (node <= 4) return 2;
+    return 3;
+  }
+
   private syncAll(): void {
     this.renderTopHud();
     this.renderBanners();
     this.phaserHost?.setCombatPaused(this.isReadOnlyTab);
 
     const exp = this.save.activeExpedition;
+    this.mainLayoutEl.classList.toggle('phase-base', !exp);
     this.mainLayoutEl.classList.toggle('phase-arrange', Boolean(exp && exp.phase === 'ARRANGE'));
+    this.mainLayoutEl.classList.toggle('phase-combat', Boolean(exp && exp.phase === 'COMBAT'));
+    this.mainLayoutEl.classList.toggle('phase-route', Boolean(exp && exp.phase === 'ROUTE_SELECT'));
     if (!exp) {
       soundEngine.setTrack('base');
       this.activeCombatPlaybackKey = null;
@@ -599,49 +608,46 @@ export class AppController {
       ? prog.selectedLoadout
       : 'cannon_skiff';
 
-    // Left column (below Base Phaser scene): Loadout selector & Launch CTA
+    // Sleek Ship Switcher & Launch Command Dock (Zero prose!)
     this.leftPanelEl.innerHTML = `
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <h2 class="panel-title">出航准备 · 选择打捞船方案</h2>
-            <p class="panel-subtitle">出航免费，每次出发恢复满耐久 30，最多深入 ${MAX_EXPEDITION_NODES} 个节点。</p>
-          </div>
-          <span class="tag">${prog.totalExpeditions > 0 ? `已出航 ${prog.totalExpeditions} 次` : '待首航'}</span>
-        </div>
-
-        <div class="loadout-grid">
+      <div class="panel panel-game-dock">
+        <div class="ship-picker-row">
           ${(['cannon_skiff', 'shield_cruiser'] as LoadoutId[])
             .map((id) => {
               const def = LOADOUTS[id];
               const unlocked = isLoadoutUnlocked(prog, id);
               const selected = activeLoadout === id;
+              const statLine = id === 'cannon_skiff' ? '攻 7 · 盾 0' : '攻 4 · 盾 6';
               return `
-                <button type="button" class="loadout-card ${selected ? 'selected' : ''}"
+                <button type="button" class="ship-slot-card ${selected ? 'selected' : ''} ${unlocked ? '' : 'locked'}"
                   data-loadout="${id}" ${unlocked && !readOnly ? '' : 'disabled'}>
-                  <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
-                    <strong>${def.name}</strong>
+                  <div class="ship-slot-visual-row">
+                    <div class="ship-slot-art">
+                      <img src="${getPlayerShipImageUrl(id)}" alt="${def.name}" />
+                    </div>
                     <span class="tag ${selected ? 'tag-amber' : ''}">${
-                      unlocked ? (selected ? '当前方案' : '可切换') : '需船坞扩建'
+                      unlocked ? (selected ? '出战' : '切换') : '需船坞'
                     }</span>
                   </div>
-                  <div style="font-size:13px;color:var(--accent-energy);font-weight:600;">${def.subtitle}</div>
-                  <div style="font-size:12px;color:var(--text-secondary);">${def.description}</div>
+                  <div class="ship-slot-meta">
+                    <strong class="ship-slot-name">${def.name}</strong>
+                    <span class="ship-slot-stats num">${statLine}</span>
+                  </div>
                 </button>
               `;
             })
             .join('')}
         </div>
 
-        <button type="button" class="btn btn-primary" id="btn-launch-expedition" style="width:100%;font-size:16px;" ${
+        <button type="button" class="btn btn-primary btn-launch-hero" id="btn-launch-expedition" ${
           readOnly ? 'disabled' : ''
         }>
           ${
             readOnly
-              ? '只读模式 · 请先接管控制权后出航'
+              ? '只读模式 · 请先接管控制权'
               : isFirstRun
-              ? '第一次打捞（新手航次）'
-              : `驾驶「${LOADOUTS[activeLoadout].name}」开始出航`
+              ? '▶ 第一次打捞（新手航次）'
+              : `▶ 驾驶「${LOADOUTS[activeLoadout].name}」出发打捞`
           }
         </button>
       </div>
@@ -665,7 +671,7 @@ export class AppController {
     this.leftPanelEl.querySelector('#btn-launch-expedition')?.addEventListener('click', () => {
       if (!this.canMutate()) return;
       soundEngine.unlock();
-      soundEngine.play('click');
+      soundEngine.play('warpJump');
       this.phaserHost?.skipBaseReturnDocking();
       this.activeDockingNotice = null;
       this.recentlyBuiltId = null;
@@ -679,112 +685,84 @@ export class AppController {
       this.syncAll();
     });
 
-    // Right column: Base Facilities & Relic Restoration
+    // Compact Facility Upgrade Strip (Clicking station diorama pins ALSO triggers these!)
     const visibleBuildings = getVisibleBuildings(prog);
     const navRelic = RELICS.ancient_navigator;
     const navState = prog.relics.ancient_navigator ?? { storedCount: 0, restored: false };
     const restoreCheck = canRestoreRelic(prog, 'ancient_navigator');
 
-    this.rightPanelEl.innerHTML = `
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <h2 class="panel-title">拆解站建设</h2>
-            <p class="panel-subtitle">
-              ${
-                prog.buildings.workbench
-                  ? '点击设施卡片或直接点击上方基地建筑进行修复与查看。'
-                  : '先完成一次打捞带回 40 信用点，修复工作台点亮你的小站。'
-              }
-            </p>
-          </div>
-          <span class="tag tag-amber">余额 ${prog.credits}</span>
-        </div>
+    const iconForBuilding: Record<BuildingId, string> = {
+      workbench: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4l-5.6 5.6a1.5 1.5 0 0 0 2.1 2.1l5.6-5.6a4 4 0 0 0 5.4-5.4l-2.1 2.1-2.1-2.1z"/></svg>`,
+      display: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 3 19 8 19 16 12 21 5 16 5 8 12 3"/><circle cx="12" cy="12" r="2.5"/></svg>`,
+      drydock: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-6 9 6v9a1 1 0 0 1-1 1h-3v-6H7v6H4a1 1 0 0 1-1-1z"/><path d="M9 17h6"/></svg>`,
+    };
+    const tagForBuilding: Record<BuildingId, string> = {
+      workbench: '解锁图鉴与建设',
+      display: '展示古代藏品',
+      drydock: '解锁护盾工程艇',
+    };
 
-        <div class="facility-list">
+    this.rightPanelEl.innerHTML = `
+      <div class="panel panel-game-dock">
+        <div class="facility-strip">
           ${visibleBuildings
             .map((bid) => {
               const def = BUILDINGS[bid];
               const built = prog.buildings[bid];
               const check = canBuildFacility(prog, bid);
-              const disabledReason = readOnly ? '只读模式' : check.reason;
+              const affordable = !built && check.canBuild && !readOnly;
               return `
-                <div class="facility-card ${built ? 'built' : ''}">
-                  <div class="facility-info">
-                    <div class="facility-name-row">
-                      <span>${def.name}</span>
-                      <span class="tag ${built ? 'tag-energy' : 'tag-amber'}">${
-                        built ? '已修复运转' : `${def.cost} 信用点`
-                      }</span>
-                    </div>
-                    <div style="font-size:13px;color:var(--text-primary);">${def.benefit}</div>
-                    <div style="font-size:12px;color:var(--text-secondary);">
-                      场景：${built ? def.repairedDescription : def.sceneChange}
+                <div class="facility-chip ${built ? 'built' : ''} ${affordable ? 'affordable' : ''}">
+                  <div class="facility-chip-head">
+                    <span class="facility-icon ${built ? 'active' : ''}" aria-hidden="true">${iconForBuilding[bid]}</span>
+                    <div class="facility-chip-title">
+                      <strong>${def.name}</strong>
+                      <span class="facility-chip-sub">${tagForBuilding[bid]}</span>
                     </div>
                   </div>
-                  <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;">
-                    ${
-                      built
-                        ? bid === 'workbench'
-                          ? `<button type="button" class="btn btn-energy btn-compact" data-open-codex="1">打开图鉴</button>`
-                          : `<span class="tag tag-energy">已启用</span>`
-                        : `<button type="button" class="btn btn-primary btn-compact" data-build="${bid}" ${
-                            check.canBuild && !readOnly ? '' : 'disabled'
-                          }>修复建造</button>
-                           ${
-                             (!check.canBuild || readOnly) && disabledReason
-                               ? `<span style="font-size:12px;color:var(--text-secondary);">${disabledReason}</span>`
-                               : ''
-                           }`
-                    }
-                  </div>
+                  ${
+                    built
+                      ? bid === 'workbench'
+                        ? `<button type="button" class="btn btn-energy btn-compact" data-open-codex="1">图鉴</button>`
+                        : `<span class="tag tag-energy">已运转 ✓</span>`
+                      : `<button type="button" class="btn ${affordable ? 'btn-primary' : ''} btn-compact" data-build="${bid}" ${
+                          affordable ? '' : 'disabled'
+                        }>${readOnly ? '锁定' : `${def.cost}¤ 修复`}</button>`
+                  }
                 </div>
               `;
             })
             .join('')}
-        </div>
 
-        ${
-          prog.buildings.display
-            ? `
-            <div class="inspector-card" style="border-color:rgba(246,184,82,0.45);">
-              <div class="panel-header">
-                <strong>收藏展台 · ${navRelic.name}</strong>
-                <span class="tag ${navState.restored ? 'tag-energy' : 'tag-amber'}">
+          ${
+            prog.buildings.display
+              ? `
+                <div class="facility-chip relic-chip ${navState.restored ? 'built' : restoreCheck.canRestore && !readOnly ? 'affordable' : ''}">
+                  <div class="facility-chip-head">
+                    <img class="relic-mini-thumb" src="${getItemImageUrl('cargo.ancient_navigator')}" alt="${navRelic.name}" />
+                    <div class="facility-chip-title">
+                      <strong>${navRelic.name}</strong>
+                      <span class="facility-chip-sub">${
+                        navState.restored
+                          ? '星仪已点亮展示'
+                          : navState.storedCount > 0
+                          ? `库存 ${navState.storedCount} 件待修复`
+                          : '深空带回后可修复'
+                      }</span>
+                    </div>
+                  </div>
                   ${
                     navState.restored
-                      ? '已修复展示中'
-                      : navState.storedCount > 0
-                      ? `库存 ${navState.storedCount} 件待修复`
-                      : '尚未带回实物'
+                      ? `<span class="tag tag-energy">展示中 ✦</span>`
+                      : `<button type="button" class="btn ${restoreCheck.canRestore && !readOnly ? 'btn-primary' : ''} btn-compact" id="btn-restore-nav" ${
+                          restoreCheck.canRestore && !readOnly ? '' : 'disabled'
+                        }>${navRelic.restoreCost}¤ 修复</button>`
                   }
-                </span>
-              </div>
-              <div style="font-size:13px;color:var(--text-secondary);">
-                ${navState.restored ? navRelic.lore : navRelic.description}
-              </div>
-              ${
-                !navState.restored
-                  ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-                      <span style="font-size:12px;color:var(--text-secondary);">
-                        ${
-                          readOnly
-                            ? '只读模式不可修复'
-                            : restoreCheck.canRestore
-                            ? `修复费用 ${navRelic.restoreCost} 信用点`
-                            : restoreCheck.reason
-                        }
-                      </span>
-                      <button type="button" class="btn btn-primary btn-compact" id="btn-restore-nav" ${
-                        restoreCheck.canRestore && !readOnly ? '' : 'disabled'
-                      }>支付 ${navRelic.restoreCost} 修复展示</button>
-                    </div>`
-                  : ''
-              }
-            </div>
-          `
-            : ''
-        }
+                </div>
+              `
+              : ''
+          }
+        </div>
       </div>
     `;
 
@@ -800,16 +778,22 @@ export class AppController {
     });
 
     this.rightPanelEl.querySelector('#btn-restore-nav')?.addEventListener('click', () => {
-      if (!this.canMutate()) return;
-      const res = restoreRelic(this.save.progression, 'ancient_navigator');
-      if (res.ok) {
-        soundEngine.play('buildComplete');
-        this.recentlyBuiltId = 'display';
-        this.save = { ...this.save, progression: res.progression };
-        this.persist();
-        this.syncAll();
-      }
+      this.handleRestoreRelic();
     });
+  }
+
+  private handleRestoreRelic(): void {
+    if (!this.canMutate()) return;
+    const res = restoreRelic(this.save.progression, 'ancient_navigator');
+    if (res.ok) {
+      soundEngine.play('buildComplete');
+      this.recentlyBuiltId = 'display';
+      this.save = { ...this.save, progression: res.progression };
+      this.persist();
+      this.syncAll();
+    } else {
+      soundEngine.play('invalid');
+    }
   }
 
   private handleBuildingInteract(buildingId: BuildingId): void {
@@ -818,6 +802,8 @@ export class AppController {
       if (buildingId === 'workbench') {
         soundEngine.play('click');
         this.openCodexModal();
+      } else if (buildingId === 'display' && canRestoreRelic(prog, 'ancient_navigator').canRestore) {
+        this.handleRestoreRelic();
       }
       return;
     }
@@ -842,12 +828,14 @@ export class AppController {
   }
 
   private renderExpeditionView(exp: ExpeditionState): void {
-    // Configure scene viewport size & Phaser CombatScene state per phase
+    const sectorIdx = this.getSectorIndex(exp.currentNode);
     if (exp.phase === 'ARRANGE') {
       const collapsed = this.isArrangeSceneCollapsed();
       this.sceneWrapEl.className = `scene-stage-wrap mode-arrange ${collapsed ? 'collapsed' : ''}`;
     } else if (exp.phase === 'ROUTE_SELECT') {
       this.sceneWrapEl.className = 'scene-stage-wrap mode-route';
+    } else if (exp.phase === 'COMBAT') {
+      this.sceneWrapEl.className = 'scene-stage-wrap mode-combat';
     } else {
       this.sceneWrapEl.className = 'scene-stage-wrap';
     }
@@ -860,6 +848,7 @@ export class AppController {
       this.phaserHost?.showCombat({
         loadoutId: exp.loadoutId,
         enemy: normalPrev.routeSpec.enemy,
+        sectorIndex: sectorIdx,
         simulation: null,
         settings: this.save.settings,
       });
@@ -872,6 +861,7 @@ export class AppController {
       this.phaserHost?.showCombat({
         loadoutId: exp.loadoutId,
         enemy: null,
+        sectorIndex: sectorIdx,
         simulation: null,
         settings: this.save.settings,
       });
@@ -882,6 +872,7 @@ export class AppController {
       this.phaserHost?.showCombat({
         loadoutId: exp.loadoutId,
         enemy: null,
+        sectorIndex: sectorIdx,
         simulation: null,
         settings: this.save.settings,
       });
@@ -892,6 +883,7 @@ export class AppController {
       this.phaserHost?.showCombat({
         loadoutId: exp.loadoutId,
         enemy: null,
+        sectorIndex: sectorIdx,
         simulation: null,
         settings: this.save.settings,
       });
@@ -902,11 +894,11 @@ export class AppController {
   private mountCargoBayPanel(exp: ExpeditionState, title: string): void {
     const editable = isCargoBayEditable(exp) && this.canMutate();
     this.rightPanelEl.innerHTML = `
-      <div class="panel">
+      <div class="panel panel-cargo-bay">
         <div class="panel-header">
           <h2 class="panel-title">${title}</h2>
           <span class="tag ${editable ? 'tag-amber' : ''}">
-            ${editable ? '可拖拽 / 点选 / 键盘整理' : this.isReadOnlyTab ? '只读锁定中' : '航行锁定中'}
+            ${editable ? '拖放 · 点选 · 键盘' : this.isReadOnlyTab ? '只读锁定' : '航行锁定'}
           </span>
         </div>
         <div id="cargo-bay-mount" class="bay-section"></div>
@@ -948,31 +940,30 @@ export class AppController {
       const lethal = prediction.outcome === 'defeat';
 
       return `
-        <div class="route-card ${isDanger ? 'danger' : ''}">
-          <div class="route-header">
-            <strong>${routeSpec.label}</strong>
-            <span class="tag ${isDanger ? 'tag-danger' : 'tag-energy'}">${routeSpec.enemy.name}</span>
+        <div class="route-beacon ${isDanger ? 'danger' : ''}">
+          <div class="route-beacon-head">
+            <span class="tag ${isDanger ? 'tag-danger' : 'tag-energy'}">${isDanger ? '⚠ 危险航道' : '✦ 普通航道'}</span>
+            <strong class="route-enemy-name">${routeSpec.enemy.name}</strong>
           </div>
 
-          <div class="route-stats">
-            <div class="route-stat-item"><span style="color:var(--text-secondary);">敌耐久</span><strong class="num">${routeSpec.enemy.maxHp}</strong></div>
-            <div class="route-stat-item"><span style="color:var(--text-secondary);">敌伤害</span><strong class="num">${routeSpec.enemy.damagePerRound}/轮</strong></div>
-            <div class="route-stat-item"><span style="color:var(--text-secondary);">胜利悬赏</span><strong class="num" style="color:var(--accent-action);">+${routeSpec.bounty}</strong></div>
-            <div class="route-stat-item"><span style="color:var(--text-secondary);">优良率</span><strong class="num" style="color:var(--accent-energy);">${Math.round(routeSpec.improvedEquipmentProb * 100)}%</strong></div>
+          <div class="route-enemy-visual ${isDanger ? 'danger' : ''}">
+            <img src="${getEnemyShipImageUrl(routeSpec.enemy.archetype)}" alt="${routeSpec.enemy.name}" />
           </div>
 
-          <div style="font-size:12px;color:var(--text-secondary);">
-            货物报价范围：<strong class="num" style="color:var(--text-primary);">${routeSpec.cargoPriceRange.min}–${routeSpec.cargoPriceRange.max}</strong> 信用点
+          <div class="route-icon-stats num">
+            <span title="敌方耐久">♥${routeSpec.enemy.maxHp}</span>
+            <span title="每轮伤害">攻${routeSpec.enemy.damagePerRound}</span>
+            <span style="color:var(--accent-action);" title="胜利悬赏">+${routeSpec.bounty}¤</span>
+            <span style="color:var(--accent-energy);" title="优良设备率">★${Math.round(routeSpec.improvedEquipmentProb * 100)}%</span>
           </div>
 
           <div class="route-prediction ${lethal ? 'lethal' : ''}">
             ${
               lethal
-                ? `<strong style="color:var(--state-danger);">⚠ 预计战败</strong>（${prediction.roundsCount} 轮后耐久归零）`
-                : `<div>预计交火 <strong class="num">${prediction.roundsCount}</strong> 轮 · 护盾挡 <strong class="num">${prediction.totalShieldAbsorbed}</strong> · 掉血 <strong class="num">${prediction.totalHpLoss}</strong></div>
-                   <div>战后耐久：<strong class="num" style="color:var(--accent-energy);">${prediction.finalPlayerHp}/${exp.maxHp}</strong>${
-                     prediction.repairApplied > 0 ? `（含胜后修 +${prediction.repairApplied}）` : ''
-                   }</div>`
+                ? `<strong style="color:var(--state-danger);">⚠ 预计战败（${prediction.roundsCount}轮）</strong>`
+                : `<span>${prediction.roundsCount}轮 · 战后 <strong class="num" style="color:var(--accent-energy);">♥${prediction.finalPlayerHp}/${exp.maxHp}</strong>${
+                    prediction.repairApplied > 0 ? ` (+${prediction.repairApplied})` : ''
+                  }</span>`
             }
           </div>
 
@@ -980,12 +971,12 @@ export class AppController {
             data-select-route="${routeType}" ${lockedForTutorial || readOnly ? 'disabled' : ''}>
             ${
               readOnly
-                ? '只读模式已锁定'
+                ? '只读锁定'
                 : lockedForTutorial
-                ? '第 2 站解锁危险航路'
+                ? '第 2 站解锁'
                 : lethal
-                ? '仍冒险进入交火'
-                : '确认进入交火'
+                ? '冒险跃迁 →'
+                : '跃迁交火 →'
             }
           </button>
         </div>
@@ -993,13 +984,10 @@ export class AppController {
     };
 
     this.leftPanelEl.innerHTML = `
-      <div class="panel">
+      <div class="panel panel-game-dock">
         <div class="panel-header">
-          <div>
-            <h2 class="panel-title">节点 ${exp.currentNode}/${exp.maxNodes} · ${normal.routeSpec.sectorName}</h2>
-            <p class="panel-subtitle">查看公开敌情与战后耐久预测，选择本次航路。</p>
-          </div>
-          <span class="tag tag-amber">累计悬赏 ${exp.accumulatedBounty}</span>
+          <h2 class="panel-title">星图跃迁 · ${normal.routeSpec.sectorName} (${exp.currentNode}/${exp.maxNodes})</h2>
+          <span class="tag tag-amber">悬赏 +${exp.accumulatedBounty}¤</span>
         </div>
         <div class="route-grid">
           ${renderRouteCard('normal', normal, false)}
@@ -1013,7 +1001,7 @@ export class AppController {
         if (!this.canMutate()) return;
         const routeType = btn.dataset.selectRoute as RouteType;
         soundEngine.unlock();
-        soundEngine.play('click');
+        soundEngine.play('warpJump');
         const nextExp = selectRoute(exp, routeType);
         this.save = { ...this.save, activeExpedition: nextExp };
         this.persist();
@@ -1021,13 +1009,14 @@ export class AppController {
       });
     });
 
-    this.mountCargoBayPanel(exp, '当前船舱配置（已锁定）');
+    this.mountCargoBayPanel(exp, '船舱配置');
   }
 
   private renderCombatPhase(exp: ExpeditionState): void {
     const readOnly = !this.canMutate();
     const combat = exp.activeCombat!;
     const playbackKey = `${exp.expeditionId}_${exp.currentNode}_${combat.routeSpec.routeType}`;
+    const sectorIdx = this.getSectorIndex(exp.currentNode);
 
     if (this.activeCombatPlaybackKey !== playbackKey) {
       this.activeCombatPlaybackKey = playbackKey;
@@ -1039,6 +1028,7 @@ export class AppController {
       this.phaserHost?.showCombat({
         loadoutId: exp.loadoutId,
         enemy: combat.routeSpec.enemy,
+        sectorIndex: sectorIdx,
         simulation: combat.simulation,
         settings: this.save.settings,
         onRoundStep: (_idx, ev: CombatRoundEvent) => {
@@ -1063,21 +1053,19 @@ export class AppController {
     this.updateCombatOverlayBars(exp);
 
     this.leftPanelEl.innerHTML = `
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <h2 class="panel-title">${readOnly ? '同步交火已暂停（只读模式）' : `同步交火中 · ${combat.routeSpec.enemy.name}`}</h2>
-            <p class="panel-subtitle">我方攻击 ${combat.statsSnapshot.totalAttack} / 初始护盾 ${combat.statsSnapshot.effectiveShield} · 敌方每轮伤害 ${combat.routeSpec.enemy.damagePerRound}</p>
-          </div>
+      <div class="panel panel-compact combat-control-bar">
+        <div class="combat-bar-status">
           <span class="tag tag-energy" id="combat-round-tag">第 ${this.liveCombatRound}/${combat.simulation.roundsCount} 轮</span>
+          <span class="combat-stat-inline num">攻${combat.statsSnapshot.totalAttack} · 盾${combat.statsSnapshot.effectiveShield}</span>
+          ${readOnly ? `<span class="tag tag-danger">已暂停</span>` : ''}
         </div>
-        <div class="action-dock">
-          <button type="button" class="btn ${this.save.settings.combatSpeed === 2 ? 'btn-energy' : ''}" id="btn-combat-speed" ${
+        <div class="combat-bar-btns">
+          <button type="button" class="btn btn-compact ${this.save.settings.combatSpeed === 2 ? 'btn-energy' : ''}" id="btn-combat-speed" ${
             readOnly ? 'disabled' : ''
           }>
-            当前速度：${this.save.settings.combatSpeed}×（切换）
+            ${this.save.settings.combatSpeed}× 速度
           </button>
-          <button type="button" class="btn" id="btn-skip-combat" ${readOnly ? 'disabled' : ''}>快速结算本战</button>
+          <button type="button" class="btn btn-compact" id="btn-skip-combat" ${readOnly ? 'disabled' : ''}>跳过 »</button>
         </div>
       </div>
     `;
@@ -1090,7 +1078,7 @@ export class AppController {
       this.applyBodySettings(nextSettings);
       this.persist();
       const btn = this.leftPanelEl.querySelector('#btn-combat-speed');
-      if (btn) btn.textContent = `当前速度：${nextSpeed}×（切换）`;
+      if (btn) btn.textContent = `${nextSpeed}× 速度`;
     });
 
     this.leftPanelEl.querySelector('#btn-skip-combat')?.addEventListener('click', () => {
@@ -1099,7 +1087,7 @@ export class AppController {
       this.phaserHost?.skipCombatPlayback();
     });
 
-    this.mountCargoBayPanel(exp, '船舱配置（交火锁定）');
+    this.mountCargoBayPanel(exp, '船舱配置');
   }
 
   private updateCombatOverlayBars(exp: ExpeditionState): void {
@@ -1122,9 +1110,11 @@ export class AppController {
       <div class="combat-hud-bars">
         <div class="unit-bar-card">
           <div class="unit-bar-header">
-            <span class="name">我方打捞船</span>
-            <span class="num">${this.liveCombatPlayerHp}/${exp.maxHp}${
-              this.liveCombatPlayerShield > 0 ? ` · 盾 ${this.liveCombatPlayerShield}` : ''
+            <span class="name">${LOADOUTS[exp.loadoutId].name}</span>
+            <span class="unit-bar-vals num">♥${this.liveCombatPlayerHp}/${exp.maxHp}${
+              this.liveCombatPlayerShield > 0
+                ? `<span class="unit-shield-val">盾${this.liveCombatPlayerShield}</span>`
+                : ''
             }</span>
           </div>
           <div class="hp-track"><div class="hp-fill" style="width:${pHpPct}%"></div></div>
@@ -1137,7 +1127,7 @@ export class AppController {
         <div class="unit-bar-card">
           <div class="unit-bar-header">
             <span class="name">${combat.routeSpec.enemy.name}</span>
-            <span class="num">${this.liveCombatEnemyHp}/${combat.routeSpec.enemy.maxHp}</span>
+            <span class="unit-bar-vals num">♥${this.liveCombatEnemyHp}/${combat.routeSpec.enemy.maxHp}</span>
           </div>
           <div class="hp-track"><div class="hp-fill enemy" style="width:${eHpPct}%"></div></div>
         </div>
@@ -1155,7 +1145,6 @@ export class AppController {
     const rewards = exp.pendingRewards!;
     const lastSim = exp.lastCombat?.simulation;
 
-    // Trigger rare chime if collectible or high-value cargo appeared
     const hasRare = rewards.some(
       (r) =>
         r.kind === 'cargo' &&
@@ -1167,15 +1156,16 @@ export class AppController {
     }
 
     this.leftPanelEl.innerHTML = `
-      <div class="panel">
+      <div class="panel panel-game-dock">
         <div class="panel-header">
-          <div>
-            <h2 class="panel-title">交火胜利 · 战利品三选一</h2>
-            <p class="panel-subtitle">
-              已获悬赏 +${lastSim?.bountyEarned ?? 0}${
-                lastSim && lastSim.repairApplied > 0 ? ` · 无人机修复 +${lastSim.repairApplied} 耐久` : ''
-              }。先看清数值与占格再选择一项。
-            </p>
+          <h2 class="panel-title">打捞战利品 · 三选一</h2>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <span class="tag tag-amber">悬赏 +${lastSim?.bountyEarned ?? 0}¤</span>
+            ${
+              lastSim && lastSim.repairApplied > 0
+                ? `<span class="tag tag-energy">修 +${lastSim.repairApplied}</span>`
+                : ''
+            }
           </div>
         </div>
 
@@ -1184,23 +1174,18 @@ export class AppController {
             .map((opt) => {
               if (opt.kind === 'repair') {
                 const afterHp = Math.min(exp.maxHp, exp.currentHp + opt.healAmount);
-                const actualGain = afterHp - exp.currentHp;
                 return `
-                  <div class="reward-card">
-                    <div class="reward-top">
-                      <div class="reward-thumb" style="font-size:24px;font-weight:800;color:var(--accent-energy);">+HP</div>
-                      <div>
-                        <div style="font-weight:700;font-size:15px;">紧急船体维修</div>
-                        <div style="font-size:12px;color:var(--text-secondary);">不占船舱格子</div>
-                      </div>
+                  <div class="reward-pod">
+                    <div class="reward-pod-art repair-art">
+                      <span>♥ +${opt.healAmount}</span>
                     </div>
-                    <div style="font-size:13px;">
-                      恢复 <strong class="num" style="color:var(--accent-energy);">+${opt.healAmount}</strong> 耐久<br/>
-                      <span style="color:var(--text-secondary);">耐久：${exp.currentHp} → ${afterHp}（实补 +${actualGain}）</span>
+                    <div class="reward-pod-info">
+                      <strong>紧急维修</strong>
+                      <span class="reward-pod-stat num" style="color:var(--accent-energy);">♥ ${exp.currentHp} → ${afterHp} · 0格</span>
                     </div>
                     <button type="button" class="btn btn-energy" data-pick-reward="repair" ${
                       readOnly ? 'disabled' : ''
-                    }>${readOnly ? '只读锁定' : '选择维修'}</button>
+                    }>${readOnly ? '锁定' : '立即维修'}</button>
                   </div>
                 `;
               }
@@ -1208,45 +1193,37 @@ export class AppController {
               const def = getItemDef(opt.item.defId);
               const shape = SHAPES[def.shapeId];
               const isCollectible = def.category === 'cargo' && def.isCollectible;
-              const perCell = Math.round(opt.item.value / shape.cells.length);
+              const statBadge =
+                def.category === 'equipment'
+                  ? `<span class="reward-pod-stat" style="color:var(--accent-energy);">${def.summary}</span>`
+                  : `<span class="reward-pod-stat num" style="color:var(--accent-action);">${opt.item.value}¤ · ${Math.round(opt.item.value / shape.cells.length)}/格</span>`;
 
               return `
-                <div class="reward-card ${isCollectible ? 'highlight-collectible' : ''}">
-                  <div class="reward-top">
-                    <div class="reward-thumb">
-                      <img src="${getItemImageUrl(def.defId)}" alt="${def.name}" />
-                    </div>
-                    <div style="min-width:0;">
-                      <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
-                        <strong style="font-size:15px;">${def.name}</strong>
-                        ${
-                          def.category === 'equipment'
-                            ? `<span class="tag ${def.quality === 'improved' ? 'tag-energy' : ''}">${
-                                def.quality === 'improved' ? '‖ 优良' : '| 普通'
-                              }</span>`
-                            : isCollectible
-                            ? `<span class="tag tag-amber">可收藏</span>`
-                            : `<span class="tag">货物</span>`
-                        }
-                      </div>
-                      <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
-                        ${renderMiniMaskHtml(def.defId)}
-                        <span style="font-size:12px;color:var(--text-secondary);">${shape.label}</span>
-                      </div>
-                    </div>
+                <div class="reward-pod ${isCollectible ? 'highlight-collectible' : ''}">
+                  <div class="reward-pod-art">
+                    <img src="${getItemImageUrl(def.defId)}" alt="${def.name}" />
                   </div>
-                  <div style="font-size:13px;">
-                    ${
-                      def.category === 'equipment'
-                        ? `<strong style="color:var(--accent-energy);">${def.summary}</strong><br/><span style="color:var(--text-secondary);font-size:12px;">返航回收 ${opt.item.value} 信用点</span>`
-                        : `<strong style="color:var(--accent-action);">估值 ${opt.item.value} 信用点</strong><br/><span style="color:var(--text-secondary);font-size:12px;">单格均价 ${perCell} · 无战斗加成</span>`
-                    }
+                  <div class="reward-pod-info">
+                    <div class="reward-pod-title">
+                      <strong>${def.name}</strong>
+                      ${
+                        def.category === 'equipment'
+                          ? `<span class="tag ${def.quality === 'improved' ? 'tag-energy' : ''}">${
+                              def.quality === 'improved' ? '‖ 优良' : '| 普通'
+                            }</span>`
+                          : isCollectible
+                          ? `<span class="tag tag-amber">★ 藏品</span>`
+                          : ''
+                      }
+                    </div>
+                    <div class="reward-pod-shape">
+                      ${renderMiniMaskHtml(def.defId)}
+                      ${statBadge}
+                    </div>
                   </div>
                   <button type="button" class="btn btn-primary" data-pick-reward="${opt.optionId}" ${
                     readOnly ? 'disabled' : ''
-                  }>
-                    ${readOnly ? '只读锁定' : '收入暂存区'}
-                  </button>
+                  }>${readOnly ? '锁定' : '收入暂存'}</button>
                 </div>
               `;
             })
@@ -1259,7 +1236,7 @@ export class AppController {
       btn.addEventListener('click', () => {
         if (!this.canMutate()) return;
         const optionId = btn.dataset.pickReward as 'equipment' | 'cargo' | 'repair';
-        soundEngine.play('place');
+        soundEngine.play(optionId === 'repair' ? 'repairPulse' : 'place');
         const nextExp = selectReward(exp, optionId);
         this.save = { ...this.save, activeExpedition: nextExp };
         this.persist();
@@ -1267,7 +1244,7 @@ export class AppController {
       });
     });
 
-    this.mountCargoBayPanel(exp, '当前船舱一览（选定后进入整理）');
+    this.mountCargoBayPanel(exp, '当前船舱');
   }
 
   private confirmPendingDiscardsIfNeeded(
@@ -1409,33 +1386,20 @@ export class AppController {
     const lastCombat = exp.lastCombat;
 
     this.leftPanelEl.innerHTML = `
-      <div class="panel">
+      <div class="panel panel-game-dock">
         <div class="panel-header">
-          <div>
-            <h2 class="panel-title" style="color:${isSafe ? 'var(--accent-action)' : 'var(--state-danger)'};">
-              ${isSafe ? '安全返航 · 收益结算' : '舰体损毁 · 紧急拖回结算'}
-            </h2>
-            <p class="panel-subtitle">
-              ${
-                isSafe
-                  ? `顺利完成 ${exp.completedNodes} 个节点，所有带回物资已清点完毕。`
-                  : `在节点 ${exp.currentNode} 战败，已按 40% 折算回收收益；基地建筑、资金与图鉴记录不受损失。`
-              }
-            </p>
-          </div>
+          <h2 class="panel-title" style="color:${isSafe ? 'var(--accent-action)' : 'var(--state-danger)'};">
+            ${isSafe ? '✦ 安全返航 · 物资清点' : '⚠ 紧急拖回 · 40%折算'}
+          </h2>
           <span class="tag ${isSafe ? 'tag-amber' : 'tag-danger'}">完成 ${exp.completedNodes} 站</span>
         </div>
 
         ${
           !isSafe && lastCombat
             ? `
-            <div class="inspector-card" style="border-color:var(--state-danger);">
-              <strong style="color:var(--state-danger);">战败复盘（可归因记录）</strong>
-              <div style="font-size:13px;color:var(--text-secondary);">
-                对手：${lastCombat.routeSpec.enemy.name}（${lastCombat.routeSpec.enemy.maxHp} 血 / 每轮 ${lastCombat.routeSpec.enemy.damagePerRound} 伤）<br/>
-                我方开战配置：耐久 ${lastCombat.startingHp} · 攻击 ${lastCombat.statsSnapshot.totalAttack} · 护盾 ${lastCombat.statsSnapshot.effectiveShield} · 交火 ${lastCombat.simulation.roundsCount} 轮<br/>
-                下趟建议：优先补足火力/护盾压低战损，或在耐久偏低时主动选择安全返航。
-              </div>
+            <div class="defeat-recap-strip">
+              <strong style="color:var(--state-danger);">战损记录</strong>
+              <span class="num">${lastCombat.routeSpec.enemy.name} (♥${lastCombat.routeSpec.enemy.maxHp} 攻${lastCombat.routeSpec.enemy.damagePerRound}) · 我方 ♥${lastCombat.startingHp} 攻${lastCombat.statsSnapshot.totalAttack} 盾${lastCombat.statsSnapshot.effectiveShield} · ${lastCombat.simulation.roundsCount}轮</span>
             </div>
           `
             : ''
@@ -1443,14 +1407,14 @@ export class AppController {
 
         <div class="settlement-list">
           <div class="settlement-row">
-            <span>累计战斗悬赏</span>
-            <strong class="num">+${summary.bountyCredits}</strong>
+            <span>✦ 战斗悬赏</span>
+            <strong class="num">+${summary.bountyCredits}¤</strong>
           </div>
           ${
             summary.tutorialBonusCredits > 0
               ? `<div class="settlement-row">
-                  <span>首次打捞站内启动补贴</span>
-                  <strong class="num" style="color:var(--accent-action);">+${summary.tutorialBonusCredits}</strong>
+                  <span>✦ 首航启动补贴</span>
+                  <strong class="num" style="color:var(--accent-action);">+${summary.tutorialBonusCredits}¤</strong>
                 </div>`
               : ''
           }
@@ -1461,22 +1425,15 @@ export class AppController {
                   ? `<button type="button" class="btn btn-compact ${
                       line.keptForCollection ? 'btn-energy' : 'btn-primary'
                     }" data-toggle-keep="${line.item.instanceId}" ${readOnly ? 'disabled' : ''}>
-                      ${
-                        line.keptForCollection
-                          ? '已选：留作收藏（0 信用点）'
-                          : `已选：按 ${line.item.value} 出售`
-                      }
+                      ${line.keptForCollection ? '留作收藏 (0¤)' : `出售 (+${line.item.value}¤)`}
                     </button>`
-                  : `<strong class="num">+${line.creditsValue}</strong>`;
+                  : `<strong class="num">+${line.creditsValue}¤</strong>`;
               return `
                 <div class="settlement-row">
-                  <div>
+                  <div class="settlement-item-left">
+                    <img class="settlement-thumb" src="${getItemImageUrl(line.item.defId)}" alt="${line.name}" />
                     <strong>${line.name}</strong>
-                    ${
-                      line.isCollectible
-                        ? `<span class="tag tag-amber" style="margin-left:6px;">稀有藏品</span>`
-                        : ''
-                    }
+                    ${line.isCollectible ? `<span class="tag tag-amber">藏品</span>` : ''}
                   </div>
                   ${toggleBtn}
                 </div>
@@ -1488,9 +1445,12 @@ export class AppController {
             .map((p) => {
               const def = getItemDef(p.item.defId);
               return `
-                <div class="settlement-row" style="opacity:0.7;">
-                  <span>${def.name}（初始借用设备）</span>
-                  <span class="tag">归还 · 不计价</span>
+                <div class="settlement-row" style="opacity:0.65;">
+                  <div class="settlement-item-left">
+                    <img class="settlement-thumb" src="${getItemImageUrl(p.item.defId)}" alt="${def.name}" />
+                    <span>${def.name}</span>
+                  </div>
+                  <span class="tag">借用归还</span>
                 </div>
               `;
             })
@@ -1498,7 +1458,7 @@ export class AppController {
           ${
             !isSafe
               ? `<div class="settlement-row" style="border-color:var(--state-danger);">
-                  <span>战败折算比例（向下取整）</span>
+                  <span>拖回折算 (40%)</span>
                   <strong class="num">floor(${summary.rawRecoverableTotal} × 40%)</strong>
                 </div>`
               : ''
@@ -1506,20 +1466,20 @@ export class AppController {
         </div>
 
         <div class="settlement-total">
-          <span>本次实得信用点</span>
+          <span>本次实得</span>
           <span class="num" style="color:var(--accent-action);" id="settlement-final-credits">+${summary.finalCreditsEarned}</span>
         </div>
 
         ${
           summary.newlyDiscoveredDefIds.length > 0
-            ? `<div style="font-size:13px;color:var(--accent-energy);">新录入图鉴发现记录：${summary.newlyDiscoveredDefIds.length} 项</div>`
+            ? `<div style="font-size:12px;color:var(--accent-energy);">✦ 新图鉴发现 +${summary.newlyDiscoveredDefIds.length}</div>`
             : ''
         }
 
-        <button type="button" class="btn btn-primary" id="btn-confirm-settlement" style="width:100%;font-size:16px;" ${
+        <button type="button" class="btn btn-primary btn-launch-hero" id="btn-confirm-settlement" ${
           readOnly ? 'disabled' : ''
         }>
-          ${readOnly ? '只读模式 · 请先接管控制权再入账' : '确认入账并返回拆解站'}
+          ${readOnly ? '只读锁定' : '▶ 确认入账 · 返回拆解站'}
         </button>
       </div>
     `;

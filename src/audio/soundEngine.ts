@@ -7,6 +7,10 @@ export type SfxKind =
   | 'laserFire'
   | 'shieldHit'
   | 'hullHit'
+  | 'enemyDestroy'
+  | 'repairPulse'
+  | 'warpJump'
+  | 'creditTick'
   | 'rewardRare'
   | 'buildComplete'
   | 'returnDock';
@@ -14,7 +18,7 @@ export type SfxKind =
 export type BgmTrack = 'base' | 'expedition' | 'none';
 
 /**
- * Procedural Web Audio synthesizer delivering all 10+ mechanical sci-fi SFX and
+ * Procedural Web Audio synthesizer delivering tactile mechanical sci-fi SFX and
  * two seamless ambient loops without heavy audio downloads.
  * Safely degrades if audio is blocked or unsupported.
  */
@@ -76,53 +80,100 @@ export class SoundEngine {
     try {
       switch (kind) {
         case 'click':
-          this.tone(ctx, 'triangle', 520, 360, 0.045, 0.07, now);
+          this.tone(ctx, 'triangle', 540, 380, 0.04, 0.065, now);
           break;
         case 'rotate':
-          this.tone(ctx, 'square', 680, 920, 0.055, 0.06, now);
+          this.tone(ctx, 'square', 640, 960, 0.045, 0.055, now);
+          this.tone(ctx, 'triangle', 320, 440, 0.04, 0.05, now + 0.015);
           break;
         case 'place':
-          // Crisp metallic snap
-          this.tone(ctx, 'triangle', 220, 95, 0.09, 0.14, now);
-          this.tone(ctx, 'sine', 840, 620, 0.06, 0.08, now + 0.02);
+          // Satisfying magnetic bulkhead latch clunk
+          this.tone(ctx, 'triangle', 200, 82, 0.095, 0.16, now);
+          this.tone(ctx, 'sine', 920, 640, 0.055, 0.075, now + 0.02);
           break;
         case 'invalid':
-          this.tone(ctx, 'sawtooth', 165, 110, 0.12, 0.09, now);
+          this.tone(ctx, 'sawtooth', 165, 105, 0.12, 0.09, now);
           break;
         case 'energyLink':
-          this.tone(ctx, 'sine', 520, 880, 0.14, 0.1, now);
-          this.tone(ctx, 'triangle', 780, 1180, 0.12, 0.07, now + 0.05);
+          this.tone(ctx, 'sine', 523, 880, 0.14, 0.1, now);
+          this.tone(ctx, 'triangle', 784, 1175, 0.14, 0.08, now + 0.05);
+          this.tone(ctx, 'sine', 1046, 1318, 0.16, 0.06, now + 0.1);
           break;
         case 'laserFire':
-          this.tone(ctx, 'sawtooth', 880, 210, 0.13, 0.08, now);
+          this.tone(ctx, 'sawtooth', 940, 190, 0.13, 0.085, now);
+          this.tone(ctx, 'sine', 1320, 440, 0.09, 0.05, now);
           break;
         case 'shieldHit':
-          this.tone(ctx, 'sine', 260, 120, 0.14, 0.12, now);
-          this.tone(ctx, 'triangle', 480, 310, 0.1, 0.06, now);
+          this.tone(ctx, 'sine', 300, 140, 0.14, 0.12, now);
+          this.tone(ctx, 'triangle', 560, 380, 0.11, 0.07, now);
           break;
         case 'hullHit':
-          this.tone(ctx, 'sawtooth', 140, 58, 0.16, 0.13, now);
+          this.tone(ctx, 'sawtooth', 145, 52, 0.17, 0.14, now);
+          this.noiseBurst(ctx, 0.12, 620, 0.09, now);
+          break;
+        case 'enemyDestroy':
+          this.tone(ctx, 'sawtooth', 120, 34, 0.38, 0.16, now);
+          this.noiseBurst(ctx, 0.34, 480, 0.14, now);
+          this.tone(ctx, 'triangle', 523, 784, 0.16, 0.07, now + 0.18);
+          break;
+        case 'repairPulse':
+          this.tone(ctx, 'sine', 440, 660, 0.14, 0.08, now);
+          this.tone(ctx, 'sine', 660, 880, 0.16, 0.07, now + 0.08);
+          break;
+        case 'warpJump':
+          this.tone(ctx, 'sine', 110, 420, 0.24, 0.09, now);
+          this.noiseBurst(ctx, 0.22, 1100, 0.06, now);
+          break;
+        case 'creditTick':
+          this.tone(ctx, 'triangle', 880, 1175, 0.055, 0.06, now);
           break;
         case 'rewardRare':
           this.tone(ctx, 'triangle', 440, 440, 0.1, 0.09, now);
           this.tone(ctx, 'triangle', 554, 554, 0.1, 0.09, now + 0.09);
-          this.tone(ctx, 'sine', 659, 880, 0.22, 0.1, now + 0.18);
+          this.tone(ctx, 'sine', 659, 880, 0.24, 0.1, now + 0.18);
           break;
         case 'buildComplete':
           this.tone(ctx, 'sawtooth', 320, 420, 0.08, 0.06, now);
           this.tone(ctx, 'triangle', 392, 392, 0.14, 0.09, now + 0.1);
           this.tone(ctx, 'triangle', 494, 494, 0.14, 0.09, now + 0.22);
-          this.tone(ctx, 'sine', 587, 784, 0.3, 0.11, now + 0.34);
+          this.tone(ctx, 'sine', 587, 784, 0.32, 0.11, now + 0.34);
           break;
         case 'returnDock':
-          this.tone(ctx, 'sine', 180, 130, 0.2, 0.1, now);
+          this.tone(ctx, 'sine', 180, 120, 0.22, 0.1, now);
           this.tone(ctx, 'triangle', 523, 659, 0.16, 0.08, now + 0.14);
-          this.tone(ctx, 'sine', 784, 784, 0.2, 0.08, now + 0.26);
+          this.tone(ctx, 'sine', 784, 1046, 0.24, 0.085, now + 0.26);
           break;
       }
     } catch {
       // Never allow audio failures to break gameplay
     }
+  }
+
+  private noiseBurst(
+    ctx: AudioContext,
+    duration: number,
+    cutoffHz: number,
+    peakGain: number,
+    startTime: number
+  ): void {
+    const sampleCount = Math.max(1, Math.floor(ctx.sampleRate * duration));
+    const buffer = ctx.createBuffer(1, sampleCount, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < sampleCount; i++) {
+      data[i] = (Math.random() * 2 - 1) * (1 - i / sampleCount);
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(cutoffHz, startTime);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(peakGain, startTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    src.start(startTime);
   }
 
   private tone(

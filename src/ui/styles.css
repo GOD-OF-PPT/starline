@@ -407,13 +407,29 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 4px;
   font-size: 12px;
   margin-bottom: 4px;
+  white-space: nowrap;
 }
 
 .unit-bar-header .name {
   font-weight: 700;
   color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.unit-bar-vals {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-weight: 700;
+}
+
+.unit-shield-val {
+  color: var(--accent-energy);
 }
 
 .hp-track {
@@ -1295,29 +1311,487 @@ body.low-quality .placed-item-node {
   filter: none;
 }
 
+/* ============================================================================
+   v2.0 Game-First Visual UI Components (Zero-Prose Diegetic Cockpit & Dock)
+   ============================================================================ */
+.panel-game-dock,
+.panel-cargo-bay {
+  background: linear-gradient(180deg, #1b2839 0%, #141f2f 100%);
+  border: 1px solid #3c526c;
+  box-shadow:
+    inset 0 1px 0 rgba(210, 228, 248, 0.1),
+    0 6px 20px rgba(4, 9, 17, 0.35);
+}
+
+.scene-stage-wrap {
+  box-shadow: 0 8px 24px rgba(4, 9, 17, 0.45);
+  border-color: #3d5470;
+}
+
+.scene-stage-wrap.mode-combat {
+  height: 244px;
+}
+
+.scene-stage-wrap.mode-base {
+  height: 228px;
+}
+
+/* Base Ship Switcher & Hero Launch CTA */
+.ship-picker-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.ship-slot-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px 10px;
+  min-height: 76px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, #141f2e 0%, #101926 100%);
+  border: 1.5px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 120ms ease, background-color 120ms ease, transform 90ms ease;
+}
+
+.ship-slot-card:hover:not(:disabled) {
+  border-color: #88a4c2;
+  background: #1b2a3e;
+}
+
+.ship-slot-card.selected {
+  border-color: var(--accent-action);
+  background: linear-gradient(180deg, rgba(246, 184, 82, 0.14) 0%, #141f2e 100%);
+  box-shadow: 0 0 0 1px rgba(246, 184, 82, 0.25);
+}
+
+.ship-slot-card.locked {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
+.ship-slot-card:focus-visible {
+  outline: 2.5px solid var(--accent-action);
+  outline-offset: 2px;
+}
+
+.ship-slot-visual-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.ship-slot-art {
+  width: 60px;
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at center, rgba(98, 214, 223, 0.14) 0%, rgba(12, 19, 32, 0.85) 75%);
+  border-radius: 6px;
+  border: 1px solid #2b3d54;
+  padding: 2px;
+}
+
+.ship-slot-art img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.ship-slot-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.ship-slot-name {
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ship-slot-stats {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-energy);
+  white-space: nowrap;
+}
+
+.btn-launch-hero {
+  width: 100%;
+  min-height: 46px;
+  font-size: 15px;
+  letter-spacing: 0.03em;
+  box-shadow: 0 4px 16px rgba(246, 184, 82, 0.26);
+}
+
+/* Compact Facility Upgrade Strip */
+.facility-strip {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 7px;
+}
+
+.facility-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  background: #131e2d;
+  border: 1px solid var(--border-subtle);
+}
+
+.facility-chip.built {
+  border-color: rgba(98, 214, 223, 0.45);
+}
+
+.facility-chip.affordable {
+  border-color: var(--accent-action);
+  background: linear-gradient(90deg, rgba(246, 184, 82, 0.12) 0%, #131e2d 65%);
+}
+
+.facility-chip-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.facility-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  background: #1d2d41;
+  border: 1px solid #3c536e;
+  color: var(--accent-action);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.facility-icon.active {
+  color: var(--accent-energy);
+  border-color: rgba(98, 214, 223, 0.55);
+}
+
+.relic-mini-thumb {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+  border-radius: 7px;
+  background: #1a283a;
+  border: 1px solid rgba(246, 184, 82, 0.5);
+  padding: 2px;
+  flex-shrink: 0;
+}
+
+.facility-chip-title {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.facility-chip-title strong {
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.facility-chip-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Visual Star-Sector Jump Beacons (Route Select) */
+.route-beacon {
+  background: linear-gradient(180deg, #162334 0%, #101a28 100%);
+  border: 1.5px solid #3c5775;
+  border-radius: var(--radius-md);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.route-beacon.danger {
+  border-color: rgba(242, 117, 100, 0.72);
+  background: linear-gradient(180deg, #251a25 0%, #131926 100%);
+}
+
+.route-beacon-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.route-enemy-name {
+  font-size: 14px;
+}
+
+.route-enemy-visual {
+  height: 68px;
+  border-radius: var(--radius-sm);
+  background: radial-gradient(circle at center, rgba(98, 214, 223, 0.14) 0%, #0d1624 75%);
+  border: 1px solid #2b3f57;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+}
+
+.route-enemy-visual.danger {
+  background: radial-gradient(circle at center, rgba(242, 117, 100, 0.22) 0%, #17121c 75%);
+  border-color: rgba(242, 117, 100, 0.5);
+}
+
+.route-enemy-visual img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.55));
+}
+
+.route-enemy-visual.danger img {
+  filter: hue-rotate(-14deg) saturate(1.35) drop-shadow(0 4px 8px rgba(242, 117, 100, 0.45));
+}
+
+.route-icon-stats {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: #101927;
+  border: 1px solid #293b50;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* Slim 1-Row Combat Control Bar */
+.combat-control-bar {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.combat-bar-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.combat-stat-inline {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.combat-bar-btns {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* Tactile Salvage Loot Pods (Reward) */
+.reward-pod {
+  background: linear-gradient(180deg, #172436 0%, #111b2a 100%);
+  border: 1.5px solid #3c546e;
+  border-radius: var(--radius-md);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.reward-pod.highlight-collectible {
+  border-color: var(--accent-action);
+  box-shadow: 0 0 14px rgba(246, 184, 82, 0.16);
+}
+
+.reward-pod-art {
+  height: 76px;
+  border-radius: var(--radius-sm);
+  background: radial-gradient(circle at center, rgba(98, 214, 223, 0.14) 0%, #0d1624 78%);
+  border: 1px solid #2b3f57;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+}
+
+.reward-pod-art img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.55));
+}
+
+.reward-pod-art.repair-art {
+  background: radial-gradient(circle at center, rgba(98, 214, 223, 0.24) 0%, #0d1624 78%);
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--accent-energy);
+  white-space: nowrap;
+}
+
+.reward-pod-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.reward-pod-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  font-size: 14px;
+}
+
+.reward-pod-shape {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reward-pod-stat {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+@media (max-width: 520px) {
+  .reward-pod {
+    display: grid;
+    grid-template-columns: 62px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+  }
+
+  .reward-pod-art {
+    width: 62px;
+    height: 62px;
+    padding: 4px;
+  }
+
+  .reward-pod-art.repair-art {
+    font-size: 16px;
+  }
+
+  .reward-pod-title {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+}
+
+/* Visual Settlement Manifest */
+.settlement-item-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settlement-thumb {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  background: #101927;
+  border: 1px solid #2e4259;
+  border-radius: 5px;
+  padding: 2px;
+  flex-shrink: 0;
+}
+
+.defeat-recap-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(242, 117, 100, 0.12);
+  border: 1px solid rgba(242, 117, 100, 0.6);
+  font-size: 12px;
+}
+
 /* Desktop & Wide Landscape 2-column responsive upgrade (>= 820px) */
 @media (min-width: 820px) {
   .main-layout {
     display: grid;
-    grid-template-columns: minmax(340px, 1.05fr) minmax(384px, 0.95fr);
+    grid-template-columns: minmax(340px, 1.08fr) minmax(384px, 0.92fr);
     align-items: start;
-    gap: 14px;
+    gap: 12px;
+  }
+
+  /* Cinematic full-bleed Orbital Station Hero Stage on Desktop Base (zero vertical scroll on 1366x768!) */
+  .main-layout.phase-base {
+    grid-template-columns: 0.92fr 1.08fr;
+    gap: 10px;
+  }
+
+  .main-layout.phase-base .scene-column {
+    display: contents;
+  }
+
+  .main-layout.phase-base .scene-stage-wrap.mode-base {
+    grid-column: 1 / -1;
+    height: clamp(410px, 60dvh, 520px);
+  }
+
+  .main-layout.phase-base .left-panel-slot {
+    grid-column: 1;
+  }
+
+  .main-layout.phase-base .work-column {
+    grid-column: 2;
+  }
+
+  .main-layout.phase-base .facility-strip {
+    grid-template-columns: repeat(auto-fit, minmax(235px, 1fr));
+    gap: 6px;
   }
 
   .scene-stage-wrap {
-    height: 290px;
+    height: 300px;
   }
 
-  .scene-stage-wrap.mode-base {
-    height: 368px;
+  .scene-stage-wrap.mode-combat {
+    height: 356px;
   }
 
   .scene-stage-wrap.mode-route {
-    height: 220px;
+    height: 224px;
   }
 
   .scene-stage-wrap.mode-arrange {
-    height: 200px;
+    height: 210px;
   }
 }
 
