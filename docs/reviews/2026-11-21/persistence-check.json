@@ -1,0 +1,6 @@
+{
+  "case": "Valid JSON but missing expedition bay, with valid backup available",
+  "loadStatus": "loaded",
+  "renderDependencyError": "TypeError: Cannot read properties of undefined (reading 'placed')",
+  "expected": "corrupt_with_backup before using malformed expedition"
+}

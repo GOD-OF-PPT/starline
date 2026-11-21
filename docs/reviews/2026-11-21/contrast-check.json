@@ -1,0 +1,8 @@
+{
+  "cell_border": "#2b3c52",
+  "cell_fill": "rgba(28,41,58,0.35)",
+  "underlying_board": "#141f2e",
+  "contrast": 1.421,
+  "project_target": 3,
+  "method": "sRGB luminance with alpha compositing, based on styles.css .cargo-cell/.cargo-board-outer"
+}

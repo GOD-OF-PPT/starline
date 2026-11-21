@@ -1,0 +1,101 @@
+{
+  "method": "Extracted from observed isolated strategy-audit execution using original heuristic strategies and the same 80 seeds per case; not player data",
+  "records": [
+    {
+      "loadout": "cannon_skiff",
+      "strategy": "cargo_only",
+      "runs": 80,
+      "fullClear": 0,
+      "maxDepth": 3,
+      "avgCredits": 71.475
+    },
+    {
+      "loadout": "cannon_skiff",
+      "strategy": "cannon_stack",
+      "runs": 80,
+      "fullClear": 0,
+      "maxDepth": 5,
+      "avgCredits": 77.3
+    },
+    {
+      "loadout": "cannon_skiff",
+      "strategy": "shield_cannon_hybrid",
+      "runs": 80,
+      "fullClear": 4,
+      "maxDepth": 6,
+      "avgCredits": 89.8125
+    },
+    {
+      "loadout": "cannon_skiff",
+      "strategy": "repair_sustain",
+      "runs": 80,
+      "fullClear": 4,
+      "maxDepth": 6,
+      "avgCredits": 84.5375
+    },
+    {
+      "loadout": "cannon_skiff",
+      "strategy": "conservative_early",
+      "runs": 80,
+      "fullClear": 0,
+      "maxDepth": 3,
+      "avgCredits": 88.1875
+    },
+    {
+      "loadout": "cannon_skiff",
+      "strategy": "deep_dive",
+      "runs": 80,
+      "fullClear": 3,
+      "maxDepth": 6,
+      "avgCredits": 69.2625
+    },
+    {
+      "loadout": "shield_cruiser",
+      "strategy": "cargo_only",
+      "runs": 80,
+      "fullClear": 0,
+      "maxDepth": 3,
+      "avgCredits": 105.625
+    },
+    {
+      "loadout": "shield_cruiser",
+      "strategy": "cannon_stack",
+      "runs": 80,
+      "fullClear": 4,
+      "maxDepth": 6,
+      "avgCredits": 86.325
+    },
+    {
+      "loadout": "shield_cruiser",
+      "strategy": "shield_cannon_hybrid",
+      "runs": 80,
+      "fullClear": 7,
+      "maxDepth": 6,
+      "avgCredits": 86.4375
+    },
+    {
+      "loadout": "shield_cruiser",
+      "strategy": "repair_sustain",
+      "runs": 80,
+      "fullClear": 6,
+      "maxDepth": 6,
+      "avgCredits": 99.675
+    },
+    {
+      "loadout": "shield_cruiser",
+      "strategy": "conservative_early",
+      "runs": 80,
+      "fullClear": 0,
+      "maxDepth": 3,
+      "avgCredits": 88.1875
+    },
+    {
+      "loadout": "shield_cruiser",
+      "strategy": "deep_dive",
+      "runs": 80,
+      "fullClear": 2,
+      "maxDepth": 6,
+      "avgCredits": 67.775
+    }
+  ]
+}

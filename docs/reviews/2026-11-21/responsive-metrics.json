@@ -1,0 +1,334 @@
+[
+  {
+    "grid": {
+      "bottom": 796.265625,
+      "height": 302,
+      "left": 29,
+      "right": 331,
+      "top": 494.265625,
+      "width": 302,
+      "x": 29,
+      "y": 494.265625
+    },
+    "height": 640,
+    "returnButton": {
+      "bottom": 1149.2109375,
+      "height": 44,
+      "left": 29,
+      "right": 175,
+      "top": 1105.2109375,
+      "width": 146,
+      "x": 29,
+      "y": 1105.2109375
+    },
+    "scene": {
+      "bottom": 396.53125,
+      "height": 126,
+      "left": 17,
+      "right": 373,
+      "top": 270.53125,
+      "width": 356,
+      "x": 17,
+      "y": 270.53125
+    },
+    "scrollHeight": 1188,
+    "scrollWidth": 360,
+    "scrollY": 0,
+    "smallText": [
+      {
+        "font": "11px",
+        "text": "电池 +4"
+      },
+      {
+        "font": "11px",
+        "text": "上限 18"
+      },
+      {
+        "font": "11px",
+        "text": "上限 4"
+      },
+      {
+        "font": "11px",
+        "text": "9/16 格"
+      },
+      {
+        "font": "11px",
+        "text": "借"
+      },
+      {
+        "font": "11px",
+        "text": "攻5"
+      },
+      {
+        "font": "11px",
+        "text": ""
+      },
+      {
+        "font": "11px",
+        "text": "攻5"
+      },
+      {
+        "font": "11px",
+        "text": ""
+      },
+      {
+        "font": "11px",
+        "text": "+2"
+      },
+      {
+        "font": "11px",
+        "text": "47¤"
+      }
+    ],
+    "width": 360
+  },
+  {
+    "grid": {
+      "bottom": 876.515625,
+      "height": 372,
+      "left": 29,
+      "right": 401,
+      "top": 504.515625,
+      "width": 372,
+      "x": 29,
+      "y": 504.515625
+    },
+    "height": 932,
+    "returnButton": {
+      "bottom": 1210.6171875,
+      "height": 44,
+      "left": 29,
+      "right": 210,
+      "top": 1166.6171875,
+      "width": 181,
+      "x": 29,
+      "y": 1166.6171875
+    },
+    "scene": {
+      "bottom": 322.78125,
+      "height": 84,
+      "left": 17,
+      "right": 343,
+      "top": 238.78125,
+      "width": 326,
+      "x": 17,
+      "y": 238.78125
+    },
+    "scrollHeight": 1249,
+    "scrollWidth": 430,
+    "scrollY": 0,
+    "smallText": [
+      {
+        "font": "11px",
+        "text": "电池 +4"
+      },
+      {
+        "font": "11px",
+        "text": "上限 18"
+      },
+      {
+        "font": "11px",
+        "text": "上限 4"
+      },
+      {
+        "font": "11px",
+        "text": "9/16 格"
+      },
+      {
+        "font": "11px",
+        "text": "借"
+      },
+      {
+        "font": "11px",
+        "text": "攻5"
+      },
+      {
+        "font": "11px",
+        "text": ""
+      },
+      {
+        "font": "11px",
+        "text": "攻5"
+      },
+      {
+        "font": "11px",
+        "text": ""
+      },
+      {
+        "font": "11px",
+        "text": "+2"
+      },
+      {
+        "font": "11px",
+        "text": "47¤"
+      }
+    ],
+    "width": 430
+  },
+  {
+    "grid": {
+      "bottom": 618.1328125,
+      "height": 358,
+      "left": 457,
+      "right": 815,
+      "top": 260.1328125,
+      "width": 358,
+      "x": 457,
+      "y": 260.1328125
+    },
+    "height": 390,
+    "returnButton": {
+      "bottom": 554.96875,
+      "height": 44,
+      "left": 29,
+      "right": 217,
+      "top": 510.96875,
+      "width": 188,
+      "x": 29,
+      "y": 510.96875
+    },
+    "scene": {
+      "bottom": 258.3984375,
+      "height": 126,
+      "left": 17,
+      "right": 413,
+      "top": 132.3984375,
+      "width": 396,
+      "x": 17,
+      "y": 132.3984375
+    },
+    "scrollHeight": 774,
+    "scrollWidth": 844,
+    "scrollY": 0,
+    "smallText": [
+      {
+        "font": "11px",
+        "text": "电池 +4"
+      },
+      {
+        "font": "11px",
+        "text": "上限 18"
+      },
+      {
+        "font": "11px",
+        "text": "上限 4"
+      },
+      {
+        "font": "11px",
+        "text": "9/16 格"
+      },
+      {
+        "font": "11px",
+        "text": "借"
+      },
+      {
+        "font": "11px",
+        "text": "攻5"
+      },
+      {
+        "font": "11px",
+        "text": ""
+      },
+      {
+        "font": "11px",
+        "text": "攻5"
+      },
+      {
+        "font": "11px",
+        "text": ""
+      },
+      {
+        "font": "11px",
+        "text": "+2"
+      },
+      {
+        "font": "11px",
+        "text": "47¤"
+      }
+    ],
+    "width": 844
+  },
+  {
+    "grid": {
+      "bottom": 644.1328125,
+      "height": 384,
+      "left": 796.1484375,
+      "right": 1180.1484375,
+      "top": 260.1328125,
+      "width": 384,
+      "x": 796.1484375,
+      "y": 260.1328125
+    },
+    "height": 768,
+    "returnButton": {
+      "bottom": 517.28125,
+      "height": 44,
+      "left": 122,
+      "right": 401.1484375,
+      "top": 473.28125,
+      "width": 279.1484375,
+      "x": 122,
+      "y": 473.28125
+    },
+    "scene": {
+      "bottom": 350.3984375,
+      "height": 218,
+      "left": 110,
+      "right": 520,
+      "top": 132.3984375,
+      "width": 410,
+      "x": 110,
+      "y": 132.3984375
+    },
+    "scrollHeight": 800,
+    "scrollWidth": 1366,
+    "scrollY": 0,
+    "smallText": [
+      {
+        "font": "11px",
+        "text": "电池 +4"
+      },
+      {
+        "font": "11px",
+        "text": "上限 18"
+      },
+      {
+        "font": "11px",
+        "text": "上限 4"
+      },
+      {
+        "font": "11px",
+        "text": "9/16 格"
+      },
+      {
+        "font": "11px",
+        "text": "借"
+      },
+      {
+        "font": "11px",
+        "text": "攻5"
+      },
+      {
+        "font": "11px",
+        "text": ""
+      },
+      {
+        "font": "11px",
+        "text": "攻5"
+      },
+      {
+        "font": "11px",
+        "text": ""
+      },
+      {
+        "font": "11px",
+        "text": "+2"
+      },
+      {
+        "font": "11px",
+        "text": "47¤"
+      }
+    ],
+    "width": 1366
+  }
+]
