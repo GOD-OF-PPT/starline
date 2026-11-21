@@ -1,5 +1,5 @@
-const LOCK_KEY = 'starline_active_tab_lock_v1';
-const CHANNEL_NAME = 'starline_tab_sync_v1';
+const DEFAULT_LOCK_KEY = 'starline_active_tab_lock_v1';
+const DEFAULT_CHANNEL_NAME = 'starline_tab_sync_v1';
 const LEASE_MS = 6000;
 const HEARTBEAT_MS = 2000;
 
@@ -8,15 +8,24 @@ interface TabLockRecord {
   readonly updatedAt: number;
 }
 
+export interface MultiTabGuardOptions {
+  readonly lockKey?: string;
+  readonly channelName?: string;
+}
+
 export class MultiTabGuard {
   private readonly tabId: string;
+  private readonly lockKey: string;
+  private readonly channelName: string;
   private channel: BroadcastChannel | null = null;
   private heartbeatTimer: number | null = null;
   private isOwner = true;
   private readonly onStatusChange: (isOwner: boolean) => void;
 
-  constructor(onStatusChange: (isOwner: boolean) => void) {
+  constructor(onStatusChange: (isOwner: boolean) => void, options?: MultiTabGuardOptions) {
     this.tabId = `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    this.lockKey = options?.lockKey ?? DEFAULT_LOCK_KEY;
+    this.channelName = options?.channelName ?? DEFAULT_CHANNEL_NAME;
     this.onStatusChange = onStatusChange;
   }
 
@@ -34,7 +43,7 @@ export class MultiTabGuard {
 
     if (typeof BroadcastChannel !== 'undefined') {
       try {
-        this.channel = new BroadcastChannel(CHANNEL_NAME);
+        this.channel = new BroadcastChannel(this.channelName);
         this.channel.onmessage = (event) => {
           const data = event.data as { type?: string; tabId?: string } | null;
           if (!data || data.tabId === this.tabId) return;
@@ -93,7 +102,7 @@ export class MultiTabGuard {
   }
 
   private handleStorageEvent = (e: StorageEvent): void => {
-    if (e.key !== LOCK_KEY || !e.newValue) return;
+    if (e.key !== this.lockKey || !e.newValue) return;
     try {
       const parsed = JSON.parse(e.newValue) as TabLockRecord;
       if (parsed.tabId && parsed.tabId !== this.tabId && this.isOwner) {
@@ -111,7 +120,7 @@ export class MultiTabGuard {
 
   private readLock(): TabLockRecord | null {
     try {
-      const raw = window.localStorage.getItem(LOCK_KEY);
+      const raw = window.localStorage.getItem(this.lockKey);
       if (!raw) return null;
       const parsed = JSON.parse(raw) as TabLockRecord;
       if (typeof parsed.tabId === 'string' && typeof parsed.updatedAt === 'number') {
@@ -126,7 +135,7 @@ export class MultiTabGuard {
   private writeLock(): void {
     try {
       const record: TabLockRecord = { tabId: this.tabId, updatedAt: Date.now() };
-      window.localStorage.setItem(LOCK_KEY, JSON.stringify(record));
+      window.localStorage.setItem(this.lockKey, JSON.stringify(record));
     } catch {
       // ignore storage failure here; persistence layer reports write failures
     }
@@ -137,7 +146,7 @@ export class MultiTabGuard {
     const current = this.readLock();
     if (current?.tabId === this.tabId) {
       try {
-        window.localStorage.removeItem(LOCK_KEY);
+        window.localStorage.removeItem(this.lockKey);
       } catch {
         // ignore
       }
