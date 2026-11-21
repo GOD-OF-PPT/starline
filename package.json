@@ -1,0 +1,22 @@
+{
+  "name": "starline-salvage-station",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "星际拆解站：再捡一件 — 微缩工业科幻船舱拼装与太空站经营游戏",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 4173",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "phaser": "3.90.0"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3",
+    "vite": "6.3.5",
+    "vitest": "3.2.4"
+  }
+}
