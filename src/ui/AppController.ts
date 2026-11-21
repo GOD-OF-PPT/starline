@@ -46,10 +46,12 @@ import { MultiTabGuard } from '../domain/tabLock';
 import { PhaserHost } from '../scenes/PhaserHost';
 import { CargoGridComponent, renderMiniMaskHtml } from './CargoGrid';
 import {
-  renderBackupRecoveryModal,
-  renderCodexModal,
-  renderHelpModal,
-  renderSettingsModal,
+  openBackupRecoveryModal,
+  openCodexModal,
+  openDiscardConfirmModal,
+  openHelpModal,
+  openSettingsModal,
+  registerModalBackgroundRoot,
 } from './Modals';
 
 export class AppController {
@@ -73,6 +75,7 @@ export class AppController {
   private activeCombatPlaybackKey: string | null = null;
 
   // Persistent DOM containers so Phaser canvas stays mounted without flicker!
+  private appShellEl!: HTMLElement;
   private topHudEl!: HTMLElement;
   private bannersEl!: HTMLElement;
   private mainLayoutEl!: HTMLElement;
@@ -89,8 +92,13 @@ export class AppController {
 
     this.tabGuard = new MultiTabGuard((isOwner) => {
       this.isReadOnlyTab = !isOwner;
-      this.renderBanners();
+      this.phaserHost?.setCombatPaused(this.isReadOnlyTab);
+      this.syncAll();
     });
+  }
+
+  private canMutate(): boolean {
+    return !this.isReadOnlyTab && this.tabGuard.canWrite();
   }
 
   init(): void {
@@ -101,21 +109,20 @@ export class AppController {
       this.save = loaded.data;
     } else if (loaded.status === 'corrupt_with_backup') {
       this.save = loaded.backup;
-      this.modalHostEl.appendChild(
-        renderBackupRecoveryModal(
-          loaded.error,
-          loaded.backup.progression.credits,
-          () => {
-            this.save = loaded.backup;
-            this.persist();
-            this.syncAll();
-          },
-          () => {
-            this.save = createFreshSaveData();
-            this.persist();
-            this.syncAll();
-          }
-        )
+      openBackupRecoveryModal(
+        this.modalHostEl,
+        loaded.error,
+        loaded.backup.progression.credits,
+        () => {
+          this.save = loaded.backup;
+          this.persist();
+          this.syncAll();
+        },
+        () => {
+          this.save = createFreshSaveData();
+          this.persist();
+          this.syncAll();
+        }
       );
     } else {
       this.save = loaded.data;
@@ -128,6 +135,7 @@ export class AppController {
 
     // Mount Phaser inside persistent canvas host
     this.phaserHost = new PhaserHost(this.sceneCanvasHostEl);
+    this.phaserHost.setCombatPaused(this.isReadOnlyTab);
     this.phaserHost.onBuildingClick((buildingId) => {
       if (this.save.activeExpedition) return;
       this.handleBuildingInteract(buildingId);
@@ -144,6 +152,7 @@ export class AppController {
     this.mountEl.innerHTML = '';
     const shell = document.createElement('div');
     shell.className = 'app-shell';
+    this.appShellEl = shell;
 
     this.topHudEl = document.createElement('header');
     this.topHudEl.className = 'top-hud';
@@ -186,14 +195,17 @@ export class AppController {
     mainLayout.appendChild(sceneCol);
     mainLayout.appendChild(this.rightPanelEl);
 
-    this.modalHostEl = document.createElement('div');
-
     shell.appendChild(this.topHudEl);
     shell.appendChild(this.bannersEl);
     shell.appendChild(mainLayout);
-    shell.appendChild(this.modalHostEl);
+
+    // Mount modalHostEl as a SIBLING of app-shell so making app-shell inert isolates background cleanly!
+    this.modalHostEl = document.createElement('div');
+    this.modalHostEl.id = 'modal-host';
 
     this.mountEl.appendChild(shell);
+    this.mountEl.appendChild(this.modalHostEl);
+    registerModalBackgroundRoot(this.appShellEl);
   }
 
   private applyBodySettings(settings: GameSettings): void {
@@ -204,7 +216,7 @@ export class AppController {
   }
 
   private persist(): void {
-    if (this.isReadOnlyTab) return;
+    if (!this.canMutate()) return;
     const res = persistSaveData(window.localStorage, this.save);
     if (!res.ok) {
       this.storageError = `存档写入失败：${res.error ?? '未知错误'}（当前进度仅保留在内存）`;
@@ -216,6 +228,7 @@ export class AppController {
   private syncAll(): void {
     this.renderTopHud();
     this.renderBanners();
+    this.phaserHost?.setCombatPaused(this.isReadOnlyTab);
 
     const exp = this.save.activeExpedition;
     this.mainLayoutEl.classList.toggle('phase-arrange', Boolean(exp && exp.phase === 'ARRANGE'));
@@ -259,6 +272,24 @@ export class AppController {
             ? `<div class="hud-pill energy"><span class="label">图鉴</span><span class="val">${codex.completionPercent}%</span></div>`
             : ''
         }
+      `;
+    } else if (exp.phase === 'SETTLEMENT') {
+      // F12: Exact single source of truth between HUD and settlement summary
+      const summary = calculateSettlement(exp, prog, Array.from(this.keptCollectibleIds));
+      const hpDanger = exp.currentHp <= 10;
+      leftPills = `
+        <div class="hud-pill">
+          <span class="label">节点</span>
+          <span class="val" id="hud-node">${exp.currentNode}/${exp.maxNodes}</span>
+        </div>
+        <div class="hud-pill ${hpDanger ? 'danger' : ''}">
+          <span class="label">耐久</span>
+          <span class="val" id="hud-hp">${exp.currentHp}/${exp.maxHp}</span>
+        </div>
+        <div class="hud-pill ${summary.reason === 'defeat' ? 'danger' : 'accent'}">
+          <span class="label">本次实得</span>
+          <span class="val" id="hud-est-return">+${summary.finalCreditsEarned}</span>
+        </div>
       `;
     } else {
       const stats = calculateBuildStats(exp.bay);
@@ -316,30 +347,31 @@ export class AppController {
     });
     this.topHudEl.querySelector('#btn-open-help')?.addEventListener('click', () => {
       soundEngine.play('click');
-      const modal = renderHelpModal(() => modal.remove());
-      this.modalHostEl.appendChild(modal);
+      openHelpModal(this.modalHostEl);
     });
     this.topHudEl.querySelector('#btn-open-settings')?.addEventListener('click', () => {
       soundEngine.play('click');
-      const modal = renderSettingsModal(
+      openSettingsModal(
+        this.modalHostEl,
         this.save.settings,
+        !this.canMutate(),
         (nextSettings) => {
+          if (!this.canMutate()) return;
           this.save = { ...this.save, settings: nextSettings };
           this.applyBodySettings(nextSettings);
           this.persist();
           this.syncAll();
         },
         () => {
+          if (!this.canMutate()) return;
           clearSaveData(window.localStorage);
           this.save = createFreshSaveData();
           this.recentlyBuiltId = null;
           this.keptCollectibleIds.clear();
           this.persist();
           this.syncAll();
-        },
-        () => modal.remove()
+        }
       );
-      this.modalHostEl.appendChild(modal);
     });
   }
 
@@ -349,17 +381,40 @@ export class AppController {
     if (this.isReadOnlyTab) {
       const b = document.createElement('div');
       b.className = 'system-banner banner-warn';
+      b.setAttribute('role', 'status');
       b.innerHTML = `
-        <span>检测到另一标签页正在运行，当前处于<strong>只读模式</strong>（防止存档互相覆盖）。</span>
+        <span>检测到另一标签页正在运行，当前处于<strong>只读模式</strong>（操作已锁定，防止存档冲突）。</span>
         <button type="button" class="btn btn-primary btn-compact" id="btn-takeover-tab">接管控制权</button>
       `;
       b.querySelector('#btn-takeover-tab')?.addEventListener('click', () => {
         this.tabGuard.takeOver();
-        // Reload latest persisted state from storage when taking over
+        this.isReadOnlyTab = false;
+        this.activeCombatPlaybackKey = null;
+        this.keptCollectibleIds.clear();
+        // Reload latest persisted valid state from storage on takeover (F02)
         const reloaded = loadSaveData(window.localStorage);
-        if (reloaded.status === 'loaded') {
+        if (reloaded.status === 'loaded' || reloaded.status === 'fresh') {
           this.save = reloaded.data;
+        } else if (reloaded.status === 'corrupt_with_backup') {
+          this.save = reloaded.backup;
+          openBackupRecoveryModal(
+            this.modalHostEl,
+            reloaded.error,
+            reloaded.backup.progression.credits,
+            () => {
+              this.save = reloaded.backup;
+              this.persist();
+              this.syncAll();
+            },
+            () => {
+              this.save = createFreshSaveData();
+              this.persist();
+              this.syncAll();
+            }
+          );
         }
+        this.applyBodySettings(this.save.settings);
+        this.phaserHost?.setCombatPaused(false);
         this.syncAll();
       });
       this.bannersEl.appendChild(b);
@@ -368,6 +423,7 @@ export class AppController {
     if (this.storageError) {
       const b = document.createElement('div');
       b.className = 'system-banner banner-danger';
+      b.setAttribute('role', 'alert');
       b.innerHTML = `<span>${this.storageError}</span>`;
       this.bannersEl.appendChild(b);
     }
@@ -396,6 +452,7 @@ export class AppController {
     this.cargoGrid = null;
 
     const prog = this.save.progression;
+    const readOnly = !this.canMutate();
     const isFirstRun = !prog.tutorialCompleted && prog.totalExpeditions === 0;
     const activeLoadout = isLoadoutUnlocked(prog, prog.selectedLoadout)
       ? prog.selectedLoadout
@@ -420,7 +477,7 @@ export class AppController {
               const selected = activeLoadout === id;
               return `
                 <button type="button" class="loadout-card ${selected ? 'selected' : ''}"
-                  data-loadout="${id}" ${unlocked ? '' : 'disabled'}>
+                  data-loadout="${id}" ${unlocked && !readOnly ? '' : 'disabled'}>
                   <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
                     <strong>${def.name}</strong>
                     <span class="tag ${selected ? 'tag-amber' : ''}">${
@@ -435,14 +492,23 @@ export class AppController {
             .join('')}
         </div>
 
-        <button type="button" class="btn btn-primary" id="btn-launch-expedition" style="width:100%;font-size:16px;">
-          ${isFirstRun ? '第一次打捞（新手航次）' : `驾驶「${LOADOUTS[activeLoadout].name}」开始出航`}
+        <button type="button" class="btn btn-primary" id="btn-launch-expedition" style="width:100%;font-size:16px;" ${
+          readOnly ? 'disabled' : ''
+        }>
+          ${
+            readOnly
+              ? '只读模式 · 请先接管控制权后出航'
+              : isFirstRun
+              ? '第一次打捞（新手航次）'
+              : `驾驶「${LOADOUTS[activeLoadout].name}」开始出航`
+          }
         </button>
       </div>
     `;
 
     this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-loadout]').forEach((btn) => {
       btn.addEventListener('click', () => {
+        if (!this.canMutate()) return;
         const id = btn.dataset.loadout as LoadoutId;
         if (!isLoadoutUnlocked(this.save.progression, id)) return;
         soundEngine.play('click');
@@ -456,6 +522,7 @@ export class AppController {
     });
 
     this.leftPanelEl.querySelector('#btn-launch-expedition')?.addEventListener('click', () => {
+      if (!this.canMutate()) return;
       soundEngine.unlock();
       soundEngine.play('click');
       this.recentlyBuiltId = null;
@@ -497,6 +564,7 @@ export class AppController {
               const def = BUILDINGS[bid];
               const built = prog.buildings[bid];
               const check = canBuildFacility(prog, bid);
+              const disabledReason = readOnly ? '只读模式' : check.reason;
               return `
                 <div class="facility-card ${built ? 'built' : ''}">
                   <div class="facility-info">
@@ -518,11 +586,11 @@ export class AppController {
                           ? `<button type="button" class="btn btn-energy btn-compact" data-open-codex="1">打开图鉴</button>`
                           : `<span class="tag tag-energy">已启用</span>`
                         : `<button type="button" class="btn btn-primary btn-compact" data-build="${bid}" ${
-                            check.canBuild ? '' : 'disabled'
+                            check.canBuild && !readOnly ? '' : 'disabled'
                           }>修复建造</button>
                            ${
-                             !check.canBuild && check.reason
-                               ? `<span style="font-size:11px;color:var(--text-secondary);">${check.reason}</span>`
+                             (!check.canBuild || readOnly) && disabledReason
+                               ? `<span style="font-size:12px;color:var(--text-secondary);">${disabledReason}</span>`
                                : ''
                            }`
                     }
@@ -556,10 +624,16 @@ export class AppController {
                 !navState.restored
                   ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
                       <span style="font-size:12px;color:var(--text-secondary);">
-                        ${restoreCheck.canRestore ? `修复费用 ${navRelic.restoreCost} 信用点` : restoreCheck.reason}
+                        ${
+                          readOnly
+                            ? '只读模式不可修复'
+                            : restoreCheck.canRestore
+                            ? `修复费用 ${navRelic.restoreCost} 信用点`
+                            : restoreCheck.reason
+                        }
                       </span>
                       <button type="button" class="btn btn-primary btn-compact" id="btn-restore-nav" ${
-                        restoreCheck.canRestore ? '' : 'disabled'
+                        restoreCheck.canRestore && !readOnly ? '' : 'disabled'
                       }>支付 ${navRelic.restoreCost} 修复展示</button>
                     </div>`
                   : ''
@@ -583,6 +657,7 @@ export class AppController {
     });
 
     this.rightPanelEl.querySelector('#btn-restore-nav')?.addEventListener('click', () => {
+      if (!this.canMutate()) return;
       const res = restoreRelic(this.save.progression, 'ancient_navigator');
       if (res.ok) {
         soundEngine.play('buildComplete');
@@ -603,6 +678,10 @@ export class AppController {
       }
       return;
     }
+    if (!this.canMutate()) {
+      soundEngine.play('invalid');
+      return;
+    }
     const res = purchaseBuilding(prog, buildingId);
     if (res.ok) {
       soundEngine.play('buildComplete');
@@ -616,8 +695,7 @@ export class AppController {
   }
 
   private openCodexModal(): void {
-    const modal = renderCodexModal(this.save.progression, () => modal.remove());
-    this.modalHostEl.appendChild(modal);
+    openCodexModal(this.modalHostEl, this.save.progression);
   }
 
   private renderExpeditionView(exp: ExpeditionState): void {
@@ -676,12 +754,13 @@ export class AppController {
   }
 
   private mountCargoBayPanel(exp: ExpeditionState, title: string): void {
+    const editable = isCargoBayEditable(exp) && this.canMutate();
     this.rightPanelEl.innerHTML = `
       <div class="panel">
         <div class="panel-header">
           <h2 class="panel-title">${title}</h2>
-          <span class="tag ${isCargoBayEditable(exp) ? 'tag-amber' : ''}">
-            ${isCargoBayEditable(exp) ? '可拖拽 / 点选整理' : '航行锁定中'}
+          <span class="tag ${editable ? 'tag-amber' : ''}">
+            ${editable ? '可拖拽 / 点选 / 键盘整理' : this.isReadOnlyTab ? '只读锁定中' : '航行锁定中'}
           </span>
         </div>
         <div id="cargo-bay-mount" class="bay-section"></div>
@@ -691,6 +770,7 @@ export class AppController {
     this.cargoGrid?.destroy();
     this.cargoGrid = new CargoGridComponent(bayMount, {
       onBayChange: (nextBay) => {
+        if (!this.canMutate()) return;
         if (!this.save.activeExpedition || !isCargoBayEditable(this.save.activeExpedition)) return;
         const updatedExp = updateArrangeBay(this.save.activeExpedition, nextBay);
         this.save = {
@@ -703,10 +783,11 @@ export class AppController {
         this.cargoGrid?.render(updatedExp.bay, true);
       },
     });
-    this.cargoGrid.render(exp.bay, isCargoBayEditable(exp));
+    this.cargoGrid.render(exp.bay, editable);
   }
 
   private renderRouteSelect(exp: ExpeditionState): void {
+    const readOnly = !this.canMutate();
     const normal = getRoutePreview(exp, 'normal');
     const danger = getRoutePreview(exp, 'danger');
     const tutorialOnlyNormal = exp.isTutorial && exp.currentNode === 1;
@@ -750,8 +831,16 @@ export class AppController {
           </div>
 
           <button type="button" class="btn ${isDanger ? 'btn-danger' : 'btn-primary'}"
-            data-select-route="${routeType}" ${lockedForTutorial ? 'disabled' : ''}>
-            ${lockedForTutorial ? '第 2 站解锁危险航路' : lethal ? '仍冒险进入交火' : '确认进入交火'}
+            data-select-route="${routeType}" ${lockedForTutorial || readOnly ? 'disabled' : ''}>
+            ${
+              readOnly
+                ? '只读模式已锁定'
+                : lockedForTutorial
+                ? '第 2 站解锁危险航路'
+                : lethal
+                ? '仍冒险进入交火'
+                : '确认进入交火'
+            }
           </button>
         </div>
       `;
@@ -775,6 +864,7 @@ export class AppController {
 
     this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-select-route]').forEach((btn) => {
       btn.addEventListener('click', () => {
+        if (!this.canMutate()) return;
         const routeType = btn.dataset.selectRoute as RouteType;
         soundEngine.unlock();
         soundEngine.play('click');
@@ -789,6 +879,7 @@ export class AppController {
   }
 
   private renderCombatPhase(exp: ExpeditionState): void {
+    const readOnly = !this.canMutate();
     const combat = exp.activeCombat!;
     const playbackKey = `${exp.expeditionId}_${exp.currentNode}_${combat.routeSpec.routeType}`;
 
@@ -812,6 +903,7 @@ export class AppController {
           this.updateCombatOverlayBars(exp);
         },
         onComplete: () => {
+          if (!this.canMutate()) return;
           if (!this.save.activeExpedition || this.save.activeExpedition.phase !== 'COMBAT') return;
           const after = completeCombat(this.save.activeExpedition);
           this.save = { ...this.save, activeExpedition: after };
@@ -819,6 +911,7 @@ export class AppController {
           this.syncAll();
         },
       });
+      this.phaserHost?.setCombatPaused(readOnly);
     }
 
     this.updateCombatOverlayBars(exp);
@@ -827,21 +920,24 @@ export class AppController {
       <div class="panel">
         <div class="panel-header">
           <div>
-            <h2 class="panel-title">同步交火中 · ${combat.routeSpec.enemy.name}</h2>
+            <h2 class="panel-title">${readOnly ? '同步交火已暂停（只读模式）' : `同步交火中 · ${combat.routeSpec.enemy.name}`}</h2>
             <p class="panel-subtitle">我方攻击 ${combat.statsSnapshot.totalAttack} / 初始护盾 ${combat.statsSnapshot.effectiveShield} · 敌方每轮伤害 ${combat.routeSpec.enemy.damagePerRound}</p>
           </div>
           <span class="tag tag-energy" id="combat-round-tag">第 ${this.liveCombatRound}/${combat.simulation.roundsCount} 轮</span>
         </div>
         <div class="action-dock">
-          <button type="button" class="btn ${this.save.settings.combatSpeed === 2 ? 'btn-energy' : ''}" id="btn-combat-speed">
+          <button type="button" class="btn ${this.save.settings.combatSpeed === 2 ? 'btn-energy' : ''}" id="btn-combat-speed" ${
+            readOnly ? 'disabled' : ''
+          }>
             当前速度：${this.save.settings.combatSpeed}×（切换）
           </button>
-          <button type="button" class="btn" id="btn-skip-combat">快速结算本战</button>
+          <button type="button" class="btn" id="btn-skip-combat" ${readOnly ? 'disabled' : ''}>快速结算本战</button>
         </div>
       </div>
     `;
 
     this.leftPanelEl.querySelector('#btn-combat-speed')?.addEventListener('click', () => {
+      if (!this.canMutate()) return;
       const nextSpeed: 1 | 2 = this.save.settings.combatSpeed === 1 ? 2 : 1;
       const nextSettings: GameSettings = { ...this.save.settings, combatSpeed: nextSpeed };
       this.save = { ...this.save, settings: nextSettings };
@@ -852,6 +948,7 @@ export class AppController {
     });
 
     this.leftPanelEl.querySelector('#btn-skip-combat')?.addEventListener('click', () => {
+      if (!this.canMutate()) return;
       soundEngine.play('click');
       this.phaserHost?.skipCombatPlayback();
     });
@@ -908,12 +1005,16 @@ export class AppController {
   }
 
   private renderRewardPhase(exp: ExpeditionState): void {
+    const readOnly = !this.canMutate();
     const rewards = exp.pendingRewards!;
     const lastSim = exp.lastCombat?.simulation;
 
     // Trigger rare chime if collectible or high-value cargo appeared
     const hasRare = rewards.some(
-      (r) => r.kind === 'cargo' && (getItemDef(r.item.defId).category === 'cargo' && (r.item.value >= 40 || getItemDef(r.item.defId).defId === 'cargo.ancient_navigator'))
+      (r) =>
+        r.kind === 'cargo' &&
+        getItemDef(r.item.defId).category === 'cargo' &&
+        (r.item.value >= 40 || getItemDef(r.item.defId).defId === 'cargo.ancient_navigator')
     );
     if (hasRare) {
       soundEngine.play('rewardRare');
@@ -951,7 +1052,9 @@ export class AppController {
                       恢复 <strong class="num" style="color:var(--accent-energy);">+${opt.healAmount}</strong> 耐久<br/>
                       <span style="color:var(--text-secondary);">耐久：${exp.currentHp} → ${afterHp}（实补 +${actualGain}）</span>
                     </div>
-                    <button type="button" class="btn btn-energy" data-pick-reward="repair">选择维修</button>
+                    <button type="button" class="btn btn-energy" data-pick-reward="repair" ${
+                      readOnly ? 'disabled' : ''
+                    }>${readOnly ? '只读锁定' : '选择维修'}</button>
                   </div>
                 `;
               }
@@ -993,8 +1096,10 @@ export class AppController {
                         : `<strong style="color:var(--accent-action);">估值 ${opt.item.value} 信用点</strong><br/><span style="color:var(--text-secondary);font-size:12px;">单格均价 ${perCell} · 无战斗加成</span>`
                     }
                   </div>
-                  <button type="button" class="btn btn-primary" data-pick-reward="${opt.optionId}">
-                    收入暂存区
+                  <button type="button" class="btn btn-primary" data-pick-reward="${opt.optionId}" ${
+                    readOnly ? 'disabled' : ''
+                  }>
+                    ${readOnly ? '只读锁定' : '收入暂存区'}
                   </button>
                 </div>
               `;
@@ -1006,6 +1111,7 @@ export class AppController {
 
     this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-pick-reward]').forEach((btn) => {
       btn.addEventListener('click', () => {
+        if (!this.canMutate()) return;
         const optionId = btn.dataset.pickReward as 'equipment' | 'cargo' | 'repair';
         soundEngine.play('place');
         const nextExp = selectReward(exp, optionId);
@@ -1018,16 +1124,36 @@ export class AppController {
     this.mountCargoBayPanel(exp, '当前船舱一览（选定后进入整理）');
   }
 
+  private confirmPendingDiscardsIfNeeded(
+    exp: ExpeditionState,
+    exitLabel: string,
+    onConfirm: () => void
+  ): void {
+    if (!this.canMutate()) return;
+    if (exp.bay.discardedThisArrange.length === 0) {
+      onConfirm();
+      return;
+    }
+    openDiscardConfirmModal(
+      this.modalHostEl,
+      exp.bay.discardedThisArrange,
+      exitLabel,
+      onConfirm
+    );
+  }
+
   private renderArrangePhase(exp: ExpeditionState): void {
     this.renderArrangeDecisionDock(exp);
     this.mountCargoBayPanel(exp, '4×4 船舱整理');
   }
 
   private renderArrangeDecisionDock(exp: ExpeditionState): void {
+    const readOnly = !this.canMutate();
     const leaveCheck = canLeaveArrange(exp);
     const finalNode = isAtFinalNode(exp);
     const stats = calculateBuildStats(exp.bay);
     const estReturn = exp.accumulatedBounty + stats.totalBayValue;
+    const canExit = leaveCheck.ok && !readOnly;
 
     let nextNodeHtml = '';
     if (!finalNode) {
@@ -1047,7 +1173,7 @@ export class AppController {
     } else {
       nextNodeHtml = `
         <div class="route-prediction">
-          已完成全部 <strong>${exp.maxNodes}</strong> 个节点！整理好战利品后即可满载返航结算。
+          已完成全部 <strong>${exp.maxNodes}</strong> 个节点！整理好战利品后点击确认完成整理，将自动进入满载返航结算。
         </div>
       `;
     }
@@ -1075,12 +1201,14 @@ export class AppController {
 
         <div class="action-dock ${finalNode ? 'single' : ''}">
           <button type="button" class="btn ${finalNode || tutorialReturnPrompt ? 'btn-primary' : 'btn-energy'}"
-            id="btn-safe-return" ${leaveCheck.ok ? '' : 'disabled'}>
+            id="btn-safe-return" ${canExit ? '' : 'disabled'}>
             ${
-              !leaveCheck.ok
+              readOnly
+                ? '只读锁定'
+                : !leaveCheck.ok
                 ? '先整理暂存奖励'
                 : finalNode
-                ? `满载返航 · 结算 (+${estReturn})`
+                ? `完成整理 · 自动返航 (+${estReturn})`
                 : `安全返航 (+${estReturn})`
             }
           </button>
@@ -1088,8 +1216,8 @@ export class AppController {
           ${
             !finalNode
               ? `<button type="button" class="btn ${tutorialReturnPrompt ? '' : 'btn-primary'}"
-                  id="btn-next-node" ${leaveCheck.ok ? '' : 'disabled'}>
-                  ${!leaveCheck.ok ? '先整理暂存奖励' : `继续深入 · 节点 ${exp.currentNode + 1}`}
+                  id="btn-next-node" ${canExit ? '' : 'disabled'}>
+                  ${readOnly ? '只读锁定' : !leaveCheck.ok ? '先整理暂存奖励' : `继续深入 · 节点 ${exp.currentNode + 1}`}
                 </button>`
               : ''
           }
@@ -1098,26 +1226,37 @@ export class AppController {
     `;
 
     this.leftPanelEl.querySelector('#btn-safe-return')?.addEventListener('click', () => {
-      if (!this.save.activeExpedition) return;
-      soundEngine.play('returnDock');
-      const nextExp = initiateSafeReturn(this.save.activeExpedition);
-      this.keptCollectibleIds.clear();
-      this.save = { ...this.save, activeExpedition: nextExp };
-      this.persist();
-      this.syncAll();
+      const cur = this.save.activeExpedition;
+      if (!cur || !this.canMutate()) return;
+      this.confirmPendingDiscardsIfNeeded(cur, '安全返航', () => {
+        const latest = this.save.activeExpedition;
+        if (!latest || !this.canMutate()) return;
+        soundEngine.play('returnDock');
+        const nextExp = initiateSafeReturn(latest);
+        this.keptCollectibleIds.clear();
+        this.save = { ...this.save, activeExpedition: nextExp };
+        this.persist();
+        this.syncAll();
+      });
     });
 
     this.leftPanelEl.querySelector('#btn-next-node')?.addEventListener('click', () => {
-      if (!this.save.activeExpedition) return;
-      soundEngine.play('click');
-      const nextExp = proceedToNextNode(this.save.activeExpedition);
-      this.save = { ...this.save, activeExpedition: nextExp };
-      this.persist();
-      this.syncAll();
+      const cur = this.save.activeExpedition;
+      if (!cur || !this.canMutate()) return;
+      this.confirmPendingDiscardsIfNeeded(cur, '继续深入', () => {
+        const latest = this.save.activeExpedition;
+        if (!latest || !this.canMutate()) return;
+        soundEngine.play('click');
+        const nextExp = proceedToNextNode(latest);
+        this.save = { ...this.save, activeExpedition: nextExp };
+        this.persist();
+        this.syncAll();
+      });
     });
   }
 
   private renderSettlementPhase(exp: ExpeditionState): void {
+    const readOnly = !this.canMutate();
     const summary = calculateSettlement(
       exp,
       this.save.progression,
@@ -1178,7 +1317,7 @@ export class AppController {
                 isSafe && line.isCollectible
                   ? `<button type="button" class="btn btn-compact ${
                       line.keptForCollection ? 'btn-energy' : 'btn-primary'
-                    }" data-toggle-keep="${line.item.instanceId}">
+                    }" data-toggle-keep="${line.item.instanceId}" ${readOnly ? 'disabled' : ''}>
                       ${
                         line.keptForCollection
                           ? '已选：留作收藏（0 信用点）'
@@ -1225,7 +1364,7 @@ export class AppController {
 
         <div class="settlement-total">
           <span>本次实得信用点</span>
-          <span class="num" style="color:var(--accent-action);">+${summary.finalCreditsEarned}</span>
+          <span class="num" style="color:var(--accent-action);" id="settlement-final-credits">+${summary.finalCreditsEarned}</span>
         </div>
 
         ${
@@ -1234,14 +1373,17 @@ export class AppController {
             : ''
         }
 
-        <button type="button" class="btn btn-primary" id="btn-confirm-settlement" style="width:100%;font-size:16px;">
-          确认入账并返回拆解站
+        <button type="button" class="btn btn-primary" id="btn-confirm-settlement" style="width:100%;font-size:16px;" ${
+          readOnly ? 'disabled' : ''
+        }>
+          ${readOnly ? '只读模式 · 请先接管控制权再入账' : '确认入账并返回拆解站'}
         </button>
       </div>
     `;
 
     this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-toggle-keep]').forEach((btn) => {
       btn.addEventListener('click', () => {
+        if (!this.canMutate()) return;
         const id = btn.dataset.toggleKeep!;
         if (this.keptCollectibleIds.has(id)) {
           this.keptCollectibleIds.delete(id);
@@ -1249,11 +1391,14 @@ export class AppController {
           this.keptCollectibleIds.add(id);
         }
         soundEngine.play('click');
+        // F12: Keep HUD and settlement total strictly synchronized on toggle
+        this.renderTopHud();
         this.renderSettlementPhase(exp);
       });
     });
 
     this.leftPanelEl.querySelector('#btn-confirm-settlement')?.addEventListener('click', () => {
+      if (!this.canMutate()) return;
       if (!this.save.activeExpedition || this.save.activeExpedition.phase !== 'SETTLEMENT') return;
       soundEngine.play('returnDock');
       const result = applyExpeditionSettlement(

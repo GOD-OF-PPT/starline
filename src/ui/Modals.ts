@@ -1,7 +1,8 @@
 import { getItemImageUrl } from '../assets/itemArt';
 import { RELICS } from '../data/buildings';
-import { CARGO_DEFINITIONS, EQUIPMENT_DEFINITIONS } from '../data/items';
+import { CARGO_DEFINITIONS, EQUIPMENT_DEFINITIONS, getItemDef } from '../data/items';
 import { SHAPES } from '../data/shapes';
+import type { DiscardedRecord } from '../domain/inventory';
 import {
   getCodexSummary,
   type BaseProgression,
@@ -9,31 +10,195 @@ import {
 } from '../domain/progression';
 import { renderMiniMaskHtml } from './CargoGrid';
 
-export function createModalBackdrop(onClose?: () => void): HTMLElement {
-  const backdrop = document.createElement('div');
-  backdrop.className = 'modal-backdrop';
-  backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop && onClose) {
-      onClose();
-    }
-  });
-  return backdrop;
+interface ActiveModalEntry {
+  readonly backdrop: HTMLElement;
+  readonly card: HTMLElement;
+  readonly dismissible: boolean;
+  readonly opener: HTMLElement | null;
+  readonly close: () => void;
 }
 
-export function renderCodexModal(
-  progression: BaseProgression,
-  onClose: () => void
-): HTMLElement {
-  const backdrop = createModalBackdrop(onClose);
-  const summary = getCodexSummary(progression);
-  const discovered = new Set(progression.discoveredItems);
+const modalStack: ActiveModalEntry[] = [];
+let appBackgroundEl: HTMLElement | null = null;
+let globalKeyListenerAttached = false;
+
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+export function registerModalBackgroundRoot(el: HTMLElement): void {
+  appBackgroundEl = el;
+}
+
+export function hasOpenModal(): boolean {
+  return modalStack.length > 0;
+}
+
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+    (el) => el.offsetParent !== null || el === document.activeElement
+  );
+}
+
+function syncBackgroundInert(): void {
+  if (!appBackgroundEl) return;
+  const locked = modalStack.length > 0;
+  if ('inert' in appBackgroundEl) {
+    (appBackgroundEl as HTMLElement & { inert: boolean }).inert = locked;
+  }
+  if (locked) {
+    appBackgroundEl.setAttribute('aria-hidden', 'true');
+  } else {
+    appBackgroundEl.removeAttribute('aria-hidden');
+  }
+}
+
+function handleGlobalModalKeyDown(e: KeyboardEvent): void {
+  if (modalStack.length === 0) return;
+  const top = modalStack[modalStack.length - 1];
+
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (top.dismissible) {
+      top.close();
+    }
+    return;
+  }
+
+  if (e.key === 'Tab') {
+    const focusables = getFocusableElements(top.card);
+    if (focusables.length === 0) {
+      e.preventDefault();
+      top.card.focus();
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement as HTMLElement | null;
+
+    if (e.shiftKey) {
+      if (!active || active === first || !top.card.contains(active)) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else {
+      if (!active || active === last || !top.card.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+    return;
+  }
+
+  // Isolate background shortcuts (e.g. R, Arrows, Space, Enter) from leaking outside the modal
+  if (!top.card.contains(e.target as Node)) {
+    e.stopPropagation();
+  }
+}
+
+function ensureGlobalKeyListener(): void {
+  if (globalKeyListenerAttached || typeof window === 'undefined') return;
+  // Capture phase ensures modal handles Escape/Tab before ANY game/grid key listeners
+  window.addEventListener('keydown', handleGlobalModalKeyDown, true);
+  globalKeyListenerAttached = true;
+}
+
+export interface ManagedModalHandle {
+  readonly backdrop: HTMLElement;
+  readonly card: HTMLElement;
+  readonly close: () => void;
+}
+
+/**
+ * Mounts an accessible modal dialog with full input isolation, focus trapping, Escape close,
+ * and automatic focus restoration to the invoking control (F01).
+ */
+export function openManagedModal(
+  host: HTMLElement,
+  options: {
+    readonly titleId: string;
+    readonly dismissible?: boolean;
+    readonly onClose?: () => void;
+  }
+): ManagedModalHandle {
+  ensureGlobalKeyListener();
+  const dismissible = options.dismissible ?? true;
+  const opener =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
 
   const card = document.createElement('div');
   card.className = 'modal-card';
-  card.innerHTML = `
+  card.setAttribute('role', 'dialog');
+  card.setAttribute('aria-modal', 'true');
+  card.setAttribute('aria-labelledby', options.titleId);
+  card.tabIndex = -1;
+
+  backdrop.appendChild(card);
+
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    const idx = modalStack.findIndex((m) => m.backdrop === backdrop);
+    if (idx >= 0) {
+      modalStack.splice(idx, 1);
+    }
+    backdrop.remove();
+    syncBackgroundInert();
+    options.onClose?.();
+
+    // Restore focus to previous modal or original opener
+    if (modalStack.length > 0) {
+      const prevTop = modalStack[modalStack.length - 1];
+      const focusables = getFocusableElements(prevTop.card);
+      (focusables[0] ?? prevTop.card).focus();
+    } else if (opener && document.body.contains(opener) && !opener.hasAttribute('disabled')) {
+      opener.focus();
+    }
+  };
+
+  if (dismissible) {
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop) {
+        close();
+      }
+    });
+  }
+
+  modalStack.push({ backdrop, card, dismissible, opener, close });
+  host.appendChild(backdrop);
+  syncBackgroundInert();
+
+  // Defer initial focus until caller finishes populating card DOM
+  queueMicrotask(() => {
+    if (closed) return;
+    const focusables = getFocusableElements(card);
+    (focusables[0] ?? card).focus();
+  });
+
+  return { backdrop, card, close };
+}
+
+export function openCodexModal(
+  host: HTMLElement,
+  progression: BaseProgression,
+  onClose?: () => void
+): ManagedModalHandle {
+  const modal = openManagedModal(host, {
+    titleId: 'modal-title-codex',
+    dismissible: true,
+    onClose,
+  });
+  const summary = getCodexSummary(progression);
+  const discovered = new Set(progression.discoveredItems);
+
+  modal.card.innerHTML = `
     <div class="panel-header">
       <div>
-        <h2 class="panel-title">站内图鉴与设备档案</h2>
+        <h2 class="panel-title" id="modal-title-codex">站内图鉴与设备档案</h2>
         <p class="panel-subtitle">
           完成度 ${summary.completionPercent}% · 设备 ${summary.equipmentDiscovered}/${summary.equipmentTotal} ·
           货物 ${summary.cargoDiscovered}/${summary.cargoTotal} · 修复藏品 ${summary.relicsRestored}/${summary.relicsTotal}
@@ -119,26 +284,29 @@ export function renderCodexModal(
       .join('')}
   `;
 
-  card.querySelector('#btn-close-codex')?.addEventListener('click', onClose);
-  backdrop.appendChild(card);
-  return backdrop;
+  modal.card.querySelector('#btn-close-codex')?.addEventListener('click', modal.close);
+  return modal;
 }
 
-export function renderHelpModal(onClose: () => void): HTMLElement {
-  const backdrop = createModalBackdrop(onClose);
-  const card = document.createElement('div');
-  card.className = 'modal-card';
-  card.innerHTML = `
+export function openHelpModal(host: HTMLElement, onClose?: () => void): ManagedModalHandle {
+  const modal = openManagedModal(host, {
+    titleId: 'modal-title-help',
+    dismissible: true,
+    onClose,
+  });
+
+  modal.card.innerHTML = `
     <div class="panel-header">
-      <h2 class="panel-title">操作与规则图示说明</h2>
+      <h2 class="panel-title" id="modal-title-help">操作与规则图示说明</h2>
       <button type="button" class="btn btn-compact" id="btn-close-help">关闭</button>
     </div>
 
     <div class="inspector-card">
-      <strong>1. 4×4 船舱拼装（无倒计时）</strong>
+      <strong>1. 4×4 船舱拼装（无倒计时 · 支持触控/鼠标/纯键盘）</strong>
       <div style="font-size:13px;color:var(--text-secondary);">
-        支持<strong>拖拽摆放</strong>，也支持<strong>点选物品 → 点击空位</strong>摆放。点击已选物品或按 <code>R</code> 可顺时针旋转 90°。
-        选中奖励先进入暂存区（不加属性、不计估值），离开整理前需全部放入或舍弃。
+        • <strong>拖拽 / 点选</strong>：拖入船舱，或点选物品再点空位摆放；点击已选物品旋转 90°。<br/>
+        • <strong>纯键盘操作</strong>：用 <code>Tab</code> 进入暂存区或 4×4 棋盘，方向键移动焦点格，<code>Enter</code>/<code>Space</code> 选中或放入，<code>R</code> 旋转，<code>Esc</code> 取消选中或关闭弹层。<br/>
+        • 选中奖励先入暂存区（不加属性、不计估值）；离开整理前若有舍弃物品会弹出清单确认。
       </div>
     </div>
 
@@ -157,39 +325,50 @@ export function renderHelpModal(onClose: () => void): HTMLElement {
       <div style="font-size:13px;color:var(--text-secondary);">
         • 路线选择前公开敌舰耐久、每轮伤害、预计战后耐久与奖励范围。<br/>
         • 每轮双方同时造成固定伤害；先扣护盾再扣耐久；<strong>同归于尽判失败</strong>。<br/>
-        • 每趟最多 6 个节点。任意整理阶段可免费<strong>安全返航</strong>拿走全部悬赏与货款；若战败仅保留 40% 现金折算，但基地、已解锁设施和图鉴记录全部保留。
+        • 每趟最多 6 个节点。任意整理阶段可免费<strong>安全返航</strong>；完成第 6 节点整理确认后自动返航结算。战败保留 40% 折算，基地、建筑与图鉴记录不受影响。
       </div>
     </div>
   `;
 
-  card.querySelector('#btn-close-help')?.addEventListener('click', onClose);
-  backdrop.appendChild(card);
-  return backdrop;
+  modal.card.querySelector('#btn-close-help')?.addEventListener('click', modal.close);
+  return modal;
 }
 
-export function renderSettingsModal(
+export function openSettingsModal(
+  host: HTMLElement,
   settings: GameSettings,
+  readOnly: boolean,
   onUpdate: (next: GameSettings) => void,
   onResetSave: () => void,
-  onClose: () => void
-): HTMLElement {
-  const backdrop = createModalBackdrop(onClose);
-  const card = document.createElement('div');
-  card.className = 'modal-card';
+  onClose?: () => void
+): ManagedModalHandle {
+  const modal = openManagedModal(host, {
+    titleId: 'modal-title-settings',
+    dismissible: true,
+    onClose,
+  });
 
-  const renderContent = (cur: GameSettings) => {
-    card.innerHTML = `
+  const renderContent = (cur: GameSettings, focusId?: string) => {
+    modal.card.innerHTML = `
       <div class="panel-header">
-        <h2 class="panel-title">系统设置</h2>
+        <h2 class="panel-title" id="modal-title-settings">系统设置</h2>
         <button type="button" class="btn btn-compact" id="btn-close-settings">关闭</button>
       </div>
+
+      ${
+        readOnly
+          ? `<div class="system-banner banner-warn"><span>当前处于只读模式，请先接管控制权再修改保存设置或重置存档。</span></div>`
+          : ''
+      }
 
       <div class="setting-row">
         <div>
           <div style="font-weight:700;">战斗播放速度</div>
           <div style="font-size:12px;color:var(--text-secondary);">仅改变演出节奏，不改变任何战斗结果</div>
         </div>
-        <button type="button" class="btn btn-compact ${cur.combatSpeed === 2 ? 'btn-energy' : ''}" id="set-speed">
+        <button type="button" class="btn btn-compact ${cur.combatSpeed === 2 ? 'btn-energy' : ''}" id="set-speed" ${
+          readOnly ? 'disabled' : ''
+        }>
           ${cur.combatSpeed === 2 ? '2 倍速' : '1 倍速'}
         </button>
       </div>
@@ -199,7 +378,9 @@ export function renderSettingsModal(
           <div style="font-weight:700;">减少动效（低动效模式）</div>
           <div style="font-size:12px;color:var(--text-secondary);">关闭微震、粒子与漂浮，保留全部状态变化</div>
         </div>
-        <button type="button" class="btn btn-compact ${cur.reducedMotion ? 'btn-energy' : ''}" id="set-motion">
+        <button type="button" class="btn btn-compact ${cur.reducedMotion ? 'btn-energy' : ''}" id="set-motion" ${
+          readOnly ? 'disabled' : ''
+        }>
           ${cur.reducedMotion ? '已开启' : '已关闭'}
         </button>
       </div>
@@ -209,7 +390,9 @@ export function renderSettingsModal(
           <div style="font-weight:700;">低画质模式</div>
           <div style="font-size:12px;color:var(--text-secondary);">关闭阴影与装饰粒子，优先保证流畅度</div>
         </div>
-        <button type="button" class="btn btn-compact ${cur.lowQuality ? 'btn-energy' : ''}" id="set-quality">
+        <button type="button" class="btn btn-compact ${cur.lowQuality ? 'btn-energy' : ''}" id="set-quality" ${
+          readOnly ? 'disabled' : ''
+        }>
           ${cur.lowQuality ? '已开启' : '已关闭'}
         </button>
       </div>
@@ -219,7 +402,9 @@ export function renderSettingsModal(
           <div style="font-weight:700;">音效 (SFX)</div>
           <div style="font-size:12px;color:var(--text-secondary);">静音时全部规则与状态仍清晰可读</div>
         </div>
-        <button type="button" class="btn btn-compact ${!cur.sfxMuted ? 'btn-energy' : ''}" id="set-sfx">
+        <button type="button" class="btn btn-compact ${!cur.sfxMuted ? 'btn-energy' : ''}" id="set-sfx" ${
+          readOnly ? 'disabled' : ''
+        }>
           ${cur.sfxMuted ? '已静音' : '已开启'}
         </button>
       </div>
@@ -229,7 +414,9 @@ export function renderSettingsModal(
           <div style="font-weight:700;">环境音乐 (BGM)</div>
           <div style="font-size:12px;color:var(--text-secondary);">基地与出航循环背景音</div>
         </div>
-        <button type="button" class="btn btn-compact ${!cur.bgmMuted ? 'btn-energy' : ''}" id="set-bgm">
+        <button type="button" class="btn btn-compact ${!cur.bgmMuted ? 'btn-energy' : ''}" id="set-bgm" ${
+          readOnly ? 'disabled' : ''
+        }>
           ${cur.bgmMuted ? '已静音' : '已开启'}
         </button>
       </div>
@@ -239,80 +426,158 @@ export function renderSettingsModal(
           <div style="font-weight:700;color:var(--state-danger);">重置本地存档</div>
           <div style="font-size:12px;color:var(--text-secondary);">清空基地进度、图鉴与当前航次并重新开始教学</div>
         </div>
-        <button type="button" class="btn btn-danger btn-compact" id="set-reset">重置存档</button>
+        <button type="button" class="btn btn-danger btn-compact" id="set-reset" ${readOnly ? 'disabled' : ''}>重置存档</button>
       </div>
     `;
 
-    card.querySelector('#btn-close-settings')?.addEventListener('click', onClose);
-    card.querySelector('#set-speed')?.addEventListener('click', () => {
-      const next: GameSettings = { ...cur, combatSpeed: cur.combatSpeed === 1 ? 2 : 1 };
-      onUpdate(next);
-      renderContent(next);
-    });
-    card.querySelector('#set-motion')?.addEventListener('click', () => {
-      const next: GameSettings = { ...cur, reducedMotion: !cur.reducedMotion };
-      onUpdate(next);
-      renderContent(next);
-    });
-    card.querySelector('#set-quality')?.addEventListener('click', () => {
-      const next: GameSettings = { ...cur, lowQuality: !cur.lowQuality };
-      onUpdate(next);
-      renderContent(next);
-    });
-    card.querySelector('#set-sfx')?.addEventListener('click', () => {
-      const next: GameSettings = { ...cur, sfxMuted: !cur.sfxMuted };
-      onUpdate(next);
-      renderContent(next);
-    });
-    card.querySelector('#set-bgm')?.addEventListener('click', () => {
-      const next: GameSettings = { ...cur, bgmMuted: !cur.bgmMuted };
-      onUpdate(next);
-      renderContent(next);
-    });
+    modal.card.querySelector('#btn-close-settings')?.addEventListener('click', modal.close);
+    if (!readOnly) {
+      modal.card.querySelector('#set-speed')?.addEventListener('click', () => {
+        const next: GameSettings = { ...cur, combatSpeed: cur.combatSpeed === 1 ? 2 : 1 };
+        onUpdate(next);
+        renderContent(next, 'set-speed');
+      });
+      modal.card.querySelector('#set-motion')?.addEventListener('click', () => {
+        const next: GameSettings = { ...cur, reducedMotion: !cur.reducedMotion };
+        onUpdate(next);
+        renderContent(next, 'set-motion');
+      });
+      modal.card.querySelector('#set-quality')?.addEventListener('click', () => {
+        const next: GameSettings = { ...cur, lowQuality: !cur.lowQuality };
+        onUpdate(next);
+        renderContent(next, 'set-quality');
+      });
+      modal.card.querySelector('#set-sfx')?.addEventListener('click', () => {
+        const next: GameSettings = { ...cur, sfxMuted: !cur.sfxMuted };
+        onUpdate(next);
+        renderContent(next, 'set-sfx');
+      });
+      modal.card.querySelector('#set-bgm')?.addEventListener('click', () => {
+        const next: GameSettings = { ...cur, bgmMuted: !cur.bgmMuted };
+        onUpdate(next);
+        renderContent(next, 'set-bgm');
+      });
 
-    let confirmReset = false;
-    const resetBtn = card.querySelector<HTMLButtonElement>('#set-reset');
-    resetBtn?.addEventListener('click', () => {
-      if (!confirmReset) {
-        confirmReset = true;
-        resetBtn.textContent = '再点一次确认清空';
-      } else {
-        onResetSave();
-        onClose();
-      }
-    });
+      let confirmReset = false;
+      const resetBtn = modal.card.querySelector<HTMLButtonElement>('#set-reset');
+      resetBtn?.addEventListener('click', () => {
+        if (!confirmReset) {
+          confirmReset = true;
+          resetBtn.textContent = '再点一次确认清空';
+        } else {
+          onResetSave();
+          modal.close();
+        }
+      });
+    }
+
+    if (focusId) {
+      modal.card.querySelector<HTMLElement>(`#${focusId}`)?.focus();
+    }
   };
 
   renderContent(settings);
-  backdrop.appendChild(card);
-  return backdrop;
+  return modal;
 }
 
-export function renderBackupRecoveryModal(
+export function openDiscardConfirmModal(
+  host: HTMLElement,
+  discards: readonly DiscardedRecord[],
+  exitLabel: string,
+  onConfirm: () => void,
+  onCancel?: () => void
+): ManagedModalHandle {
+  const modal = openManagedModal(host, {
+    titleId: 'modal-title-discard',
+    dismissible: true,
+    onClose: onCancel,
+  });
+
+  // Group identical defId + borrowed + value entries cleanly while showing accurate count and total loss
+  const totalValue = discards.reduce((sum, d) => sum + (d.item.isBorrowed ? 0 : d.item.value), 0);
+
+  modal.card.innerHTML = `
+    <div class="panel-header">
+      <div>
+        <h2 class="panel-title" id="modal-title-discard" style="color:var(--accent-action);">确认舍弃清单（${discards.length} 件）</h2>
+        <p class="panel-subtitle">离开整理阶段后以下物品将永久丢弃，无法再撤销。取消可返回继续整理或撤销舍弃。</p>
+      </div>
+    </div>
+
+    <div class="settlement-list">
+      ${discards
+        .map((rec) => {
+          const def = getItemDef(rec.item.defId);
+          const qualityText =
+            def.category === 'equipment' ? ` · ${def.qualityLabel}` : '';
+          const valText = rec.item.isBorrowed
+            ? '借用设备（无回收价）'
+            : `估值 ${rec.item.value} 信用点`;
+          return `
+            <div class="settlement-row">
+              <div style="display:flex;align-items:center;gap:8px;">
+                <img src="${getItemImageUrl(rec.item.defId)}" alt="${def.name}" style="width:28px;height:28px;object-fit:contain;" />
+                <div>
+                  <strong>${def.name}</strong><span style="font-size:12px;color:var(--text-secondary);">${qualityText}</span>
+                  ${def.category === 'cargo' && def.isCollectible ? '<span class="tag tag-amber" style="margin-left:6px;">稀有藏品</span>' : ''}
+                </div>
+              </div>
+              <span class="num" style="font-size:13px;color:var(--state-danger);">${valText}</span>
+            </div>
+          `;
+        })
+        .join('')}
+    </div>
+
+    <div class="settlement-row" style="border-color:rgba(242,117,100,0.5);">
+      <span>放弃估值合计（共 ${discards.length} 件）</span>
+      <strong class="num" style="color:var(--state-danger);">${totalValue} 信用点</strong>
+    </div>
+
+    <div class="action-dock">
+      <button type="button" class="btn btn-energy" id="btn-discard-cancel">返回整理（可撤销）</button>
+      <button type="button" class="btn btn-danger" id="btn-discard-confirm">确认舍弃并${exitLabel}</button>
+    </div>
+  `;
+
+  modal.card.querySelector('#btn-discard-cancel')?.addEventListener('click', () => {
+    modal.close();
+  });
+  modal.card.querySelector('#btn-discard-confirm')?.addEventListener('click', () => {
+    modal.close();
+    onConfirm();
+  });
+
+  return modal;
+}
+
+export function openBackupRecoveryModal(
+  host: HTMLElement,
   errorMsg: string,
   backupCredits: number,
   onRestore: () => void,
   onStartFresh: () => void
-): HTMLElement {
-  const backdrop = createModalBackdrop();
-  const card = document.createElement('div');
-  card.className = 'modal-card';
-  card.innerHTML = `
-    <h2 class="panel-title" style="color:var(--accent-action);">检测到主存档异常</h2>
-    <p class="panel-subtitle">主存档读取失败（${errorMsg}），但系统保留了一份最近的有效备份（信用点：${backupCredits}）。</p>
+): ManagedModalHandle {
+  const modal = openManagedModal(host, {
+    titleId: 'modal-title-backup',
+    dismissible: false,
+  });
+
+  modal.card.innerHTML = `
+    <h2 class="panel-title" id="modal-title-backup" style="color:var(--accent-action);">检测到主存档异常</h2>
+    <p class="panel-subtitle">主存档校验未通过（${errorMsg}），但系统保留了一份最近的有效备份（信用点：${backupCredits}）。</p>
     <div class="action-dock">
       <button type="button" class="btn btn-primary" id="btn-restore-backup">恢复最近备份</button>
       <button type="button" class="btn btn-danger" id="btn-reset-fresh">放弃并开新档</button>
     </div>
   `;
-  card.querySelector('#btn-restore-backup')?.addEventListener('click', () => {
-    backdrop.remove();
+  modal.card.querySelector('#btn-restore-backup')?.addEventListener('click', () => {
+    modal.close();
     onRestore();
   });
-  card.querySelector('#btn-reset-fresh')?.addEventListener('click', () => {
-    backdrop.remove();
+  modal.card.querySelector('#btn-reset-fresh')?.addEventListener('click', () => {
+    modal.close();
     onStartFresh();
   });
-  backdrop.appendChild(card);
-  return backdrop;
+  return modal;
 }

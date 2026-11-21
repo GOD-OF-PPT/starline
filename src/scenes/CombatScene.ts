@@ -71,9 +71,14 @@ export class CombatScene extends Phaser.Scene {
   private waitingCompletion = false;
   private shakeTimerMs = 0;
   private elapsed = 0;
+  private externalPaused = false;
 
   constructor() {
     super({ key: 'CombatScene' });
+  }
+
+  setPaused(paused: boolean): void {
+    this.externalPaused = paused;
   }
 
   init(data?: { playback?: CombatScenePlayback }): void {
@@ -124,6 +129,7 @@ export class CombatScene extends Phaser.Scene {
   }
 
   skipPlayback(): void {
+    if (this.externalPaused) return;
     if (!this.playback?.simulation || (!this.playbackActive && !this.waitingCompletion)) return;
     const sim = this.playback.simulation;
     while (this.nextRoundIndex < sim.rounds.length) {
@@ -203,8 +209,9 @@ export class CombatScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
-    // Pause automatically if browser tab is hidden (Blueprint §9)
+    // Pause automatically if browser tab is hidden (Blueprint §9) or read-only tab lost control (F02)
     if (typeof document !== 'undefined' && document.hidden) return;
+    if (this.externalPaused) return;
 
     const dtMs = Math.min(delta, 50);
     const dt = dtMs / 1000;

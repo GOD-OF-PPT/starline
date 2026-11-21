@@ -100,6 +100,10 @@ export class PhaserHost {
     }
   }
 
+  setCombatPaused(paused: boolean): void {
+    this.combatScene.setPaused(paused);
+  }
+
   skipCombatPlayback(): void {
     if (this.ready && this.game.scene.isActive('CombatScene')) {
       this.combatScene.skipPlayback();

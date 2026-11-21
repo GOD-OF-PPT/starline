@@ -25,6 +25,7 @@ import {
   type ItemInstance,
   type PlacementFailureReason,
 } from '../domain/inventory';
+import { hasOpenModal } from './Modals';
 
 export interface CargoGridCallbacks {
   readonly onBayChange: (nextBay: CargoBayState) => void;
@@ -745,6 +746,7 @@ export class CargoGridComponent {
   };
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    if (hasOpenModal()) return;
     if (!this.editable || !this.bay || !this.selected) return;
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
     if (e.key === 'r' || e.key === 'R') {

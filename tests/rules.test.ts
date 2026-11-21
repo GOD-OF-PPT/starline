@@ -511,6 +511,114 @@ describe('§11 规则边界 — 存档备份恢复与存储异常提示', () => 
     expect(writeFail.error).toBeTruthy();
   });
 
+  it('F03 回归：可解析但语义损坏的主存档进入备份恢复分支，且不覆盖最后有效备份', () => {
+    const storage = new MemoryStorage();
+    const validBase = createFreshSaveData();
+    const validWithCredits = {
+      ...validBase,
+      progression: { ...validBase.progression, credits: 88 },
+    };
+    expect(persistSaveData(storage, validWithCredits).ok).toBe(true);
+    // Persist once more so validWithCredits is stored in BACKUP as well
+    const validExp = startExpedition({ loadoutId: 'cannon_skiff', seed: 1234 });
+    expect(persistSaveData(storage, { ...validWithCredits, activeExpedition: validExp }).ok).toBe(
+      true
+    );
+
+    const corruptCases: Array<{ name: string; mutate: (obj: Record<string, unknown>) => void }> = [
+      {
+        name: 'missing expedition bay (audit exact repro)',
+        mutate: (obj) => {
+          obj.activeExpedition = { phase: 'ARRANGE', currentNode: 2 };
+        },
+      },
+      {
+        name: 'COMBAT phase missing activeCombat',
+        mutate: (obj) => {
+          obj.activeExpedition = { ...validExp, phase: 'COMBAT', activeCombat: null };
+        },
+      },
+      {
+        name: 'REWARD phase missing pendingRewards',
+        mutate: (obj) => {
+          obj.activeExpedition = { ...validExp, phase: 'REWARD', pendingRewards: null };
+        },
+      },
+      {
+        name: 'out-of-bounds node 7',
+        mutate: (obj) => {
+          obj.activeExpedition = { ...validExp, currentNode: 7 };
+        },
+      },
+      {
+        name: 'unknown item defId in placed bay',
+        mutate: (obj) => {
+          obj.activeExpedition = {
+            ...validExp,
+            bay: {
+              ...validExp.bay,
+              placed: [
+                {
+                  item: makeItem('bad_1', 'equipment.plasma_fake.legendary', 99),
+                  x: 0,
+                  y: 0,
+                  rotation: 0,
+                },
+              ],
+            },
+          };
+        },
+      },
+      {
+        name: 'overlapping placed items in bay',
+        mutate: (obj) => {
+          obj.activeExpedition = {
+            ...validExp,
+            bay: {
+              ...validExp.bay,
+              placed: [
+                { item: makeItem('o1', 'cargo.data_box', 10), x: 1, y: 1, rotation: 0 },
+                { item: makeItem('o2', 'cargo.data_box', 10), x: 1, y: 1, rotation: 0 },
+              ],
+            },
+          };
+        },
+      },
+      {
+        name: 'illegal phase name',
+        mutate: (obj) => {
+          obj.activeExpedition = { ...validExp, phase: 'HACKED_PHASE' };
+        },
+      },
+      {
+        name: 'future schemaVersion',
+        mutate: (obj) => {
+          obj.schemaVersion = 999;
+        },
+      },
+    ];
+
+    for (const tc of corruptCases) {
+      const cloned = JSON.parse(JSON.stringify(validWithCredits)) as Record<string, unknown>;
+      tc.mutate(cloned);
+      storage.setItem(PRIMARY_SAVE_KEY, JSON.stringify(cloned));
+      const res = loadSaveData(storage);
+      expect(res.status, `case: ${tc.name}`).toBe('corrupt_with_backup');
+      if (res.status === 'corrupt_with_backup') {
+        expect(res.backup.progression.credits).toBe(88);
+      }
+    }
+
+    // Attempt to persist a new valid save while primary is corrupt: MUST NOT overwrite good backup!
+    const backupBefore = storage.getItem(BACKUP_SAVE_KEY);
+    const nextValid = {
+      ...validWithCredits,
+      progression: { ...validWithCredits.progression, credits: 200 },
+    };
+    expect(persistSaveData(storage, nextValid).ok).toBe(true);
+    expect(storage.getItem(BACKUP_SAVE_KEY)).toBe(backupBefore);
+  });
+
   it('危险航路数值公式校验', () => {
     const n3 = getRouteSpec(3, 'normal');
     const d3 = getRouteSpec(3, 'danger');
@@ -523,3 +631,4 @@ describe('§11 规则边界 — 存档备份恢复与存储异常提示', () => 
     expect(d6.improvedEquipmentProb).toBe(0.75); // capped at 75%
   });
 });
+
