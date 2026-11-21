@@ -4,10 +4,12 @@ import type { EnemyArchetype, SectorBgIndex } from '../data/nodes';
 import { SHAPES } from '../data/shapes';
 
 /**
- * Illustrated high-craft game asset URL resolver (v3.0).
- * Serves 37 pre-extracted hand-painted industrial sci-fi WebP assets from /assets/
- * (17 items, 8 POT side-view ships including 2 BOSS warships, 5 base diorama layers,
- * 6 distinct deep-space sector backdrops, and 16:9 title screen key art).
+ * Illustrated high-craft game asset URL resolver (v3.0 + V2 Voyage Management).
+ * Serves all 56 hand-painted industrial sci-fi WebP assets from /assets/
+ * (31 top-down items including 10 V2 equipment families x 2 qualities & 2 mission cargos,
+ * 9 POT side-view ships including Heavy Freighter & 2 BOSS warships,
+ * 5 base diorama layers, 6 deep-space sector backdrops, 4 non-combat event scenes,
+ * and 16:9 title screen key art).
  */
 
 const BASE = (typeof import.meta !== 'undefined' && import.meta.env?.BASE_URL) || '/';
@@ -16,6 +18,12 @@ function assetUrl(relPath: string): string {
   const prefix = BASE.endsWith('/') ? BASE : `${BASE}/`;
   return `${prefix}assets/${relPath}`;
 }
+
+/** Alias V2 repair drone IDs onto the crisp hand-painted L3 repair drone sprites */
+const ITEM_ALIASES: Record<string, string> = {
+  'equipment.repair.common': 'equipment.drone.common',
+  'equipment.repair.improved': 'equipment.drone.improved',
+};
 
 const KNOWN_ITEM_IDS = new Set([
   'equipment.laser.common',
@@ -26,6 +34,18 @@ const KNOWN_ITEM_IDS = new Set([
   'equipment.shield.improved',
   'equipment.drone.common',
   'equipment.drone.improved',
+  'equipment.heavy.common',
+  'equipment.heavy.improved',
+  'equipment.capacitor.common',
+  'equipment.capacitor.improved',
+  'equipment.hangar.common',
+  'equipment.hangar.improved',
+  'equipment.relay.common',
+  'equipment.relay.improved',
+  'equipment.counter.common',
+  'equipment.counter.improved',
+  'equipment.flak.common',
+  'equipment.flak.improved',
   'cargo.data_box',
   'cargo.alloy_bar',
   'cargo.coolant_tank',
@@ -35,11 +55,14 @@ const KNOWN_ITEM_IDS = new Set([
   'cargo.quantum_core',
   'cargo.cryo_amber',
   'cargo.obsidian_crown',
+  'mission.sealed_reactor',
+  'mission.escape_pod',
 ]);
 
 export function getItemImageUrl(defId: string): string {
-  if (KNOWN_ITEM_IDS.has(defId)) {
-    return assetUrl(`items/${defId.replace(/\./g, '_')}.webp`);
+  const canonical = ITEM_ALIASES[defId] ?? defId;
+  if (KNOWN_ITEM_IDS.has(canonical)) {
+    return assetUrl(`items/${canonical.replace(/\./g, '_')}.webp`);
   }
   const def = getItemDef(defId);
   const shape = SHAPES[def.shapeId];
@@ -47,7 +70,7 @@ export function getItemImageUrl(defId: string): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(fallbackSvg)}`;
 }
 
-export function getPlayerShipImageUrl(loadoutId: LoadoutId): string {
+export function getPlayerShipImageUrl(loadoutId: LoadoutId | 'heavy_freighter'): string {
   return assetUrl(`ships/player_${loadoutId}.webp`);
 }
 
@@ -57,6 +80,12 @@ export function getEnemyShipImageUrl(archetype: EnemyArchetype): string {
 
 export function getSectorBgImageUrl(sectorIndex: SectorBgIndex): string {
   return assetUrl(`bg/sector_${sectorIndex}.webp`);
+}
+
+export function getEventBackdropImageUrl(
+  eventKind: 'wreck' | 'merchant' | 'anomaly' | 'distress'
+): string {
+  return assetUrl(`events/event_${eventKind}.webp`);
 }
 
 export function getTitleKeyArtUrl(): string {

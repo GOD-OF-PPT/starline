@@ -12,6 +12,13 @@ export interface BaseSceneState {
   readonly progression: BaseProgression;
   readonly settings: GameSettings;
   readonly recentlyBuiltId: BuildingId | null;
+  readonly v2Override?: {
+    readonly shipId?: 'cannon_skiff' | 'shield_cruiser' | 'heavy_freighter';
+    readonly wbText?: string;
+    readonly dispText?: string;
+    readonly dockText?: string;
+    readonly showAllPins?: boolean;
+  };
 }
 
 export interface ReturnDockingPlayback {
@@ -84,6 +91,7 @@ export class BaseScene extends Phaser.Scene {
       ['base.overlay.drydock', getBaseLayerImageUrl('drydock')],
       ['ship.player.cannon_skiff', getPlayerShipImageUrl('cannon_skiff')],
       ['ship.player.shield_cruiser', getPlayerShipImageUrl('shield_cruiser')],
+      ['ship.player.heavy_freighter', getPlayerShipImageUrl('heavy_freighter')],
     ];
     for (const [key, url] of queue) {
       if (!this.textures.exists(key)) {
@@ -364,19 +372,24 @@ export class BaseScene extends Phaser.Scene {
       const dockCheck = canBuildFacility(progression, 'drydock');
       const hasRestorable = relicSum.restorableIds.length > 0;
 
-      const wbText = wbBuilt
-        ? '工作台 · 图鉴'
-        : `修复工作台 · ${BUILDINGS.workbench.cost}¤`;
-      const dispText = !dispBuilt
-        ? `展台 · ${BUILDINGS.display.cost}¤`
-        : hasRestorable
-        ? `展台 · 可修复 (${relicSum.restorableIds.length})`
-        : relicSum.restoredCount >= relicSum.totalCount
-        ? `藏品馆 ${relicSum.restoredCount}/${relicSum.totalCount} ★`
-        : relicSum.restoredCount > 0
-        ? `藏品馆 ${relicSum.restoredCount}/${relicSum.totalCount}`
-        : '展台 · 待藏品';
-      const dockText = dockBuilt ? '双泊位 ✓' : `扩建船坞 · ${BUILDINGS.drydock.cost}¤`;
+      const v2o = this.currentState?.v2Override;
+      const wbText =
+        v2o?.wbText ??
+        (wbBuilt ? '工作台 · 图鉴' : `修复工作台 · ${BUILDINGS.workbench.cost}¤`);
+      const dispText =
+        v2o?.dispText ??
+        (!dispBuilt
+          ? `展台 · ${BUILDINGS.display.cost}¤`
+          : hasRestorable
+          ? `展台 · 可修复 (${relicSum.restorableIds.length})`
+          : relicSum.restoredCount >= relicSum.totalCount
+          ? `藏品馆 ${relicSum.restoredCount}/${relicSum.totalCount} ★`
+          : relicSum.restoredCount > 0
+          ? `藏品馆 ${relicSum.restoredCount}/${relicSum.totalCount}`
+          : '展台 · 待藏品');
+      const dockText =
+        v2o?.dockText ?? (dockBuilt ? '双泊位 ✓' : `扩建船坞 · ${BUILDINGS.drydock.cost}¤`);
+      const forcePins = Boolean(v2o?.showAllPins);
 
       return {
         workbench: {
@@ -409,7 +422,7 @@ export class BaseScene extends Phaser.Scene {
             : !dispBuilt && dispCheck.canBuild
             ? '#F6B852'
             : '#D5E0EC',
-          visible: wbBuilt,
+          visible: wbBuilt || forcePins,
         },
         drydock: {
           pos: L.drydock,
@@ -417,7 +430,7 @@ export class BaseScene extends Phaser.Scene {
           text: dockText,
           accent: dockBuilt ? 0x62d6df : dockCheck.canBuild ? 0xf6b852 : 0x5d728a,
           textColor: dockBuilt ? '#62D6DF' : dockCheck.canBuild ? '#F6B852' : '#D5E0EC',
-          visible: wbBuilt,
+          visible: wbBuilt || forcePins,
         },
       };
     })();
@@ -547,8 +560,13 @@ export class BaseScene extends Phaser.Scene {
       const dockPhase = Math.min(1, p / 0.48);
       const easeOut = 1 - Math.pow(1 - dockPhase, 3);
 
+      const v2Ship = this.currentState.v2Override?.shipId;
       const isShield = progression.selectedLoadout === 'shield_cruiser' && progression.buildings.drydock;
-      const shipKey = isShield ? 'ship.player.shield_cruiser' : 'ship.player.cannon_skiff';
+      const shipKey = v2Ship
+        ? `ship.player.${v2Ship}`
+        : isShield
+        ? 'ship.player.shield_cruiser'
+        : 'ship.player.cannon_skiff';
       if (this.arrivalShipSprite.texture.key !== shipKey) {
         this.arrivalShipSprite.setTexture(shipKey);
       }

@@ -5,6 +5,11 @@ export type SfxKind =
   | 'invalid'
   | 'energyLink'
   | 'laserFire'
+  | 'chargeUp'
+  | 'heavyBlast'
+  | 'droneLaunch'
+  | 'counterZap'
+  | 'contractDeliver'
   | 'shieldHit'
   | 'hullHit'
   | 'enemyDestroy'
@@ -104,6 +109,33 @@ export class SoundEngine {
         case 'laserFire':
           this.tone(ctx, 'sawtooth', 940, 190, 0.13, 0.085, now);
           this.tone(ctx, 'sine', 1320, 440, 0.09, 0.05, now);
+          break;
+        case 'chargeUp':
+          // Heavy cannon capacitor charge hum
+          this.tone(ctx, 'sine', 190, 520, 0.24, 0.08, now);
+          this.tone(ctx, 'triangle', 380, 760, 0.2, 0.05, now + 0.04);
+          break;
+        case 'heavyBlast':
+          // Deep railgun punch + bass thump
+          this.tone(ctx, 'sawtooth', 180, 44, 0.26, 0.16, now);
+          this.noiseBurst(ctx, 0.18, 860, 0.13, now);
+          this.tone(ctx, 'square', 420, 110, 0.14, 0.08, now);
+          break;
+        case 'droneLaunch':
+          // Merged per-round micro-drone volley chirp
+          this.tone(ctx, 'triangle', 680, 1120, 0.07, 0.07, now);
+          this.tone(ctx, 'sine', 960, 1340, 0.07, 0.055, now + 0.055);
+          break;
+        case 'counterZap':
+          // Crisp reactive shield-arc counter zap
+          this.tone(ctx, 'sawtooth', 1240, 360, 0.11, 0.1, now);
+          this.tone(ctx, 'triangle', 740, 1480, 0.09, 0.075, now + 0.025);
+          break;
+        case 'contractDeliver':
+          // Clean industrial confirmation chime for contract delivery
+          this.tone(ctx, 'triangle', 440, 440, 0.12, 0.085, now);
+          this.tone(ctx, 'triangle', 554.37, 554.37, 0.12, 0.085, now + 0.1);
+          this.tone(ctx, 'sine', 659.25, 880, 0.28, 0.1, now + 0.2);
           break;
         case 'shieldHit':
           this.tone(ctx, 'sine', 300, 140, 0.14, 0.12, now);
