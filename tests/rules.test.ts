@@ -619,6 +619,68 @@ describe('§11 规则边界 — 存档备份恢复与存储异常提示', () => 
     expect(storage.getItem(BACKUP_SAVE_KEY)).toBe(backupBefore);
   });
 
+  it('F05 回归：教学局第 3 站必然出现「全部物品装不下」的真实空间取舍，且正式局不受影响', () => {
+    // Formal run starts clean with only 2/16 occupied
+    const formal = startExpedition({ loadoutId: 'cannon_skiff', isTutorial: false, seed: 42 });
+    expect(calculateBuildStats(formal.bay).occupiedCellCount).toBe(2);
+
+    // Tutorial run starts with pre-loaded salvage (13/16 occupied, 3 free cells)
+    let tut = startExpedition({ loadoutId: 'cannon_skiff', isTutorial: true, seed: 42 });
+    expect(calculateBuildStats(tut.bay).occupiedCellCount).toBe(13);
+
+    // Node 1: win -> pick 1x2 laser -> rotate 90deg -> fits at (0,3)-(1,3) -> 15/16 occupied
+    tut = completeCombat(selectRoute(tut, 'normal'));
+    tut = selectReward(tut, 'equipment');
+    const l1Id = tut.bay.staging[0].item.instanceId;
+    const p1 = placeFromStaging(tut.bay, l1Id, 0, 3, 1);
+    expect(p1.ok).toBe(true);
+    tut = updateArrangeBay(tut, p1.bay);
+    expect(calculateBuildStats(tut.bay).occupiedCellCount).toBe(15);
+
+    // Node 2: win -> pick 1x1 battery -> fits at (2,2) adjacent to borrowed laser -> 16/16 FULL & attack increases
+    tut = proceedToNextNode(tut);
+    tut = completeCombat(selectRoute(tut, 'normal'));
+    tut = selectReward(tut, 'equipment');
+    const b1Id = tut.bay.staging[0].item.instanceId;
+    const atkBefore = calculateBuildStats(tut.bay).totalAttack;
+    const p2 = placeFromStaging(tut.bay, b1Id, 2, 2, 0);
+    expect(p2.ok).toBe(true);
+    tut = updateArrangeBay(tut, p2.bay);
+    expect(calculateBuildStats(tut.bay).occupiedCellCount).toBe(16);
+    expect(calculateBuildStats(tut.bay).totalAttack).toBeGreaterThan(atkBefore);
+
+    // Node 3: win -> pick either equipment (shield 1x2) or cargo (old_engine 2x2) -> CANNOT FIT anywhere without discarding!
+    tut = proceedToNextNode(tut);
+    tut = completeCombat(selectRoute(tut, 'normal'));
+    const afterPickEq = selectReward(tut, 'equipment');
+    const eqStaged = afterPickEq.bay.staging[0].item;
+    let canFitAny = false;
+    for (const rot of [0, 1, 2, 3] as const) {
+      for (let y = 0; y < 4; y++) {
+        for (let x = 0; x < 4; x++) {
+          if (checkPlacement(afterPickEq.bay, eqStaged.defId, x, y, rot).valid) {
+            canFitAny = true;
+          }
+        }
+      }
+    }
+    expect(canFitAny).toBe(false);
+
+    const afterPickCargo = selectReward(tut, 'cargo');
+    const cargoStaged = afterPickCargo.bay.staging[0].item;
+    let canFitCargoAny = false;
+    for (const rot of [0, 1, 2, 3] as const) {
+      for (let y = 0; y < 4; y++) {
+        for (let x = 0; x < 4; x++) {
+          if (checkPlacement(afterPickCargo.bay, cargoStaged.defId, x, y, rot).valid) {
+            canFitCargoAny = true;
+          }
+        }
+      }
+    }
+    expect(canFitCargoAny).toBe(false);
+  });
+
   it('危险航路数值公式校验', () => {
     const n3 = getRouteSpec(3, 'normal');
     const d3 = getRouteSpec(3, 'danger');

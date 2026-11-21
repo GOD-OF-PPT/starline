@@ -65,7 +65,8 @@ export class AppController {
   private storageError: string | null = null;
   private recentlyBuiltId: BuildingId | null = null;
   private keptCollectibleIds = new Set<string>();
-  private sceneCollapsed = false;
+  /** null = automatic responsive default (collapsed on compact viewports during ARRANGE, F06) */
+  private sceneCollapseOverride: boolean | null = null;
 
   // Live combat playback display values
   private liveCombatPlayerHp = 30;
@@ -101,6 +102,15 @@ export class AppController {
     return !this.isReadOnlyTab && this.tabGuard.canWrite();
   }
 
+  private isCompactViewport(): boolean {
+    return window.innerWidth < 820 || window.innerHeight <= 700;
+  }
+
+  private isArrangeSceneCollapsed(): boolean {
+    if (this.sceneCollapseOverride !== null) return this.sceneCollapseOverride;
+    return this.isCompactViewport();
+  }
+
   init(): void {
     this.buildShellDom();
 
@@ -133,7 +143,7 @@ export class AppController {
     this.applyBodySettings(this.save.settings);
     soundEngine.setMute(this.save.settings.sfxMuted, this.save.settings.bgmMuted);
 
-    // Mount Phaser inside persistent canvas host
+    // Mount Phaser inside persistent canvas host (PhaserHost owns ResizeObserver, F07)
     this.phaserHost = new PhaserHost(this.sceneCanvasHostEl);
     this.phaserHost.setCombatPaused(this.isReadOnlyTab);
     this.phaserHost.onBuildingClick((buildingId) => {
@@ -141,8 +151,18 @@ export class AppController {
       this.handleBuildingInteract(buildingId);
     });
 
+    // Re-evaluate compact ARRANGE scene collapse automatically on orientation/viewport transitions
     window.addEventListener('resize', () => {
-      this.phaserHost?.resize();
+      if (this.save.activeExpedition?.phase === 'ARRANGE' && this.sceneCollapseOverride === null) {
+        const collapsed = this.isArrangeSceneCollapsed();
+        const shouldHide = collapsed;
+        const currentlyHidden = this.sceneWrapEl.classList.contains('collapsed');
+        if (shouldHide !== currentlyHidden) {
+          this.sceneWrapEl.className = `scene-stage-wrap mode-arrange ${shouldHide ? 'collapsed' : ''}`;
+          this.renderTopHud();
+          this.phaserHost?.resize();
+        }
+      }
     });
 
     this.syncAll();
@@ -235,7 +255,7 @@ export class AppController {
     if (!exp) {
       soundEngine.setTrack('base');
       this.activeCombatPlaybackKey = null;
-      this.sceneCollapsed = false;
+      this.sceneCollapseOverride = null;
       this.sceneWrapEl.className = 'scene-stage-wrap mode-base';
       this.sceneOverlayEl.innerHTML = '';
       this.phaserHost?.resize();
@@ -305,24 +325,24 @@ export class AppController {
           <span class="val" id="hud-hp">${exp.currentHp}/${exp.maxHp}</span>
         </div>
         <div class="hud-pill accent">
-          <span class="label">预计返航</span>
+          <span class="label">返航</span>
           <span class="val" id="hud-est-return">+${estReturn}</span>
         </div>
       `;
     }
 
+    const arrangeCollapsed = this.isArrangeSceneCollapsed();
+
     this.topHudEl.innerHTML = `
       <div class="hud-group">
-        <h1 style="margin:0;font-size:15px;font-weight:800;letter-spacing:0.02em;color:var(--text-primary);white-space:nowrap;">
-          星际拆解站
-        </h1>
+        <h1 class="hud-brand">星际拆解站</h1>
         ${leftPills}
       </div>
       <div class="hud-actions">
         ${
           exp && exp.phase === 'ARRANGE'
             ? `<button type="button" class="btn btn-icon" id="btn-toggle-scene" title="展开或收起舰船视图">${
-                this.sceneCollapsed ? '显示舰船' : '收起舰船'
+                arrangeCollapsed ? '舰船' : '收起'
               }</button>`
             : ''
         }
@@ -337,7 +357,7 @@ export class AppController {
     `;
 
     this.topHudEl.querySelector('#btn-toggle-scene')?.addEventListener('click', () => {
-      this.sceneCollapsed = !this.sceneCollapsed;
+      this.sceneCollapseOverride = !this.isArrangeSceneCollapsed();
       soundEngine.play('click');
       this.syncAll();
     });
@@ -701,7 +721,10 @@ export class AppController {
   private renderExpeditionView(exp: ExpeditionState): void {
     // Configure scene viewport size & Phaser CombatScene state per phase
     if (exp.phase === 'ARRANGE') {
-      this.sceneWrapEl.className = `scene-stage-wrap mode-arrange ${this.sceneCollapsed ? 'collapsed' : ''}`;
+      const collapsed = this.isArrangeSceneCollapsed();
+      this.sceneWrapEl.className = `scene-stage-wrap mode-arrange ${collapsed ? 'collapsed' : ''}`;
+    } else if (exp.phase === 'ROUTE_SELECT') {
+      this.sceneWrapEl.className = 'scene-stage-wrap mode-route';
     } else {
       this.sceneWrapEl.className = 'scene-stage-wrap';
     }
@@ -1162,18 +1185,18 @@ export class AppController {
       const lethal = nextNormal.prediction.outcome === 'defeat';
       nextNodeHtml = `
         <div class="route-prediction ${lethal ? 'lethal' : ''}">
-          <strong>下一站预告（节点 ${exp.currentNode + 1}/${exp.maxNodes} 普通线）：</strong>
+          <strong>下站(${exp.currentNode + 1}/${exp.maxNodes})：</strong>
           ${
             lethal
-              ? `<span style="color:var(--state-danger);font-weight:700;">按当前配置预计战败！</span> 建议调整装备或立刻安全返航。`
-              : `敌 ${nextNormal.routeSpec.enemy.maxHp} 血 / ${nextNormal.routeSpec.enemy.damagePerRound} 伤 · 预计战后耐久 <strong>${nextNormal.prediction.finalPlayerHp}/${exp.maxHp}</strong>`
+              ? `<span style="color:var(--state-danger);font-weight:700;">预计战败！</span>建议调装或返航`
+              : `敌 ${nextNormal.routeSpec.enemy.maxHp}血/${nextNormal.routeSpec.enemy.damagePerRound}伤 · 战后耐久 <strong>${nextNormal.prediction.finalPlayerHp}/${exp.maxHp}</strong>`
           }
         </div>
       `;
     } else {
       nextNodeHtml = `
         <div class="route-prediction">
-          已完成全部 <strong>${exp.maxNodes}</strong> 个节点！整理好战利品后点击确认完成整理，将自动进入满载返航结算。
+          <strong>最终站 (${exp.maxNodes}/${exp.maxNodes}) 已通关！</strong>整理完毕后点击确认，将自动启航返港结算。
         </div>
       `;
     }
@@ -1182,13 +1205,10 @@ export class AppController {
       exp.isTutorial && exp.currentNode >= TUTORIAL_MAX_RECOMMENDED_NODE && !finalNode;
 
     this.leftPanelEl.innerHTML = `
-      <div class="panel">
+      <div class="panel panel-compact">
         <div class="panel-header">
-          <div>
-            <h2 class="panel-title">整理与返航决策</h2>
-            <p class="panel-subtitle">调整完设备与货物后，决定立刻返航还是继续深入。</p>
-          </div>
-          <span class="tag tag-amber">预计带回 +${estReturn}</span>
+          <h2 class="panel-title">整理决策</h2>
+          <span class="tag tag-amber">带回 +${estReturn}</span>
         </div>
 
         ${nextNodeHtml}
@@ -1217,7 +1237,7 @@ export class AppController {
             !finalNode
               ? `<button type="button" class="btn ${tutorialReturnPrompt ? '' : 'btn-primary'}"
                   id="btn-next-node" ${canExit ? '' : 'disabled'}>
-                  ${readOnly ? '只读锁定' : !leaveCheck.ok ? '先整理暂存奖励' : `继续深入 · 节点 ${exp.currentNode + 1}`}
+                  ${readOnly ? '只读锁定' : !leaveCheck.ok ? '先整理暂存奖励' : `继续 · 节点 ${exp.currentNode + 1}`}
                 </button>`
               : ''
           }

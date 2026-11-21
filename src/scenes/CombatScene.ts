@@ -59,7 +59,7 @@ export class CombatScene extends Phaser.Scene {
   private playerSprite: Phaser.GameObjects.Image | null = null;
   private enemySprite: Phaser.GameObjects.Image | null = null;
 
-  private stars: { x: number; y: number; speed: number; r: number; a: number }[] = [];
+  private stars: { nx: number; ny: number; speed: number; r: number; a: number }[] = [];
   private sparks: SparkParticle[] = [];
   private beams: BeamEffect[] = [];
   private shieldArcs: ShieldArcEffect[] = [];
@@ -72,6 +72,8 @@ export class CombatScene extends Phaser.Scene {
   private shakeTimerMs = 0;
   private elapsed = 0;
   private externalPaused = false;
+  private viewW = 390;
+  private viewH = 180;
 
   constructor() {
     super({ key: 'CombatScene' });
@@ -81,6 +83,18 @@ export class CombatScene extends Phaser.Scene {
     this.externalPaused = paused;
   }
 
+  syncViewport(w: number, h: number): void {
+    if (w < 16 || h < 16) return;
+    this.viewW = w;
+    this.viewH = h;
+    if (this.cameras?.main) {
+      this.cameras.main.setViewport(0, 0, w, h);
+    }
+    if (this.scene.isActive()) {
+      this.layoutSprites();
+    }
+  }
+
   init(data?: { playback?: CombatScenePlayback }): void {
     if (data?.playback) {
       this.playback = data.playback;
@@ -88,17 +102,18 @@ export class CombatScene extends Phaser.Scene {
   }
 
   create(): void {
+    this.viewW = this.scale.width || 390;
+    this.viewH = this.scale.height || 180;
+    this.cameras.main.setViewport(0, 0, this.viewW, this.viewH);
     this.cameras.main.setBackgroundColor('#111A29');
     registerCombatShipTextures(this);
 
-    const w = this.scale.width || 390;
-    const h = this.scale.height || 180;
     this.stars = [];
     for (let i = 0; i < 36; i++) {
       this.stars.push({
-        x: ((i * 97) % 100) / 100 * w,
-        y: ((i * 53) % 100) / 100 * h,
-        speed: 14 + (i % 4) * 10,
+        nx: ((i * 97) % 100) / 100,
+        ny: ((i * 53) % 100) / 100,
+        speed: 0.03 + (i % 4) * 0.02,
         r: i % 6 === 0 ? 1.5 : 1,
         a: 0.18 + (i % 4) * 0.08,
       });
@@ -109,10 +124,19 @@ export class CombatScene extends Phaser.Scene {
 
     this.applyPlaybackState();
 
-    this.scale.on('resize', this.layoutSprites, this);
+    this.scale.on('resize', this.handleResize, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
-      this.scale.off('resize', this.layoutSprites, this);
+      this.scale.off('resize', this.handleResize, this);
     });
+  }
+
+  private handleResize(gameSize?: Phaser.Structs.Size): void {
+    if (!this.scene.isActive()) return;
+    if (gameSize && gameSize.width > 0 && gameSize.height > 0) {
+      this.syncViewport(gameSize.width, gameSize.height);
+    } else {
+      this.syncViewport(this.scale.width || 390, this.scale.height || 180);
+    }
   }
 
   setPlayback(playback: CombatScenePlayback): void {
@@ -186,8 +210,8 @@ export class CombatScene extends Phaser.Scene {
   }
 
   private layoutSprites(): void {
-    const w = this.scale.width || 390;
-    const h = this.scale.height || 180;
+    const w = this.viewW || this.scale.width || 390;
+    const h = this.viewH || this.scale.height || 180;
     const shipScale = Math.min((w * 0.42) / 768, (h * 0.78) / 384);
 
     if (this.playerSprite) {
@@ -222,19 +246,19 @@ export class CombatScene extends Phaser.Scene {
     const lowQ = Boolean(settings?.lowQuality);
 
     // 1. Background star parallax
-    const w = this.scale.width || 390;
-    const h = this.scale.height || 180;
+    const w = this.viewW || this.scale.width || 390;
+    const h = this.viewH || this.scale.height || 180;
     this.bgGraphics.clear();
     this.bgGraphics.fillStyle(0x111a29, 1);
     this.bgGraphics.fillRect(0, 0, w, h);
 
     for (const st of this.stars) {
       if (!reduced) {
-        st.x -= st.speed * dt;
-        if (st.x < 0) st.x += w;
+        st.nx -= st.speed * dt;
+        if (st.nx < 0) st.nx += 1;
       }
       this.bgGraphics.fillStyle(0xcbd8e8, st.a);
-      this.bgGraphics.fillCircle(st.x, st.y, st.r);
+      this.bgGraphics.fillCircle(st.nx * w, st.ny * h, st.r);
     }
 
     // Subtle ship idle hover (disabled in reduced motion)

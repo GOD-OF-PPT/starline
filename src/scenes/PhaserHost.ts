@@ -6,30 +6,49 @@ import { CombatScene, type CombatScenePlayback } from './CombatScene';
 
 export type ActiveSceneMode = 'base' | 'combat';
 
+/**
+ * Single authoritative lifecycle & viewport bridge between responsive DOM container
+ * and Phaser scenes (F07 fix).
+ * Uses Phaser.Scale.NONE + ResizeObserver so the canvas NEVER lags behind container
+ * reflows or crops on orientation/viewport transitions.
+ */
 export class PhaserHost {
+  private readonly container: HTMLElement;
   private game: Phaser.Game;
   private baseScene: BaseScene;
   private combatScene: CombatScene;
+  private resizeObserver: ResizeObserver | null = null;
+  private rafHandle: number | null = null;
+
   private currentMode: ActiveSceneMode | null = null;
   private pendingBase: BaseSceneState | null = null;
   private pendingCombat: CombatScenePlayback | null = null;
   private buildingClickHandler: ((id: BuildingId) => void) | null = null;
   private ready = false;
+  private lastW = 0;
+  private lastH = 0;
 
   constructor(container: HTMLElement) {
+    this.container = container;
     this.baseScene = new BaseScene();
     this.combatScene = new CombatScene();
+
+    const initRect = container.getBoundingClientRect();
+    const initW = Math.max(200, Math.round(initRect.width) || 390);
+    const initH = Math.max(120, Math.round(initRect.height) || 240);
+    this.lastW = initW;
+    this.lastH = initH;
 
     this.game = new Phaser.Game({
       type: Phaser.AUTO,
       parent: container,
-      width: container.clientWidth || 390,
-      height: container.clientHeight || 240,
+      width: initW,
+      height: initH,
       backgroundColor: '#111A29',
       antialias: true,
       pixelArt: false,
       scale: {
-        mode: Phaser.Scale.RESIZE,
+        mode: Phaser.Scale.NONE,
         autoCenter: Phaser.Scale.NO_CENTER,
       },
       scene: [this.baseScene, this.combatScene],
@@ -37,6 +56,7 @@ export class PhaserHost {
 
     this.game.events.once(Phaser.Core.Events.READY, () => {
       this.ready = true;
+      this.enforceCanvasCss();
       this.game.scene.stop('BaseScene');
       this.game.scene.stop('CombatScene');
       if (this.currentMode === 'base' && this.pendingBase) {
@@ -44,7 +64,65 @@ export class PhaserHost {
       } else if (this.currentMode === 'combat' && this.pendingCombat) {
         this.showCombat(this.pendingCombat);
       }
+      this.scheduleResize();
     });
+
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(() => {
+        this.scheduleResize();
+      });
+      this.resizeObserver.observe(container);
+    }
+
+    window.addEventListener('resize', this.handleWindowResize);
+    window.addEventListener('orientationchange', this.handleWindowResize);
+  }
+
+  private handleWindowResize = (): void => {
+    this.scheduleResize();
+  };
+
+  private enforceCanvasCss(): void {
+    const canvas = this.game?.canvas;
+    if (!canvas) return;
+    canvas.style.display = 'block';
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+  }
+
+  private scheduleResize(): void {
+    if (this.rafHandle !== null) {
+      cancelAnimationFrame(this.rafHandle);
+    }
+    this.rafHandle = requestAnimationFrame(() => {
+      this.rafHandle = null;
+      this.syncSizeNow();
+    });
+  }
+
+  private syncSizeNow(): void {
+    if (!this.game?.scale) return;
+    const rect = this.container.getBoundingClientRect();
+    const w = Math.round(rect.width);
+    const h = Math.round(rect.height);
+    if (w < 16 || h < 16) return;
+
+    this.enforceCanvasCss();
+
+    if (w !== this.lastW || h !== this.lastH) {
+      this.lastW = w;
+      this.lastH = h;
+      this.game.scale.resize(w, h);
+    }
+
+    if (this.ready) {
+      if (this.game.scene.isActive('BaseScene')) {
+        this.baseScene.syncViewport(w, h);
+      }
+      if (this.game.scene.isActive('CombatScene')) {
+        this.combatScene.syncViewport(w, h);
+      }
+    }
   }
 
   onBuildingClick(handler: (id: BuildingId) => void): void {
@@ -74,6 +152,7 @@ export class PhaserHost {
         onBuildingClick: this.buildingClickHandler ?? undefined,
       });
     }
+    this.scheduleResize();
   }
 
   showCombat(playback: CombatScenePlayback): void {
@@ -92,6 +171,7 @@ export class PhaserHost {
     } else {
       this.game.scene.start('CombatScene', { playback });
     }
+    this.scheduleResize();
   }
 
   updateCombatSettings(settings: GameSettings): void {
@@ -111,15 +191,19 @@ export class PhaserHost {
   }
 
   resize(): void {
-    if (!this.game?.scale) return;
-    const parent = this.game.canvas?.parentElement;
-    if (!parent) return;
-    const w = Math.max(200, parent.clientWidth);
-    const h = Math.max(120, parent.clientHeight);
-    this.game.scale.resize(w, h);
+    this.syncSizeNow();
+    this.scheduleResize();
   }
 
   destroy(): void {
+    if (this.rafHandle !== null) {
+      cancelAnimationFrame(this.rafHandle);
+      this.rafHandle = null;
+    }
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    window.removeEventListener('resize', this.handleWindowResize);
+    window.removeEventListener('orientationchange', this.handleWindowResize);
     this.game.destroy(true);
   }
 }

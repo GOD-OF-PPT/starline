@@ -13,6 +13,7 @@ import { calculateBuildStats } from '../domain/buildStats';
 import {
   checkPlacement,
   discardItem,
+  findFirstValidPlacement,
   findItemAtCell,
   getPlacedItemCells,
   movePlacedItem,
@@ -68,8 +69,11 @@ function reasonToZh(reason?: PlacementFailureReason): string {
 }
 
 /**
- * Interactive 4x4 Cargo Bay supporting BOTH drag-and-drop (with touch finger lift & ghost outline)
- * AND tap-to-select / tap-to-place / rotate / discard / undo.
+ * Interactive 4x4 Cargo Bay supporting:
+ * 1. Drag-and-drop (with touch finger lift & ghost outline)
+ * 2. Tap-to-select / tap-to-place / rotate / discard / undo
+ * 3. Full WAI-ARIA keyboard path (F10): roving tabindex on 16 gridcells, Arrow keys, Enter/Space
+ *    grab & place, R rotate, Delete discard, Escape cancel — all isolated from open modals (F01).
  * Hit testing strictly uses occupied cell masks (L3/T4 transparent cutouts NEVER block clicks!).
  */
 export class CargoGridComponent {
@@ -79,6 +83,9 @@ export class CargoGridComponent {
   private bay: CargoBayState | null = null;
   private editable = false;
   private selected: SelectedRef | null = null;
+  private carrying = false; // keyboard carry/aim mode
+  private focusedCell: GridCoord = { x: 0, y: 0 };
+  private gridHasFocus = false;
   private drag: DragState | null = null;
   private lastSnappedId: string | null = null;
   private invalidToastText: string | null = null;
@@ -96,9 +103,17 @@ export class CargoGridComponent {
     window.addEventListener('keydown', this.handleKeyDown);
   }
 
-  render(bay: CargoBayState, editable: boolean): void {
+  render(bay: CargoBayState, editable: boolean, restoreCellFocus = false): void {
+    const wasCellFocused =
+      restoreCellFocus ||
+      (this.boardEl !== null && this.boardEl.contains(document.activeElement));
+
     this.bay = bay;
     this.editable = editable;
+
+    if (!editable) {
+      this.carrying = false;
+    }
 
     // Validate selection still exists
     if (this.selected) {
@@ -108,6 +123,7 @@ export class CargoGridComponent {
           : bay.staging.some((s) => s.item.instanceId === this.selected?.instanceId);
       if (!exists) {
         this.selected = null;
+        this.carrying = false;
       }
     }
 
@@ -138,7 +154,7 @@ export class CargoGridComponent {
         <span class="v">${stats.effectiveShield}</span>
         <span class="sub ${stats.shieldCapped ? 'cap' : ''}">${
       stats.shieldOverflow > 0
-        ? `已达上限 (+${stats.shieldOverflow}溢出)`
+        ? `已达上限(+${stats.shieldOverflow})`
         : stats.shieldCapped
         ? '已达上限'
         : '上限 18'
@@ -149,7 +165,7 @@ export class CargoGridComponent {
         <span class="v">+${stats.effectiveRepair}</span>
         <span class="sub ${stats.repairCapped ? 'cap' : ''}">${
       stats.repairOverflow > 0
-        ? `已达上限 (+${stats.repairOverflow}溢出)`
+        ? `已达上限(+${stats.repairOverflow})`
         : stats.repairCapped
         ? '已达上限'
         : '上限 4'
@@ -167,20 +183,21 @@ export class CargoGridComponent {
     const board = document.createElement('div');
     board.className = 'cargo-board-outer';
     board.setAttribute('role', 'grid');
-    board.setAttribute('aria-label', '4乘4船舱拼装网格');
+    board.setAttribute('aria-label', '4乘4船舱拼装网格，方向键移动焦点，回车选取或放置，R键旋转');
     this.boardEl = board;
 
     if (this.invalidToastText) {
       const toast = document.createElement('div');
       toast.className = 'drag-reason-toast';
+      toast.setAttribute('role', 'alert');
       toast.textContent = this.invalidToastText;
       board.appendChild(toast);
     }
 
-    // 2a. Background 16 cells
+    // 2a. Background 16 cells with roving tabindex (F10)
     const cellsWrap = document.createElement('div');
     cellsWrap.className = 'cargo-grid-cells';
-    const preview = this.computeDragPreview();
+    const preview = this.computeActivePreview();
 
     for (let y = 0; y < GRID_SIZE; y++) {
       for (let x = 0; x < GRID_SIZE; x++) {
@@ -188,6 +205,35 @@ export class CargoGridComponent {
         cellEl.className = 'cargo-cell';
         cellEl.dataset.cx = String(x);
         cellEl.dataset.cy = String(y);
+        cellEl.setAttribute('role', 'gridcell');
+
+        const isRoving = this.focusedCell.x === x && this.focusedCell.y === y;
+        cellEl.tabIndex = isRoving ? 0 : -1;
+        if (isRoving && this.gridHasFocus) {
+          cellEl.classList.add('kb-focused');
+        }
+
+        const occupant = findItemAtCell(bay, x, y);
+        const occName = occupant ? getItemDef(occupant.item.defId).name : '空位';
+        cellEl.setAttribute('aria-label', `第${y + 1}行第${x + 1}列 ${occName}`);
+
+        cellEl.addEventListener('focus', () => {
+          this.focusedCell = { x, y };
+          if (!this.gridHasFocus) {
+            this.gridHasFocus = true;
+            this.updateCellVisualFocusAndPreview();
+          }
+        });
+        cellEl.addEventListener('blur', () => {
+          queueMicrotask(() => {
+            if (this.boardEl && !this.boardEl.contains(document.activeElement)) {
+              this.gridHasFocus = false;
+              this.boardEl
+                .querySelectorAll('.kb-focused')
+                .forEach((el) => el.classList.remove('kb-focused'));
+            }
+          });
+        });
 
         if (preview) {
           const inCells = preview.cells.some((c) => c.x === x && c.y === y);
@@ -224,7 +270,8 @@ export class CargoGridComponent {
       const isSelected =
         this.selected?.zone === 'grid' && this.selected.instanceId === placed.item.instanceId;
       const isDraggingThis =
-        this.drag?.active && this.drag.item.instanceId === placed.item.instanceId;
+        (this.drag?.active && this.drag.item.instanceId === placed.item.instanceId) ||
+        (this.carrying && isSelected);
 
       const node = document.createElement('div');
       node.className = 'placed-item-node';
@@ -267,19 +314,19 @@ export class CargoGridComponent {
         }
       }
 
-      // Upright quality / borrowed / stat badges placed on first & last occupied cells
+      // Upright quality / borrowed / stat badges placed on first & last occupied cells (strictly >= 12px, F08)
       const firstCell = cells[0];
       const lastCell = cells[cells.length - 1];
 
       if (def.category === 'equipment') {
         const qBadge = document.createElement('div');
         qBadge.className = 'item-upright-badge badge-top-left';
-        qBadge.style.left = `calc(${((firstCell.x - placed.x) / bounds.width) * 100}% + 3px)`;
-        qBadge.style.top = `calc(${((firstCell.y - placed.y) / bounds.height) * 100}% + 3px)`;
+        qBadge.style.left = `calc(${((firstCell.x - placed.x) / bounds.width) * 100}% + 2px)`;
+        qBadge.style.top = `calc(${((firstCell.y - placed.y) / bounds.height) * 100}% + 2px)`;
         const notchHtml =
           def.quality === 'improved'
-            ? `<span class="quality-notches"><span class="quality-notch improved"></span><span class="quality-notch improved"></span></span>`
-            : `<span class="quality-notches"><span class="quality-notch"></span></span>`;
+            ? `<span class="quality-notches" aria-label="优良"><span class="quality-notch improved"></span><span class="quality-notch improved"></span></span>`
+            : `<span class="quality-notches" aria-label="普通"><span class="quality-notch"></span></span>`;
         qBadge.innerHTML = placed.item.isBorrowed ? `${notchHtml}借` : notchHtml;
         node.appendChild(qBadge);
 
@@ -289,10 +336,10 @@ export class CargoGridComponent {
         valBadge.style.top = 'auto';
         valBadge.style.right = `calc(${
           ((bounds.width - 1 - (lastCell.x - placed.x)) / bounds.width) * 100
-        }% + 3px)`;
+        }% + 2px)`;
         valBadge.style.bottom = `calc(${
           ((bounds.height - 1 - (lastCell.y - placed.y)) / bounds.height) * 100
-        }% + 3px)`;
+        }% + 2px)`;
 
         if (def.kind === 'laser') {
           valBadge.textContent = `攻${laserBonusMap.get(placed.item.instanceId) ?? def.attackBonus}`;
@@ -309,18 +356,18 @@ export class CargoGridComponent {
         valBadge.className = 'item-upright-badge badge-bottom-right badge-amber';
         valBadge.style.right = `calc(${
           ((bounds.width - 1 - (lastCell.x - placed.x)) / bounds.width) * 100
-        }% + 3px)`;
+        }% + 2px)`;
         valBadge.style.bottom = `calc(${
           ((bounds.height - 1 - (lastCell.y - placed.y)) / bounds.height) * 100
-        }% + 3px)`;
+        }% + 2px)`;
         valBadge.textContent = `${placed.item.value}¤`;
         node.appendChild(valBadge);
 
         if (def.isCollectible) {
           const cBadge = document.createElement('div');
           cBadge.className = 'item-upright-badge badge-top-left badge-amber';
-          cBadge.style.left = `calc(${((firstCell.x - placed.x) / bounds.width) * 100}% + 3px)`;
-          cBadge.style.top = `calc(${((firstCell.y - placed.y) / bounds.height) * 100}% + 3px)`;
+          cBadge.style.left = `calc(${((firstCell.x - placed.x) / bounds.width) * 100}% + 2px)`;
+          cBadge.style.top = `calc(${((firstCell.y - placed.y) / bounds.height) * 100}% + 2px)`;
           cBadge.textContent = '藏';
           node.appendChild(cBadge);
         }
@@ -361,10 +408,10 @@ export class CargoGridComponent {
         svg.appendChild(dot1);
 
         const pill = document.createElementNS(svgNS, 'rect');
-        pill.setAttribute('x', String(mx - 17));
-        pill.setAttribute('y', String(my - 11));
-        pill.setAttribute('width', '34');
-        pill.setAttribute('height', '22');
+        pill.setAttribute('x', String(mx - 19));
+        pill.setAttribute('y', String(my - 12));
+        pill.setAttribute('width', '38');
+        pill.setAttribute('height', '24');
         pill.setAttribute('rx', '6');
         pill.setAttribute('fill', '#111A29');
         pill.setAttribute('stroke', '#62D6DF');
@@ -373,10 +420,10 @@ export class CargoGridComponent {
 
         const txt = document.createElementNS(svgNS, 'text');
         txt.setAttribute('x', String(mx));
-        txt.setAttribute('y', String(my + 4));
+        txt.setAttribute('y', String(my + 5));
         txt.setAttribute('text-anchor', 'middle');
         txt.setAttribute('fill', '#62D6DF');
-        txt.setAttribute('font-size', '13');
+        txt.setAttribute('font-size', '15');
         txt.setAttribute('font-weight', '700');
         txt.textContent = `+${link.bonus}`;
         svg.appendChild(txt);
@@ -385,22 +432,47 @@ export class CargoGridComponent {
       board.appendChild(svg);
     }
 
-    // Board pointerdown listener (mask-based hit detection!)
+    // Board listeners: mask-based pointerdown + grid keyboard navigation (F10)
     board.addEventListener('pointerdown', this.handleBoardPointerDown);
+    board.addEventListener('keydown', this.handleBoardKeyDown);
     this.root.appendChild(board);
 
-    // 3. Staging & Discard Undo Area (shown during ARRANGE or if staging non-empty)
+    // 3. Staging & Discard Undo Area (shown during ARRANGE or if staging/discards non-empty)
     if (editable || bay.staging.length > 0) {
       this.renderStagingAndUndo(bay, editable);
     }
 
-    // 4. Selected Item Inspector
+    // 4. Compact Selected Item Action Bar & Expandable Inspector (F06)
     this.renderInspector(bay, editable);
+
+    if (wasCellFocused) {
+      this.focusCellElement(this.focusedCell.x, this.focusedCell.y);
+    }
 
     this.lastSnappedId = null;
   }
 
+  private focusCellElement(x: number, y: number): void {
+    const el = this.boardEl?.querySelector<HTMLElement>(
+      `.cargo-cell[data-cx="${x}"][data-cy="${y}"]`
+    );
+    if (el) {
+      el.focus({ preventScroll: true });
+      this.gridHasFocus = true;
+    }
+  }
+
+  private updateCellVisualFocusAndPreview(): void {
+    if (!this.bay) return;
+    this.render(this.bay, this.editable, true);
+  }
+
   private renderStagingAndUndo(bay: CargoBayState, editable: boolean): void {
+    // Keep empty staging compact so it doesn't waste height on 360x640 / 844x390 when there's nothing staged or discarded
+    if (bay.staging.length === 0 && bay.discardedThisArrange.length === 0) {
+      return;
+    }
+
     const wrap = document.createElement('div');
     wrap.className = `staging-bar ${bay.staging.length > 0 ? 'has-items' : ''}`;
 
@@ -410,7 +482,7 @@ export class CargoGridComponent {
       <span style="font-size:13px;font-weight:700;color:${
         bay.staging.length > 0 ? 'var(--accent-action)' : 'var(--text-secondary)'
       }">
-        暂存区 ${bay.staging.length > 0 ? `(${bay.staging.length} 件待放入或舍弃)` : '(空 · 可将舱内物品暂移此处腾位)'}
+        暂存区 ${bay.staging.length > 0 ? `(${bay.staging.length} 件待放入或舍弃)` : '(空)'}
       </span>
     `;
 
@@ -418,6 +490,7 @@ export class CargoGridComponent {
       const undoBtn = document.createElement('button');
       undoBtn.type = 'button';
       undoBtn.className = 'btn btn-compact';
+      undoBtn.id = 'btn-undo-discard';
       undoBtn.textContent = `撤销舍弃 (${bay.discardedThisArrange.length})`;
       undoBtn.onclick = () => {
         const res = undoDiscard(bay);
@@ -441,13 +514,19 @@ export class CargoGridComponent {
         const isSel =
           this.selected?.zone === 'staging' && this.selected.instanceId === st.item.instanceId;
 
-        const chip = document.createElement('div');
+        const chip = document.createElement('button');
+        chip.type = 'button';
         chip.className = `staging-chip ${isSel ? 'selected' : ''}`;
+        chip.dataset.stagingId = st.item.instanceId;
+        chip.setAttribute(
+          'aria-label',
+          `暂存物品 ${def.name} ${shape.label}，按回车或点击以放入船舱`
+        );
         chip.innerHTML = `
           <img src="${getItemImageUrl(st.item.defId)}" alt="${def.name}" style="transform: rotate(${
             st.rotation * 90
           }deg)" />
-          <div style="display:flex;flex-direction:column;gap:2px;">
+          <div style="display:flex;flex-direction:column;gap:1px;">
             <span style="font-size:13px;font-weight:700;">${def.name} ${
               def.category === 'equipment' ? `(${def.qualityLabel})` : ''
             }</span>
@@ -459,11 +538,33 @@ export class CargoGridComponent {
           </div>
         `;
 
+        // Keyboard Enter/Space on staging chip enters keyboard placement aiming inside 4x4 grid! (F10)
+        chip.addEventListener('keydown', (e) => {
+          if (hasOpenModal() || !editable) return;
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            soundEngine.unlock();
+            soundEngine.play('click');
+            this.selected = { zone: 'staging', instanceId: st.item.instanceId };
+            this.carrying = true;
+            const hint = findFirstValidPlacement(bay, st.item.defId, st.rotation);
+            if (hint) {
+              this.focusedCell = { x: hint.x, y: hint.y };
+            }
+            this.render(bay, editable, true);
+          } else if (e.key === 'r' || e.key === 'R') {
+            e.preventDefault();
+            this.selected = { zone: 'staging', instanceId: st.item.instanceId };
+            this.rotateSelected();
+          }
+        });
+
         chip.addEventListener('pointerdown', (e) => {
           if (!editable) return;
           e.preventDefault();
           soundEngine.unlock();
           this.selected = { zone: 'staging', instanceId: st.item.instanceId };
+          this.carrying = false;
           this.drag = {
             pointerId: e.pointerId,
             pointerType: e.pointerType,
@@ -492,20 +593,16 @@ export class CargoGridComponent {
   }
 
   private renderInspector(bay: CargoBayState, editable: boolean): void {
-    const card = document.createElement('div');
-    card.className = 'inspector-card';
-
+    // When nothing is selected in compact arrange mode, show a single-line hint instead of a tall box (F06)
     if (!this.selected) {
-      card.innerHTML = `
-        <div style="font-size:13px;color:var(--text-secondary);">
-          ${
-            editable
-              ? '点选或拖拽任意物品摆放至 4×4 船舱。选中后点击空位可直接放置，按 R 或点击旋转调整方向。'
-              : '点击船舱内任意物品查看详细属性与占格说明（当前阶段已锁定布局）。'
-          }
-        </div>
-      `;
-      this.root.appendChild(card);
+      const hint = document.createElement('div');
+      hint.style.fontSize = '12px';
+      hint.style.color = 'var(--text-secondary)';
+      hint.style.width = '100%';
+      hint.textContent = editable
+        ? '操作：拖放或点选物品→点空位；键盘 Tab 进网格，方向键选格，Enter 取放，R 旋转。'
+        : '点击船舱内物品可查看属性（当前阶段已锁定布局）。';
+      this.root.appendChild(hint);
       return;
     }
 
@@ -531,27 +628,28 @@ export class CargoGridComponent {
         ? `<span class="tag ${def.quality === 'improved' ? 'tag-energy' : ''}">${
             def.quality === 'improved' ? '‖ 优良' : '| 普通'
           }</span>`
-        : `<span class="tag tag-amber">估值 ${item.value} · 每格 ${perCell}</span>`,
+        : `<span class="tag tag-amber">${item.value}¤ (${perCell}/格)</span>`,
     ];
 
     if (item.isBorrowed) {
-      tags.push(`<span class="tag">借用 · 不可出售</span>`);
+      tags.push(`<span class="tag">借用</span>`);
     } else if (def.category === 'equipment') {
-      tags.push(`<span class="tag">返航回收 ${item.value}</span>`);
+      tags.push(`<span class="tag">回收 ${item.value}</span>`);
     }
     if (def.category === 'cargo' && def.isCollectible) {
-      tags.push(`<span class="tag tag-amber">返航可留作收藏</span>`);
+      tags.push(`<span class="tag tag-amber">可收藏</span>`);
     }
+
+    const card = document.createElement('div');
+    card.className = 'inspector-card';
 
     const top = document.createElement('div');
     top.className = 'inspector-top';
     top.innerHTML = `
-      <div>
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;">
-          <strong style="font-size:15px;">${def.name}</strong>
-          ${tags.join('')}
-        </div>
-        <div style="font-size:13px;color:var(--text-secondary);">${def.detail}</div>
+      <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
+        <strong style="font-size:14px;">${def.name}</strong>
+        ${tags.join('')}
+        ${this.carrying ? '<span class="tag tag-amber">放置瞄准中 · Enter确认</span>' : ''}
       </div>
     `;
     card.appendChild(top);
@@ -563,7 +661,8 @@ export class CargoGridComponent {
       const rotateBtn = document.createElement('button');
       rotateBtn.type = 'button';
       rotateBtn.className = 'btn btn-energy btn-compact';
-      rotateBtn.textContent = '旋转 90° (R)';
+      rotateBtn.id = 'btn-rotate-selected';
+      rotateBtn.textContent = '旋转 (R)';
       rotateBtn.onclick = () => this.rotateSelected();
       actions.appendChild(rotateBtn);
 
@@ -571,12 +670,14 @@ export class CargoGridComponent {
         const toStageBtn = document.createElement('button');
         toStageBtn.type = 'button';
         toStageBtn.className = 'btn btn-compact';
-        toStageBtn.textContent = '移至暂存区';
+        toStageBtn.id = 'btn-move-to-staging';
+        toStageBtn.textContent = '移至暂存';
         toStageBtn.onclick = () => {
           const res = movePlacedToStaging(bay, item.instanceId);
           if (res.ok) {
             soundEngine.play('click');
             this.selected = { zone: 'staging', instanceId: item.instanceId };
+            this.carrying = false;
             this.callbacks.onBayChange(res.bay);
           }
         };
@@ -586,19 +687,22 @@ export class CargoGridComponent {
       const discardBtn = document.createElement('button');
       discardBtn.type = 'button';
       discardBtn.className = 'btn btn-danger btn-compact';
-      discardBtn.textContent = '舍弃（可撤销）';
-      discardBtn.onclick = () => {
-        const res = discardItem(bay, item.instanceId);
-        if (res.ok) {
-          soundEngine.play('click');
-          this.selected = null;
-          this.callbacks.onBayChange(res.bay);
-        }
-      };
+      discardBtn.id = 'btn-discard-selected';
+      discardBtn.textContent = '舍弃';
+      discardBtn.onclick = () => this.discardSelected();
       actions.appendChild(discardBtn);
 
       card.appendChild(actions);
     }
+
+    // On-demand expandable detail text so compact viewports don't waste vertical height (F06)
+    const details = document.createElement('details');
+    details.className = 'inspector-details';
+    details.innerHTML = `
+      <summary>物品说明 ▾（${def.summary}）</summary>
+      <div style="margin-top:4px;">${def.detail}</div>
+    `;
+    card.appendChild(details);
 
     this.root.appendChild(card);
   }
@@ -614,17 +718,25 @@ export class CargoGridComponent {
     ) {
       return null;
     }
-    const cx = Math.min(GRID_SIZE - 1, Math.max(0, Math.floor(((clientX - rect.left) / rect.width) * GRID_SIZE)));
-    const cy = Math.min(GRID_SIZE - 1, Math.max(0, Math.floor(((clientY - rect.top) / rect.height) * GRID_SIZE)));
+    const cx = Math.min(
+      GRID_SIZE - 1,
+      Math.max(0, Math.floor(((clientX - rect.left) / rect.width) * GRID_SIZE))
+    );
+    const cy = Math.min(
+      GRID_SIZE - 1,
+      Math.max(0, Math.floor(((clientY - rect.top) / rect.height) * GRID_SIZE))
+    );
     return { x: cx, y: cy };
   }
 
   private handleBoardPointerDown = (e: PointerEvent): void => {
-    if (!this.bay) return;
+    if (hasOpenModal() || !this.bay) return;
     soundEngine.unlock();
     const cell = this.getCellFromPoint(e.clientX, e.clientY);
     if (!cell) return;
 
+    this.focusedCell = cell;
+    this.carrying = false;
     const hitItem = findItemAtCell(this.bay, cell.x, cell.y);
 
     // If not editable, only allow selecting to inspect
@@ -637,7 +749,7 @@ export class CargoGridComponent {
 
     // If user tapped an empty cell while an item is selected -> tap-to-place!
     if (!hitItem && this.selected) {
-      this.tryTapPlace(cell.x, cell.y);
+      this.tryPlaceAtCell(cell.x, cell.y, false);
       return;
     }
 
@@ -664,7 +776,93 @@ export class CargoGridComponent {
     }
   };
 
+  /**
+   * Full keyboard grid navigation & placement (F10).
+   */
+  private handleBoardKeyDown = (e: KeyboardEvent): void => {
+    if (hasOpenModal() || !this.bay) return;
+
+    let dx = 0;
+    let dy = 0;
+    if (e.key === 'ArrowLeft') dx = -1;
+    else if (e.key === 'ArrowRight') dx = 1;
+    else if (e.key === 'ArrowUp') dy = -1;
+    else if (e.key === 'ArrowDown') dy = 1;
+
+    if (dx !== 0 || dy !== 0) {
+      e.preventDefault();
+      const nx = Math.max(0, Math.min(GRID_SIZE - 1, this.focusedCell.x + dx));
+      const ny = Math.max(0, Math.min(GRID_SIZE - 1, this.focusedCell.y + dy));
+      this.focusedCell = { x: nx, y: ny };
+      this.gridHasFocus = true;
+      this.render(this.bay, this.editable, true);
+      return;
+    }
+
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      soundEngine.unlock();
+      const { x, y } = this.focusedCell;
+
+      if (!this.editable) {
+        const hit = findItemAtCell(this.bay, x, y);
+        this.selected = hit ? { zone: 'grid', instanceId: hit.item.instanceId } : null;
+        soundEngine.play('click');
+        this.render(this.bay, this.editable, true);
+        return;
+      }
+
+      // If currently carrying an item via keyboard (or a staging item is selected), place at focusedCell!
+      if (this.selected && (this.carrying || this.selected.zone === 'staging')) {
+        this.tryPlaceAtCell(x, y, true);
+        return;
+      }
+
+      // Otherwise grab/select the item occupying focusedCell
+      const hit = findItemAtCell(this.bay, x, y);
+      if (hit) {
+        this.selected = { zone: 'grid', instanceId: hit.item.instanceId };
+        this.carrying = true;
+        soundEngine.play('click');
+        this.render(this.bay, this.editable, true);
+      } else if (this.selected) {
+        // Selected grid item + pressing Enter on empty cell moves it there
+        this.tryPlaceAtCell(x, y, true);
+      }
+      return;
+    }
+
+    if (e.key === 'r' || e.key === 'R') {
+      if (!this.editable || !this.selected) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.rotateSelected(true);
+      return;
+    }
+
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (!this.editable || !this.selected) return;
+      e.preventDefault();
+      this.discardSelected(true);
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      if (this.carrying || this.selected) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (this.carrying) {
+          this.carrying = false;
+        } else {
+          this.selected = null;
+        }
+        this.render(this.bay, this.editable, true);
+      }
+    }
+  };
+
   private handleWindowPointerMove = (e: PointerEvent): void => {
+    if (hasOpenModal()) return;
     if (!this.drag || e.pointerId !== this.drag.pointerId || !this.bay || !this.editable) return;
 
     const dx = e.clientX - this.drag.startClientX;
@@ -697,6 +895,11 @@ export class CargoGridComponent {
     const d = this.drag;
     this.cleanupDragGhost();
     this.drag = null;
+
+    if (hasOpenModal()) {
+      this.render(this.bay, this.editable);
+      return;
+    }
 
     if (!d.active) {
       // It was a tap on an item!
@@ -746,19 +949,24 @@ export class CargoGridComponent {
   };
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    // F01: strictly isolate all background grid shortcuts when any modal dialog is open
     if (hasOpenModal()) return;
     if (!this.editable || !this.bay || !this.selected) return;
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    // If focus is inside the board itself, handleBoardKeyDown already handles it
+    if (this.boardEl && this.boardEl.contains(e.target as Node)) return;
+
     if (e.key === 'r' || e.key === 'R') {
       e.preventDefault();
       this.rotateSelected();
     } else if (e.key === 'Escape') {
+      this.carrying = false;
       this.selected = null;
       this.render(this.bay, this.editable);
     }
   };
 
-  private tryTapPlace(cellX: number, cellY: number): void {
+  private tryPlaceAtCell(cellX: number, cellY: number, fromKeyboard: boolean): void {
     if (!this.bay || !this.selected || !this.editable) return;
 
     const isStaging = this.selected.zone === 'staging';
@@ -769,11 +977,15 @@ export class CargoGridComponent {
 
     const def = getItemDef(entry.item.defId);
     const bounds = getShapeBounds(def.shapeId, entry.rotation);
-    // Clamp origin slightly if tapping right/bottom edge so placing multi-cell items feels effortless
-    const preferredOrigins: GridCoord[] = [
-      { x: cellX, y: cellY },
-      { x: Math.min(cellX, GRID_SIZE - bounds.width), y: Math.min(cellY, GRID_SIZE - bounds.height) },
-    ];
+    const preferredOrigins: GridCoord[] = fromKeyboard
+      ? [{ x: cellX, y: cellY }] // exact feedback for keyboard aiming!
+      : [
+          { x: cellX, y: cellY },
+          {
+            x: Math.min(cellX, GRID_SIZE - bounds.width),
+            y: Math.min(cellY, GRID_SIZE - bounds.height),
+          },
+        ];
 
     let lastReason: PlacementFailureReason | undefined;
     for (const orig of preferredOrigins) {
@@ -783,8 +995,13 @@ export class CargoGridComponent {
       if (res.ok) {
         this.lastSnappedId = entry.item.instanceId;
         this.selected = { zone: 'grid', instanceId: entry.item.instanceId };
+        this.carrying = false;
+        this.focusedCell = { x: orig.x, y: orig.y };
         soundEngine.play('place');
         this.callbacks.onBayChange(res.bay);
+        if (fromKeyboard) {
+          this.focusCellElement(orig.x, orig.y);
+        }
         return;
       }
       lastReason = res.reason;
@@ -792,16 +1009,19 @@ export class CargoGridComponent {
 
     this.showInvalidReason(reasonToZh(lastReason));
     soundEngine.play('invalid');
-    this.render(this.bay, this.editable);
+    this.render(this.bay, this.editable, fromKeyboard);
   }
 
-  private rotateSelected(): void {
+  private rotateSelected(restoreCellFocus = false): void {
     if (!this.bay || !this.selected || !this.editable) return;
     if (this.selected.zone === 'staging') {
       const res = rotateStagingItem(this.bay, this.selected.instanceId);
       if (res.ok) {
         soundEngine.play('rotate');
         this.callbacks.onBayChange(res.bay);
+        if (restoreCellFocus) {
+          this.focusCellElement(this.focusedCell.x, this.focusedCell.y);
+        }
       }
     } else {
       const res = rotatePlacedItemInPlace(this.bay, this.selected.instanceId);
@@ -809,32 +1029,72 @@ export class CargoGridComponent {
         this.lastSnappedId = this.selected.instanceId;
         soundEngine.play('rotate');
         this.callbacks.onBayChange(res.bay);
+        if (restoreCellFocus) {
+          this.focusCellElement(this.focusedCell.x, this.focusedCell.y);
+        }
       } else {
         this.showInvalidReason(`旋转空间不足：${reasonToZh(res.reason)}`);
         soundEngine.play('invalid');
-        this.render(this.bay, this.editable);
+        this.render(this.bay, this.editable, restoreCellFocus);
       }
     }
   }
 
-  private computeDragPreview(): {
+  private discardSelected(restoreCellFocus = false): void {
+    if (!this.bay || !this.selected || !this.editable) return;
+    const res = discardItem(this.bay, this.selected.instanceId);
+    if (res.ok) {
+      soundEngine.play('click');
+      this.selected = null;
+      this.carrying = false;
+      this.callbacks.onBayChange(res.bay);
+      if (restoreCellFocus) {
+        this.focusCellElement(this.focusedCell.x, this.focusedCell.y);
+      }
+    }
+  }
+
+  private computeActivePreview(): {
     valid: boolean;
     cells: readonly GridCoord[];
     conflictCells: readonly GridCoord[];
   } | null {
-    if (!this.drag?.active || !this.bay) return null;
-    if (this.drag.hoverOriginX === null || this.drag.hoverOriginY === null) return null;
-    const ignoreId = this.drag.zone === 'grid' ? this.drag.item.instanceId : undefined;
-    const check = checkPlacement(
-      this.bay,
-      this.drag.item.defId,
-      this.drag.hoverOriginX,
-      this.drag.hoverOriginY,
-      this.drag.rotation,
-      ignoreId,
-      !this.editable
-    );
-    return check;
+    if (!this.bay) return null;
+
+    // 1. Active pointer drag preview
+    if (this.drag?.active && this.drag.hoverOriginX !== null && this.drag.hoverOriginY !== null) {
+      const ignoreId = this.drag.zone === 'grid' ? this.drag.item.instanceId : undefined;
+      return checkPlacement(
+        this.bay,
+        this.drag.item.defId,
+        this.drag.hoverOriginX,
+        this.drag.hoverOriginY,
+        this.drag.rotation,
+        ignoreId,
+        !this.editable
+      );
+    }
+
+    // 2. Active keyboard carrying / aiming preview (F10)
+    if (this.gridHasFocus && this.editable && this.selected && (this.carrying || this.selected.zone === 'staging')) {
+      const entry =
+        this.selected.zone === 'staging'
+          ? this.bay.staging.find((s) => s.item.instanceId === this.selected?.instanceId)
+          : this.bay.placed.find((p) => p.item.instanceId === this.selected?.instanceId);
+      if (!entry) return null;
+      const ignoreId = this.selected.zone === 'grid' ? entry.item.instanceId : undefined;
+      return checkPlacement(
+        this.bay,
+        entry.item.defId,
+        this.focusedCell.x,
+        this.focusedCell.y,
+        entry.rotation,
+        ignoreId,
+        !this.editable
+      );
+    }
+
+    return null;
   }
 
   private createDragGhost(drag: DragState): void {

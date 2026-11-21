@@ -27,6 +27,8 @@ export class BaseScene extends Phaser.Scene {
   private buildCelebrateTimer = 0;
   private celebrateBuilding: BuildingId | null = null;
   private stars: { nx: number; ny: number; r: number; a: number }[] = [];
+  private viewW = 390;
+  private viewH = 260;
 
   constructor() {
     super({ key: 'BaseScene' });
@@ -38,6 +40,9 @@ export class BaseScene extends Phaser.Scene {
   }
 
   create(): void {
+    this.viewW = this.scale.width || 390;
+    this.viewH = this.scale.height || 260;
+    this.cameras.main.setViewport(0, 0, this.viewW, this.viewH);
     this.cameras.main.setBackgroundColor('#111A29');
 
     // Subtle non-collectible background stars (deterministic pattern)
@@ -66,6 +71,18 @@ export class BaseScene extends Phaser.Scene {
     });
   }
 
+  syncViewport(w: number, h: number): void {
+    if (w < 16 || h < 16) return;
+    this.viewW = w;
+    this.viewH = h;
+    if (this.cameras?.main) {
+      this.cameras.main.setViewport(0, 0, w, h);
+    }
+    if (this.scene.isActive() && this.bgGraphics) {
+      this.redrawStatic();
+    }
+  }
+
   setState(state: BaseSceneState): void {
     const newlyBuilt = state.recentlyBuiltId;
     if (newlyBuilt && newlyBuilt !== this.celebrateBuilding) {
@@ -92,14 +109,18 @@ export class BaseScene extends Phaser.Scene {
     this.drawDynamicLayer();
   }
 
-  private handleResize(): void {
+  private handleResize(gameSize?: Phaser.Structs.Size): void {
     if (!this.scene.isActive()) return;
-    this.redrawStatic();
+    if (gameSize && gameSize.width > 0 && gameSize.height > 0) {
+      this.syncViewport(gameSize.width, gameSize.height);
+    } else {
+      this.syncViewport(this.scale.width || 390, this.scale.height || 260);
+    }
   }
 
   private getLayout() {
-    const w = this.scale.width || 390;
-    const h = this.scale.height || 300;
+    const w = this.viewW || this.scale.width || 390;
+    const h = this.viewH || this.scale.height || 260;
     const cx = w * 0.5;
     const cy = h * 0.57;
     // Unit scale fits cleanly on both 360px portrait and 1366px desktop

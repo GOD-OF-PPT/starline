@@ -16,7 +16,7 @@ import {
   type RouteSpec,
   type RouteType,
 } from '../data/nodes';
-import { TUTORIAL_SCRIPT } from '../data/tutorial';
+import { TUTORIAL_INITIAL_CARGO, TUTORIAL_SCRIPT } from '../data/tutorial';
 import { calculateBuildStats, type BuildStats } from './buildStats';
 import { simulateCombat, type CombatSimulationResult } from './combat';
 import {
@@ -24,6 +24,7 @@ import {
   createEmptyCargoBay,
   type CargoBayState,
   type ItemInstance,
+  type PlacedItem,
 } from './inventory';
 import { SeededRng, createRandomSeed, type RngCursor } from './rng';
 
@@ -91,24 +92,49 @@ export function startExpedition(options: StartExpeditionOptions): ExpeditionStat
   const expeditionId =
     options.expeditionId ?? `exp_${Date.now().toString(36)}_${(seed >>> 0).toString(36)}`;
 
+  let seq = 0;
   const starterItem: ItemInstance = {
-    instanceId: `${expeditionId}_item_0`,
+    instanceId: `${expeditionId}_item_${seq++}`,
     defId: loadout.starterDefId,
     isBorrowed: true,
     value: 0,
     acquiredNode: 0,
   };
 
+  const placed: PlacedItem[] = [
+    {
+      item: starterItem,
+      x: loadout.starterOrigin.x,
+      y: loadout.starterOrigin.y,
+      rotation: 0,
+    },
+  ];
+  const discoveredDuringRun: string[] = [loadout.starterDefId];
+
+  if (options.isTutorial) {
+    for (const pre of TUTORIAL_INITIAL_CARGO) {
+      const def = getCargoDef(pre.cargoKind);
+      placed.push({
+        item: {
+          instanceId: `${expeditionId}_item_${seq++}`,
+          defId: def.defId,
+          isBorrowed: false,
+          value: pre.value,
+          acquiredNode: 0,
+        },
+        x: pre.x,
+        y: pre.y,
+        rotation: pre.rotation,
+      });
+      if (!discoveredDuringRun.includes(def.defId)) {
+        discoveredDuringRun.push(def.defId);
+      }
+    }
+  }
+
   const bay: CargoBayState = {
     ...createEmptyCargoBay(),
-    placed: [
-      {
-        item: starterItem,
-        x: loadout.starterOrigin.x,
-        y: loadout.starterOrigin.y,
-        rotation: 0,
-      },
-    ],
+    placed,
   };
 
   return {
@@ -124,13 +150,13 @@ export function startExpedition(options: StartExpeditionOptions): ExpeditionStat
     accumulatedBounty: 0,
     bay,
     rngCursor: { seed: seed >>> 0, draws: 0 },
-    nextInstanceSeq: 1,
+    nextInstanceSeq: seq,
     recentEquipmentKinds: [],
     activeCombat: null,
     lastCombat: null,
     pendingRewards: null,
     settlementReason: null,
-    discoveredDuringRun: [loadout.starterDefId],
+    discoveredDuringRun,
   };
 }
 
