@@ -142,9 +142,15 @@ export class V2CombatScene extends Phaser.Scene {
   private playerFlashMs = 0;
   private shieldArcLife = 0;
   private counterBackflowLife = 0;
+  private synergyPulseLife = 0;
+  private synergyTargetKind: MountedModuleEntry['kind'] | null = null;
+  private hangarDoorLife = 0;
+  private prevDronesCount = 0;
   private activeDronesCount = 0;
   private heavyChargingCount = 0;
+  private enemyChargeMs = 0;
   private shakeTimerMs = 0;
+  private onAssetError: ((key: string) => void) | null = null;
 
   private roundTimerMs = 0;
   private nextRoundIdx = 0;
@@ -158,6 +164,10 @@ export class V2CombatScene extends Phaser.Scene {
 
   setPaused(paused: boolean): void {
     this.externalPaused = paused;
+  }
+
+  setAssetErrorHandler(handler: (key: string) => void): void {
+    this.onAssetError = handler;
   }
 
   private applyCameraViewport(): void {
@@ -180,13 +190,19 @@ export class V2CombatScene extends Phaser.Scene {
     }
   }
 
-  init(data?: { playback?: V2StagePlayback }): void {
+  init(data?: { playback?: V2StagePlayback; onAssetError?: (key: string) => void }): void {
     if (data?.playback) {
       this.playback = data.playback;
+    }
+    if (data?.onAssetError) {
+      this.onAssetError = data.onAssetError;
     }
   }
 
   preload(): void {
+    this.load.on('loaderror', (file: { key?: string }) => {
+      this.onAssetError?.(file?.key ?? 'unknown');
+    });
     const queue: [string, string][] = [
       ['bg.sector.1', getSectorBgImageUrl(1)],
       ['bg.sector.2', getSectorBgImageUrl(2)],
@@ -551,8 +567,13 @@ export class V2CombatScene extends Phaser.Scene {
     this.playerFlashMs = 0;
     this.shieldArcLife = 0;
     this.counterBackflowLife = 0;
+    this.synergyPulseLife = 0;
+    this.synergyTargetKind = null;
+    this.hangarDoorLife = 0;
+    this.prevDronesCount = 0;
     this.activeDronesCount = 0;
     this.heavyChargingCount = 0;
+    this.enemyChargeMs = 0;
     this.shakeTimerMs = 0;
 
     const pb = this.playback;
@@ -749,6 +770,7 @@ export class V2CombatScene extends Phaser.Scene {
     const pb = this.playback;
     if (!pb || !this.playerSprite) return;
     const reduced = pb.settings.reducedMotion;
+    const vSpec = pb.shipVisualSpec;
 
     const pHp = getShipHardpoints(`ship.player.${pb.shipId}`);
     const pMuzzle = this.getSpritePoint(this.playerSprite, pHp.muzzle);
@@ -758,8 +780,13 @@ export class V2CombatScene extends Phaser.Scene {
     const droneMuzzle = this.getModuleMuzzle('drone_bay') ?? { x: this.playerBaseX + 24, y: this.playerBaseY + 18 };
     const counterMuzzle = this.getModuleMuzzle('counter_ring') ?? { x: this.playerBaseX + 24, y: this.playerBaseY - 12 };
 
-    // Update countable drone & heavy charging telemetry
+    // Update countable drone & heavy charging telemetry + ventral hangar bay hatch launch cue
+    this.prevDronesCount = this.activeDronesCount;
     this.activeDronesCount = Object.values(log.droneCountsByHangar).reduce((a, b) => a + b, 0);
+    if (this.activeDronesCount > this.prevDronesCount) {
+      this.hangarDoorLife = 0.44;
+      this.rings.push({ x: droneMuzzle.x, y: droneMuzzle.y, maxR: 20, color: 0x7be8ff, life: 0.28, maxLife: 0.28 });
+    }
     this.heavyChargingCount = log.heavyChargingIds.length;
     if (this.heavyChargingCount > 0) {
       soundEngine.play('chargeUp');
@@ -770,6 +797,7 @@ export class V2CombatScene extends Phaser.Scene {
     let playedHeavy = false;
     let playedDrone = false;
     let playedFlak = false;
+    let shownSynergyTag = false;
 
     const dmgByEnemy = new Map<string, number>();
 
@@ -787,6 +815,12 @@ export class V2CombatScene extends Phaser.Scene {
         if (!playedHeavy) {
           soundEngine.play('heavyBlast');
           playedHeavy = true;
+          if (vSpec?.heavyBoosted && !shownSynergyTag) {
+            this.synergyPulseLife = 0.42;
+            this.synergyTargetKind = 'heavy';
+            this.spawnPopup(heavyMuzzle.x - 8, heavyMuzzle.y - 26, '联动·先手', '#F6B852');
+            shownSynergyTag = true;
+          }
         }
         this.playerRecoilX = -10;
         const hm = this.moduleSprites.find((m) => m.kind === 'heavy');
@@ -808,6 +842,12 @@ export class V2CombatScene extends Phaser.Scene {
         if (!playedDrone) {
           soundEngine.play('droneLaunch');
           playedDrone = true;
+          if (vSpec?.hangarBoosted && !shownSynergyTag) {
+            this.synergyPulseLife = 0.42;
+            this.synergyTargetKind = 'drone_bay';
+            this.spawnPopup(droneMuzzle.x, droneMuzzle.y + 20, '联动·编队', '#62D6DF');
+            shownSynergyTag = true;
+          }
         }
         const laneOffset = ((this.beams.length % 4) - 1.5) * 14;
         this.beams.push({
@@ -855,6 +895,12 @@ export class V2CombatScene extends Phaser.Scene {
         if (!playedLaser) {
           soundEngine.play('laserFire');
           playedLaser = true;
+          if (atk.sourceKind === 'laser' && vSpec?.laserBoosted && !shownSynergyTag) {
+            this.synergyPulseLife = 0.42;
+            this.synergyTargetKind = 'laser';
+            this.spawnPopup(laserMuzzle.x - 6, laserMuzzle.y - 22, '联动·充能', '#62D6DF');
+            shownSynergyTag = true;
+          }
         }
         this.playerRecoilX = Math.min(this.playerRecoilX, -4);
         const lm = this.moduleSprites.find((m) => m.kind === 'laser');
@@ -880,9 +926,12 @@ export class V2CombatScene extends Phaser.Scene {
       }
     }
 
-    // Enemy attacks -> player shield/hull
+    // Enemy attacks -> player shield/hull + armored/boss muzzle charge telegraph
     let totalHullDmg = 0;
     let totalPierce = 0;
+    if (log.enemyAttacks.length > 0) {
+      this.enemyChargeMs = 240;
+    }
     for (const ea of log.enemyAttacks) {
       const src = this.enemies.find((e) => e.enemyId === ea.enemyId);
       if (src) {
@@ -1052,10 +1101,11 @@ export class V2CombatScene extends Phaser.Scene {
       this.layoutModules(bobP);
     }
 
-    // Enemy bobbing + damaged hull state (<50% HP darkened tint + rising smoke puffs)
+    // Enemy bobbing + 3-state visual (Normal / Armored Charge / Damaged Smoke & Dimmed Flicker)
     this.smokeAccumMs += delta;
     const emitSmoke = !reduced && !lowQuality && this.smokeAccumMs >= 160;
     if (emitSmoke) this.smokeAccumMs = 0;
+    if (this.enemyChargeMs > 0) this.enemyChargeMs = Math.max(0, this.enemyChargeMs - delta);
 
     for (let i = 0; i < this.enemies.length; i++) {
       const e = this.enemies[i];
@@ -1072,7 +1122,8 @@ export class V2CombatScene extends Phaser.Scene {
         e.flashMs -= delta;
         e.sprite.setTintFill(0xffffff);
       } else if (isDamaged) {
-        e.sprite.setTint(0xb6c0cf);
+        const flicker = !reduced && Math.sin(this.elapsed * 18 + i * 3) > 0.72;
+        e.sprite.setTint(flicker ? 0x8fa1b8 : 0xb6c0cf);
       } else {
         e.sprite.clearTint();
       }
@@ -1101,6 +1152,44 @@ export class V2CombatScene extends Phaser.Scene {
     }
 
     this.fxGraphics.clear();
+
+    // Synergy Power Conduit Pulse (Origin: Hull Core -> Process: Illuminated Conduit -> Result: Energized Mount!)
+    if (this.synergyPulseLife > 0 && this.synergyTargetKind && this.playerSprite?.visible) {
+      this.synergyPulseLife = Math.max(0, this.synergyPulseLife - dt);
+      const a = Math.min(1, this.synergyPulseLife / 0.42);
+      const mod = this.moduleSprites.find((m) => m.kind === this.synergyTargetKind);
+      if (mod && mod.sprite.scene) {
+        const conduitColor = this.synergyTargetKind === 'heavy' ? 0xf6b852 : 0x62d6df;
+        this.fxGraphics.lineStyle(3, conduitColor, a * 0.92);
+        this.fxGraphics.lineBetween(this.playerBaseX - 8, this.playerBaseY, mod.sprite.x, mod.sprite.y);
+        this.fxGraphics.fillStyle(conduitColor, a * 0.55);
+        this.fxGraphics.fillCircle(mod.sprite.x, mod.sprite.y, 12 * a + 4);
+      }
+    }
+
+    // Ventral Drone Bay Hatch Opening Warm Launch Glow
+    if (this.hangarDoorLife > 0 && this.playerSprite?.visible) {
+      this.hangarDoorLife = Math.max(0, this.hangarDoorLife - dt);
+      const a = Math.min(1, this.hangarDoorLife / 0.44);
+      const dm = this.getModuleMuzzle('drone_bay');
+      if (dm) {
+        this.fxGraphics.fillStyle(0xf6b852, a * 0.42);
+        this.fxGraphics.fillEllipse(dm.x - 4, dm.y + 4, 26, 10);
+        this.fxGraphics.lineStyle(2, 0x7be8ff, a * 0.85);
+        this.fxGraphics.lineBetween(dm.x - 8, dm.y + 4, dm.x + 22, dm.y + 4);
+      }
+    }
+
+    // Enemy Armored/Boss Pre-Fire Charge Core Telegraph
+    if (this.enemyChargeMs > 0) {
+      const a = Math.min(1, this.enemyChargeMs / 240);
+      for (const e of this.enemies) {
+        if (e.dead || (e.spec.armor <= 0 && !e.spec.isBoss)) continue;
+        const eMuz = this.getSpritePoint(e.sprite, getShipHardpoints(`ship.enemy.${e.spec.spriteArchetype}`).muzzle);
+        this.fxGraphics.fillStyle(0xff8c52, a * 0.65);
+        this.fxGraphics.fillCircle(eMuz.x, eMuz.y, (e.spec.isBoss ? 14 : 9) * a);
+      }
+    }
 
     // Heavy Cannon amber charging halo directly at the mounted Heavy Railgun barrel
     if (this.heavyChargingCount > 0 && this.playerSprite) {

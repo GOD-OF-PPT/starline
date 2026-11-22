@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-11-22T04:21:07.528Z",
+  "timestamp": "2026-11-22T05:01:00.239Z",
   "checks": [
     {
       "id": "E01_TitleShowcaseEntry",
@@ -52,14 +52,34 @@
       "detail": "Expedition #3 combat progressed organically to Round 1 without freezing"
     },
     {
+      "id": "E15_MapSideBySideCompareCards",
+      "pass": true,
+      "detail": "Map displays 2 side-by-side route comparison cards (zero duplicate tabs)"
+    },
+    {
+      "id": "E16_MobileMapNext2LayersFocus",
+      "pass": true,
+      "detail": "Mobile 390×844 map focusVisible=true, layers=2, overflowX=0px"
+    },
+    {
       "id": "E09_WreckThreeHotspots",
       "pass": true,
       "detail": "3 spatial hotspots over wreck: [{\"spot\":\"armory\",\"w\":91,\"h\":52},{\"spot\":\"reactor\",\"w\":91,\"h\":52},{\"spot\":\"cargo\",\"w\":78,\"h\":52}]"
     },
     {
+      "id": "E17_ArrangeCargoHeroAboveFold",
+      "pass": true,
+      "detail": "Arrange sceneCollapsed=true, exteriorBar=true, boardBottom=521/768, stagingBottom=637"
+    },
+    {
       "id": "E10_StagingCardBounds_2x3Reactor",
       "pass": true,
       "detail": "Staging cards bounded cleanly: [{\"cardW\":215,\"cardH\":74,\"thumbW\":44,\"thumbH\":44,\"fitsList\":true},{\"cardW\":215,\"cardH\":74,\"thumbW\":44,\"thumbH\":44,\"fitsList\":true}]"
+    },
+    {
+      "id": "E18_EliteNormalForecastLabel",
+      "pass": true,
+      "detail": "Elite pre-combat forecast label: 按正常执行推演：有战败风险 9 回合"
     },
     {
       "id": "E11_EliteRound2TacticPauseAndSkipGuard",
@@ -70,6 +90,11 @@
       "id": "E12_ShowcaseIsolation",
       "pass": true,
       "detail": "Formal profile unchanged (credits=18, runs=3)"
+    },
+    {
+      "id": "E19_AssetClarityDiagnostics",
+      "pass": true,
+      "detail": "All 9 key assets loaded with naturalW >= 1x target CSS size at DPR=2 (canvas 2292×1344)"
     },
     {
       "id": "E13_Responsive_360x640",

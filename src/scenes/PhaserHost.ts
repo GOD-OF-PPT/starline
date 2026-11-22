@@ -25,6 +25,9 @@ export class PhaserHost {
   private pendingCombat: CombatScenePlayback | null = null;
   private pendingV2Stage: V2StagePlayback | null = null;
   private buildingClickHandler: ((id: BuildingId) => void) | null = null;
+  private berthClickHandler: (() => void) | null = null;
+  private assetErrorHandler: ((failedKeys: string[]) => void) | null = null;
+  private failedAssetKeys = new Set<string>();
   private ready = false;
   private lastW = 0;
   private lastH = 0;
@@ -32,6 +35,11 @@ export class PhaserHost {
   private lastBackingH = 0;
   private lowQuality = false;
   private currentDpr = 1;
+
+  private handleSceneAssetError = (key: string): void => {
+    this.failedAssetKeys.add(key);
+    this.assetErrorHandler?.([...this.failedAssetKeys]);
+  };
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -79,15 +87,23 @@ export class PhaserHost {
         this.game.scene.start('BaseScene', {
           state: this.pendingBase,
           onBuildingClick: this.buildingClickHandler ?? undefined,
+          onBerthClick: this.berthClickHandler ?? undefined,
+          onAssetError: this.handleSceneAssetError,
         });
         this.currentMode = 'base';
       } else if (targetMode === 'combat' && this.pendingCombat) {
         this.game.scene.stop('BaseScene');
-        this.game.scene.start('CombatScene', { playback: this.pendingCombat });
+        this.game.scene.start('CombatScene', {
+          playback: this.pendingCombat,
+          onAssetError: this.handleSceneAssetError,
+        });
         this.currentMode = 'combat';
       } else if (targetMode === 'v2_stage' && this.pendingV2Stage) {
         this.game.scene.stop('BaseScene');
-        this.game.scene.start('V2CombatScene', { playback: this.pendingV2Stage });
+        this.game.scene.start('V2CombatScene', {
+          playback: this.pendingV2Stage,
+          onAssetError: this.handleSceneAssetError,
+        });
         this.currentMode = 'v2_stage';
       } else {
         this.game.scene.stop('BaseScene');
@@ -174,6 +190,39 @@ export class PhaserHost {
     this.baseScene.setClickHandler(handler);
   }
 
+  onBerthClick(handler: () => void): void {
+    this.berthClickHandler = handler;
+    this.baseScene.setBerthClickHandler(handler);
+  }
+
+  onAssetLoadError(handler: (failedKeys: string[]) => void): void {
+    this.assetErrorHandler = handler;
+  }
+
+  retryFailedAssets(): void {
+    this.failedAssetKeys.clear();
+    if (!this.ready) return;
+    if (this.currentMode === 'base' && this.pendingBase) {
+      this.game.scene.start('BaseScene', {
+        state: this.pendingBase,
+        onBuildingClick: this.buildingClickHandler ?? undefined,
+        onBerthClick: this.berthClickHandler ?? undefined,
+        onAssetError: this.handleSceneAssetError,
+      });
+    } else if (this.currentMode === 'combat' && this.pendingCombat) {
+      this.game.scene.start('CombatScene', {
+        playback: this.pendingCombat,
+        onAssetError: this.handleSceneAssetError,
+      });
+    } else if (this.currentMode === 'v2_stage' && this.pendingV2Stage) {
+      this.game.scene.start('V2CombatScene', {
+        playback: this.pendingV2Stage,
+        onAssetError: this.handleSceneAssetError,
+      });
+    }
+    this.scheduleResize();
+  }
+
   showBase(state: BaseSceneState): void {
     this.pendingBase = state;
     const switching = this.currentMode !== 'base';
@@ -186,6 +235,8 @@ export class PhaserHost {
       this.game.scene.start('BaseScene', {
         state,
         onBuildingClick: this.buildingClickHandler ?? undefined,
+        onBerthClick: this.berthClickHandler ?? undefined,
+        onAssetError: this.handleSceneAssetError,
       });
     } else if (this.game.scene.isActive('BaseScene')) {
       this.baseScene.setState(state);
@@ -193,6 +244,8 @@ export class PhaserHost {
       this.game.scene.start('BaseScene', {
         state,
         onBuildingClick: this.buildingClickHandler ?? undefined,
+        onBerthClick: this.berthClickHandler ?? undefined,
+        onAssetError: this.handleSceneAssetError,
       });
     }
     this.scheduleResize();
@@ -207,11 +260,11 @@ export class PhaserHost {
     if (switching) {
       if (this.game.scene.isActive('BaseScene')) this.game.scene.stop('BaseScene');
       if (this.game.scene.isActive('V2CombatScene')) this.game.scene.stop('V2CombatScene');
-      this.game.scene.start('CombatScene', { playback });
+      this.game.scene.start('CombatScene', { playback, onAssetError: this.handleSceneAssetError });
     } else if (this.game.scene.isActive('CombatScene')) {
       this.combatScene.setPlayback(playback);
     } else {
-      this.game.scene.start('CombatScene', { playback });
+      this.game.scene.start('CombatScene', { playback, onAssetError: this.handleSceneAssetError });
     }
     this.scheduleResize();
   }
@@ -225,11 +278,11 @@ export class PhaserHost {
     if (switching) {
       if (this.game.scene.isActive('BaseScene')) this.game.scene.stop('BaseScene');
       if (this.game.scene.isActive('CombatScene')) this.game.scene.stop('CombatScene');
-      this.game.scene.start('V2CombatScene', { playback });
+      this.game.scene.start('V2CombatScene', { playback, onAssetError: this.handleSceneAssetError });
     } else if (this.game.scene.isActive('V2CombatScene')) {
       this.v2CombatScene.setPlayback(playback);
     } else {
-      this.game.scene.start('V2CombatScene', { playback });
+      this.game.scene.start('V2CombatScene', { playback, onAssetError: this.handleSceneAssetError });
     }
     this.scheduleResize();
   }

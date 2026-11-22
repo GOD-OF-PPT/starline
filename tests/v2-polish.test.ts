@@ -23,7 +23,10 @@ import { launchV2Expedition, validateV2PrepareLoadout } from '../src/v2/domain/l
 import {
   createFreshV2Profile,
   createFreshV2SaveData,
+  loadV2SaveData,
+  persistV2SaveData,
   validateV2SaveDataDetailed,
+  type V2StorageLike,
 } from '../src/v2/domain/persistenceV2';
 import { deriveV2ShipVisualSpec } from '../src/v2/domain/shipVisualSpec';
 import { computeV2PlacementTacticalDelta } from '../src/v2/domain/tacticalDelta';
@@ -371,4 +374,72 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
     );
     expect(lowOverload?.enabled).toBe(false);
   });
+
+  it('Elite Round-2 tactical pause survives full save/reload round-trip before and after decision without double-applying bonuses', () => {
+    const store = new Map<string, string>();
+    const memStorage: V2StorageLike = {
+      getItem: (k) => store.get(k) ?? null,
+      setItem: (k, v) => {
+        store.set(k, v);
+      },
+      removeItem: (k) => {
+        store.delete(k);
+      },
+    };
+
+    const run = createV2ShowcaseRun('trial_counter');
+    const atElite: V2RunState = {
+      ...run,
+      isShowcase: false,
+      phase: 'ENCOUNTER',
+      currentNodeId: 'L4A',
+      visitedNodeIds: ['L1A', 'L2A', 'L3A', 'L4A'],
+    };
+
+    const started = startV2CombatAtCurrentNode(atElite, 'weakest', { enableEliteTactic: true });
+    expect(started.ok).toBe(true);
+    const pendingBefore = started.run.activeCombat?.pendingDecision;
+    expect(pendingBefore?.chosen).toBeNull();
+
+    // 1. Persist right at Round-2 pause boundary (simulating F5 mid-pause!)
+    const saveMidPause = { ...createFreshV2SaveData(), activeRun: started.run };
+    expect(persistV2SaveData(memStorage, saveMidPause).ok).toBe(true);
+    const reloadedMidPause = loadV2SaveData(memStorage);
+    expect(reloadedMidPause.status).toBe('loaded');
+    if (reloadedMidPause.status !== 'loaded') return;
+
+    const restoredRun = reloadedMidPause.data.activeRun!;
+    expect(restoredRun.activeCombat?.pendingDecision?.decisionId).toBe(pendingBefore!.decisionId);
+    expect(restoredRun.activeCombat?.pendingDecision?.chosen).toBeNull();
+
+    // Wrong decisionId MUST be rejected
+    expect(commitV2EliteTacticDecision(restoredRun, 'wrong_id', 'overload').ok).toBe(false);
+
+    // 2. Commit Emergency Defense once -> persist -> reload
+    const committed = commitV2EliteTacticDecision(
+      restoredRun,
+      pendingBefore!.decisionId,
+      'emergency_defense'
+    );
+    expect(committed.ok).toBe(true);
+    expect(committed.run.activeCombat?.pendingDecision?.chosen).toBe('emergency_defense');
+
+    expect(
+      persistV2SaveData(memStorage, { ...reloadedMidPause.data, activeRun: committed.run }).ok
+    ).toBe(true);
+    const reloadedPostCommit = loadV2SaveData(memStorage);
+    expect(reloadedPostCommit.status).toBe('loaded');
+    if (reloadedPostCommit.status !== 'loaded') return;
+
+    const postCommitRun = reloadedPostCommit.data.activeRun!;
+    expect(postCommitRun.activeCombat?.pendingDecision?.chosen).toBe('emergency_defense');
+    // Re-committing after reload MUST fail so +8 shield / +6 dmg can NEVER stack!
+    expect(
+      commitV2EliteTacticDecision(postCommitRun, pendingBefore!.decisionId, 'emergency_defense').ok
+    ).toBe(false);
+    expect(
+      commitV2EliteTacticDecision(postCommitRun, pendingBefore!.decisionId, 'overload').ok
+    ).toBe(false);
+  });
 });
+

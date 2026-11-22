@@ -1,0 +1,99 @@
+{
+  "dpr": 2,
+  "canvasCssW": 1146,
+  "canvasCssH": 672,
+  "canvasBackingW": 2292,
+  "canvasBackingH": 1344,
+  "assets": [
+    {
+      "id": "station_worn",
+      "url": "/assets/base/station_worn.webp",
+      "targetCssW": 1146,
+      "targetCssH": 644,
+      "naturalW": 1280,
+      "naturalH": 720,
+      "ok": true,
+      "sourceToCssRatioW": 1.12
+    },
+    {
+      "id": "ship_cannon_skiff",
+      "url": "/assets/ships/player_cannon_skiff.webp",
+      "targetCssW": 390,
+      "targetCssH": 195,
+      "naturalW": 512,
+      "naturalH": 256,
+      "ok": true,
+      "sourceToCssRatioW": 1.31
+    },
+    {
+      "id": "mod_heavy_railgun",
+      "url": "/assets/modules/mod_heavy_railgun.webp",
+      "targetCssW": 180,
+      "targetCssH": 180,
+      "naturalW": 256,
+      "naturalH": 128,
+      "ok": true,
+      "sourceToCssRatioW": 1.42
+    },
+    {
+      "id": "mod_drone_bay",
+      "url": "/assets/modules/mod_drone_bay.webp",
+      "targetCssW": 148,
+      "targetCssH": 148,
+      "naturalW": 256,
+      "naturalH": 128,
+      "ok": true,
+      "sourceToCssRatioW": 1.73
+    },
+    {
+      "id": "mod_counter_ring",
+      "url": "/assets/modules/mod_counter_ring.webp",
+      "targetCssW": 117,
+      "targetCssH": 117,
+      "naturalW": 192,
+      "naturalH": 192,
+      "ok": true,
+      "sourceToCssRatioW": 1.64
+    },
+    {
+      "id": "enemy_frigate",
+      "url": "/assets/ships/enemy_frigate.webp",
+      "targetCssW": 390,
+      "targetCssH": 195,
+      "naturalW": 512,
+      "naturalH": 256,
+      "ok": true,
+      "sourceToCssRatioW": 1.31
+    },
+    {
+      "id": "item_laser_common",
+      "url": "/assets/items/equipment_laser_common.webp",
+      "targetCssW": 84,
+      "targetCssH": 168,
+      "naturalW": 192,
+      "naturalH": 384,
+      "ok": true,
+      "sourceToCssRatioW": 2.29
+    },
+    {
+      "id": "item_battery_common",
+      "url": "/assets/items/equipment_battery_common.webp",
+      "targetCssW": 84,
+      "targetCssH": 84,
+      "naturalW": 192,
+      "naturalH": 192,
+      "ok": true,
+      "sourceToCssRatioW": 2.29
+    },
+    {
+      "id": "item_mission_reactor",
+      "url": "/assets/items/mission_sealed_reactor.webp",
+      "targetCssW": 168,
+      "targetCssH": 252,
+      "naturalW": 384,
+      "naturalH": 576,
+      "ok": true,
+      "sourceToCssRatioW": 2.29
+    }
+  ]
+}
