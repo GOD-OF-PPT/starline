@@ -16,6 +16,7 @@ import {
   V2_EQUIPMENT_DEFS,
   V2_RESEARCH_COST_CREDITS,
   V2_WAREHOUSE_CAPACITY,
+  getEffectiveV2EquipmentBudgetCost,
   getMerchantBuybackPrice,
   getV2EquipmentDefByKind,
   type V2ArchetypeId,
@@ -1120,9 +1121,9 @@ export class V2AppController {
         this.liveCombatRound = resumeRound;
         this.liveCombatEventLine =
           pending?.chosen === 'overload'
-            ? '指令生效：火力过载 · 耗 4 盾追加 6 点直击'
+            ? '指令生效：火力过载 · 耗 3 盾/耐久追加 9 点无视护甲破甲直击'
             : pending?.chosen === 'emergency_defense'
-            ? '指令生效：紧急防御 · +8 护盾，本轮主动武器停火'
+            ? '指令生效：紧急防御 · 强化护盾并全炮停火（机库扩编与护盾反击保留）'
             : '';
         const prevLog = resumeRound > 0 ? sim.rounds[resumeRound - 1] : null;
         this.liveCombatPlayerHp = prevLog ? prevLog.playerHpAfter : sim.startingPlayerHp;
@@ -1794,7 +1795,7 @@ export class V2AppController {
             </button>`;
           }).join('')}
         </div>
-        <div class="v2-trial-bp-note">试航方案为普通品质整套借用（返航归还）；已研究永久蓝图可自由混搭单件借用、制造优良件并保存自定义预设。</div>
+        <div class="v2-trial-bp-note">试航方案为普通品质整套借用（返航归还，不可混搭外部件）；已研究永久蓝图可自由混搭、在研究台制造自有普通件（出航预算 -1）并保存预设；优良件仅限远航打捞或商人获取。</div>
       </div>
 
       <div class="v2-prep-group">
@@ -1855,6 +1856,14 @@ export class V2AppController {
           </div>
         </div>
 
+        ${
+          draft.trialBuildId
+            ? `<div class="system-banner banner-warn" style="margin:4px 0 8px 0;">
+                当前处于「${V2_TRIAL_BUILDS[draft.trialBuildId].shortName}」整套试航模式：可在右侧舱内拖动/旋转体验联动，点击上方「切回自由配装」即可增删设备与保存预设。
+              </div>`
+            : ''
+        }
+
         <div class="v2-pool-subtitle">永久蓝图借用（免费 · 返航归还）</div>
         <div class="v2-pool-chips">
           ${p.blueprints
@@ -1862,7 +1871,7 @@ export class V2AppController {
               const def = getV2EquipmentDefByKind(kind, 'common');
               const overBudget = check.totalBudget + def.budgetCost > check.maxBudget;
               return `<button type="button" class="v2-pool-btn" data-add-loan="${def.defId}" ${
-                overBudget || readOnly ? 'disabled' : ''
+                draft.trialBuildId || overBudget || readOnly ? 'disabled' : ''
               }>
                 <span class="v2-origin-badge origin-loan">借</span>
                 <img src="${getItemImageUrl(def.defId)}" alt="${def.name}" />
@@ -1872,7 +1881,7 @@ export class V2AppController {
             .join('')}
         </div>
 
-        <div class="v2-pool-subtitle">仓库自有设备（${p.equipmentWarehouse.length} 件 · 战败将损失实物）</div>
+        <div class="v2-pool-subtitle">仓库自有设备（${p.equipmentWarehouse.length} 件 · 普通自有预算 -1 · 战败损失实物）</div>
         <div class="v2-pool-chips">
           ${
             p.equipmentWarehouse.length === 0
@@ -1882,15 +1891,17 @@ export class V2AppController {
                     const def = V2_EQUIPMENT_DEFS[w.definitionId];
                     if (!def) return '';
                     const alreadyUsed = usedOwnedIds.has(w.instanceId);
-                    const overBudget = check.totalBudget + def.budgetCost > check.maxBudget;
+                    const effBudget = getEffectiveV2EquipmentBudgetCost(def, 'owned');
+                    const overBudget = check.totalBudget + effBudget > check.maxBudget;
+                    const discountSuffix = effBudget < def.budgetCost ? '(-1)' : '';
                     return `<button type="button" class="v2-pool-btn origin-owned" data-add-owned="${
                       w.instanceId
-                    }" ${alreadyUsed || overBudget || readOnly ? 'disabled' : ''}>
+                    }" ${draft.trialBuildId || alreadyUsed || overBudget || readOnly ? 'disabled' : ''}>
                       <span class="v2-origin-badge origin-owned">自</span>
                       <img src="${getItemImageUrl(w.definitionId)}" alt="${def.name}" />
                       <span>${def.name} <em class="v2-q-tag">${
                       w.quality === 'improved' ? '良' : '普'
-                    }</em><small>${alreadyUsed ? '已装载' : `预算${def.budgetCost}`}</small></span>
+                    }</em><small>${alreadyUsed ? '已装载' : `预算${effBudget}${discountSuffix}`}</small></span>
                     </button>`;
                   })
                   .join('')
@@ -1906,7 +1917,7 @@ export class V2AppController {
               V2_SHIPS[draft.shipId].name.slice(0, 4)
             }-${V2_ARCHETYPE_LABELS[draft.primaryArchetype].name.slice(0, 2)}" />
             <button type="button" class="btn btn-sm btn-secondary" id="v2-preset-save" ${
-              readOnly || draft.slots.length === 0 ? 'disabled' : ''
+              readOnly || draft.trialBuildId !== null || draft.slots.length === 0 ? 'disabled' : ''
             }>保存预设</button>
           </div>
         </div>
@@ -2042,6 +2053,7 @@ export class V2AppController {
 
     this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-add-loan]').forEach((btn) => {
       btn.addEventListener('click', () => {
+        if (draft.trialBuildId) return;
         const defId = btn.dataset.addLoan!;
         const spot = findFirstLegalV2Placement(previewBay, defId);
         if (!spot) {
@@ -2068,6 +2080,7 @@ export class V2AppController {
 
     this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-add-owned]').forEach((btn) => {
       btn.addEventListener('click', () => {
+        if (draft.trialBuildId) return;
         const instId = btn.dataset.addOwned!;
         const w = p.equipmentWarehouse.find((item) => item.instanceId === instId);
         if (!w) return;
@@ -2096,7 +2109,7 @@ export class V2AppController {
     });
 
     this.leftPanelEl.querySelector('#v2-preset-save')?.addEventListener('click', () => {
-      if (!this.canMutate()) return;
+      if (!this.canMutate() || draft.trialBuildId) return;
       const input = this.leftPanelEl.querySelector<HTMLInputElement>('#v2-preset-name');
       const name = input?.value.trim() || `预设 ${p.loadoutPresets.length + 1}`;
       const existing = p.loadoutPresets.find((pr) => pr.name === name);
@@ -2255,14 +2268,16 @@ export class V2AppController {
         });
         this.syncAll();
       },
-      onPrepareRemove: (instanceId) => {
-        draft.playingDemo = false;
-        draft.demoPlaybackKey = null;
-        draft.slots = draft.slots.filter(
-          (s) => s.slotKey !== instanceId && s.warehouseInstanceId !== instanceId
-        );
-        this.syncAll();
-      },
+      onPrepareRemove: draft.trialBuildId
+        ? undefined
+        : (instanceId) => {
+            draft.playingDemo = false;
+            draft.demoPlaybackKey = null;
+            draft.slots = draft.slots.filter(
+              (s) => s.slotKey !== instanceId && s.warehouseInstanceId !== instanceId
+            );
+            this.syncAll();
+          },
     });
   }
 
@@ -3446,6 +3461,15 @@ export class V2AppController {
                           }>${this.dispositionLabel(d, line.item, p)}</button>`
                         )
                         .join('')}
+                      ${
+                        isSafe &&
+                        !run.isShowcase &&
+                        line.item.category === 'equipment' &&
+                        line.item.origin === 'loot' &&
+                        !p.buildings.research_lab
+                          ? `<button type="button" class="btn btn-sm btn-ghost" disabled title="在基地花费 100¤ 建造研究台后，可将拾获设备入库并研究永久蓝图">建成研究台(100¤)可入库</button>`
+                          : ''
+                      }
                     </div>
                   </div>`
                 )

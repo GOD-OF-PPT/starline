@@ -2,6 +2,7 @@ import {
   V2_EQUIPMENT_DEFS,
   V2_MAX_BATTLE_SHIELD,
   V2_MAX_POST_WIN_REPAIR,
+  getEffectiveV2EquipmentBudgetCost,
   type V2EquipmentKind,
   type V2Quality,
 } from '../data/equipment';
@@ -98,7 +99,7 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
     }
     const def = V2_EQUIPMENT_DEFS[placed.item.definitionId];
     if (def) {
-      totalPlacedBudget += def.budgetCost;
+      totalPlacedBudget += getEffectiveV2EquipmentBudgetCost(def, placed.item.origin);
       eqItems.push({ placed, kind: def.kind, quality: def.quality });
     }
   }
@@ -110,6 +111,7 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
   const shields = eqItems.filter((e) => e.kind === 'shield');
   const capacitors = eqItems.filter((e) => e.kind === 'capacitor');
   const relays = eqItems.filter((e) => e.kind === 'relay');
+  const counters = eqItems.filter((e) => e.kind === 'counter');
 
   const links: V2AdjacencyLink[] = [];
 
@@ -221,16 +223,19 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
       damagePerEnemy: f.quality === 'improved' ? 3 : 2,
     }));
 
-  // 5. Shields (cap 20 including hull bonus)
+  // 5. Shields (cap 20 including hull bonus + counter reactive capacitors!)
   let rawShield = ship.bonusShield;
   for (const s of shields) {
     rawShield += s.quality === 'improved' ? 8 : 6;
+  }
+  for (const ct of counters) {
+    rawShield += ct.quality === 'improved' ? 5 : 4;
   }
   const effectiveShield = Math.min(V2_MAX_BATTLE_SHIELD, rawShield);
 
   // 6. Active Counters (must be adjacent to at least one Shield; ship-wide highest quality fires ONCE/round)
   const activeCounters: V2CounterComputed[] = [];
-  for (const ct of eqItems.filter((e) => e.kind === 'counter')) {
+  for (const ct of counters) {
     const adjShield = shields.find((s) => areV2PlacedItemsAdjacent(ct.placed, s.placed));
     if (adjShield) {
       links.push({

@@ -169,15 +169,19 @@ export function buildEncounterUnits(
   const tpl = V2_ENCOUNTER_TEMPLATES[kind];
   const mult = tpl.scaleWithDepth ? getDepthScalingFactor(layer) : 1.0;
 
-  return tpl.units.map((u) => {
+  return tpl.units.map((u, idx) => {
     const spriteArchetype: EnemyArchetype =
       useLeviathanVisual && u.isBoss ? 'boss_leviathan' : u.spriteArchetype;
+    const scaledDamage =
+      kind === 'swarm' && layer >= 5 && idx < 2
+        ? 2
+        : Math.max(1, Math.round(u.baseDamage * mult));
     return {
       enemyId: `${nodeId}_${u.unitIdSuffix}`,
       name: useLeviathanVisual && u.isBoss ? '黑曜旗舰护卫' : u.name,
       spriteArchetype,
       maxHp: Math.max(1, Math.round(u.baseHp * mult)),
-      damagePerRound: Math.max(1, Math.round(u.baseDamage * mult)),
+      damagePerRound: scaledDamage,
       armor: u.armor, // Armor never scales with depth (§8.3)
       pierceRatio: u.pierceRatio,
       isBoss: u.isBoss,

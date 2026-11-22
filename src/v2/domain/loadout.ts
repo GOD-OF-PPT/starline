@@ -3,6 +3,7 @@ import { V2_CONTRACT_TEMPLATES } from '../data/contracts';
 import type { V2CrewId } from '../data/crew';
 import {
   V2_EQUIPMENT_DEFS,
+  getEffectiveV2EquipmentBudgetCost,
   type V2ArchetypeId,
   type V2EquipmentKind,
 } from '../data/equipment';
@@ -17,7 +18,7 @@ import {
 import { createV2EquipmentInstance } from './itemCatalog';
 import { createV2RngStreams } from './rngStreams';
 import { generateV2StarGraph } from './routeGenerator';
-import { isKindAuthorizedByTrialBuild } from '../data/trialBuilds';
+import { buildTrialPrepareSlots, isKindAuthorizedByTrialBuild } from '../data/trialBuilds';
 import {
   V2_MAX_FUEL,
   V2_RULES_VERSION,
@@ -133,18 +134,23 @@ export function validateV2PrepareLoadout(
       errors.push(`槽位 ${i + 1} 设备定义无效`);
       continue;
     }
-    totalBudget += def.budgetCost;
+    totalBudget += getEffectiveV2EquipmentBudgetCost(def, slot.origin);
 
     if (slot.origin === 'loan') {
       if (def.quality !== 'common') {
         errors.push(`免费借用仅限普通品质（${def.name} 为优良）`);
       }
-      const allowedByBlueprint = profile.blueprints.includes(def.kind);
-      const allowedByTrial = isKindAuthorizedByTrialBuild(trialBuildId, def.kind);
-      if (!allowedByBlueprint && !allowedByTrial) {
+      if (trialBuildId !== null) {
+        if (!isKindAuthorizedByTrialBuild(trialBuildId, def.kind)) {
+          errors.push(`试航方案为整套借用，不可混入方案外设备「${def.name}」`);
+        }
+      } else if (!profile.blueprints.includes(def.kind)) {
         errors.push(`尚未解锁「${def.name}」普通蓝图，不可免费借用`);
       }
     } else {
+      if (trialBuildId !== null) {
+        errors.push(`试航方案为整套借用，不可与自有设备「${def.name}」混搭`);
+      }
       if (!slot.warehouseInstanceId) {
         errors.push(`自有槽位 ${def.name} 缺少真实库存实例 ID`);
       } else {
@@ -179,6 +185,20 @@ export function validateV2PrepareLoadout(
         ...tempBay,
         placed: [...tempBay.placed, { item: dummy, x: slot.x, y: slot.y, rotation: slot.rotation }],
       };
+    }
+  }
+
+  // Whole-kit integrity check when launching in Trial Mode (allows repositioning/rotating inside bay, forbids partial-kit mixing)
+  if (trialBuildId !== null) {
+    const expectedIds = buildTrialPrepareSlots(trialBuildId, shipId)
+      .map((s) => s.definitionId)
+      .sort();
+    const actualIds = slots.map((s) => s.definitionId).sort();
+    const exactMatch =
+      expectedIds.length === actualIds.length &&
+      expectedIds.every((id, idx) => id === actualIds[idx]);
+    if (!exactMatch) {
+      errors.push('试航方案必须保持整套配置完整（可在舱内拖动/旋转调整位置，切回自由配装后方可增删设备）');
     }
   }
 

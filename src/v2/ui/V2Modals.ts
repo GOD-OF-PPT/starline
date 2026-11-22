@@ -8,6 +8,7 @@ import {
   V2_EQUIPMENT_DEFS,
   V2_RESEARCH_COST_CREDITS,
   V2_WAREHOUSE_CAPACITY,
+  getEffectiveV2EquipmentBudgetCost,
   getV2EquipmentDefByKind,
   type V2EquipmentKind,
 } from '../data/equipment';
@@ -330,7 +331,7 @@ export function openV2HelpModal(host: HTMLElement): void {
         <h3>三、物品来源标记</h3>
         <ul>
           <li><span class="v2-origin-chip origin-loan">借</span> 借用设备：出航免费借用，返航自动归还，不可售卖或入库。</li>
-          <li><span class="v2-origin-chip origin-owned">自</span> 自有设备：来自基地设备库，战败将损失，安全返航可回库或出售。</li>
+          <li><span class="v2-origin-chip origin-owned">自</span> 自有设备：来自基地设备库，普通自有件出航预算 -1（最低 1），战败将损失实物，安全返航可回库或出售。</li>
           <li><span class="v2-origin-chip origin-loot">拾</span> 拾获物品：途中获取，可向商人折价变卖或返航后出售/入库研究。</li>
           <li><span class="v2-origin-chip origin-mission">任</span> 任务物品：仅用于完成委托交付，不可出售或入库。</li>
         </ul>
@@ -572,6 +573,9 @@ export function openV2WarehouseModal(
                   .map((item) => {
                     const def = V2_EQUIPMENT_DEFS[item.definitionId];
                     const resCheck = canResearchV2Instance(profile, item.instanceId);
+                    const effBudget = def ? getEffectiveV2EquipmentBudgetCost(def, 'owned') : 0;
+                    const discountTag =
+                      def && effBudget < def.budgetCost ? '（自有-1）' : '';
                     return `<div class="v2-wh-row">
                       <img class="v2-wh-icon" src="${getItemImageUrl(item.definitionId)}" alt="${def?.name ?? item.definitionId}" />
                       <div class="v2-wh-info">
@@ -583,7 +587,9 @@ export function openV2WarehouseModal(
                     }</span>
                         </div>
                         <div class="v2-wh-sub">${
-                          def ? `${V2_SHAPES[def.shapeId].label} · 预算 ${def.budgetCost} · 回收 ${item.fixedValue}¤` : ''
+                          def
+                            ? `${V2_SHAPES[def.shapeId].label} · 出航预算 ${effBudget}${discountTag} · 回收 ${item.fixedValue}¤`
+                            : ''
                         }${
                           resCheck.canResearch && resCheck.isImproved
                             ? ' · 注意：研究优良件仅解锁普通蓝图'
@@ -613,11 +619,12 @@ export function openV2WarehouseModal(
           <span>当前信用点：<strong class="num">${profile.credits}¤</strong></span>
         </div>
         <div class="v2-empty-hint" style="margin-bottom:8px;">
-          解锁永久蓝图后，可自由混搭、保存配装预设，或在此直接制造自有普通设备入库。优良品质设备仅可通过远航打捞或商人获得。
+          解锁永久蓝图后，可自由混搭、保存配装预设，或在此制造自有普通设备入库（<strong>出航预算 -1，最低 1</strong>，提升上限但战败损失实物）。优良品质设备仅可通过远航打捞或商人获得。
         </div>
         <div class="v2-wh-list">
           ${V2_ALL_EQUIPMENT_KINDS.map((kind) => {
             const def = getV2EquipmentDefByKind(kind, 'common');
+            const ownedBudget = getEffectiveV2EquipmentBudgetCost(def, 'owned');
             const unlocked = profile.blueprints.includes(kind);
             const canCraft =
               hasLab &&
@@ -633,9 +640,9 @@ export function openV2WarehouseModal(
               unlocked ? '已掌握' : '待研究'
             }</span>
                 </div>
-                <div class="v2-wh-sub">${renderV2MiniMaskHtml(def.shapeId)} ${def.summary} · 预算 ${
+                <div class="v2-wh-sub">${renderV2MiniMaskHtml(def.shapeId)} ${def.summary} · 借用预算 ${
               def.budgetCost
-            }</div>
+            }${ownedBudget < def.budgetCost ? ` → 自有预算 ${ownedBudget}` : ''}</div>
               </div>
               <div class="v2-wh-actions">
                 <button type="button" class="btn btn-sm btn-primary" data-craft-kind="${kind}" ${

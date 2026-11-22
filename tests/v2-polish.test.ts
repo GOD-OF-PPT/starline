@@ -270,8 +270,8 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
     }
   });
 
-  it('Phase D Elite Round-2 tactical decision triggers cleanly, enforces shield cost, blocks premature completion, and is idempotent', () => {
-    // Build a showcase run with trial_counter (12 starting shield!) and teleport cleanly into Elite L4A
+  it('Phase D Elite Round-2 tactical decision triggers cleanly, enforces 3-point survival cost, blocks premature completion, and is idempotent', () => {
+    // Build a showcase run with trial_counter (shield 6 + counter 4 = 10 starting shield + laser!) and teleport cleanly into Elite L4A
     const baseRun = createV2ShowcaseRun('trial_counter', 'elite_tactic_test');
     const atElite: V2RunState = {
       ...baseRun,
@@ -288,8 +288,8 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
     expect(pending!.chosen).toBeNull();
     expect(pending!.options.length).toBe(3);
 
-    // Starting shield 12, Elite R1 enemy total dmg = 4 + 1 + 1 = 6 -> R1 end shield = 6 >= 4, so Overload MUST be enabled!
-    expect(pending!.playerShieldAtPause).toBe(6);
+    // Starting shield 10, Elite R1 enemy total dmg = 4 + 1 + 1 = 6 -> R1 end shield = 4, hp+shield = 34 > 3 -> Overload enabled!
+    expect(pending!.playerShieldAtPause).toBe(4);
     const overloadOpt = pending!.options.find((o) => o.choice === 'overload')!;
     expect(overloadOpt.enabled).toBe(true);
 
@@ -297,7 +297,7 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
     const premature = completeV2CombatAtCurrentNode(started.run, ['core']);
     expect(premature.ok).toBe(false);
 
-    // Emergency Defense test: +8 shield (6 -> 14), halts equipment weapons in R2, preserves core attack & counter!
+    // Emergency Defense test: +5 (+2 counter synergy = +7) shield, pauses direct guns, preserves Counter (+2 bonus)!
     const defSim = simulateV2Combat({
       resultId: 'chk_def',
       bay: atElite.bay,
@@ -309,20 +309,21 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
     });
     const r2Def = defSim.rounds[1];
     expect(r2Def).toBeDefined();
-    expect(r2Def.playerAttacks.every((a) => a.sourceKind === 'core')).toBe(true);
-    expect(r2Def.counterAttack).not.toBeNull(); // Counter retained!
-    expect(r2Def.playerShieldAfter).toBeGreaterThan(pending!.playerShieldAtPause - 6);
+    expect(r2Def.playerAttacks.length).toBe(0); // Direct guns paused during full-shield defense
+    expect(r2Def.counterAttack).not.toBeNull(); // Supercharged Counter retained!
+    expect(r2Def.playerShieldAfter).toBeGreaterThan(pending!.playerShieldAtPause);
 
-    // Commit Overload decision
+    // Commit Overload decision (9 armor-piercing damage!)
     const committed = commitV2EliteTacticDecision(started.run, pending!.decisionId, 'overload');
     expect(committed.ok).toBe(true);
     expect(committed.run.activeCombat!.pendingDecision!.chosen).toBe('overload');
     expect(committed.run.activeCombat!.simulation.appliedTactic).toBe('overload');
-    expect(
-      committed.run.activeCombat!.simulation.rounds[1].playerAttacks.some(
-        (a) => a.sourceInstanceId === 'tactic_overload'
-      )
-    ).toBe(true);
+    const overloadHit = committed.run.activeCombat!.simulation.rounds[1].playerAttacks.find(
+      (a) => a.sourceInstanceId === 'tactic_overload'
+    );
+    expect(overloadHit).toBeDefined();
+    expect(overloadHit!.appliedDamage).toBe(9);
+    expect(overloadHit!.armorBlocked).toBe(0);
 
     // Save validation passes with pendingDecision committed
     const saveCheck = validateV2SaveDataDetailed({
@@ -343,7 +344,7 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
     const finished = completeV2CombatAtCurrentNode(committed.run, ['core']);
     expect(finished.ok).toBe(true);
 
-    // Also verify Overload is disabled when Round-1 remaining shield < 4
+    // Also verify Overload is disabled when Round-1 remaining HP + shield <= 3 (near-death self-destruct guard)
     const noShieldBay: V2CargoBayState = {
       shipId: 'cannon_skiff',
       placed: [
@@ -364,12 +365,12 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
       staging: [],
       discardedThisArrange: [],
     };
-    const lowShieldStart = startV2CombatAtCurrentNode(
-      { ...atElite, bay: noShieldBay },
+    const lowSurvivalStart = startV2CombatAtCurrentNode(
+      { ...atElite, hp: 9, bay: noShieldBay }, // takes 6 dmg in R1 -> 3 HP + 0 shield <= 3!
       'weakest',
       { enableEliteTactic: true }
     );
-    const lowOverload = lowShieldStart.run.activeCombat?.pendingDecision?.options.find(
+    const lowOverload = lowSurvivalStart.run.activeCombat?.pendingDecision?.options.find(
       (o) => o.choice === 'overload'
     );
     expect(lowOverload?.enabled).toBe(false);
@@ -433,7 +434,7 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
 
     const postCommitRun = reloadedPostCommit.data.activeRun!;
     expect(postCommitRun.activeCombat?.pendingDecision?.chosen).toBe('emergency_defense');
-    // Re-committing after reload MUST fail so +8 shield / +6 dmg can NEVER stack!
+    // Re-committing after reload MUST fail so bonuses can NEVER stack!
     expect(
       commitV2EliteTacticDecision(postCommitRun, pendingBefore!.decisionId, 'emergency_defense').ok
     ).toBe(false);
@@ -441,5 +442,149 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
       commitV2EliteTacticDecision(postCommitRun, pendingBefore!.decisionId, 'overload').ok
     ).toBe(false);
   });
+
+  it('Balance Fix Regression: Owned common -1 budget advantage, strict whole-kit trial non-mixing, Hangar multi-target spillover, monotonic cargo density, and 3-way Elite tactic non-dominance', async () => {
+    const { V2_CARGO_DEFS } = await import('../src/v2/data/cargo');
+    const { V2_SHAPES } = await import('../src/v2/data/shapes');
+    const { buildEncounterUnits } = await import('../src/v2/data/enemies');
+
+    // 1. Owned common equipment enjoys -1 budget discount (min 1) over lossless free loan
+    const ownedHeavy = createV2EquipmentInstance({
+      instanceId: 'wh_heavy_1',
+      kind: 'heavy',
+      quality: 'common',
+      origin: 'owned',
+      acquiredDepth: 0,
+      location: 'warehouse',
+    });
+    const ownedShield = createV2EquipmentInstance({
+      instanceId: 'wh_shield_1',
+      kind: 'shield',
+      quality: 'common',
+      origin: 'owned',
+      acquiredDepth: 0,
+      location: 'warehouse',
+    });
+    const profileWithOwned = {
+      ...createFreshV2Profile(),
+      blueprints: ['laser', 'battery', 'shield', 'repair', 'heavy', 'capacitor'] as const,
+      equipmentWarehouse: [ownedHeavy, ownedShield],
+    };
+    // Loan heavy(3) + cap(1) + shield(2) + laser(2) = 8 > 6 (rejected),
+    // Owned heavy(2) + loan cap(1) + owned shield(1) + loan laser(2) = 6 <= 6 (legal!)
+    const ownedCombo = validateV2PrepareLoadout(profileWithOwned, 'cannon_skiff', 'engineer', [
+      { slotKey: 'oh', origin: 'owned', definitionId: 'equipment.heavy.common', warehouseInstanceId: ownedHeavy.instanceId, x: 0, y: 0, rotation: 0 },
+      { slotKey: 'lc', origin: 'loan', definitionId: 'equipment.capacitor.common', x: 1, y: 0, rotation: 0 },
+      { slotKey: 'os', origin: 'owned', definitionId: 'equipment.shield.common', warehouseInstanceId: ownedShield.instanceId, x: 2, y: 0, rotation: 0 },
+      { slotKey: 'll', origin: 'loan', definitionId: 'equipment.laser.common', x: 3, y: 0, rotation: 0 },
+    ]);
+    expect(ownedCombo.valid).toBe(true);
+    expect(ownedCombo.totalBudget).toBe(6);
+
+    // 2. Trial mode rejects partial-kit removal or mixing with owned items, while allowing bay repositioning
+    const heavyTrialSlots = buildTrialPrepareSlots('trial_heavy', 'cannon_skiff');
+    const repositionedTrial = heavyTrialSlots.map((s) => ({ ...s, x: s.x + 1 }));
+    expect(
+      validateV2PrepareLoadout(profileWithOwned, 'cannon_skiff', 'engineer', repositionedTrial, 'trial_heavy').valid
+    ).toBe(true);
+    const partialTrial = heavyTrialSlots.slice(0, 2);
+    expect(
+      validateV2PrepareLoadout(profileWithOwned, 'cannon_skiff', 'engineer', partialTrial, 'trial_heavy').valid
+    ).toBe(false);
+    const mixedOwnedTrial = [
+      ...heavyTrialSlots.slice(0, 2),
+      { slotKey: 'mix', origin: 'owned' as const, definitionId: 'equipment.shield.common', warehouseInstanceId: ownedShield.instanceId, x: 2, y: 0, rotation: 0 as const },
+    ];
+    expect(
+      validateV2PrepareLoadout(profileWithOwned, 'cannon_skiff', 'engineer', mixedOwnedTrial, 'trial_heavy').valid
+    ).toBe(false);
+
+    // 3. Hangar drones switch targets on kill vs 4-unit Swarm (beating Heavy in rounds & HP!)
+    const hangarBay: V2CargoBayState = {
+      shipId: 'cannon_skiff',
+      placed: buildTrialPrepareSlots('trial_hangar', 'cannon_skiff').map((s, i) => ({
+        item: createV2EquipmentInstance({
+          instanceId: `hg_${i}`,
+          kind: s.definitionId.split('.')[1] as Parameters<typeof createV2EquipmentInstance>[0]['kind'],
+          quality: 'common',
+          origin: 'loan',
+          acquiredDepth: 0,
+          location: 'bay',
+        }),
+        x: s.x,
+        y: s.y,
+        rotation: s.rotation,
+      })),
+      staging: [],
+      discardedThisArrange: [],
+    };
+    const heavyBay: V2CargoBayState = {
+      shipId: 'cannon_skiff',
+      placed: buildTrialPrepareSlots('trial_heavy', 'cannon_skiff').map((s, i) => ({
+        item: createV2EquipmentInstance({
+          instanceId: `hv_${i}`,
+          kind: s.definitionId.split('.')[1] as Parameters<typeof createV2EquipmentInstance>[0]['kind'],
+          quality: 'common',
+          origin: 'loan',
+          acquiredDepth: 0,
+          location: 'bay',
+        }),
+        x: s.x,
+        y: s.y,
+        rotation: s.rotation,
+      })),
+      staging: [],
+      discardedThisArrange: [],
+    };
+    const swarmL3 = buildEncounterUnits('swarm', 3, 'reg_sw');
+    const simHangarSwarm = simulateV2Combat({ resultId: 'hs', bay: hangarBay, startingHp: 30, maxHp: 30, units: swarmL3, targetPolicy: 'weakest' });
+    const simHeavySwarm = simulateV2Combat({ resultId: 'vs', bay: heavyBay, startingHp: 30, maxHp: 30, units: swarmL3, targetPolicy: 'weakest' });
+    expect(simHangarSwarm.roundsCount).toBeLessThan(simHeavySwarm.roundsCount);
+    expect(simHangarSwarm.finalPlayerHp).toBeGreaterThan(simHeavySwarm.finalPlayerHp);
+
+    // 4. Monotonic cargo value-per-cell density ladder (larger/awkward shapes >= smaller easy shapes)
+    const density = (id: string) =>
+      V2_CARGO_DEFS[id].layer1BasePrice / V2_SHAPES[V2_CARGO_DEFS[id].shapeId].cells.length;
+    expect(density('cargo.data_box')).toBeLessThan(density('cargo.alloy_bar'));
+    expect(density('cargo.alloy_bar')).toBeLessThan(density('cargo.old_engine'));
+    expect(density('cargo.old_engine')).toBeLessThan(density('cargo.coolant_tank'));
+    expect(density('cargo.coolant_tank')).toBeLessThan(density('cargo.folding_antenna'));
+
+    // 5. All 3 Elite Round-2 tactics (normal / overload / emergency_defense) strictly win distinct archetypes (no single dominant tactic!)
+    const eliteUnits = buildEncounterUnits('elite', 6, 'reg_el');
+    const makeBay = (specs: { kind: Parameters<typeof createV2EquipmentInstance>[0]['kind']; quality: 'common' | 'improved'; x: number; y: number }[]): V2CargoBayState => ({
+      shipId: 'cannon_skiff',
+      placed: specs.map((sp, idx) => ({
+        item: createV2EquipmentInstance({ instanceId: `e_${idx}`, kind: sp.kind, quality: sp.quality, origin: 'owned', acquiredDepth: 0, location: 'bay' }),
+        x: sp.x,
+        y: sp.y,
+        rotation: 0,
+      })),
+      staging: [],
+      discardedThisArrange: [],
+    });
+    const bestOf = (bay: V2CargoBayState, hp: number) => {
+      const results = (['normal', 'overload', 'emergency_defense'] as const).map((t) => {
+        const s = simulateV2Combat({ resultId: t, bay, startingHp: hp, maxHp: 30, units: eliteUnits, targetPolicy: 'weakest', round2Tactic: t });
+        return { t, score: (s.outcome === 'victory' ? 10000 : 0) + s.finalPlayerHpAfterRepair * 10 - s.roundsCount };
+      });
+      return results.sort((a, b) => b.score - a.score)[0].t;
+    };
+
+    // Heavy wins via overload; 2xLaser+Bat wins via normal; Counter/ImpHangar wins via emergency_defense!
+    expect(
+      bestOf(makeBay([{ kind: 'heavy', quality: 'common', x: 0, y: 0 }, { kind: 'capacitor', quality: 'improved', x: 1, y: 0 }, { kind: 'shield', quality: 'improved', x: 2, y: 0 }]), 30)
+    ).toBe('overload');
+    expect(
+      bestOf(makeBay([{ kind: 'laser', quality: 'common', x: 0, y: 0 }, { kind: 'battery', quality: 'common', x: 1, y: 0 }, { kind: 'laser', quality: 'common', x: 2, y: 0 }, { kind: 'shield', quality: 'common', x: 3, y: 0 }, { kind: 'shield', quality: 'common', x: 0, y: 2 }]), 25)
+    ).toBe('normal');
+    expect(
+      bestOf(makeBay([{ kind: 'shield', quality: 'improved', x: 0, y: 0 }, { kind: 'counter', quality: 'common', x: 1, y: 0 }, { kind: 'laser', quality: 'common', x: 2, y: 0 }, { kind: 'battery', quality: 'improved', x: 3, y: 0 }]), 30)
+    ).toBe('emergency_defense');
+    expect(
+      bestOf(makeBay([{ kind: 'hangar', quality: 'improved', x: 0, y: 0 }, { kind: 'relay', quality: 'common', x: 2, y: 0 }, { kind: 'shield', quality: 'improved', x: 3, y: 0 }]), 24)
+    ).toBe('emergency_defense');
+  });
 });
+
 

@@ -116,8 +116,8 @@ export const V2_CONTRACT_TEMPLATES: Record<string, V2ContractTemplate> = {
     markerCount: 3,
     requiredCompletions: 3,
     surveyFuelCost: 1,
-    spaceNote: '不占船舱 · 第 2/4/6 层各勘测 1 次（每次 -1 油）',
-    gameplayNote: '完成第 2、4、6 层全部 3 处标记勘测并安全返航',
+    spaceNote: '不占船舱 · 第 2/4/6 层各勘测 1 次（全程需 9 油，建议携领航员或途中补油）',
+    gameplayNote: '完成第 2、4、6 层全部 3 处标记勘测并安全返航（需提前规划燃料余量）',
     rewardNote: '交付报酬 120¤',
   },
   free_salvage: {

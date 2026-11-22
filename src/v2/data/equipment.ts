@@ -208,8 +208,8 @@ const BASE_SPECS: readonly BaseEquipmentSpec[] = [
     commonBudget: 3,
     commonRecycle: 20,
     family: 'hangar_kit',
-    commonSummary: '第 1 轮出 1 架，每轮 +1 至多 3 架；每架当轮单体 2',
-    improvedSummary: '第 1 轮出 1 架，每轮 +1 至多 3 架；每架当轮单体 3',
+    commonSummary: '第 1 轮出 1 架，每轮 +1 至多 3 架；每架独立索敌造成 2 伤（击毁自动转火）',
+    improvedSummary: '第 1 轮出 1 架，每轮 +1 至多 3 架；每架独立索敌造成 3 伤（击毁自动转火）',
     commonBadge: '机×2',
     improvedBadge: '机×3',
   },
@@ -234,10 +234,10 @@ const BASE_SPECS: readonly BaseEquipmentSpec[] = [
     commonBudget: 2,
     commonRecycle: 14,
     family: 'counter_kit',
-    commonSummary: '相邻护盾板激活：每轮按实吸护盾 floor(50%) 反击（最高 4，全船限 1 次）',
-    improvedSummary: '相邻护盾板激活：每轮按实吸护盾 floor(75%) 反击（最高 5，全船限 1 次）',
-    commonBadge: '反50%',
-    improvedBadge: '反75%',
+    commonSummary: '自带 +4 护盾；相邻护盾板激活：每轮按实吸护盾 floor(50%) 反击（最高 4，全船限 1 次）',
+    improvedSummary: '自带 +5 护盾；相邻护盾板激活：每轮按实吸护盾 floor(75%) 反击（最高 5，全船限 1 次）',
+    commonBadge: '盾4/反50%',
+    improvedBadge: '盾5/反75%',
   },
   {
     kind: 'flak',
@@ -300,6 +300,21 @@ export function getV2EquipmentDef(defId: string): V2EquipmentDef | undefined {
 
 export function getV2EquipmentDefByKind(kind: V2EquipmentKind, quality: V2Quality): V2EquipmentDef {
   return V2_EQUIPMENT_DEFS[`equipment.${kind}.${quality}`];
+}
+
+/**
+ * Effective pre-flight loadout budget cost:
+ * Owned common equipment enjoys a -1 budget discount (minimum 1) so crafting/storing common gear
+ * yields a real firepower ceiling advantage over lossless free blueprint loans in exchange for defeat risk!
+ */
+export function getEffectiveV2EquipmentBudgetCost(
+  def: Pick<V2EquipmentDef, 'budgetCost' | 'quality'>,
+  origin: 'loan' | 'owned' | 'loot' | 'mission'
+): number {
+  if (origin === 'owned' && def.quality === 'common') {
+    return Math.max(1, def.budgetCost - 1);
+  }
+  return def.budgetCost;
 }
 
 export function getMerchantBuybackPrice(fixedValue: number): number {

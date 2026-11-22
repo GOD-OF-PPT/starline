@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-11-22T05:01:00.239Z",
+  "timestamp": "2026-11-22T12:36:20.402Z",
   "checks": [
     {
       "id": "E01_TitleShowcaseEntry",
@@ -25,6 +25,11 @@
       "id": "E05_TrialHeavyModularMounts",
       "pass": true,
       "detail": "Prepare Heavy mounts readout: 磁轨重炮×1·先手\n护盾 6"
+    },
+    {
+      "id": "E20_TrialWholeKitLockAndCopy",
+      "pass": true,
+      "detail": "Trial lock: loansDisabled=true, presetDisabled=true, falseCraftCopy=false"
     },
     {
       "id": "E06_TacticalDeltaComparator",
@@ -79,12 +84,17 @@
     {
       "id": "E18_EliteNormalForecastLabel",
       "pass": true,
-      "detail": "Elite pre-combat forecast label: 按正常执行推演：有战败风险 9 回合"
+      "detail": "Elite pre-combat forecast label: 按正常执行推演：预计获胜 8 回合"
     },
     {
       "id": "E11_EliteRound2TacticPauseAndSkipGuard",
       "pass": true,
-      "detail": "Skip disabled during pause=true, options=[{\"choice\":\"normal\",\"disabled\":false},{\"choice\":\"overload\",\"disabled\":false},{\"choice\":\"emergency_defense\",\"disabled\":false}]"
+      "detail": "Skip disabled during pause=true, options=[{\"choice\":\"normal\",\"disabled\":false,\"text\":\"正常执行\\n预计胜 · 余 5 HP (8轮)\\n按原配装节拍自动交火，无额外损耗且保持重炮蓄能/机库扩编进度\"},{\"choice\":\"overload\",\"disabled\":false,\"text\":\"火力过载\\n预计胜 · 余 2 HP (8轮)\\n消耗 3 护盾，本轮追加 1 次 9 点无视护甲破甲直击\"},{\"choice\":\"emergency_defense\",\"disabled\":false,\"text\":\"紧急防御\\n预计胜 · 余 7 HP (9轮)\\n立刻 +7 护盾（上限 20，含反击器协同 +2），全炮停火且重炮蓄能延后 1 轮（机库照常扩编，反击当轮 +2 伤）\"}]"
+    },
+    {
+      "id": "E21_ShowcaseEliteWinningTactic",
+      "pass": true,
+      "detail": "Elite Round-2 overlay displays winning tactical divergence: normal:WIN, overload:WIN, emergency_defense:WIN"
     },
     {
       "id": "E12_ShowcaseIsolation",

@@ -1,0 +1,90 @@
+=== 1. STARTER & TRIAL LOADOUTS vs ALL ENEMIES (cannon_skiff, 30 HP) ===
+
+-- default_laser (5/6) | core=2 shield=6 counter=no --
+┌─────────┬────────────────┬────────────────┬────────────────┬────────────────┬────────────────┬────────────────┬─────────────────┬─────────────────┬─────────────────┬─────────────────┬─────────────────┬─────────────────┬─────────────────┐
+│ (index) │ L1_patrol      │ L1_swarm       │ L1_armored     │ L1_piercer     │ L3_patrol      │ L3_swarm       │ L3_armored      │ L3_piercer      │ L5_patrol       │ L5_swarm        │ L5_armored      │ L5_piercer      │ ELITE_BOSS      │
+├─────────┼────────────────┼────────────────┼────────────────┼────────────────┼────────────────┼────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┤
+│ 0       │ 'W (-0hp, 3R)' │ 'W (-4hp, 4R)' │ 'W (-6hp, 6R)' │ 'W (-3hp, 3R)' │ 'W (-3hp, 3R)' │ 'W (-4hp, 4R)' │ 'W (-15hp, 7R)' │ 'W (-10hp, 4R)' │ 'W (-10hp, 4R)' │ 'W (-20hp, 8R)' │ 'L (-30hp, 9R)' │ 'W (-14hp, 4R)' │ 'L (-30hp, 8R)' │
+└─────────┴────────────────┴────────────────┴────────────────┴────────────────┴────────────────┴────────────────┴─────────────────┴─────────────────┴─────────────────┴─────────────────┴─────────────────┴─────────────────┴─────────────────┘
+
+-- trial_heavy (6/6) | core=2 shield=6 counter=no --
+┌─────────┬────────────────┬─────────────────┬────────────────┬────────────────┬────────────────┬─────────────────┬────────────────┬────────────────┬────────────────┬─────────────────┬─────────────────┬────────────────┬─────────────────┐
+│ (index) │ L1_patrol      │ L1_swarm        │ L1_armored     │ L1_piercer     │ L3_patrol      │ L3_swarm        │ L3_armored     │ L3_piercer     │ L5_patrol      │ L5_swarm        │ L5_armored      │ L5_piercer     │ ELITE_BOSS      │
+├─────────┼────────────────┼─────────────────┼────────────────┼────────────────┼────────────────┼─────────────────┼────────────────┼────────────────┼────────────────┼─────────────────┼─────────────────┼────────────────┼─────────────────┤
+│ 0       │ 'W (-0hp, 2R)' │ 'W (-10hp, 7R)' │ 'W (-0hp, 3R)' │ 'W (-3hp, 3R)' │ 'W (-3hp, 3R)' │ 'W (-10hp, 7R)' │ 'W (-9hp, 5R)' │ 'W (-6hp, 3R)' │ 'W (-6hp, 3R)' │ 'W (-14hp, 7R)' │ 'W (-14hp, 5R)' │ 'W (-9hp, 3R)' │ 'L (-30hp, 8R)' │
+└─────────┴────────────────┴─────────────────┴────────────────┴────────────────┴────────────────┴─────────────────┴────────────────┴────────────────┴────────────────┴─────────────────┴─────────────────┴────────────────┴─────────────────┘
+
+-- trial_hangar (6/6) | core=2 shield=6 counter=no --
+┌─────────┬────────────────┬────────────────┬────────────────┬────────────────┬────────────────┬────────────────┬─────────────────┬─────────────────┬─────────────────┬─────────────────┬─────────────────┬─────────────────┬─────────────────┐
+│ (index) │ L1_patrol      │ L1_swarm       │ L1_armored     │ L1_piercer     │ L3_patrol      │ L3_swarm       │ L3_armored      │ L3_piercer      │ L5_patrol       │ L5_swarm        │ L5_armored      │ L5_piercer      │ ELITE_BOSS      │
+├─────────┼────────────────┼────────────────┼────────────────┼────────────────┼────────────────┼────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┤
+│ 0       │ 'W (-0hp, 3R)' │ 'W (-6hp, 4R)' │ 'W (-6hp, 6R)' │ 'W (-3hp, 3R)' │ 'W (-6hp, 4R)' │ 'W (-6hp, 4R)' │ 'W (-15hp, 7R)' │ 'W (-10hp, 4R)' │ 'W (-10hp, 4R)' │ 'W (-13hp, 5R)' │ 'L (-30hp, 9R)' │ 'W (-14hp, 4R)' │ 'L (-30hp, 8R)' │
+└─────────┴────────────────┴────────────────┴────────────────┴────────────────┴────────────────┴────────────────┴─────────────────┴─────────────────┴─────────────────┴─────────────────┴─────────────────┴─────────────────┴─────────────────┘
+
+-- trial_counter (6/6) | core=2 shield=10 counter=50%/4 --
+┌─────────┬────────────────┬────────────────┬────────────────┬────────────────┬────────────────┬────────────────┬──────────────────┬────────────────┬────────────────┬─────────────────┬──────────────────┬─────────────────┬─────────────────┐
+│ (index) │ L1_patrol      │ L1_swarm       │ L1_armored     │ L1_piercer     │ L3_patrol      │ L3_swarm       │ L3_armored       │ L3_piercer     │ L5_patrol      │ L5_swarm        │ L5_armored       │ L5_piercer      │ ELITE_BOSS      │
+├─────────┼────────────────┼────────────────┼────────────────┼────────────────┼────────────────┼────────────────┼──────────────────┼────────────────┼────────────────┼─────────────────┼──────────────────┼─────────────────┼─────────────────┤
+│ 0       │ 'W (-0hp, 3R)' │ 'W (-0hp, 4R)' │ 'W (-6hp, 8R)' │ 'W (-3hp, 3R)' │ 'W (-2hp, 4R)' │ 'W (-1hp, 5R)' │ 'W (-29hp, 13R)' │ 'W (-8hp, 4R)' │ 'W (-6hp, 4R)' │ 'W (-10hp, 7R)' │ 'L (-30hp, 10R)' │ 'W (-15hp, 5R)' │ 'L (-30hp, 9R)' │
+└─────────┴────────────────┴────────────────┴────────────────┴────────────────┴────────────────┴────────────────┴──────────────────┴────────────────┴────────────────┴─────────────────┴──────────────────┴─────────────────┴─────────────────┘
+
+=== 2. HEAVY FREIGHTER (budget 5, 28 HP) TRIAL BUILDS vs L1 & L3 ===
+trial_heavy on heavy_freighter: budget=4/5, shield=0, L1_patrol=victory(rem 22hp/3R), L3_armored=victory(rem 13hp/5R)
+trial_hangar on heavy_freighter: budget=4/5, shield=0, L1_patrol=victory(rem 22hp/3R), L3_armored=victory(rem 7hp/7R)
+trial_counter on heavy_freighter: budget=4/5, shield=10, L1_patrol=victory(rem 18hp/10R), L3_armored=defeat(rem 0hp/13R)
+
+=== 3. 4-NODE SHOWCASE RUN AUDIT (L1A & L4A Elite across all 3 Trial Builds: Base vs L2A-Upgraded) ===
+trial_heavy: L1A=victory(rem 30hp/3R)
+   L4A_base=[normal:L(0hp/8R) | overload:W(2hp/7R) | emergency_defense:L(0hp/9R)]
+   L4A_upg =[normal:L(0hp/9R) | overload:W(4hp/7R) | emergency_defense:L(0hp/10R)]
+trial_hangar: L1A=victory(rem 24hp/4R)
+   L4A_base=[normal:L(0hp/7R) | overload:L(0hp/6R) | emergency_defense:L(0hp/7R)]
+   L4A_upg =[normal:L(0hp/7R) | overload:L(0hp/6R) | emergency_defense:W(2hp/7R)]
+trial_counter: L1A=victory(rem 30hp/3R)
+   L4A_base=[normal:L(0hp/9R) | overload:L(0hp/9R) | emergency_defense:L(0hp/11R)]
+   L4A_upg =[normal:W(7hp/8R) | overload:W(4hp/8R) | emergency_defense:W(13hp/8R)]
+
+=== 4. ELITE ROUND-2 TACTIC DOMINANCE MATRIX (12 Realistic Late-Game Builds vs Elite) ===
+┌─────────┬─────────────────────────────────────────────┬──────────┬──────────────┬──────────────┬──────────────┬─────────────────────┐
+│ (index) │ build                                       │ r2Shield │ normal       │ overload     │ defense      │ best                │
+├─────────┼─────────────────────────────────────────────┼──────────┼──────────────┼──────────────┼──────────────┼─────────────────────┤
+│ 0       │ 'Heavy+Cap+Shield+Laser (Skiff)'            │ 0        │ 'D(0hp/7R)'  │ 'V(2hp/6R)'  │ 'D(0hp/8R)'  │ 'overload'          │
+│ 1       │ 'Heavy+Cap+2xShield (Skiff)'                │ 6        │ 'D(0hp/8R)'  │ 'V(2hp/7R)'  │ 'D(0hp/9R)'  │ 'overload'          │
+│ 2       │ 'ImpHangar+Relay+ImpShield (Showcase)'      │ 2        │ 'D(0hp/7R)'  │ 'D(0hp/6R)'  │ 'V(2hp/7R)'  │ 'emergency_defense' │
+│ 3       │ 'ImpHangar+Relay+Shield+Laser (Skiff)'      │ 0        │ 'V(7hp/5R)'  │ 'V(4hp/5R)'  │ 'V(7hp/6R)'  │ 'normal'            │
+│ 4       │ 'Counter+ImpShield+Laser+ImpBat (Showcase)' │ 6        │ 'V(7hp/8R)'  │ 'V(4hp/8R)'  │ 'V(13hp/8R)' │ 'emergency_defense' │
+│ 5       │ 'Counter+2xShield+Laser+Bat (Cruiser)'      │ 14       │ 'V(15hp/8R)' │ 'V(12hp/8R)' │ 'V(16hp/9R)' │ 'emergency_defense' │
+│ 6       │ '2xLaser+Bat+2xShield (Skiff)'              │ 6        │ 'V(10hp/6R)' │ 'V(7hp/6R)'  │ 'V(10hp/7R)' │ 'normal'            │
+│ 7       │ '2xLaser+ImpBat+Shield (Skiff)'             │ 0        │ 'V(9hp/5R)'  │ 'V(6hp/5R)'  │ 'V(9hp/6R)'  │ 'normal'            │
+│ 8       │ 'ImpHeavy+Cap+2xShield (Skiff)'             │ 6        │ 'V(2hp/7R)'  │ 'V(4hp/6R)'  │ 'V(2hp/8R)'  │ 'overload'          │
+│ 9       │ 'Heavy+Cap+Laser+Shield (Freighter)'        │ 0        │ 'D(0hp/7R)'  │ 'V(2hp/6R)'  │ 'D(0hp/8R)'  │ 'overload'          │
+│ 10      │ 'Counter+Shield+Laser+Flak (Cruiser)'       │ 8        │ 'V(3hp/9R)'  │ 'D(0hp/9R)'  │ 'V(5hp/10R)' │ 'emergency_defense' │
+│ 11      │ 'TrialHeavy+ImpCap+ImpShield (Showcase)'    │ 2        │ 'D(0hp/9R)'  │ 'V(4hp/7R)'  │ 'D(0hp/10R)' │ 'overload'          │
+└─────────┴─────────────────────────────────────────────┴──────────┴──────────────┴──────────────┴──────────────┴─────────────────────┘
+Best tactic counts: { normal: 3, overload: 5, emergency_defense: 4, tie: 0 } | overload disabled: 0 / 12
+
+=== 5. CARGO VALUE DENSITY (Credits / Cell) ===
+┌─────────┬────────────────┬───────┬───────┬────┬─────────┬────┬─────┬─────────┬───────┐
+│ (index) │ name           │ shape │ cells │ L1 │ L1/cell │ L3 │ L6  │ L6/cell │ relic │
+├─────────┼────────────────┼───────┼───────┼────┼─────────┼────┼─────┼─────────┼───────┤
+│ 0       │ '数据盒'       │ '1x1' │ 1     │ 7  │ 7       │ 9  │ 14  │ 14      │ ''    │
+│ 1       │ '合金条'       │ '1x2' │ 2     │ 15 │ 7.5     │ 20 │ 30  │ 15      │ ''    │
+│ 2       │ '冷却罐'       │ '1x3' │ 3     │ 27 │ 9       │ 35 │ 54  │ 18      │ ''    │
+│ 3       │ '旧引擎'       │ '2x2' │ 4     │ 32 │ 8       │ 42 │ 64  │ 16      │ ''    │
+│ 4       │ '折叠天线'     │ 'L3'  │ 3     │ 32 │ 10.7    │ 42 │ 64  │ 21.3    │ ''    │
+│ 5       │ '古代导航仪'   │ 'T4'  │ 4     │ 48 │ 12      │ 62 │ 96  │ 24      │ 'Y'   │
+│ 6       │ '量子星核'     │ '2x2' │ 4     │ 50 │ 12.5    │ 65 │ 100 │ 25      │ 'Y'   │
+│ 7       │ '星渊琥珀匣'   │ '1x3' │ 3     │ 42 │ 14      │ 55 │ 84  │ 28      │ 'Y'   │
+│ 8       │ '黑曜舰桥冠徽' │ 'L3'  │ 3     │ 52 │ 17.3    │ 68 │ 104 │ 34.7    │ 'Y'   │
+└─────────┴────────────────┴───────┴───────┴────┴─────────┴────┴─────┴─────────┴───────┘
+
+=== 6. FUEL BUDGET vs ALL 6 CONTRACTS ===
+transport_std   | minToComplete=3/9 fuel | full6Layers=6/9 fuel | reward=70¤
+transport_deep  | minToComplete=5/9 fuel | full6Layers=6/9 fuel | reward=120¤
+rescue_std      | minToComplete=3/9 fuel | full6Layers=9/9 fuel | reward=70¤
+rescue_deep     | minToComplete=5/9 fuel | full6Layers=7/9 fuel | reward=120¤
+survey_std      | minToComplete=6/9 fuel | full6Layers=8/9 fuel | reward=70¤
+survey_deep     | minToComplete=9/9 fuel | full6Layers=9/9 fuel | reward=120¤
+
+=== 7. TUTORIAL REWARD CHECK ===
+Tutorial reward if discarding engine+coolant (without reactor placed): 0 contractCompleted: false

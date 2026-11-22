@@ -855,7 +855,9 @@ export class CargoGridV2Component {
                       delta?.recommendedSpot ? '↓ 装入推荐位' : '↓ 放入船舱'
                     }</button>`
                   : this.prepareMode
-                  ? `<button type="button" class="btn btn-sm btn-danger" id="btn-v2-prep-remove">✕ 移出配装</button>`
+                  ? this.callbacks.onPrepareRemoveItem
+                    ? `<button type="button" class="btn btn-sm btn-danger" id="btn-v2-prep-remove">✕ 移出配装</button>`
+                    : `<span class="v2-origin-chip origin-loan" style="align-self:center;">试航整套锁定 · 可拖动/旋转</span>`
                   : `<button type="button" class="btn btn-sm btn-ghost" id="btn-v2-to-staging">↑ 移至暂存</button>`
               }
               ${
@@ -1274,10 +1276,11 @@ export class CargoGridV2Component {
       if (this.selected && this.gridHasFocus) {
         e.preventDefault();
         if (this.prepareMode) {
+          if (!this.callbacks.onPrepareRemoveItem) return;
           const sel = this.getSelectedItemInfo();
           if (sel && sel.zone === 'grid') {
             this.selected = null;
-            this.callbacks.onPrepareRemoveItem?.(sel.item.instanceId);
+            this.callbacks.onPrepareRemoveItem(sel.item.instanceId);
           }
         } else {
           this.discardSelected();
