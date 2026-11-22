@@ -214,11 +214,12 @@ export function selectV2MapNode(run: V2RunState, targetNodeId: string): V2Action
 }
 
 /**
- * Resolves Wreck Salvage choice: Armory (1 equipment) OR Cargo Hold (2 cargos), mutually exclusive (§5.4).
+ * Resolves Wreck Salvage choice: Armory (1 equipment), Cargo Hold (2 cargos),
+ * OR Reactor Bay (+2 fuel / +8 HP repair) — mutually exclusive & idempotent (§5.4 + Polish Phase B).
  */
 export function resolveV2WreckChoice(
   run: V2RunState,
-  room: 'armory' | 'cargo',
+  room: 'armory' | 'cargo' | 'reactor_fuel' | 'reactor_repair',
   unlockedFamilies: readonly V2UnlockFamilyId[]
 ): V2ActionOutcome {
   if (run.phase !== 'ENCOUNTER' || !run.currentNodeId) {
@@ -234,14 +235,29 @@ export function resolveV2WreckChoice(
   }
 
   let nextBay = run.bay;
+  let nextFuel = run.fuel;
+  let nextHp = run.hp;
   let acquiredEq: V2ItemInstance | null = null;
+
   if (room === 'armory') {
     nextBay = addV2ItemToStaging(nextBay, node.wreck.armoryItem, 0);
     acquiredEq = node.wreck.armoryItem;
-  } else {
+  } else if (room === 'cargo') {
     for (const cg of node.wreck.cargoItems) {
       nextBay = addV2ItemToStaging(nextBay, cg, 0);
     }
+  } else if (room === 'reactor_fuel') {
+    const fuelGain = Math.min(node.wreck.reactorFuelGain ?? 2, run.maxFuel - run.fuel);
+    if (fuelGain <= 0) {
+      return { ok: false, run, error: '燃料已满，可改选应急维修或其他舱室' };
+    }
+    nextFuel = run.fuel + fuelGain;
+  } else {
+    const repairGain = Math.min(node.wreck.reactorRepairGain ?? 8, run.maxHp - run.hp);
+    if (repairGain <= 0) {
+      return { ok: false, run, error: '船体耐久已满，可改选抽取燃料或其他舱室' };
+    }
+    nextHp = run.hp + repairGain;
   }
 
   const updatedNode: V2MapNode = {
@@ -252,6 +268,8 @@ export function resolveV2WreckChoice(
 
   let nextRun: V2RunState = {
     ...run,
+    fuel: nextFuel,
+    hp: nextHp,
     bay: nextBay,
     phase: 'ARRANGE',
     claimedEventIds: [...run.claimedEventIds, claimKey],

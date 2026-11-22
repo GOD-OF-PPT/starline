@@ -363,6 +363,8 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
             armoryValueRange: `回收 ${armoryItem.fixedValue}¤`,
             cargoSizeRange: `2 件（单件 ${sizeRangeLabel([c1, c2])}）`,
             cargoValueRange: `合计 ${c1.fixedValue + c2.fixedValue}¤（${valueRangeLabel([c1, c2])}）`,
+            reactorFuelGain: 2,
+            reactorRepairGain: 8,
             chosenRoom: null,
           };
           return payload;

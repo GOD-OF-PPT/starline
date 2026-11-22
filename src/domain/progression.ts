@@ -22,6 +22,8 @@ export interface GameSettings {
   readonly lowQuality: boolean;
   readonly sfxMuted: boolean;
   readonly bgmMuted: boolean;
+  /** Optional Phase-D experiment: single Round-2 tactical decision in Elite battles */
+  readonly eliteTacticExperiment?: boolean;
 }
 
 export interface RelicProgress {

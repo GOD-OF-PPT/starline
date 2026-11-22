@@ -83,6 +83,8 @@ export interface V2ShopEquipmentOffer {
   readonly sold: boolean;
 }
 
+export type V2WreckChoice = 'armory' | 'cargo' | 'reactor_fuel' | 'reactor_repair';
+
 export interface V2WreckPayload {
   readonly armoryItem: V2ItemInstance;
   readonly cargoItems: readonly V2ItemInstance[];
@@ -90,7 +92,9 @@ export interface V2WreckPayload {
   readonly armoryValueRange: string;
   readonly cargoSizeRange: string;
   readonly cargoValueRange: string;
-  readonly chosenRoom: 'armory' | 'cargo' | null;
+  readonly reactorFuelGain?: number;
+  readonly reactorRepairGain?: number;
+  readonly chosenRoom: V2WreckChoice | null;
 }
 
 export interface V2MerchantPayload {
@@ -217,6 +221,30 @@ export interface V2CombatRoundLog {
   readonly enemiesAfter: readonly V2CombatUnitSnapshot[];
 }
 
+export type V2EliteTacticChoice = 'normal' | 'overload' | 'emergency_defense';
+
+export interface V2EliteTacticOptionPreview {
+  readonly choice: V2EliteTacticChoice;
+  readonly label: string;
+  readonly summary: string;
+  readonly enabled: boolean;
+  readonly disabledReason?: string;
+  readonly predictedOutcome: 'victory' | 'defeat';
+  readonly predictedFinalHp: number;
+  readonly predictedRounds: number;
+}
+
+export interface V2EliteTacticDecision {
+  readonly decisionId: string;
+  readonly roundNumber: number;
+  readonly playerHpAtPause: number;
+  readonly playerShieldAtPause: number;
+  readonly enemyThreatDamage: number;
+  readonly enemiesAlive: number;
+  readonly options: readonly V2EliteTacticOptionPreview[];
+  readonly chosen: V2EliteTacticChoice | null;
+}
+
 export interface V2CombatSimulation {
   readonly resultId: string;
   readonly outcome: 'victory' | 'defeat';
@@ -230,6 +258,7 @@ export interface V2CombatSimulation {
   readonly finalPlayerHpAfterRepair: number;
   readonly initialEnemies: readonly V2CombatUnitSnapshot[];
   readonly rounds: readonly V2CombatRoundLog[];
+  readonly appliedTactic?: V2EliteTacticChoice;
 }
 
 export interface V2CombatRewardBundle {
@@ -253,6 +282,8 @@ export interface V2ActiveCombatState {
   readonly startingHp: number;
   readonly targetPolicy: V2TargetPolicy;
   readonly simulation: V2CombatSimulation;
+  /** Optional Phase-D Round-2 Elite tactical decision (paused before Round 2) */
+  readonly pendingDecision?: V2EliteTacticDecision | null;
 }
 
 export interface V2EngineerSwapOffer {
@@ -261,6 +292,8 @@ export interface V2EngineerSwapOffer {
   readonly used: boolean;
 }
 
+export type V2TrialBuildId = 'trial_heavy' | 'trial_hangar' | 'trial_counter';
+
 export interface V2RunState {
   readonly runId: string;
   readonly schemaVersion: number;
@@ -268,6 +301,8 @@ export interface V2RunState {
   readonly seed: number;
   readonly rngStreams: V2RngStreams;
   readonly isTutorial: boolean;
+  readonly isShowcase?: boolean;
+  readonly trialBuildId?: V2TrialBuildId | null;
   readonly allowImproved: boolean;
   readonly contract: V2ContractInstance;
   readonly shipId: V2ShipId;
