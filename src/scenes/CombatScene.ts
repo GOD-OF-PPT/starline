@@ -149,13 +149,25 @@ export class CombatScene extends Phaser.Scene {
     }
   }
 
-  init(data?: { playback?: CombatScenePlayback }): void {
+  private onAssetError: ((key: string) => void) | null = null;
+
+  setAssetErrorHandler(handler: (key: string) => void): void {
+    this.onAssetError = handler;
+  }
+
+  init(data?: { playback?: CombatScenePlayback; onAssetError?: (key: string) => void }): void {
     if (data?.playback) {
       this.playback = data.playback;
+    }
+    if (data?.onAssetError) {
+      this.onAssetError = data.onAssetError;
     }
   }
 
   preload(): void {
+    this.load.on('loaderror', (file: { key?: string }) => {
+      this.onAssetError?.(file?.key ?? 'unknown');
+    });
     const queue: [string, string][] = [
       ['bg.sector.1', getSectorBgImageUrl(1)],
       ['bg.sector.2', getSectorBgImageUrl(2)],

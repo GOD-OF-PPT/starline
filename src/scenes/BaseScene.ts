@@ -17,6 +17,8 @@ export interface BaseSceneState {
     readonly wbText?: string;
     readonly dispText?: string;
     readonly dockText?: string;
+    readonly berthText?: string;
+    readonly workbenchWorking?: boolean;
     readonly showAllPins?: boolean;
   };
 }
@@ -36,12 +38,15 @@ const TEX_H = 720;
 /**
  * Illustrated 2:1 Axonometric Orbital Salvage Station (v2.0).
  * Composites hand-painted same-camera quadrant overlays over station_worn.webp with zero jump,
- * enriched with real-time Phaser VFX (welding sparks, patrolling cargo tug, pulsing relic rings,
- * blinking deck beacons, interactive diegetic pins, and F11 return-to-port docking animation).
+ * enriched with real-time Phaser VFX (welding sparks, articulated unloading crane arm, berthed active ship,
+ * active workbench overhead lamp, pulsing relic rings, blinking deck beacons, interactive diegetic pins,
+ * and F11 return-to-port docking animation).
  */
 export class BaseScene extends Phaser.Scene {
   private currentState: BaseSceneState | null = null;
   private onBuildingClick: ((id: BuildingId) => void) | null = null;
+  private onBerthClick: (() => void) | null = null;
+  private onAssetError: ((key: string) => void) | null = null;
 
   private bgGraphics!: Phaser.GameObjects.Graphics;
   private edgeMaskGraphics!: Phaser.GameObjects.Graphics;
@@ -52,6 +57,7 @@ export class BaseScene extends Phaser.Scene {
   private dispEmptyOverlay!: Phaser.GameObjects.Image;
   private dispRelicOverlay!: Phaser.GameObjects.Image;
   private drydockOverlay!: Phaser.GameObjects.Image;
+  private berthedShipSprite!: Phaser.GameObjects.Image;
   private arrivalShipSprite!: Phaser.GameObjects.Image;
 
   private hitZones: {
@@ -60,6 +66,7 @@ export class BaseScene extends Phaser.Scene {
     badgeBg: Phaser.GameObjects.Graphics;
     label: Phaser.GameObjects.Text;
   }[] = [];
+  private berthZone: Phaser.GameObjects.Zone | null = null;
 
   private elapsed = 0;
   private buildCelebrateTimer = 0;
@@ -78,12 +85,22 @@ export class BaseScene extends Phaser.Scene {
     super({ key: 'BaseScene' });
   }
 
-  init(data?: { state?: BaseSceneState; onBuildingClick?: (id: BuildingId) => void }): void {
+  init(data?: {
+    state?: BaseSceneState;
+    onBuildingClick?: (id: BuildingId) => void;
+    onBerthClick?: () => void;
+    onAssetError?: (key: string) => void;
+  }): void {
     if (data?.state) this.currentState = data.state;
     if (data?.onBuildingClick) this.onBuildingClick = data.onBuildingClick;
+    if (data?.onBerthClick) this.onBerthClick = data.onBerthClick;
+    if (data?.onAssetError) this.onAssetError = data.onAssetError;
   }
 
   preload(): void {
+    this.load.on('loaderror', (file: { key?: string }) => {
+      this.onAssetError?.(file?.key ?? 'unknown');
+    });
     const queue: [string, string][] = [
       ['base.station.worn', getBaseLayerImageUrl('worn')],
       ['base.overlay.workbench', getBaseLayerImageUrl('workbench')],
@@ -118,6 +135,13 @@ export class BaseScene extends Phaser.Scene {
     this.drydockOverlay = this.add.image(0, 0, 'base.overlay.drydock').setOrigin(0.5, 0.5).setDepth(3.3).setVisible(false);
     this.edgeMaskGraphics = this.add.graphics().setDepth(3.6);
 
+    // Berthed player ship resting on the landing pad (matches active selected ship!)
+    this.berthedShipSprite = this.add
+      .image(0, 0, 'ship.player.cannon_skiff')
+      .setOrigin(0.5, 0.5)
+      .setDepth(4.5)
+      .setVisible(false);
+
     // Arrival ship sprite used exclusively during F11 return-to-port approach
     this.arrivalShipSprite = this.add
       .image(0, 0, 'ship.player.cannon_skiff')
@@ -135,6 +159,7 @@ export class BaseScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.texturesReady = false;
       this.hitZones = [];
+      this.berthZone = null;
       this.scale.off('resize', this.handleResize, this);
     });
   }
@@ -173,6 +198,14 @@ export class BaseScene extends Phaser.Scene {
 
   setClickHandler(handler: (id: BuildingId) => void): void {
     this.onBuildingClick = handler;
+  }
+
+  setBerthClickHandler(handler: () => void): void {
+    this.onBerthClick = handler;
+  }
+
+  setAssetErrorHandler(handler: (key: string) => void): void {
+    this.onAssetError = handler;
   }
 
   startReturnDocking(playback: ReturnDockingPlayback): void {
@@ -311,6 +344,25 @@ export class BaseScene extends Phaser.Scene {
         .setDepth(8);
       this.hitZones.push({ id: d.id, zone, badgeBg, label });
     }
+
+    if (this.berthZone?.scene) this.berthZone.destroy();
+    this.berthZone = this.add
+      .zone(0, 0, 140, 88)
+      .setInteractive({ useHandCursor: true })
+      .setDepth(9);
+    this.berthZone.on('pointerdown', () => {
+      this.onBerthClick?.();
+    });
+  }
+
+  private resolveActiveShipKey(): string {
+    if (!this.currentState) return 'ship.player.cannon_skiff';
+    const v2Ship = this.currentState.v2Override?.shipId;
+    if (v2Ship) return `ship.player.${v2Ship}`;
+    const isShield =
+      this.currentState.progression.selectedLoadout === 'shield_cruiser' &&
+      this.currentState.progression.buildings.drydock;
+    return isShield ? 'ship.player.shield_cruiser' : 'ship.player.cannon_skiff';
   }
 
   private redrawStatic(): void {
@@ -378,6 +430,17 @@ export class BaseScene extends Phaser.Scene {
     this.dispEmptyOverlay.setVisible(dispBuilt && !anyRelicRestored);
     this.dispRelicOverlay.setVisible(dispBuilt && anyRelicRestored);
     this.drydockOverlay.setVisible(dockBuilt);
+
+    // Clickable landing-pad berth zone over the painted isometric ship (launches Prepare cleanly!)
+    if (this.berthedShipSprite?.scene) {
+      this.berthedShipSprite.setVisible(false);
+    }
+    if (this.berthZone?.scene) {
+      this.berthZone
+        .setPosition(L.padShip.x, L.padShip.y - 6 * L.scale)
+        .setSize(Math.max(110, 190 * L.scale), Math.max(70, 110 * L.scale))
+        .setVisible(Boolean(this.onBerthClick));
+    }
 
     // Update diegetic station pins directly above each facility!
     const pinSpecs: Record<
@@ -484,6 +547,13 @@ export class BaseScene extends Phaser.Scene {
     const s = L.scale;
     const t = settings.reducedMotion ? 0 : this.elapsed;
 
+    // 0. Subtle landing-pad mooring readiness beacon ring around the painted isometric ship
+    if (!this.dockingPlayback && !settings.reducedMotion) {
+      const padPulse = 0.22 + 0.14 * Math.sin(t * 2.2);
+      this.animGraphics.lineStyle(1.4, 0x62d6df, padPulse);
+      this.animGraphics.strokeEllipse(L.padShip.x, L.padShip.y + 8 * s, 114 * s, 54 * s);
+    }
+
     // 1. Subtle aviation beacons blinking on station corner bollards
     if (!settings.reducedMotion) {
       const blink = Math.sin(t * 3.1) > 0.35;
@@ -500,32 +570,51 @@ export class BaseScene extends Phaser.Scene {
       }
     }
 
-    // 2. Repaired Workbench: live welding spark bursts & warm flickering arc glow
-    if (progression.buildings.workbench && !settings.reducedMotion && !settings.lowQuality) {
-      const sp = L.workbenchSpark;
-      const pulse = 0.55 + 0.45 * Math.sin(t * 14);
-      this.animGraphics.fillStyle(0xffe7a8, 0.72 * pulse);
-      this.animGraphics.fillCircle(sp.x, sp.y, Math.max(2.5, 6 * s * pulse));
-      for (let i = 0; i < 6; i++) {
-        const phase = (t * 2.4 + i * 0.17) % 1;
-        const ang = -Math.PI * 0.85 + (i * 0.32);
-        const dist = phase * 26 * s;
-        const px = sp.x + Math.cos(ang) * dist;
-        const py = sp.y + Math.sin(ang) * dist + phase * phase * 18 * s;
-        this.animGraphics.fillStyle(i % 2 === 0 ? 0xf6b852 : 0xfff0c2, Math.max(0, 1 - phase));
-        this.animGraphics.fillCircle(px, py, Math.max(1.2, 2.2 * s * (1 - phase * 0.5)));
+    // 2. Repaired Workbench: active-working 3rd state (warm overhead lamp + welding sparks + deck crane)
+    const wbWorking = Boolean(this.currentState.v2Override?.workbenchWorking || this.dockingPlayback);
+    if (progression.buildings.workbench) {
+      if (wbWorking) {
+        const lamp = L.pt(0.22, 0.34);
+        const conePulse = settings.reducedMotion ? 0.16 : 0.13 + 0.05 * Math.sin(t * 4.2);
+        this.animGraphics.fillStyle(0xf6b852, conePulse);
+        this.animGraphics.fillTriangle(
+          lamp.x,
+          lamp.y,
+          L.workbench.x - 58 * s,
+          L.workbench.y + 42 * s,
+          L.workbench.x + 54 * s,
+          L.workbench.y + 34 * s
+        );
+        this.animGraphics.fillStyle(0x62d6df, 0.9);
+        this.animGraphics.fillCircle(L.pt(0.185, 0.39).x, L.pt(0.185, 0.39).y, Math.max(2, 3 * s));
       }
 
-      // Autonomous hovering cargo-tug drone gliding smoothly along central cross-walkway
-      const p = (Math.sin(t * 0.8) + 1) * 0.5;
-      const botX = Phaser.Math.Linear(L.pt(0.36, 0.55).x, L.pt(0.62, 0.39).x, p);
-      const botY = Phaser.Math.Linear(L.pt(0.36, 0.55).y, L.pt(0.62, 0.39).y, p) + Math.sin(t * 4) * 2 * s;
-      this.animGraphics.fillStyle(0x060b14, 0.42);
-      this.animGraphics.fillEllipse(botX, botY + 9 * s, 14 * s, 6 * s);
-      this.animGraphics.fillStyle(0x88a0b8, 1);
-      this.animGraphics.fillRoundedRect(botX - 7 * s, botY - 4 * s, 14 * s, 8 * s, 3);
-      this.animGraphics.fillStyle(0x62d6df, 1);
-      this.animGraphics.fillCircle(botX + 2 * s, botY, Math.max(1.5, 2.4 * s));
+      if (!settings.reducedMotion && !settings.lowQuality) {
+        const sp = L.workbenchSpark;
+        const pulse = 0.55 + 0.45 * Math.sin(t * 14);
+        this.animGraphics.fillStyle(0xffe7a8, 0.72 * pulse);
+        this.animGraphics.fillCircle(sp.x, sp.y, Math.max(2.5, 6 * s * pulse));
+        for (let i = 0; i < 6; i++) {
+          const phase = (t * 2.4 + i * 0.17) % 1;
+          const ang = -Math.PI * 0.85 + i * 0.32;
+          const dist = phase * 26 * s;
+          const px = sp.x + Math.cos(ang) * dist;
+          const py = sp.y + Math.sin(ang) * dist + phase * phase * 18 * s;
+          this.animGraphics.fillStyle(i % 2 === 0 ? 0xf6b852 : 0xfff0c2, Math.max(0, 1 - phase));
+          this.animGraphics.fillCircle(px, py, Math.max(1.2, 2.2 * s * (1 - phase * 0.5)));
+        }
+
+        // Autonomous hovering cargo-tug drone gliding smoothly along central cross-walkway
+        const p = (Math.sin(t * 0.8) + 1) * 0.5;
+        const botX = Phaser.Math.Linear(L.pt(0.36, 0.55).x, L.pt(0.62, 0.39).x, p);
+        const botY = Phaser.Math.Linear(L.pt(0.36, 0.55).y, L.pt(0.62, 0.39).y, p) + Math.sin(t * 4) * 2 * s;
+        this.animGraphics.fillStyle(0x060b14, 0.42);
+        this.animGraphics.fillEllipse(botX, botY + 9 * s, 14 * s, 6 * s);
+        this.animGraphics.fillStyle(0x88a0b8, 1);
+        this.animGraphics.fillRoundedRect(botX - 7 * s, botY - 4 * s, 14 * s, 8 * s, 3);
+        this.animGraphics.fillStyle(0x62d6df, 1);
+        this.animGraphics.fillCircle(botX + 2 * s, botY, Math.max(1.5, 2.4 * s));
+      }
     }
 
     // 3. Restored Museum Relics: multi-relic orbital halo + color-coded floating relic pips!
@@ -571,33 +660,27 @@ export class BaseScene extends Phaser.Scene {
       }
     }
 
-    // 5. F11 Return-to-Port Docking & Unloading Sequence (<= 1.4s, pure presentation!)
+    // 5. F11 Return-to-Port Docking & Articulated Mechanical Crane Unloading Sequence (<= 1.4s, pure presentation!)
     if (this.dockingPlayback) {
       const p = Math.min(1, this.dockingElapsedMs / this.dockingDurationMs);
       const dockPhase = Math.min(1, p / 0.48);
       const easeOut = 1 - Math.pow(1 - dockPhase, 3);
 
-      const v2Ship = this.currentState.v2Override?.shipId;
-      const isShield = progression.selectedLoadout === 'shield_cruiser' && progression.buildings.drydock;
-      const shipKey = v2Ship
-        ? `ship.player.${v2Ship}`
-        : isShield
-        ? 'ship.player.shield_cruiser'
-        : 'ship.player.cannon_skiff';
+      const shipKey = this.resolveActiveShipKey();
       if (this.arrivalShipSprite.texture.key !== shipKey) {
         this.arrivalShipSprite.setTexture(shipKey);
       }
 
       const curX = Phaser.Math.Linear(L.approachStart.x, L.padShip.x, easeOut);
-      const curY = Phaser.Math.Linear(L.approachStart.y, L.padShip.y, easeOut);
-      const shipScale = Phaser.Math.Linear(0.36, 0.24, easeOut) * s;
+      const curY = Phaser.Math.Linear(L.approachStart.y, L.padShip.y - 8 * s, easeOut);
+      const shipScale = Phaser.Math.Linear(0.36, 0.245, easeOut) * s;
 
       this.arrivalShipSprite
-        .setVisible(p < 0.62)
+        .setVisible(p < 0.95)
         .setPosition(curX, curY)
         .setScale(shipScale)
-        .setAngle(-18 * (1 - easeOut))
-        .setAlpha(p > 0.48 ? Math.max(0, 1 - (p - 0.48) / 0.14) : this.dockingPlayback.wasDefeat ? 0.8 : 1);
+        .setAngle(Phaser.Math.Linear(-22, -12, easeOut))
+        .setAlpha(this.dockingPlayback.wasDefeat ? 0.85 : 1);
 
       // Braking retro-thruster plume or amber escort tug
       if (dockPhase < 0.94) {
@@ -614,10 +697,14 @@ export class BaseScene extends Phaser.Scene {
         }
       }
 
-      // Cargo crates arcing smoothly from landing pad into Workbench / Display
+      // Articulated 2-segment mechanical gantry crane physically carrying crates from ship to Workbench/Display!
       if (p >= 0.44 && p <= 0.96) {
         const unloadP = (p - 0.44) / 0.52;
         const crates = Math.min(5, Math.max(2, this.dockingPlayback.crateCount));
+        const craneBase = L.pt(0.34, 0.57);
+        let leadGripX: number | null = null;
+        let leadGripY: number | null = null;
+
         for (let i = 0; i < crates; i++) {
           const localP = Math.max(0, Math.min(1, unloadP * 1.45 - i * 0.13));
           if (localP <= 0 || localP >= 1) continue;
@@ -627,11 +714,32 @@ export class BaseScene extends Phaser.Scene {
           const cy =
             Phaser.Math.Linear(L.padShip.y - 12 * s, target.y, localP) -
             Math.sin(localP * Math.PI) * 52 * s;
+          if (leadGripX === null) {
+            leadGripX = cx;
+            leadGripY = cy;
+          }
           const sz = Math.max(6, 13 * s);
           this.animGraphics.fillStyle(isRelicCrate ? 0x62d6df : 0xf6b852, 1);
           this.animGraphics.lineStyle(1.6, 0x0d1726, 1);
           this.animGraphics.fillRoundedRect(cx - sz * 0.5, cy - sz * 0.5, sz, sz, 3);
           this.animGraphics.strokeRoundedRect(cx - sz * 0.5, cy - sz * 0.5, sz, sz, 3);
+        }
+
+        if (leadGripX !== null && leadGripY !== null) {
+          const elbowX = (craneBase.x + leadGripX) * 0.5 - 12 * s;
+          const elbowY = Math.min(craneBase.y, leadGripY) - 44 * s;
+          // Heavy gantry pedestal
+          this.animGraphics.fillStyle(0x2d3f54, 1);
+          this.animGraphics.fillCircle(craneBase.x, craneBase.y, Math.max(4, 7 * s));
+          // Upper boom & forearm articulated steel struts
+          this.animGraphics.lineStyle(Math.max(2.5, 4.4 * s), 0x7b93ad, 0.95);
+          this.animGraphics.lineBetween(craneBase.x, craneBase.y, elbowX, elbowY);
+          this.animGraphics.lineStyle(Math.max(2, 3.4 * s), 0xa8bfd6, 0.95);
+          this.animGraphics.lineBetween(elbowX, elbowY, leadGripX, leadGripY - 6 * s);
+          // Hydraulic joint & amber magnetic grapple head
+          this.animGraphics.fillStyle(0xf6b852, 1);
+          this.animGraphics.fillCircle(elbowX, elbowY, Math.max(2.5, 4 * s));
+          this.animGraphics.fillCircle(leadGripX, leadGripY - 6 * s, Math.max(2.5, 4.2 * s));
         }
       }
 
