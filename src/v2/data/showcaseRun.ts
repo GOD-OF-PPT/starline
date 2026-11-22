@@ -144,7 +144,7 @@ export function createV2ShowcaseRun(
       armorySizeRange: '2–4 格设备',
       armoryValueRange: '回收 10–20¤',
       cargoSizeRange: '2 件（1–2 格）',
-      cargoValueRange: '合计 26¤',
+      cargoValueRange: '合计 22¤',
       reactorFuelGain: 2,
       reactorRepairGain: 8,
       chosenRoom: null,
@@ -167,8 +167,8 @@ export function createV2ShowcaseRun(
           trialBuildId === 'trial_heavy'
             ? 'capacitor'
             : trialBuildId === 'trial_hangar'
-            ? 'relay'
-            : 'repair',
+            ? 'hangar'
+            : 'battery',
         quality: 'improved',
         origin: 'loot',
         acquiredDepth: 2,
@@ -191,9 +191,9 @@ export function createV2ShowcaseRun(
         }),
       ],
       armorySizeRange: '优良核心配件',
-      armoryValueRange: '回收 12–21¤',
+      armoryValueRange: '回收 12–30¤',
       cargoSizeRange: '2 件（1–3 格）',
-      cargoValueRange: '合计 36¤',
+      cargoValueRange: '合计 39¤',
       reactorFuelGain: 2,
       reactorRepairGain: 8,
       chosenRoom: null,
@@ -284,7 +284,7 @@ export function createV2ShowcaseRun(
       armorySizeRange: '2 格优良护盾',
       armoryValueRange: '回收 15¤',
       cargoSizeRange: '含古星图仪藏品',
-      cargoValueRange: '合计 55¤+',
+      cargoValueRange: '合计 80¤+',
       reactorFuelGain: 2,
       reactorRepairGain: 8,
       chosenRoom: null,
@@ -301,7 +301,7 @@ export function createV2ShowcaseRun(
     nextNodeIds: ['L4A', 'L4B'],
     contractMarker: false,
     anomaly: {
-      cargoCategoryLabel: '折叠天线（L3 · 单件 26¤）',
+      cargoCategoryLabel: '折叠天线（L3 · 单件 42¤）',
       safeFuelCost: 1,
       safeCargoItem: createV2CargoInstance({
         instanceId: `${runId}_l3_anom_s`,

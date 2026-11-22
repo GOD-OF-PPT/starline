@@ -18,9 +18,11 @@ import type {
 } from './types';
 
 export const V2_MAX_COMBAT_ROUNDS = 30;
-export const V2_ELITE_OVERLOAD_SHIELD_COST = 4;
-export const V2_ELITE_OVERLOAD_RAW_DMG = 6;
-export const V2_ELITE_DEFENSE_SHIELD_GAIN = 8;
+export const V2_ELITE_OVERLOAD_COST = 3;
+export const V2_ELITE_OVERLOAD_RAW_DMG = 9;
+export const V2_ELITE_DEFENSE_SHIELD_GAIN = 5;
+/** @deprecated Alias kept for external imports; Overload now spends shield first then HP */
+export const V2_ELITE_OVERLOAD_SHIELD_COST = V2_ELITE_OVERLOAD_COST;
 
 interface MutableUnit {
   readonly enemyId: string;
@@ -69,10 +71,11 @@ function applyHitToUnit(
   unit: MutableUnit,
   sourceKind: V2PlayerAttackEvent['sourceKind'],
   sourceInstanceId: string,
-  rawDamage: number
+  rawDamage: number,
+  ignoreArmor = false
 ): V2PlayerAttackEvent {
-  // §8.2: Per-hit armor reduction: max(1, rawDamage - armor)
-  const appliedDamage = Math.max(1, rawDamage - unit.armor);
+  // §8.2: Per-hit armor reduction: max(1, rawDamage - armor) (unless armor-piercing tactical order)
+  const appliedDamage = ignoreArmor ? Math.max(1, rawDamage) : Math.max(1, rawDamage - unit.armor);
   const armorBlocked = Math.max(0, rawDamage - appliedDamage);
   const wasAlive = unit.hp > 0;
   unit.hp = Math.max(0, unit.hp - appliedDamage);
@@ -124,6 +127,7 @@ export function simulateV2Combat(params: {
   let outcome: 'victory' | 'defeat' = 'defeat';
   let stalemate = false;
   let appliedTactic: V2EliteTacticChoice | undefined = undefined;
+  let heavyStallApplied = false;
 
   for (let round = 1; round <= V2_MAX_COMBAT_ROUNDS; round++) {
     // Step 1: Read start-of-round living enemies, compute hangar drone counts & heavy firing schedule
@@ -134,18 +138,30 @@ export function simulateV2Combat(params: {
     }
 
     // Phase-D optional Round-2 Elite tactical order (applied cleanly at Round 2 boundary before shots)
-    let suppressEquipmentWeaponsThisRound = false;
+    let suppressDirectWeaponsThisRound = false;
     let triggerOverloadBonusHit = false;
     if (round === 2 && params.round2Tactic) {
       appliedTactic = params.round2Tactic;
-      if (params.round2Tactic === 'overload' && playerShield >= V2_ELITE_OVERLOAD_SHIELD_COST) {
-        playerShield -= V2_ELITE_OVERLOAD_SHIELD_COST;
+      if (
+        params.round2Tactic === 'overload' &&
+        playerHp + playerShield > V2_ELITE_OVERLOAD_COST
+      ) {
+        const shieldPaid = Math.min(playerShield, V2_ELITE_OVERLOAD_COST);
+        playerShield -= shieldPaid;
+        const hpPaid = V2_ELITE_OVERLOAD_COST - shieldPaid;
+        playerHp = Math.max(1, playerHp - hpPaid);
         triggerOverloadBonusHit = true;
       } else if (params.round2Tactic === 'emergency_defense') {
-        playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + V2_ELITE_DEFENSE_SHIELD_GAIN);
-        suppressEquipmentWeaponsThisRound = true;
+        const shieldGain =
+          V2_ELITE_DEFENSE_SHIELD_GAIN + (stats.bestActiveCounter ? 2 : 0);
+        playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + shieldGain);
+        suppressDirectWeaponsThisRound = true;
+        heavyStallApplied = true;
       }
     }
+
+    // Power diversion during Emergency Defense stalls heavy railgun charge by 1 cycle, while hangar bays continue launching/ramping
+    const effectiveHeavyRound = heavyStallApplied && round >= 2 ? round - 1 : round;
 
     const droneCountsByHangar: Record<string, number> = {};
     for (const hg of stats.hangars) {
@@ -155,27 +171,34 @@ export function simulateV2Combat(params: {
 
     const heavyChargingIds: string[] = [];
     for (const h of stats.heavies) {
-      const fires = h.firesOnOddRounds ? round % 2 === 1 : round % 2 === 0;
-      if (!fires || suppressEquipmentWeaponsThisRound) heavyChargingIds.push(h.instanceId);
+      const fires = h.firesOnOddRounds ? effectiveHeavyRound % 2 === 1 : effectiveHeavyRound % 2 === 0;
+      if (!fires || suppressDirectWeaponsThisRound) heavyChargingIds.push(h.instanceId);
     }
 
     // Step 2 & 3: Select single-target primary from start-of-round snapshot (overkill allowed & deterministic!)
     const primaryTarget = selectTargetByPolicy(startLiving, params.targetPolicy)!;
     const playerAttacks: V2PlayerAttackEvent[] = [];
 
-    // 2a. Core attack (preserved even during emergency_defense)
-    if (stats.coreAttack > 0) {
+    // 2a. Core attack (paused during full-shield emergency_defense power diversion)
+    if (stats.coreAttack > 0 && !suppressDirectWeaponsThisRound) {
       playerAttacks.push(applyHitToUnit(primaryTarget, 'core', 'ship_core', stats.coreAttack));
     }
 
-    // Optional Round-2 Overload extra normal hit (subject to armor)
+    // Optional Round-2 Overload armor-piercing strike (ignores enemy armor; switches to living target if primary fell to core!)
     if (triggerOverloadBonusHit) {
+      const overloadTarget = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
       playerAttacks.push(
-        applyHitToUnit(primaryTarget, 'core', 'tactic_overload', V2_ELITE_OVERLOAD_RAW_DMG)
+        applyHitToUnit(
+          overloadTarget,
+          'core',
+          'tactic_overload',
+          V2_ELITE_OVERLOAD_RAW_DMG,
+          true
+        )
       );
     }
 
-    if (!suppressEquipmentWeaponsThisRound) {
+    if (!suppressDirectWeaponsThisRound) {
       // 2b. Lasers (sorted by instanceId)
       for (const l of stats.lasers) {
         playerAttacks.push(applyHitToUnit(primaryTarget, 'laser', l.instanceId, l.totalDamage));
@@ -183,19 +206,22 @@ export function simulateV2Combat(params: {
 
       // 2c. Heavy cannons firing this round (sorted by instanceId)
       for (const h of stats.heavies) {
-        const fires = h.firesOnOddRounds ? round % 2 === 1 : round % 2 === 0;
+        const fires = h.firesOnOddRounds
+          ? effectiveHeavyRound % 2 === 1
+          : effectiveHeavyRound % 2 === 0;
         if (fires) {
           const bonus = round === 1 ? h.firstShotBonus : 0;
           playerAttacks.push(applyHitToUnit(primaryTarget, 'heavy', h.instanceId, h.baseDamage + bonus));
         }
       }
 
-      // 2d. Hangar drones: each active drone fires 1 individual hit (so armor applies per drone! AC08)
+      // 2d. Hangar drones: each active drone acquires a living enemy independently (auto-switches on kill; per-drone armor still applies! AC08)
       for (const hg of stats.hangars) {
         const drones = droneCountsByHangar[hg.instanceId] ?? 0;
         for (let d = 0; d < drones; d++) {
+          const droneTarget = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
           playerAttacks.push(
-            applyHitToUnit(primaryTarget, 'hangar', `${hg.instanceId}_d${d + 1}`, hg.damagePerDrone)
+            applyHitToUnit(droneTarget, 'hangar', `${hg.instanceId}_d${d + 1}`, hg.damagePerDrone)
           );
         }
       }
@@ -236,12 +262,14 @@ export function simulateV2Combat(params: {
       });
     }
 
-    // Step 5: Counter phase (ship-wide ONCE per round, based ONLY on actual shield absorbed, preserved during emergency_defense!)
+    // Step 5: Counter phase (ship-wide ONCE per round, based ONLY on actual shield absorbed; supercharged +2 during emergency_defense!)
     let counterAttack: V2PlayerAttackEvent | null = null;
     if (stats.bestActiveCounter && shieldAbsorbedTotal > 0) {
+      const defenseCounterBonus =
+        round === 2 && params.round2Tactic === 'emergency_defense' ? 2 : 0;
       const rawCounter = Math.min(
-        stats.bestActiveCounter.maxDamage,
-        Math.floor(shieldAbsorbedTotal * stats.bestActiveCounter.ratio)
+        stats.bestActiveCounter.maxDamage + defenseCounterBonus,
+        Math.floor(shieldAbsorbedTotal * stats.bestActiveCounter.ratio) + defenseCounterBonus
       );
       if (rawCounter > 0) {
         const postMainLiving = enemies.filter((u) => u.hp > 0);
@@ -342,7 +370,16 @@ function buildEliteRound2Decision(params: {
   const aliveEnemies = r1.enemiesAfter.filter((e) => e.hp > 0);
   if (aliveEnemies.length === 0) return null;
 
-  const canOverload = r1.playerShieldAfter >= V2_ELITE_OVERLOAD_SHIELD_COST;
+  const canOverload = r1.playerHpAfter + r1.playerShieldAfter > V2_ELITE_OVERLOAD_COST;
+  const overloadShieldCost = Math.min(r1.playerShieldAfter, V2_ELITE_OVERLOAD_COST);
+  const overloadHpCost = V2_ELITE_OVERLOAD_COST - overloadShieldCost;
+  const overloadCostLabel =
+    overloadHpCost === 0
+      ? `消耗 ${overloadShieldCost} 护盾`
+      : overloadShieldCost === 0
+      ? `消耗 ${overloadHpCost} 耐久`
+      : `消耗 ${overloadShieldCost} 盾 + ${overloadHpCost} 耐久`;
+
   const simOverload = canOverload
     ? simulateV2Combat({
         resultId: `prev_ov_${params.run.runId}_${params.nodeId}`,
@@ -365,11 +402,14 @@ function buildEliteRound2Decision(params: {
     round2Tactic: 'emergency_defense',
   });
 
+  const hasCounter = calculateV2BuildStats(params.run.bay).bestActiveCounter !== null;
+  const defenseShieldGain = V2_ELITE_DEFENSE_SHIELD_GAIN + (hasCounter ? 2 : 0);
+
   const options: V2EliteTacticOptionPreview[] = [
     {
       choice: 'normal',
       label: '正常执行',
-      summary: '按原配装节拍自动交火，保留现有护盾与武器轮次',
+      summary: '按原配装节拍自动交火，无额外损耗且保持重炮蓄能/机库扩编进度',
       enabled: true,
       predictedOutcome: params.baselineSim.outcome,
       predictedFinalHp: params.baselineSim.finalPlayerHpAfterRepair,
@@ -378,11 +418,11 @@ function buildEliteRound2Decision(params: {
     {
       choice: 'overload',
       label: '火力过载',
-      summary: `消耗 ${V2_ELITE_OVERLOAD_SHIELD_COST} 护盾，本轮额外追加 1 次 ${V2_ELITE_OVERLOAD_RAW_DMG} 点直击（受护甲影响）`,
+      summary: `${overloadCostLabel}，本轮追加 1 次 ${V2_ELITE_OVERLOAD_RAW_DMG} 点无视护甲破甲直击`,
       enabled: canOverload,
       disabledReason: canOverload
         ? undefined
-        : `当前剩余护盾 ${r1.playerShieldAfter} < ${V2_ELITE_OVERLOAD_SHIELD_COST}`,
+        : `剩余护盾与耐久总和 ${r1.playerHpAfter + r1.playerShieldAfter} ≤ ${V2_ELITE_OVERLOAD_COST}，无法承受过载反冲`,
       predictedOutcome: simOverload.outcome,
       predictedFinalHp: simOverload.finalPlayerHpAfterRepair,
       predictedRounds: simOverload.roundsCount,
@@ -390,7 +430,9 @@ function buildEliteRound2Decision(params: {
     {
       choice: 'emergency_defense',
       label: '紧急防御',
-      summary: `立刻 +${V2_ELITE_DEFENSE_SHIELD_GAIN} 护盾（上限 ${V2_MAX_BATTLE_SHIELD}），本轮设备主动武器停火（核心/机库增长/反击保留）`,
+      summary: `立刻 +${defenseShieldGain} 护盾（上限 ${V2_MAX_BATTLE_SHIELD}${
+        hasCounter ? '，含反击器协同 +2' : ''
+      }），全炮停火且重炮蓄能延后 1 轮（机库照常扩编${hasCounter ? '，反击当轮 +2 伤' : ''}）`,
       enabled: true,
       predictedOutcome: simDefense.outcome,
       predictedFinalHp: simDefense.finalPlayerHpAfterRepair,

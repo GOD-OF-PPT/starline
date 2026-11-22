@@ -41,24 +41,24 @@ export const V2_TRIAL_BUILDS: Record<V2TrialBuildId, V2TrialBuildSpec> = {
     name: '无人机编队方案',
     shortName: '无人机编队',
     archetypeId: 'hangar',
-    tagline: '无人机库 + 编队中继每轮扩编，满编 4 架持续压制',
-    advantage: '中长战越打越猛 · 蜂群与常规敌舰通吃',
-    tradeoff: '首轮仅升空 1 架输出偏薄，遇重甲逐发受减伤',
+    tagline: '无人机库 + 编队中继每轮扩编，满编 4 架独立索敌自动转火',
+    advantage: '克制多目标蜂群 · 无过量浪费且中长战火力持续攀升',
+    tradeoff: '首轮仅升空 1 架启动偏慢，遇重甲逐发受护甲减伤',
     allowedKinds: ['hangar', 'relay', 'shield'],
-    demoEnemyTitle: '巡逻拾荒艇（20 耐久）',
-    demoHint: '每轮机库开门递增 1→2→3→4 架编队齐射',
+    demoEnemyTitle: '微型蜂群（4 目标）',
+    demoHint: '每轮机库开门递增 1→2→3→4 架编队，击毁即刻转火清群',
   },
   trial_counter: {
     id: 'trial_counter',
     name: '护盾反击方案',
     shortName: '护盾反击',
     archetypeId: 'counter',
-    tagline: '双护盾板夹护反击器，硬吃齐射并将能量电弧劈回敌舰',
-    advantage: '高盾低战损 · 接敌火力越猛反击回射越痛',
-    tradeoff: '遇 50% 穿盾猎手时吸收锐减，反击收益显著下降',
-    allowedKinds: ['shield', 'counter'],
+    tagline: '护盾板 + 反击环构建 10–14 点厚盾，激光补刀并回劈吸收电弧',
+    advantage: '高盾低战损 · 克制齐射蜂群与高频率常规火力',
+    tradeoff: '遇 50% 穿盾猎手时吸收锐减，破重甲速度逊于重炮',
+    allowedKinds: ['shield', 'counter', 'laser'],
     demoEnemyTitle: '双巡逻快艇（齐射 6 伤）',
-    demoHint: '护盾吸收实伤后立即回流至反击环劈出电弧',
+    demoHint: '护盾 + 反击环提供厚盾吸收并劈回电弧，激光同步压血线',
   },
 };
 
@@ -136,7 +136,7 @@ export function buildTrialPrepareSlots(
     return base;
   }
 
-  // trial_counter
+  // trial_counter: shield(2) + counter(2, built-in +4 shield!) + laser(2) on 4x4 hulls (6/6, 10–14 shield + real DPS!)
   const base: V2PrepareSlotEntry[] = [
     {
       slotKey: 'trial_counter_1',
@@ -159,7 +159,7 @@ export function buildTrialPrepareSlots(
     base.push({
       slotKey: 'trial_counter_3',
       origin: 'loan',
-      definitionId: 'equipment.shield.common', // 1x2, budget 2 -> (2,0),(2,1) (total 6/6)
+      definitionId: 'equipment.laser.common', // 1x2, budget 2 -> (2,0),(2,1) (total 6/6)
       x: 2,
       y: 0,
       rotation: 0,
@@ -190,7 +190,7 @@ export function getTrialDemoUnits(trialId: V2TrialBuildId): readonly V2EnemyUnit
     return buildEncounterUnits('armored', 3, 'demo_heavy');
   }
   if (trialId === 'trial_hangar') {
-    return buildEncounterUnits('patrol', 3, 'demo_hangar');
+    return buildEncounterUnits('swarm', 3, 'demo_hangar');
   }
   // trial_counter: two scout raiders dealing 6 total/round so shield absorption + counter arc trigger immediately!
   return [
