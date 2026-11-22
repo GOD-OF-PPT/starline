@@ -67,5 +67,5 @@ V2「远航经营」已完整实施并作为默认入口启用，同时完整保
 最新验收记录：
 
 - [V2 体验深化与精修验收报告](docs/reviews/2026-11-21-v2-polish/V2体验深化与精修验收报告.md)
-- [无头 Chromium E2E 检查数据（19/19 通过）](docs/reviews/2026-11-21-v2-polish/e2e_checks.json) 与 [截图证据目录](docs/reviews/2026-11-21-v2-polish/screenshots/)
+- [无头 Chromium E2E 检查数据（24/24 通过）](docs/reviews/2026-11-21-v2-polish/e2e_checks.json)、[资产清晰度诊断数据](docs/reviews/2026-11-21-v2-polish/asset_clarity_diagnostics.json) 与 [截图证据目录（17 张 2× DPR 实拍）](docs/reviews/2026-11-21-v2-polish/screenshots/)
 
