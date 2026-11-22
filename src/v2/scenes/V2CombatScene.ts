@@ -94,6 +94,7 @@ export class V2CombatScene extends Phaser.Scene {
 
   private viewW = 390;
   private viewH = 240;
+  private dpr = 1;
   private texturesReady = false;
   private externalPaused = false;
   private elapsed = 0;
@@ -121,13 +122,21 @@ export class V2CombatScene extends Phaser.Scene {
     this.externalPaused = paused;
   }
 
-  syncViewport(w: number, h: number): void {
+  private applyCameraViewport(): void {
+    if (!this.cameras?.main) return;
+    const bw = Math.round(this.viewW * this.dpr);
+    const bh = Math.round(this.viewH * this.dpr);
+    this.cameras.main.setViewport(0, 0, bw, bh);
+    this.cameras.main.setZoom(this.dpr);
+    this.cameras.main.centerOn(this.viewW * 0.5, this.viewH * 0.5);
+  }
+
+  syncViewport(w: number, h: number, dpr?: number): void {
     if (w < 16 || h < 16) return;
     this.viewW = w;
     this.viewH = h;
-    if (this.cameras?.main) {
-      this.cameras.main.setViewport(0, 0, w, h);
-    }
+    if (dpr !== undefined) this.dpr = dpr;
+    this.applyCameraViewport();
     if (this.scene.isActive() && this.texturesReady) {
       this.layoutAll();
     }
@@ -169,9 +178,10 @@ export class V2CombatScene extends Phaser.Scene {
   }
 
   create(): void {
-    this.viewW = this.scale.width || 390;
-    this.viewH = this.scale.height || 240;
-    this.cameras.main.setViewport(0, 0, this.viewW, this.viewH);
+    this.dpr = (this.game.registry.get('dpr') as number) || 1;
+    this.viewW = Math.round((this.scale.width || 390) / this.dpr);
+    this.viewH = Math.round((this.scale.height || 240) / this.dpr);
+    this.applyCameraViewport();
     this.cameras.main.setBackgroundColor('#0C1524');
 
     this.stars = [];
@@ -188,6 +198,11 @@ export class V2CombatScene extends Phaser.Scene {
     this.bgImage = this.add.image(0, 0, 'bg.sector.1').setOrigin(0.5, 0.5).setDepth(0);
     this.bgGraphics = this.add.graphics().setDepth(1);
     this.fxGraphics = this.add.graphics().setDepth(7);
+    this.playerSprite = null;
+    this.enemies = [];
+    this.popups = [];
+    this.beams = [];
+    this.rings = [];
     this.texturesReady = true;
 
     this.applyPlayback();
@@ -195,18 +210,30 @@ export class V2CombatScene extends Phaser.Scene {
     this.scale.on('resize', this.handleResize, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.texturesReady = false;
+      this.playbackActive = false;
+      this.waitingCompletion = false;
+      this.nextRoundIdx = 0;
+      this.beams = [];
+      this.rings = [];
       this.clearPopups();
       this.destroyEnemySprites();
+      this.playerSprite = null;
+      this.bgImage = null;
       this.scale.off('resize', this.handleResize, this);
     });
   }
 
   private handleResize(gameSize?: Phaser.Structs.Size): void {
     if (!this.scene.isActive()) return;
+    const dpr = (this.game.registry.get('dpr') as number) || this.dpr || 1;
     if (gameSize && gameSize.width > 0 && gameSize.height > 0) {
-      this.syncViewport(gameSize.width, gameSize.height);
+      this.syncViewport(Math.round(gameSize.width / dpr), Math.round(gameSize.height / dpr), dpr);
     } else {
-      this.syncViewport(this.scale.width || 390, this.scale.height || 240);
+      this.syncViewport(
+        Math.round((this.scale.width || 390) / dpr),
+        Math.round((this.scale.height || 240) / dpr),
+        dpr
+      );
     }
   }
 
@@ -238,12 +265,16 @@ export class V2CombatScene extends Phaser.Scene {
   }
 
   private clearPopups(): void {
-    for (const p of this.popups) p.textObj.destroy();
+    for (const p of this.popups) {
+      if (p.textObj?.scene) p.textObj.destroy();
+    }
     this.popups = [];
   }
 
   private destroyEnemySprites(): void {
-    for (const e of this.enemies) e.sprite.destroy();
+    for (const e of this.enemies) {
+      if (e.sprite?.scene) e.sprite.destroy();
+    }
     this.enemies = [];
   }
 
@@ -271,13 +302,15 @@ export class V2CombatScene extends Phaser.Scene {
     const bgKey = pb.eventBackdrop
       ? `event.${pb.eventBackdrop}`
       : `bg.sector.${pb.sectorIndex ?? 1}`;
-    if (this.bgImage && this.textures.exists(bgKey)) {
+    if (!this.bgImage || !this.bgImage.scene) {
+      this.bgImage = this.add.image(0, 0, this.textures.exists(bgKey) ? bgKey : 'bg.sector.1').setOrigin(0.5, 0.5).setDepth(0);
+    } else if (this.textures.exists(bgKey)) {
       this.bgImage.setTexture(bgKey);
     }
 
-    // Player ship sprite
+    // Player ship sprite (guard .scene so restarted scenes NEVER reference destroyed objects!)
     const pKey = `v2.ship.player.${pb.shipId}`;
-    if (!this.playerSprite) {
+    if (!this.playerSprite || !this.playerSprite.scene) {
       this.playerSprite = this.add.image(0, 0, pKey).setOrigin(0.5, 0.5).setDepth(3);
     } else if (this.textures.exists(pKey)) {
       this.playerSprite.setTexture(pKey);

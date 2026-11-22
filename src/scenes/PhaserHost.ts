@@ -28,6 +28,10 @@ export class PhaserHost {
   private ready = false;
   private lastW = 0;
   private lastH = 0;
+  private lastBackingW = 0;
+  private lastBackingH = 0;
+  private lowQuality = false;
+  private currentDpr = 1;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -38,15 +42,18 @@ export class PhaserHost {
     const initRect = container.getBoundingClientRect();
     const initW = Math.max(200, Math.round(initRect.width) || 390);
     const initH = Math.max(120, Math.round(initRect.height) || 240);
+    this.currentDpr = this.computeDpr();
     this.lastW = initW;
     this.lastH = initH;
+    this.lastBackingW = Math.round(initW * this.currentDpr);
+    this.lastBackingH = Math.round(initH * this.currentDpr);
 
     this.game = new Phaser.Game({
       type: Phaser.AUTO,
       parent: container,
-      width: initW,
-      height: initH,
-      backgroundColor: '#111A29',
+      width: this.lastBackingW,
+      height: this.lastBackingH,
+      backgroundColor: '#0B1320',
       render: {
         antialias: true,
         antialiasGL: true,
@@ -60,9 +67,11 @@ export class PhaserHost {
       },
       scene: [this.baseScene, this.combatScene, this.v2CombatScene],
     });
+    this.game.registry.set('dpr', this.currentDpr);
 
     this.game.events.once(Phaser.Core.Events.READY, () => {
       this.ready = true;
+      this.game.registry.set('dpr', this.currentDpr);
       this.enforceCanvasCss();
       const targetMode = this.currentMode;
       this.currentMode = null;
@@ -97,6 +106,12 @@ export class PhaserHost {
     window.addEventListener('orientationchange', this.handleWindowResize);
   }
 
+  private computeDpr(): number {
+    if (this.lowQuality || typeof window === 'undefined') return 1;
+    const raw = window.devicePixelRatio || 1;
+    return Math.min(2, Math.max(1, Math.round(raw * 2) / 2));
+  }
+
   private handleWindowResize = (): void => {
     this.scheduleResize();
   };
@@ -127,22 +142,29 @@ export class PhaserHost {
     if (w < 16 || h < 16) return;
 
     this.enforceCanvasCss();
+    const dpr = this.computeDpr();
+    const bw = Math.round(w * dpr);
+    const bh = Math.round(h * dpr);
+    this.currentDpr = dpr;
+    this.game.registry.set('dpr', dpr);
 
-    if (w !== this.lastW || h !== this.lastH) {
+    if (bw !== this.lastBackingW || bh !== this.lastBackingH || w !== this.lastW || h !== this.lastH) {
       this.lastW = w;
       this.lastH = h;
-      this.game.scale.resize(w, h);
+      this.lastBackingW = bw;
+      this.lastBackingH = bh;
+      this.game.scale.resize(bw, bh);
     }
 
     if (this.ready) {
       if (this.game.scene.isActive('BaseScene')) {
-        this.baseScene.syncViewport(w, h);
+        this.baseScene.syncViewport(w, h, dpr);
       }
       if (this.game.scene.isActive('CombatScene')) {
-        this.combatScene.syncViewport(w, h);
+        this.combatScene.syncViewport(w, h, dpr);
       }
       if (this.game.scene.isActive('V2CombatScene')) {
-        this.v2CombatScene.syncViewport(w, h);
+        this.v2CombatScene.syncViewport(w, h, dpr);
       }
     }
   }
@@ -213,6 +235,10 @@ export class PhaserHost {
   }
 
   updateCombatSettings(settings: GameSettings): void {
+    if (this.lowQuality !== settings.lowQuality) {
+      this.lowQuality = settings.lowQuality;
+      this.scheduleResize();
+    }
     if (this.ready && this.game.scene.isActive('CombatScene')) {
       this.combatScene.updateSettings(settings);
     }

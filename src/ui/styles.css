@@ -4335,3 +4335,93 @@ body.low-quality .placed-item-node {
   bottom: 44px;
   right: 16px;
 }
+
+/* ==========================================================================
+   PHASE A FIX: Complete V2 Staging Card Layout (Zero Overflow for 1x1..2x3)
+   ========================================================================== */
+
+.staging-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(156px, 1fr));
+  gap: 8px;
+}
+
+.staging-item-card,
+.v2-staging-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 58px;
+  padding: 7px 9px 7px 26px !important;
+  border-radius: var(--radius-sm);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.staging-item-card:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-raised);
+}
+
+.staging-item-card.selected {
+  border-color: var(--accent-action);
+  background: rgba(246, 184, 82, 0.14);
+  box-shadow: inset 0 0 0 1px var(--accent-action);
+}
+
+.staging-item-card.origin-mission {
+  border-color: rgba(242, 117, 100, 0.72);
+}
+
+.staging-item-card .v2-origin-badge {
+  position: absolute;
+  top: 6px;
+  left: 5px;
+}
+
+.staging-thumb {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  max-width: 44px;
+  max-height: 44px;
+  object-fit: contain;
+  flex-shrink: 0;
+  border-radius: 5px;
+  background: rgba(11, 19, 32, 0.7);
+  padding: 3px;
+}
+
+.staging-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.staging-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.staging-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
