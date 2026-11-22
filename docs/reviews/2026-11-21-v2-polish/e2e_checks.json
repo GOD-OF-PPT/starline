@@ -1,0 +1,100 @@
+{
+  "timestamp": "2026-11-22T04:21:07.528Z",
+  "checks": [
+    {
+      "id": "E01_TitleShowcaseEntry",
+      "pass": true,
+      "detail": "4-node Showcase CTA rendered on Title screen"
+    },
+    {
+      "id": "E02_BaseHeroProportion",
+      "pass": true,
+      "detail": "Base station hero occupies 88% viewport height, workbench panels hidden"
+    },
+    {
+      "id": "E03_Retina2xDprCanvas",
+      "pass": true,
+      "detail": "Canvas backing width 2292px vs CSS host 1146px at DPR=2"
+    },
+    {
+      "id": "E04_ZeroDevJargonOnBase",
+      "pass": true,
+      "detail": "hasDevJargon=false, overflowX=0"
+    },
+    {
+      "id": "E05_TrialHeavyModularMounts",
+      "pass": true,
+      "detail": "Prepare Heavy mounts readout: 磁轨重炮×1·先手\n护盾 6"
+    },
+    {
+      "id": "E06_TacticalDeltaComparator",
+      "pass": true,
+      "detail": "Tactical delta strip: 联动 | 已贴邻「蓄能器」生效（先手） | 收益 | 相对卸下，对「模拟靶舰（装甲护卫）」：由败转胜（余 21 耐久 · 5 轮） | 舱位 | 已占 3 格（1×3）· 船舱余 10/16 格"
+    },
+    {
+      "id": "E07_ConsecutiveRun1_NoRound0Freeze",
+      "pass": true,
+      "detail": "Expedition #1 combat progressed organically to Round 1 without freezing"
+    },
+    {
+      "id": "E08_CombatHeroViewport",
+      "pass": true,
+      "detail": "Live combat stage occupies 88% viewport height"
+    },
+    {
+      "id": "E07_ConsecutiveRun2_NoRound0Freeze",
+      "pass": true,
+      "detail": "Expedition #2 combat progressed organically to Round 1 without freezing"
+    },
+    {
+      "id": "E07_ConsecutiveRun3_NoRound0Freeze",
+      "pass": true,
+      "detail": "Expedition #3 combat progressed organically to Round 1 without freezing"
+    },
+    {
+      "id": "E09_WreckThreeHotspots",
+      "pass": true,
+      "detail": "3 spatial hotspots over wreck: [{\"spot\":\"armory\",\"w\":91,\"h\":52},{\"spot\":\"reactor\",\"w\":91,\"h\":52},{\"spot\":\"cargo\",\"w\":78,\"h\":52}]"
+    },
+    {
+      "id": "E10_StagingCardBounds_2x3Reactor",
+      "pass": true,
+      "detail": "Staging cards bounded cleanly: [{\"cardW\":215,\"cardH\":74,\"thumbW\":44,\"thumbH\":44,\"fitsList\":true},{\"cardW\":215,\"cardH\":74,\"thumbW\":44,\"thumbH\":44,\"fitsList\":true}]"
+    },
+    {
+      "id": "E11_EliteRound2TacticPauseAndSkipGuard",
+      "pass": true,
+      "detail": "Skip disabled during pause=true, options=[{\"choice\":\"normal\",\"disabled\":false},{\"choice\":\"overload\",\"disabled\":false},{\"choice\":\"emergency_defense\",\"disabled\":false}]"
+    },
+    {
+      "id": "E12_ShowcaseIsolation",
+      "pass": true,
+      "detail": "Formal profile unchanged (credits=18, runs=3)"
+    },
+    {
+      "id": "E13_Responsive_360x640",
+      "pass": true,
+      "detail": "Viewport 360×640 horizontal overflow=0px"
+    },
+    {
+      "id": "E13_Responsive_390x844",
+      "pass": true,
+      "detail": "Viewport 390×844 horizontal overflow=0px"
+    },
+    {
+      "id": "E13_Responsive_430x932",
+      "pass": true,
+      "detail": "Viewport 430×932 horizontal overflow=0px"
+    },
+    {
+      "id": "E13_Responsive_844x390",
+      "pass": true,
+      "detail": "Viewport 844×390 horizontal overflow=-15px"
+    },
+    {
+      "id": "E14_ZeroRuntimeErrors",
+      "pass": true,
+      "detail": "pageErrors=0, consoleErrors=0"
+    }
+  ]
+}

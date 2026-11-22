@@ -17,6 +17,7 @@ import {
 import { createV2EquipmentInstance } from './itemCatalog';
 import { createV2RngStreams } from './rngStreams';
 import { generateV2StarGraph } from './routeGenerator';
+import { isKindAuthorizedByTrialBuild } from '../data/trialBuilds';
 import {
   V2_MAX_FUEL,
   V2_RULES_VERSION,
@@ -28,6 +29,7 @@ import {
   type V2PresetSlot,
   type V2ProfileState,
   type V2RunState,
+  type V2TrialBuildId,
 } from './types';
 
 export const V2_MAX_SAVED_PRESETS = 3;
@@ -107,7 +109,8 @@ export function validateV2PrepareLoadout(
   profile: V2ProfileState,
   shipId: V2ShipId,
   crewId: V2CrewId | null,
-  slots: readonly V2PrepareSlotEntry[]
+  slots: readonly V2PrepareSlotEntry[],
+  trialBuildId: V2TrialBuildId | null = null
 ): V2PrepareValidation {
   const errors: string[] = [];
   if (!profile.unlockedShips.includes(shipId)) {
@@ -136,7 +139,9 @@ export function validateV2PrepareLoadout(
       if (def.quality !== 'common') {
         errors.push(`免费借用仅限普通品质（${def.name} 为优良）`);
       }
-      if (!profile.blueprints.includes(def.kind)) {
+      const allowedByBlueprint = profile.blueprints.includes(def.kind);
+      const allowedByTrial = isKindAuthorizedByTrialBuild(trialBuildId, def.kind);
+      if (!allowedByBlueprint && !allowedByTrial) {
         errors.push(`尚未解锁「${def.name}」普通蓝图，不可免费借用`);
       }
     } else {
@@ -203,6 +208,7 @@ export function launchV2Expedition(params: {
   readonly crewId: V2CrewId | null;
   readonly primaryArchetype: V2ArchetypeId;
   readonly slots: readonly V2PrepareSlotEntry[];
+  readonly trialBuildId?: V2TrialBuildId | null;
   readonly seed?: number;
   readonly allowImproved?: boolean;
   readonly maxLayers?: number;
@@ -212,11 +218,13 @@ export function launchV2Expedition(params: {
   readonly run: V2RunState | null;
   readonly errors: readonly string[];
 } {
+  const trialBuildId = params.trialBuildId ?? null;
   const check = validateV2PrepareLoadout(
     params.profile,
     params.shipId,
     params.crewId,
-    params.slots
+    params.slots,
+    trialBuildId
   );
   if (!check.valid) {
     return { ok: false, profile: params.profile, run: null, errors: check.errors };
@@ -286,6 +294,7 @@ export function launchV2Expedition(params: {
     seed,
     rngStreams: generated.nextStreams,
     isTutorial: false,
+    trialBuildId,
     allowImproved: params.allowImproved ?? true,
     contract,
     shipId: params.shipId,

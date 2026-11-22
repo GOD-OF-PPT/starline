@@ -23,10 +23,24 @@ export class MultiTabGuard {
   private readonly onStatusChange: (isOwner: boolean) => void;
 
   constructor(onStatusChange: (isOwner: boolean) => void, options?: MultiTabGuardOptions) {
-    this.tabId = `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     this.lockKey = options?.lockKey ?? DEFAULT_LOCK_KEY;
     this.channelName = options?.channelName ?? DEFAULT_CHANNEL_NAME;
+    this.tabId = this.resolvePerTabId();
     this.onStatusChange = onStatusChange;
+  }
+
+  private resolvePerTabId(): string {
+    const fallback = `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    if (typeof window === 'undefined') return fallback;
+    try {
+      const selfKey = `${this.lockKey}_self_id`;
+      const existing = window.sessionStorage.getItem(selfKey);
+      if (existing && existing.length > 0) return existing;
+      window.sessionStorage.setItem(selfKey, fallback);
+      return fallback;
+    } catch {
+      return fallback;
+    }
   }
 
   start(): boolean {
@@ -68,6 +82,7 @@ export class MultiTabGuard {
 
     window.addEventListener('storage', this.handleStorageEvent);
     window.addEventListener('beforeunload', this.handleUnload);
+    window.addEventListener('pagehide', this.handleUnload);
 
     this.heartbeatTimer = window.setInterval(() => {
       if (this.isOwner) {
@@ -96,6 +111,7 @@ export class MultiTabGuard {
     }
     window.removeEventListener('storage', this.handleStorageEvent);
     window.removeEventListener('beforeunload', this.handleUnload);
+    window.removeEventListener('pagehide', this.handleUnload);
     this.releaseIfOwned();
     this.channel?.close();
     this.channel = null;
@@ -116,6 +132,8 @@ export class MultiTabGuard {
 
   private handleUnload = (): void => {
     this.releaseIfOwned();
+    this.channel?.close();
+    this.channel = null;
   };
 
   private readLock(): TabLockRecord | null {

@@ -252,6 +252,19 @@ function validateV2Run(raw: unknown): V2ValidationResult {
   if (run.phase === 'SETTLEMENT' && run.settlementReason !== 'safe_return' && run.settlementReason !== 'defeat') {
     return { ok: false, error: 'SETTLEMENT 阶段缺少合法 settlementReason' };
   }
+  if (run.activeCombat?.pendingDecision) {
+    const pd = run.activeCombat.pendingDecision;
+    if (
+      typeof pd.decisionId !== 'string' ||
+      pd.decisionId.length === 0 ||
+      (pd.chosen !== null &&
+        pd.chosen !== 'normal' &&
+        pd.chosen !== 'overload' &&
+        pd.chosen !== 'emergency_defense')
+    ) {
+      return { ok: false, error: 'activeCombat.pendingDecision 数据损坏' };
+    }
+  }
 
   return validateV2Bay(run.bay, run.shipId);
 }

@@ -4335,3 +4335,1066 @@ body.low-quality .placed-item-node {
   bottom: 44px;
   right: 16px;
 }
+
+/* ==========================================================================
+   PHASE A FIX: Complete V2 Staging Card Layout (Zero Overflow for 1x1..2x3)
+   ========================================================================== */
+
+.staging-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(156px, 1fr));
+  gap: 8px;
+}
+
+.staging-item-card,
+.v2-staging-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 58px;
+  padding: 7px 9px 7px 26px !important;
+  border-radius: var(--radius-sm);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.staging-item-card:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-raised);
+}
+
+.staging-item-card.selected {
+  border-color: var(--accent-action);
+  background: rgba(246, 184, 82, 0.14);
+  box-shadow: inset 0 0 0 1px var(--accent-action);
+}
+
+.staging-item-card.origin-mission {
+  border-color: rgba(242, 117, 100, 0.72);
+}
+
+.staging-item-card .v2-origin-badge {
+  position: absolute;
+  top: 6px;
+  left: 5px;
+}
+
+.staging-thumb {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  max-width: 44px;
+  max-height: 44px;
+  object-fit: contain;
+  flex-shrink: 0;
+  border-radius: 5px;
+  background: rgba(11, 19, 32, 0.7);
+  padding: 3px;
+}
+
+.staging-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.staging-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.staging-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ==========================================================================
+   PHASE C & D: HERO-STAGE "DE-WORKBENCH" UI, MODULAR SHIP HUD, 3-HOTSPOT WRECK,
+   TRIAL BUILDS, INSTANT TACTICAL DELTA & ELITE ROUND-2 TACTIC OVERLAY
+   ========================================================================== */
+
+.v2-ico {
+  display: inline-block;
+  vertical-align: -2px;
+  flex-shrink: 0;
+}
+
+.v2-showcase-chip {
+  font-size: 12px;
+  font-weight: 800;
+  padding: 2px 8px;
+  border-radius: 99px;
+  background: rgba(246, 184, 82, 0.2);
+  border: 1px solid var(--accent-action);
+  color: var(--accent-action);
+}
+
+.btn-showcase-hero {
+  width: 100%;
+  border-color: rgba(98, 214, 223, 0.55) !important;
+  background: rgba(20, 44, 62, 0.85) !important;
+  color: var(--accent-energy) !important;
+  font-weight: 700;
+}
+
+.btn-showcase-hero:hover:not(:disabled) {
+  background: rgba(30, 62, 86, 0.92) !important;
+  border-color: var(--accent-energy) !important;
+}
+
+/* Lower-noise recessed steel hierarchy: calm static containers, sharp active highlights */
+.v2-shell .panel-card {
+  border-color: rgba(110, 134, 162, 0.24);
+  background: rgba(16, 25, 40, 0.92);
+}
+
+.v2-shell .scene-card {
+  border-color: rgba(110, 134, 162, 0.28);
+  position: relative;
+  overflow: hidden;
+}
+
+/* --- 1. BASE HERO STAGE (Space Station = 75%+ Hero Viewport, Zero Vertical Clip!) --- */
+@media (min-width: 860px) {
+  .v2-shell .v2-top-hud {
+    display: grid !important;
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas: 'brand pills actions';
+    align-items: center;
+  }
+  .v2-shell .v2-top-hud .hud-brand {
+    grid-area: brand;
+  }
+  .v2-shell .v2-top-hud .hud-pills {
+    grid-area: pills;
+    justify-self: center;
+    width: auto;
+  }
+  .v2-shell .v2-top-hud .hud-actions {
+    grid-area: actions;
+    justify-self: end;
+  }
+
+  .v2-shell.phase-base-hero,
+  .v2-shell.phase-combat-live {
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow: hidden;
+    padding-bottom: 10px;
+  }
+
+  .v2-shell.phase-base-hero .main-layout,
+  .v2-shell.phase-combat-live .main-layout {
+    flex: 1;
+    min-height: 0;
+    grid-template-columns: 1fr !important;
+    grid-template-rows: 1fr;
+  }
+
+  .v2-shell.phase-base-hero .scene-card,
+  .v2-shell.phase-combat-live .scene-card {
+    grid-column: 1 / -1;
+    height: 100%;
+    min-height: 0;
+    max-height: none;
+  }
+}
+
+.v2-shell.phase-base-hero .panel-left,
+.v2-shell.phase-base-hero .panel-right {
+  display: none !important;
+}
+
+.v2-shell.phase-base-hero .main-layout {
+  grid-template-columns: 1fr !important;
+}
+
+.v2-shell.phase-base-hero .scene-overlay {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  pointer-events: none;
+  background: linear-gradient(
+    to top,
+    rgba(8, 13, 23, 0.9) 0%,
+    rgba(8, 13, 23, 0.45) 28%,
+    rgba(8, 13, 23, 0) 56%
+  );
+}
+
+.v2-base-hero-hud {
+  margin-top: auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  pointer-events: none;
+}
+
+.v2-base-cmd-card {
+  pointer-events: auto;
+  max-width: 390px;
+  width: 100%;
+  background: rgba(11, 18, 31, 0.88);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(246, 184, 82, 0.42);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+}
+
+.v2-cmd-eyebrow {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-action);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.v2-cmd-title {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.v2-cmd-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.v2-cmd-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.v2-cmd-actions .btn-launch-hero {
+  flex: 1;
+}
+
+.v2-base-utility-col {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: 440px;
+}
+
+.v2-next-goal-pill {
+  width: 100%;
+  background: rgba(11, 18, 31, 0.86);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(110, 134, 162, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  text-align: left;
+  color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+  transition: border-color 140ms ease, transform 120ms ease;
+}
+
+.v2-next-goal-pill.is-ready {
+  border-color: var(--accent-energy);
+  box-shadow: 0 0 16px rgba(98, 214, 223, 0.18);
+}
+
+.v2-next-goal-pill:hover {
+  border-color: var(--accent-action);
+  transform: translateY(-1px);
+}
+
+.v2-goal-k {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-energy);
+}
+
+.v2-next-goal-pill strong {
+  font-size: 13px;
+}
+
+.v2-next-goal-pill small {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.v2-station-dock {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(84px, 1fr));
+  gap: 6px;
+  background: rgba(11, 18, 31, 0.86);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(110, 134, 162, 0.32);
+  border-radius: var(--radius-md);
+  padding: 6px;
+}
+
+.v2-dock-btn {
+  background: rgba(24, 37, 57, 0.72);
+  border: 1px solid rgba(110, 134, 162, 0.24);
+  border-radius: 8px;
+  color: var(--text-primary);
+  padding: 7px 6px;
+  min-height: 54px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.v2-dock-btn:hover {
+  border-color: var(--accent-energy);
+  background: rgba(34, 54, 82, 0.88);
+}
+
+.v2-dock-btn small {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* --- 2. COMBAT LIVE HERO STAGE & ELITE ROUND-2 TACTIC OVERLAY --- */
+.v2-shell.phase-combat-live .panel-left,
+.v2-shell.phase-combat-live .panel-right {
+  display: none !important;
+}
+
+.v2-shell.phase-combat-live .main-layout {
+  grid-template-columns: 1fr !important;
+}
+
+.v2-combat-hero-hud {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  right: 12px;
+  bottom: auto !important;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(8, 13, 23, 0.84);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(110, 134, 162, 0.28);
+  pointer-events: auto;
+}
+
+.v2-combat-status-group,
+.v2-combat-ctrl-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.v2-hp-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.v2-mini-bar {
+  width: 56px;
+  height: 7px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+  display: inline-block;
+}
+
+.v2-mini-bar > span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #62d6df, #7ae582);
+  border-radius: 99px;
+}
+
+.v2-elite-tactic-overlay {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 12;
+  pointer-events: auto;
+  background: rgba(9, 15, 26, 0.94);
+  backdrop-filter: blur(12px);
+  border: 1.5px solid var(--accent-action);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.65);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.v2-et-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.v2-et-head strong {
+  color: var(--accent-action);
+  font-size: 15px;
+}
+
+.v2-et-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.v2-et-btn {
+  background: rgba(22, 34, 52, 0.92);
+  border: 1px solid rgba(110, 134, 162, 0.36);
+  border-radius: var(--radius-sm);
+  padding: 9px 10px;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 120ms ease, transform 100ms ease;
+}
+
+.v2-et-btn:hover:not(:disabled) {
+  border-color: var(--accent-action);
+  transform: translateY(-1px);
+}
+
+.v2-et-btn.is-amber:not(:disabled) {
+  border-color: rgba(246, 184, 82, 0.65);
+}
+
+.v2-et-btn.is-cyan:not(:disabled) {
+  border-color: rgba(98, 214, 223, 0.65);
+}
+
+.v2-et-btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.v2-et-btn-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.v2-et-pred {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.v2-et-pred.ok {
+  color: #7ae582;
+}
+
+.v2-et-pred.risk {
+  color: var(--state-danger);
+}
+
+.v2-et-btn-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.35;
+}
+
+/* --- 3. WRECK 3-HOTSPOT HERO STAGE --- */
+.v2-shell.phase-wreck-hero .scene-card {
+  height: 360px;
+}
+
+.v2-wreck-hotspot {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  min-width: 56px;
+  min-height: 52px;
+  padding: 6px 10px;
+  border-radius: 99px;
+  background: rgba(11, 18, 31, 0.84);
+  border: 1.5px solid rgba(98, 214, 223, 0.72);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+  pointer-events: auto;
+  z-index: 6;
+  box-shadow: 0 0 0 4px rgba(98, 214, 223, 0.16);
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.v2-wreck-hotspot:hover {
+  transform: translate(-50%, -50%) scale(1.05);
+}
+
+.v2-wreck-hotspot.active {
+  border-color: var(--accent-action);
+  background: rgba(246, 184, 82, 0.24);
+  color: #fff;
+  box-shadow: 0 0 0 6px rgba(246, 184, 82, 0.25), 0 8px 20px rgba(0, 0, 0, 0.5);
+}
+
+.v2-hotspot-ring {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-energy);
+  box-shadow: 0 0 8px var(--accent-energy);
+}
+
+.v2-wreck-hotspot.active .v2-hotspot-ring {
+  background: var(--accent-action);
+  box-shadow: 0 0 10px var(--accent-action);
+}
+
+.v2-hotspot-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.v2-wreck-confirm-dock {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 10px;
+  z-index: 7;
+  pointer-events: auto;
+  background: rgba(10, 17, 29, 0.92);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(246, 184, 82, 0.45);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.v2-wh-confirm-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.v2-wh-confirm-text strong {
+  font-size: 14px;
+  color: var(--accent-action);
+}
+
+.v2-wh-confirm-text span {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.v2-wh-reactor-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* --- 4. PREPARE: TRIAL BUILDS, MODULAR MOUNTS & LIVE DEMO BAR --- */
+.v2-mount-strip {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.v2-mount-pill {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 99px;
+  background: rgba(11, 18, 31, 0.84);
+  border: 1px solid rgba(98, 214, 223, 0.45);
+  color: var(--accent-energy);
+}
+
+.v2-mount-pill.muted {
+  border-color: rgba(110, 134, 162, 0.35);
+  color: var(--text-secondary);
+}
+
+.v2-demo-bar {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(11, 18, 31, 0.88);
+  border: 1px solid rgba(246, 184, 82, 0.45);
+  font-size: 12px;
+  color: var(--text-primary);
+  pointer-events: auto;
+  z-index: 6;
+}
+
+.v2-trial-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 6px;
+}
+
+.v2-trial-mini-card {
+  background: var(--surface-deep);
+  border: 1px solid rgba(110, 134, 162, 0.28);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.v2-trial-mini-card:hover:not(:disabled) {
+  border-color: var(--accent-energy);
+}
+
+.v2-trial-mini-card.active {
+  border-color: var(--accent-action);
+  background: rgba(246, 184, 82, 0.14);
+  box-shadow: inset 0 0 0 1px var(--accent-action);
+}
+
+.v2-tm-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.v2-tm-pro {
+  font-size: 12px;
+  color: #7ae582;
+  line-height: 1.35;
+}
+
+.v2-tm-con {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.35;
+}
+
+/* Showcase Trial Picker Modal Cards */
+.v2-trial-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.v2-trial-card {
+  background: var(--surface-deep);
+  border: 1px solid rgba(110, 134, 162, 0.32);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.v2-trial-card:hover {
+  border-color: var(--accent-action);
+  background: rgba(246, 184, 82, 0.1);
+}
+
+.v2-trial-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+}
+
+.v2-trial-ico {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: rgba(98, 214, 223, 0.15);
+  color: var(--accent-energy);
+  display: grid;
+  place-items: center;
+}
+
+.v2-trial-tag {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.v2-trial-pros {
+  font-size: 12px;
+  color: #7ae582;
+}
+
+.v2-trial-cons {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* --- 5. UNIFIED BRANCHING STAR MAP --- */
+.v2-dag-hero {
+  padding: 10px;
+}
+
+.v2-dag-stage {
+  position: relative;
+  min-width: 100%;
+}
+
+.v2-dag-edges-svg {
+  position: absolute;
+  inset: 22px 0 6px 0;
+  width: 100%;
+  height: calc(100% - 28px);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.v2-dag-stage .v2-dag-grid {
+  position: relative;
+  z-index: 2;
+}
+
+.v2-dag-node.selected {
+  border-color: var(--accent-action) !important;
+  box-shadow: 0 0 0 2px rgba(246, 184, 82, 0.35);
+  background: rgba(246, 184, 82, 0.22) !important;
+  color: #fff !important;
+}
+
+.v2-dag-sup {
+  position: absolute;
+  bottom: 2px;
+  left: 4px;
+  font-size: 10px;
+  font-weight: 800;
+  color: #7ae582;
+}
+
+.v2-map-switch-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.v2-map-tab-pill {
+  flex: 1;
+  background: var(--surface-deep);
+  border: 1px solid rgba(110, 134, 162, 0.32);
+  border-radius: var(--radius-sm);
+  padding: 7px 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.v2-map-tab-pill.active {
+  border-color: var(--accent-action);
+  background: rgba(246, 184, 82, 0.16);
+  color: var(--text-primary);
+}
+
+/* --- 6. CARGO GRID TACTICAL DELTA & RECOMMENDED SYNERGY SLOT --- */
+.cargo-cell.cell-recommended {
+  background: rgba(98, 214, 223, 0.13) !important;
+  box-shadow: inset 0 0 0 2px rgba(98, 214, 223, 0.72);
+}
+
+.v2-delta-strip {
+  margin-top: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(9, 15, 26, 0.7);
+  border-left: 2.5px solid rgba(110, 134, 162, 0.45);
+  font-size: 12px;
+}
+
+.v2-delta-strip.positive {
+  border-left-color: var(--accent-energy);
+}
+
+.v2-delta-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  line-height: 1.35;
+}
+
+.v2-delta-k {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-energy);
+  flex-shrink: 0;
+}
+
+.v2-delta-row strong {
+  color: var(--accent-action);
+  font-weight: 700;
+}
+
+.v2-arrange-goal-strip {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(20, 34, 52, 0.72);
+  border: 1px solid rgba(110, 134, 162, 0.28);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.v2-arrange-goal-strip.is-mission {
+  border-color: var(--accent-action);
+  background: rgba(246, 184, 82, 0.12);
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+/* --- 7. SETTLEMENT NEXT BASE GOAL & SHOWCASE FOOTER --- */
+.v2-settle-goal-hint {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(15, 27, 44, 0.85);
+  border: 1px solid rgba(110, 134, 162, 0.32);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.v2-settle-goal-hint.is-ready {
+  border-color: var(--accent-energy);
+  background: rgba(22, 54, 68, 0.48);
+}
+
+.v2-settle-goal-hint small {
+  color: var(--text-secondary);
+}
+
+.v2-showcase-finish-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.v2-showcase-finish-actions .btn-launch-hero {
+  flex: 1;
+}
+
+/* --- RESPONSIVE BREAKPOINTS FOR HERO STAGES (360x640 / 390x844 / 430x932 / 844x390 / 1366x768) --- */
+@media (max-width: 859px) {
+  /* Mobile Base Hero: Station diorama crisp on top, Command Card + 4-icon dock stacked cleanly below! */
+  .v2-shell.phase-base-hero .scene-card {
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .v2-shell.phase-base-hero .scene-canvas-host {
+    position: relative;
+    height: 250px;
+    flex-shrink: 0;
+  }
+
+  .v2-shell.phase-base-hero .scene-overlay {
+    position: static;
+    background: var(--surface-panel);
+    pointer-events: auto;
+  }
+
+  .v2-shell.phase-base-hero .scene-stage-tag {
+    display: none;
+  }
+
+  .v2-base-hero-hud {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 10px;
+    gap: 10px;
+  }
+
+  .v2-base-cmd-card,
+  .v2-base-utility-col {
+    max-width: none;
+    width: 100%;
+    align-items: stretch;
+  }
+
+  .v2-station-dock {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .v2-trial-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .v2-et-options {
+    grid-template-columns: 1fr;
+  }
+
+  .v2-shell.phase-combat-live .scene-card {
+    height: calc(100dvh - 114px);
+    min-height: 360px;
+  }
+
+  .v2-shell.phase-wreck-hero .scene-card {
+    height: 290px;
+  }
+
+  .v2-wreck-hotspot {
+    padding: 5px 8px;
+    font-size: 12px;
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 480px) {
+  .v2-shell.phase-base-hero .scene-canvas-host {
+    height: 210px;
+  }
+
+  .v2-dock-btn {
+    padding: 6px 3px;
+    font-size: 12px;
+  }
+
+  .v2-dock-btn small {
+    font-size: 11px;
+  }
+}
+
+/* Short Landscape (e.g. 844x390) — keep Station & Battlefield full-screen with compact bottom glass dock */
+@media (max-height: 500px) and (min-width: 600px) {
+  .v2-shell.phase-base-hero .scene-card {
+    height: calc(100dvh - 58px);
+    min-height: 290px;
+    display: block;
+  }
+
+  .v2-shell.phase-base-hero .scene-canvas-host {
+    position: absolute;
+    inset: 0;
+    height: 100%;
+  }
+
+  .v2-shell.phase-base-hero .scene-overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(to top, rgba(8, 13, 23, 0.92) 0%, rgba(8, 13, 23, 0) 58%);
+    pointer-events: none;
+  }
+
+  .v2-base-hero-hud {
+    flex-direction: row;
+    align-items: flex-end;
+    padding: 8px 10px;
+  }
+
+  .v2-base-cmd-card {
+    max-width: 310px;
+    padding: 8px 10px;
+  }
+
+  .v2-cmd-desc {
+    display: none;
+  }
+
+  .v2-base-utility-col {
+    max-width: 380px;
+  }
+
+  .v2-next-goal-pill small {
+    display: none;
+  }
+
+  .v2-shell.phase-combat-live .scene-card {
+    height: calc(100dvh - 58px);
+    min-height: 290px;
+  }
+
+  .v2-shell.phase-wreck-hero .scene-card {
+    height: 220px;
+  }
+
+  .v2-et-options {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
