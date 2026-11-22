@@ -1023,13 +1023,16 @@ export class V2CombatScene extends Phaser.Scene {
       }
     }
 
-    // Camera micro-shake
+    // Camera micro-shake (DPR-safe via centerOn so zoomed world stays 100% full-bleed!)
     if (this.shakeTimerMs > 0 && !reduced) {
       this.shakeTimerMs = Math.max(0, this.shakeTimerMs - delta);
       const mag = (this.shakeTimerMs / 120) * 3.2;
-      this.cameras.main.setScroll((Math.random() - 0.5) * mag * 2, (Math.random() - 0.5) * mag * 2);
+      this.cameras.main.centerOn(
+        this.viewW * 0.5 + (Math.random() - 0.5) * mag * 2,
+        this.viewH * 0.5 + (Math.random() - 0.5) * mag * 2
+      );
     } else {
-      this.cameras.main.setScroll(0, 0);
+      this.cameras.main.centerOn(this.viewW * 0.5, this.viewH * 0.5);
     }
 
     // Ship subtle motion + recoil + modular hardpoints sync

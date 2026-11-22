@@ -492,6 +492,14 @@ export class V2AppController {
     }
 
     // 3. Closest unbuilt paid facility
+    const shortTag: Record<V2FacilityId, string> = {
+      workbench: '免费启用基础工作台与预设',
+      contract_hub: '开启三类标准远航委托',
+      research_lab: '解锁 12 格设备库与永久蓝图研究',
+      drydock: '解锁护盾工程艇（+4 护盾）',
+      display: '开启 4 件稀世遗物展台陈列',
+      drydock_tier2: '解锁 5×4 远航货船（18 格大舱）',
+    };
     const priorityOrder: V2FacilityId[] = [
       'research_lab',
       'drydock',
@@ -507,8 +515,8 @@ export class V2AppController {
         title: `扩建目标：${fac.name}`,
         detail:
           chk.canBuild || diff === 0
-            ? `${fac.effectSummary.slice(0, 22)}（资金已够！）`
-            : `还差 ${diff}¤ · ${fac.effectSummary.slice(0, 18)}`,
+            ? `${shortTag[fid]}（资金已就绪）`
+            : `还差 ${diff}¤ · ${shortTag[fid]}`,
         actionKind: 'facilities',
         targetCost: fac.cost,
         ready: chk.canBuild,

@@ -517,13 +517,16 @@ export class CombatScene extends Phaser.Scene {
       }
     }
 
-    // 4. World-only micro-shake (<= 3.5 CSS px, <= 120ms, disabled in reducedMotion)
+    // 4. World-only micro-shake (<= 3.5 CSS px, <= 120ms, DPR-safe via centerOn)
     if (this.shakeTimerMs > 0 && !reduced) {
       this.shakeTimerMs = Math.max(0, this.shakeTimerMs - dtMs);
       const amp = (this.shakeTimerMs / 120) * 3.2;
-      this.cameras.main.setScroll((Math.random() - 0.5) * amp * 2, (Math.random() - 0.5) * amp * 2);
+      this.cameras.main.centerOn(
+        this.viewW * 0.5 + (Math.random() - 0.5) * amp * 2,
+        this.viewH * 0.5 + (Math.random() - 0.5) * amp * 2
+      );
     } else {
-      this.cameras.main.setScroll(0, 0);
+      this.cameras.main.centerOn(this.viewW * 0.5, this.viewH * 0.5);
     }
 
     // 5. Render dynamic thruster glow + BOSS core pulse + beams + shield arcs + shockwaves + sparks
