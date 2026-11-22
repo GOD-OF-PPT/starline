@@ -4,6 +4,7 @@ import {
   getEventBackdropImageUrl,
   getPlayerShipImageUrl,
   getSectorBgImageUrl,
+  getShipModuleImageUrl,
 } from '../../assets/itemArt';
 import { getShipHardpoints } from '../../assets/manifest';
 import { soundEngine } from '../../audio/soundEngine';
@@ -11,15 +12,22 @@ import type { SectorBgIndex } from '../../data/nodes';
 import type { GameSettings } from '../../domain/progression';
 import type { V2EnemyUnitSpec } from '../data/enemies';
 import type { V2ShipId } from '../data/ships';
+import type { V2ShipVisualSpec } from '../domain/shipVisualSpec';
 import type { V2CombatRoundLog, V2CombatSimulation } from '../domain/types';
 
 export interface V2StagePlayback {
   readonly shipId: V2ShipId;
+  readonly shipVisualSpec?: V2ShipVisualSpec | null;
   readonly sectorIndex: SectorBgIndex;
   readonly eventBackdrop: 'wreck' | 'merchant' | 'anomaly' | 'distress' | null;
   readonly units: readonly V2EnemyUnitSpec[];
   readonly simulation: V2CombatSimulation | null;
   readonly settings: GameSettings;
+  /** Optional 1-indexed round number to pause BEFORE executing (e.g. 2 for Elite Round-2 decision) */
+  readonly pauseAtRound?: number | null;
+  /** Optional 0-indexed round index to resume playback from after a tactical decision */
+  readonly resumeFromRound?: number;
+  readonly onPauseForDecision?: () => void;
   readonly onRoundStep?: (roundIndex: number, log: V2CombatRoundLog) => void;
   readonly onComplete?: () => void;
 }
@@ -45,6 +53,17 @@ interface RingFx {
   maxLife: number;
 }
 
+interface SmokePuff {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  r: number;
+  color: number;
+  life: number;
+  maxLife: number;
+}
+
 interface PopupFx {
   textObj: Phaser.GameObjects.Text;
   vy: number;
@@ -52,10 +71,24 @@ interface PopupFx {
   maxLife: number;
 }
 
+interface MountedModuleEntry {
+  readonly kind: 'heavy' | 'laser' | 'drone_bay' | 'counter_ring' | 'cargo_rack';
+  sprite: Phaser.GameObjects.Image;
+  badgeText?: Phaser.GameObjects.Text;
+  /** Offset relative to playerSprite display width/height */
+  relX: number;
+  relY: number;
+  scaleRatio: number;
+  recoilX: number;
+  muzzleOffsetX: number;
+  muzzleOffsetY: number;
+}
+
 interface EnemyVisualEntry {
   readonly enemyId: string;
   readonly spec: V2EnemyUnitSpec;
   sprite: Phaser.GameObjects.Image;
+  intentTag?: Phaser.GameObjects.Text;
   baseX: number;
   baseY: number;
   hp: number;
@@ -71,12 +104,12 @@ const BG_TEX_W = 1280;
 const BG_TEX_H = 720;
 
 /**
- * Dedicated V2 Multi-Unit Combat & Event Stage Scene:
- * - Renders 3 player ships (Cannon Skiff, Shield Cruiser, Heavy Freighter), 6 deep-space sectors,
- *   and 4 hand-painted event backdrops (Wreck, Merchant, Anomaly, Distress).
- * - Renders 1..4 individual enemy units with individual HP/armor/pierce readouts.
- * - Distinct visual signatures for Heavy Cannon charge/slug, countable orbiting Drone Hangar units (1..4),
- *   reactive Shield Counter jagged arc lightning, and multi-target Flak shrapnel bursts.
+ * Dedicated V2 Multi-Unit Combat, Modular Ship Showcase & Event Stage Scene:
+ * - Renders 3 player ships + 5 real hand-painted modular external hardpoint sprites driven strictly by V2ShipVisualSpec
+ *   (Heavy Railgun, Pulse Laser Turret, Ventral Drone Launch Bay, Shield Counter-Arc Ring, External Magnetic Cargo Clamp).
+ * - Fires projectiles directly from corresponding mounted hardpoints with mechanical charge/recoil/impact/backflow stages.
+ * - Renders enemy tactical intent pills and damaged smoke states when HP < 50%.
+ * - Supports Phase-D Elite Round-2 tactical pause boundary (skipPlayback NEVER bypasses an unresolved decision!).
  * - Pure presentation only: replays pre-computed deterministic V2CombatSimulation; zero rule mutation!
  */
 export class V2CombatScene extends Phaser.Scene {
@@ -85,11 +118,13 @@ export class V2CombatScene extends Phaser.Scene {
   private bgGraphics!: Phaser.GameObjects.Graphics;
   private fxGraphics!: Phaser.GameObjects.Graphics;
   private playerSprite: Phaser.GameObjects.Image | null = null;
+  private moduleSprites: MountedModuleEntry[] = [];
   private enemies: EnemyVisualEntry[] = [];
 
   private stars: { nx: number; ny: number; speed: number; r: number; a: number }[] = [];
   private beams: BeamFx[] = [];
   private rings: RingFx[] = [];
+  private smokes: SmokePuff[] = [];
   private popups: PopupFx[] = [];
 
   private viewW = 390;
@@ -97,13 +132,16 @@ export class V2CombatScene extends Phaser.Scene {
   private dpr = 1;
   private texturesReady = false;
   private externalPaused = false;
+  private decisionPaused = false;
   private elapsed = 0;
+  private smokeAccumMs = 0;
 
   private playerBaseX = 95;
   private playerBaseY = 120;
   private playerRecoilX = 0;
   private playerFlashMs = 0;
   private shieldArcLife = 0;
+  private counterBackflowLife = 0;
   private activeDronesCount = 0;
   private heavyChargingCount = 0;
   private shakeTimerMs = 0;
@@ -169,6 +207,11 @@ export class V2CombatScene extends Phaser.Scene {
       ['ship.enemy.hulk', getEnemyShipImageUrl('hulk')],
       ['ship.enemy.boss_dreadnought', getEnemyShipImageUrl('boss_dreadnought')],
       ['ship.enemy.boss_leviathan', getEnemyShipImageUrl('boss_leviathan')],
+      ['ship.mod.laser_turret', getShipModuleImageUrl('laser_turret')],
+      ['ship.mod.heavy_railgun', getShipModuleImageUrl('heavy_railgun')],
+      ['ship.mod.drone_bay', getShipModuleImageUrl('drone_bay')],
+      ['ship.mod.counter_ring', getShipModuleImageUrl('counter_ring')],
+      ['ship.mod.cargo_rack', getShipModuleImageUrl('cargo_rack')],
     ];
     for (const [key, url] of queue) {
       if (!this.textures.exists(key)) {
@@ -185,11 +228,11 @@ export class V2CombatScene extends Phaser.Scene {
     this.cameras.main.setBackgroundColor('#0C1524');
 
     this.stars = [];
-    for (let i = 0; i < 36; i++) {
+    for (let i = 0; i < 42; i++) {
       this.stars.push({
         nx: ((i * 97) % 100) / 100,
         ny: ((i * 53) % 100) / 100,
-        speed: 0.03 + (i % 4) * 0.025,
+        speed: 0.028 + (i % 4) * 0.022,
         r: i % 5 === 0 ? 1.5 : 1,
         a: 0.2 + (i % 4) * 0.07,
       });
@@ -199,10 +242,12 @@ export class V2CombatScene extends Phaser.Scene {
     this.bgGraphics = this.add.graphics().setDepth(1);
     this.fxGraphics = this.add.graphics().setDepth(7);
     this.playerSprite = null;
+    this.moduleSprites = [];
     this.enemies = [];
     this.popups = [];
     this.beams = [];
     this.rings = [];
+    this.smokes = [];
     this.texturesReady = true;
 
     this.applyPlayback();
@@ -212,10 +257,13 @@ export class V2CombatScene extends Phaser.Scene {
       this.texturesReady = false;
       this.playbackActive = false;
       this.waitingCompletion = false;
+      this.decisionPaused = false;
       this.nextRoundIdx = 0;
       this.beams = [];
       this.rings = [];
+      this.smokes = [];
       this.clearPopups();
+      this.destroyModuleSprites();
       this.destroyEnemySprites();
       this.playerSprite = null;
       this.bgImage = null;
@@ -244,24 +292,71 @@ export class V2CombatScene extends Phaser.Scene {
     }
   }
 
+  /** Updates modular ship hardpoints immediately without resetting backdrop or idle pose */
+  updateShipVisualSpec(spec: V2ShipVisualSpec | null): void {
+    if (!this.playback) return;
+    this.playback = { ...this.playback, shipVisualSpec: spec };
+    if (this.scene.isActive() && this.texturesReady) {
+      this.rebuildModuleSprites();
+      this.layoutModules();
+    }
+  }
+
   updateSettings(settings: GameSettings): void {
     if (this.playback) {
       this.playback = { ...this.playback, settings };
     }
   }
 
+  /**
+   * Plays short mechanical cutting spark burst on wreck backdrop when player cuts a room open.
+   */
+  triggerWreckCutFx(normX: number, normY: number): void {
+    if (!this.scene.isActive() || !this.texturesReady) return;
+    const x = this.viewW * normX;
+    const y = this.viewH * normY;
+    this.rings.push({ x, y, maxR: 38, color: 0xf6b852, life: 0.36, maxLife: 0.36 });
+    this.rings.push({ x, y, maxR: 22, color: 0x62d6df, life: 0.28, maxLife: 0.28 });
+    soundEngine.play('place');
+  }
+
   skipPlayback(): void {
-    if (this.externalPaused) return;
+    if (this.externalPaused || this.decisionPaused) return;
     if (!this.playback?.simulation || (!this.playbackActive && !this.waitingCompletion)) return;
     const sim = this.playback.simulation;
+    const pauseAt = this.playback.pauseAtRound ?? null;
+
     while (this.nextRoundIdx < sim.rounds.length) {
+      // Strictly respect unresolved Phase-D Elite Round-2 decision boundary!
+      if (pauseAt !== null && this.nextRoundIdx + 1 === pauseAt) {
+        this.playbackActive = false;
+        this.decisionPaused = true;
+        this.playback.onPauseForDecision?.();
+        return;
+      }
       const log = sim.rounds[this.nextRoundIdx];
+      this.syncUnitStatesToRound(log);
       this.playback.onRoundStep?.(this.nextRoundIdx, log);
       this.nextRoundIdx += 1;
     }
     this.playbackActive = false;
     this.waitingCompletion = false;
     this.playback.onComplete?.();
+  }
+
+  private syncUnitStatesToRound(log: V2CombatRoundLog): void {
+    this.activeDronesCount = Object.values(log.droneCountsByHangar).reduce((a, b) => a + b, 0);
+    this.heavyChargingCount = log.heavyChargingIds.length;
+    for (const snap of log.enemiesAfter) {
+      const entry = this.enemies.find((e) => e.enemyId === snap.enemyId);
+      if (!entry) continue;
+      entry.hp = snap.hp;
+      if (snap.hp <= 0) {
+        entry.dead = true;
+        entry.sprite.setAlpha(0.18).setTint(0x4b5563);
+        entry.intentTag?.setVisible(false);
+      }
+    }
   }
 
   private clearPopups(): void {
@@ -271,26 +366,191 @@ export class V2CombatScene extends Phaser.Scene {
     this.popups = [];
   }
 
+  private destroyModuleSprites(): void {
+    for (const m of this.moduleSprites) {
+      if (m.sprite?.scene) m.sprite.destroy();
+      if (m.badgeText?.scene) m.badgeText.destroy();
+    }
+    this.moduleSprites = [];
+  }
+
   private destroyEnemySprites(): void {
     for (const e of this.enemies) {
       if (e.sprite?.scene) e.sprite.destroy();
+      if (e.intentTag?.scene) e.intentTag.destroy();
     }
     this.enemies = [];
+  }
+
+  private rebuildModuleSprites(): void {
+    this.destroyModuleSprites();
+    const spec = this.playback?.shipVisualSpec;
+    if (!spec || !this.playerSprite || !this.playerSprite.scene) return;
+
+    const addMount = (
+      kind: MountedModuleEntry['kind'],
+      texKey: string,
+      relX: number,
+      relY: number,
+      scaleRatio: number,
+      depth: number,
+      muzzleOffsetX: number,
+      muzzleOffsetY: number,
+      countBadge?: number
+    ) => {
+      if (!this.textures.exists(texKey)) return;
+      const sprite = this.add.image(0, 0, texKey).setOrigin(0.5, 0.5).setDepth(depth);
+      let badgeText: Phaser.GameObjects.Text | undefined;
+      if (countBadge && countBadge > 1) {
+        badgeText = this.add
+          .text(0, 0, `×${countBadge}`, {
+            fontFamily: 'system-ui, -apple-system, sans-serif',
+            fontSize: '11px',
+            fontStyle: 'bold',
+            color: '#F6B852',
+            backgroundColor: 'rgba(11, 18, 31, 0.84)',
+            padding: { left: 4, right: 4, top: 1, bottom: 1 },
+            resolution: 2,
+          })
+          .setOrigin(0.5, 0.5)
+          .setDepth(depth + 1);
+      }
+      this.moduleSprites.push({
+        kind,
+        sprite,
+        badgeText,
+        relX,
+        relY,
+        scaleRatio,
+        recoilX: 0,
+        muzzleOffsetX,
+        muzzleOffsetY,
+      });
+    };
+
+    // 1. Dorsal Main Weapon: Heavy Railgun or Pulse Laser Turret (or both staggered cleanly)
+    if (spec.heavyCount > 0) {
+      addMount(
+        'heavy',
+        'ship.mod.heavy_railgun',
+        0.04,
+        -0.38,
+        0.46,
+        4,
+        0.44,
+        -0.02,
+        spec.heavyCount
+      );
+    }
+    if (spec.laserCount > 0) {
+      addMount(
+        'laser',
+        'ship.mod.laser_turret',
+        spec.heavyCount > 0 ? -0.18 : 0.08,
+        spec.heavyCount > 0 ? -0.34 : -0.34,
+        0.34,
+        4,
+        0.44,
+        -0.06,
+        spec.laserCount
+      );
+    }
+
+    // 2. Dorsal Counter-Arc Emitter Ring (mounts aft or forward dorsal when counter is installed)
+    if (spec.hasCounter) {
+      const hasTopWeapon = spec.heavyCount > 0 || spec.laserCount > 0;
+      addMount(
+        'counter_ring',
+        'ship.mod.counter_ring',
+        hasTopWeapon ? -0.26 : -0.02,
+        -0.36,
+        0.30,
+        4,
+        0.38,
+        -0.06
+      );
+    }
+
+    // 3. Ventral Drone Launch Bay Pod
+    if (spec.hangarCount > 0) {
+      addMount(
+        'drone_bay',
+        'ship.mod.drone_bay',
+        0.06,
+        0.42,
+        0.38,
+        4,
+        0.36,
+        0.04,
+        spec.hangarCount
+      );
+    }
+
+    // 4. External Magnetic Cargo Clamp (shown for Sealed Reactor / Escape Pods / Heavy Salvage Load)
+    if (spec.hasSealedReactor || spec.escapePodCount > 0 || spec.cargoMassTier >= 2) {
+      addMount(
+        'cargo_rack',
+        'ship.mod.cargo_rack',
+        spec.hangarCount > 0 ? -0.26 : -0.16,
+        0.40,
+        0.34,
+        2,
+        0,
+        0
+      );
+    }
+  }
+
+  private layoutModules(bobY = 0): void {
+    if (!this.playerSprite || !this.playerSprite.scene) return;
+    const dw = this.playerSprite.displayWidth;
+    const dh = this.playerSprite.displayHeight;
+    const px = this.playerSprite.x;
+    const py = this.playerSprite.y + bobY * 0; // playerSprite.y already includes bobY in update!
+
+    for (const m of this.moduleSprites) {
+      const targetW = dw * m.scaleRatio;
+      const scale = targetW / (m.sprite.width || 256);
+      const mx = px + dw * m.relX + m.recoilX;
+      const my = py + dh * m.relY;
+      m.sprite.setScale(scale).setPosition(mx, my);
+      if (m.badgeText) {
+        m.badgeText.setPosition(mx - m.sprite.displayWidth * 0.25, my - m.sprite.displayHeight * 0.48);
+      }
+      if (this.playerFlashMs > 0) {
+        m.sprite.setTintFill(0xffffff);
+      } else {
+        m.sprite.clearTint();
+      }
+    }
+  }
+
+  private getModuleMuzzle(kind: MountedModuleEntry['kind']): { x: number; y: number } | null {
+    const mod = this.moduleSprites.find((m) => m.kind === kind);
+    if (!mod || !mod.sprite.scene) return null;
+    return {
+      x: mod.sprite.x + mod.sprite.displayWidth * mod.muzzleOffsetX,
+      y: mod.sprite.y + mod.sprite.displayHeight * mod.muzzleOffsetY,
+    };
   }
 
   private applyPlayback(): void {
     this.beams = [];
     this.rings = [];
+    this.smokes = [];
     this.clearPopups();
+    this.destroyModuleSprites();
     this.destroyEnemySprites();
 
     this.roundTimerMs = 0;
-    this.nextRoundIdx = 0;
+    this.nextRoundIdx = this.playback?.resumeFromRound ?? 0;
+    this.decisionPaused = false;
     this.waitingCompletion = false;
     this.completionDelayMs = 0;
     this.playerRecoilX = 0;
     this.playerFlashMs = 0;
     this.shieldArcLife = 0;
+    this.counterBackflowLife = 0;
     this.activeDronesCount = 0;
     this.heavyChargingCount = 0;
     this.shakeTimerMs = 0;
@@ -303,31 +563,58 @@ export class V2CombatScene extends Phaser.Scene {
       ? `event.${pb.eventBackdrop}`
       : `bg.sector.${pb.sectorIndex ?? 1}`;
     if (!this.bgImage || !this.bgImage.scene) {
-      this.bgImage = this.add.image(0, 0, this.textures.exists(bgKey) ? bgKey : 'bg.sector.1').setOrigin(0.5, 0.5).setDepth(0);
+      this.bgImage = this.add
+        .image(0, 0, this.textures.exists(bgKey) ? bgKey : 'bg.sector.1')
+        .setOrigin(0.5, 0.5)
+        .setDepth(0);
     } else if (this.textures.exists(bgKey)) {
       this.bgImage.setTexture(bgKey);
     }
 
-    // Player ship sprite (guard .scene so restarted scenes NEVER reference destroyed objects!)
+    // Player ship sprite (hide on wreck backdrop so the 3 interactive hull compartments stay unobstructed!)
+    const showPlayerShip = pb.eventBackdrop !== 'wreck';
     const pKey = `v2.ship.player.${pb.shipId}`;
     if (!this.playerSprite || !this.playerSprite.scene) {
       this.playerSprite = this.add.image(0, 0, pKey).setOrigin(0.5, 0.5).setDepth(3);
     } else if (this.textures.exists(pKey)) {
       this.playerSprite.setTexture(pKey);
     }
-    this.playerSprite.setVisible(true).setAlpha(1).clearTint();
+    this.playerSprite.setVisible(showPlayerShip).setAlpha(1).clearTint();
 
-    // Enemy unit sprites (1..4)
+    if (showPlayerShip) {
+      this.rebuildModuleSprites();
+    }
+
+    // Enemy unit sprites (1..4) + compact tactical intent pills
     for (const unit of pb.units) {
       const eKey = `ship.enemy.${unit.spriteArchetype}`;
       const sprite = this.add
         .image(0, 0, this.textures.exists(eKey) ? eKey : 'ship.enemy.scout')
         .setOrigin(0.5, 0.5)
         .setDepth(unit.isBoss ? 4 : 3);
+
+      const intentParts: string[] = [`攻${unit.damagePerRound}`];
+      if (unit.armor > 0) intentParts.push(`甲${unit.armor}`);
+      if (unit.pierceRatio > 0) intentParts.push(`穿${Math.round(unit.pierceRatio * 100)}%`);
+
+      const intentTag = this.add
+        .text(0, 0, intentParts.join(' · '), {
+          fontFamily: 'system-ui, -apple-system, sans-serif',
+          fontSize: unit.isBoss ? '11px' : '10px',
+          fontStyle: 'bold',
+          color: unit.pierceRatio > 0 ? '#FFA3B8' : unit.armor > 0 ? '#F6B852' : '#E9EDF2',
+          backgroundColor: 'rgba(11, 18, 31, 0.82)',
+          padding: { left: 5, right: 5, top: 2, bottom: 2 },
+          resolution: 2,
+        })
+        .setOrigin(0.5, 0.5)
+        .setDepth(6);
+
       this.enemies.push({
         enemyId: unit.enemyId,
         spec: unit,
         sprite,
+        intentTag,
         baseX: 0,
         baseY: 0,
         hp: unit.maxHp,
@@ -338,12 +625,20 @@ export class V2CombatScene extends Phaser.Scene {
       });
     }
 
+    // If resuming from Round >= 1 (e.g. after Elite Round-2 tactic choice), fast-sync Round 1 HP visuals
+    if (pb.simulation && this.nextRoundIdx > 0) {
+      const prevLog = pb.simulation.rounds[Math.min(this.nextRoundIdx - 1, pb.simulation.rounds.length - 1)];
+      if (prevLog) {
+        this.syncUnitStatesToRound(prevLog);
+      }
+    }
+
     this.layoutAll();
 
     if (pb.simulation) {
       this.playbackActive = true;
-      this.roundTimerMs = 240;
-      if (pb.units.some((u) => u.isBoss)) {
+      this.roundTimerMs = this.nextRoundIdx > 0 ? 180 : 240;
+      if (this.nextRoundIdx === 0 && pb.units.some((u) => u.isBoss)) {
         soundEngine.play('bossAlarm');
       }
     } else {
@@ -355,67 +650,73 @@ export class V2CombatScene extends Phaser.Scene {
     const w = this.viewW;
     const h = this.viewH;
 
-    if (this.bgImage) {
+    if (this.bgImage && this.bgImage.scene) {
       const bgScale = Math.max(w / BG_TEX_W, h / BG_TEX_H);
       this.bgImage.setPosition(w * 0.5, h * 0.5).setScale(bgScale);
     }
 
-    const baseShipScale = Math.min((w * 0.34) / SHIP_TEX_W, (h * 0.48) / SHIP_TEX_H);
+    const baseShipScale = Math.min((w * 0.34) / SHIP_TEX_W, (h * 0.46) / SHIP_TEX_H);
     const hasCombatUnits = this.enemies.length > 0;
-    this.playerBaseX = hasCombatUnits ? w * 0.23 : w * 0.26;
-    this.playerBaseY = hasCombatUnits ? h * 0.57 : h * 0.62;
+    this.playerBaseX = hasCombatUnits ? w * 0.24 : w * 0.48;
+    this.playerBaseY = hasCombatUnits ? h * 0.54 : h * 0.56;
 
-    if (this.playerSprite) {
-      const pScale = hasCombatUnits ? baseShipScale : baseShipScale * 0.85;
+    if (this.playerSprite && this.playerSprite.scene) {
+      const pScale = hasCombatUnits ? baseShipScale : baseShipScale * 1.15;
       this.playerSprite.setScale(pScale).setPosition(this.playerBaseX, this.playerBaseY);
+      this.layoutModules();
     }
 
-    // Layout 1..4 enemies cleanly without overlapping HUD top strip
+    // Layout 1..4 enemies cleanly without overlapping top/bottom HUD strips
     const n = this.enemies.length;
     if (n === 1) {
       const e = this.enemies[0];
       e.baseX = w * 0.76;
-      e.baseY = h * 0.57;
-      const mult = e.spec.isBoss ? 1.18 : 1.0;
+      e.baseY = h * 0.54;
+      const mult = e.spec.isBoss ? 1.16 : 1.0;
       e.sprite.setScale(baseShipScale * mult).setPosition(e.baseX, e.baseY);
     } else if (n === 3) {
-      // Layer 6 Elite formation: flagship center-right + 2 escort fighters flanking!
       const positions: [number, number, number][] = [
-        [w * 0.8, h * 0.57, 1.12],
-        [w * 0.62, h * 0.36, 0.58],
-        [w * 0.62, h * 0.78, 0.58],
+        [w * 0.80, h * 0.54, 1.10],
+        [w * 0.62, h * 0.34, 0.56],
+        [w * 0.62, h * 0.74, 0.56],
       ];
       this.enemies.forEach((e, idx) => {
-        const [ex, ey, mult] = positions[idx] ?? [w * 0.74, h * 0.56, 0.65];
+        const [ex, ey, mult] = positions[idx] ?? [w * 0.74, h * 0.54, 0.65];
         e.baseX = ex;
         e.baseY = ey;
         e.sprite.setScale(baseShipScale * mult).setPosition(ex, ey);
       });
     } else if (n >= 4) {
-      // 4-unit Swarm diamond formation
       const positions: [number, number][] = [
-        [w * 0.63, h * 0.36],
-        [w * 0.82, h * 0.42],
-        [w * 0.63, h * 0.76],
-        [w * 0.82, h * 0.72],
+        [w * 0.63, h * 0.34],
+        [w * 0.82, h * 0.39],
+        [w * 0.63, h * 0.72],
+        [w * 0.82, h * 0.68],
       ];
       this.enemies.forEach((e, idx) => {
         const [ex, ey] = positions[idx % positions.length];
         e.baseX = ex;
         e.baseY = ey;
-        e.sprite.setScale(baseShipScale * 0.54).setPosition(ex, ey);
+        e.sprite.setScale(baseShipScale * 0.52).setPosition(ex, ey);
       });
     } else if (n === 2) {
       const positions: [number, number][] = [
-        [w * 0.72, h * 0.40],
-        [w * 0.78, h * 0.74],
+        [w * 0.72, h * 0.38],
+        [w * 0.78, h * 0.70],
       ];
       this.enemies.forEach((e, idx) => {
         const [ex, ey] = positions[idx];
         e.baseX = ex;
         e.baseY = ey;
-        e.sprite.setScale(baseShipScale * 0.75).setPosition(ex, ey);
+        e.sprite.setScale(baseShipScale * 0.74).setPosition(ex, ey);
       });
+    }
+
+    for (const e of this.enemies) {
+      if (e.intentTag && e.intentTag.scene) {
+        const yOff = e.sprite.displayHeight * 0.52 + 10;
+        e.intentTag.setPosition(e.baseX, e.baseY - yOff).setVisible(!e.dead);
+      }
     }
   }
 
@@ -437,6 +738,7 @@ export class V2CombatScene extends Phaser.Scene {
         color,
         stroke: '#0B121F',
         strokeThickness: 4,
+        resolution: 2,
       })
       .setOrigin(0.5, 0.5)
       .setDepth(9);
@@ -451,16 +753,19 @@ export class V2CombatScene extends Phaser.Scene {
     const pHp = getShipHardpoints(`ship.player.${pb.shipId}`);
     const pMuzzle = this.getSpritePoint(this.playerSprite, pHp.muzzle);
     const pHit = this.getSpritePoint(this.playerSprite, pHp.hit);
+    const heavyMuzzle = this.getModuleMuzzle('heavy') ?? pMuzzle;
+    const laserMuzzle = this.getModuleMuzzle('laser') ?? pMuzzle;
+    const droneMuzzle = this.getModuleMuzzle('drone_bay') ?? { x: this.playerBaseX + 24, y: this.playerBaseY + 18 };
+    const counterMuzzle = this.getModuleMuzzle('counter_ring') ?? { x: this.playerBaseX + 24, y: this.playerBaseY - 12 };
 
     // Update countable drone & heavy charging telemetry
     this.activeDronesCount = Object.values(log.droneCountsByHangar).reduce((a, b) => a + b, 0);
     this.heavyChargingCount = log.heavyChargingIds.length;
     if (this.heavyChargingCount > 0) {
       soundEngine.play('chargeUp');
-      this.spawnPopup(this.playerBaseX, this.playerBaseY - 34, '重炮蓄能', '#F6B852');
+      this.spawnPopup(heavyMuzzle.x - 10, heavyMuzzle.y - 20, '重炮蓄能', '#F6B852');
     }
 
-    // Aggregate per-round build SFX (merged per round, never spammed!)
     let playedLaser = false;
     let playedHeavy = false;
     let playedDrone = false;
@@ -484,31 +789,34 @@ export class V2CombatScene extends Phaser.Scene {
           playedHeavy = true;
         }
         this.playerRecoilX = -10;
-        if (!reduced) this.shakeTimerMs = 110;
+        const hm = this.moduleSprites.find((m) => m.kind === 'heavy');
+        if (hm) hm.recoilX = -12;
+        if (!reduced) this.shakeTimerMs = 120;
         this.beams.push({
-          x1: pMuzzle.x,
-          y1: pMuzzle.y,
+          x1: heavyMuzzle.x,
+          y1: heavyMuzzle.y,
           x2: ePt.x,
           y2: ePt.y,
           color: 0xf6b852,
-          thickness: 6,
-          life: 0.36,
-          maxLife: 0.36,
+          thickness: 6.5,
+          life: 0.38,
+          maxLife: 0.38,
         });
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 34, color: 0xf6b852, life: 0.34, maxLife: 0.34 });
+        this.rings.push({ x: heavyMuzzle.x, y: heavyMuzzle.y, maxR: 18, color: 0xffe4a3, life: 0.2, maxLife: 0.2 });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 36, color: 0xf6b852, life: 0.36, maxLife: 0.36 });
       } else if (atk.sourceKind === 'hangar') {
         if (!playedDrone) {
           soundEngine.play('droneLaunch');
           playedDrone = true;
         }
-        // Launch from orbiting drone position ahead of ship
+        const laneOffset = ((this.beams.length % 4) - 1.5) * 14;
         this.beams.push({
-          x1: this.playerBaseX + 36,
-          y1: this.playerBaseY - 22 + (this.beams.length % 4) * 14,
+          x1: droneMuzzle.x + 26,
+          y1: this.playerBaseY + laneOffset,
           x2: ePt.x,
           y2: ePt.y,
           color: 0x7be8ff,
-          thickness: 2,
+          thickness: 2.2,
           life: 0.25,
           maxLife: 0.25,
         });
@@ -518,25 +826,43 @@ export class V2CombatScene extends Phaser.Scene {
           playedFlak = true;
         }
         this.beams.push({
-          x1: pMuzzle.x,
-          y1: pMuzzle.y - 6,
+          x1: laserMuzzle.x,
+          y1: laserMuzzle.y - 4,
           x2: ePt.x,
           y2: ePt.y,
           color: 0xffd27d,
-          thickness: 2.2,
+          thickness: 2.4,
           life: 0.22,
           maxLife: 0.22,
         });
         this.rings.push({ x: ePt.x, y: ePt.y, maxR: 20, color: 0xffd27d, life: 0.24, maxLife: 0.24 });
+      } else if (atk.sourceInstanceId === 'tactic_overload') {
+        soundEngine.play('heavyBlast');
+        this.playerRecoilX = -8;
+        this.beams.push({
+          x1: pMuzzle.x,
+          y1: pMuzzle.y,
+          x2: ePt.x,
+          y2: ePt.y,
+          color: 0xff9f43,
+          thickness: 5,
+          life: 0.34,
+          maxLife: 0.34,
+        });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 30, color: 0xff9f43, life: 0.3, maxLife: 0.3 });
+        this.spawnPopup(this.playerBaseX + 12, this.playerBaseY - 36, '火力过载！', '#FF9F43');
       } else {
         if (!playedLaser) {
           soundEngine.play('laserFire');
           playedLaser = true;
         }
         this.playerRecoilX = Math.min(this.playerRecoilX, -4);
+        const lm = this.moduleSprites.find((m) => m.kind === 'laser');
+        if (lm && atk.sourceKind === 'laser') lm.recoilX = -6;
+        const srcPt = atk.sourceKind === 'laser' ? laserMuzzle : pMuzzle;
         this.beams.push({
-          x1: pMuzzle.x,
-          y1: pMuzzle.y,
+          x1: srcPt.x,
+          y1: srcPt.y,
           x2: ePt.x,
           y2: ePt.y,
           color: 0x62d6df,
@@ -547,7 +873,6 @@ export class V2CombatScene extends Phaser.Scene {
       }
     }
 
-    // Popups for enemy damage
     for (const [eid, total] of dmgByEnemy.entries()) {
       const target = this.enemies.find((e) => e.enemyId === eid);
       if (target && total > 0) {
@@ -580,9 +905,9 @@ export class V2CombatScene extends Phaser.Scene {
     }
 
     if (log.shieldAbsorbedTotal > 0) {
-      this.shieldArcLife = 0.34;
+      this.shieldArcLife = 0.36;
       soundEngine.play('shieldHit');
-      this.spawnPopup(this.playerBaseX + 22, this.playerBaseY - 22, `盾${log.shieldAbsorbedTotal}`, '#62D6DF');
+      this.spawnPopup(this.playerBaseX + 26, this.playerBaseY - 24, `盾吸 ${log.shieldAbsorbedTotal}`, '#62D6DF');
     }
     if (totalHullDmg > 0) {
       this.playerFlashMs = 110;
@@ -596,27 +921,29 @@ export class V2CombatScene extends Phaser.Scene {
       );
     }
 
-    // Reactive Shield Counter jagged lightning arc back to enemy!
+    // Reactive Shield Counter: energy backflow into Counter Ring -> jagged cyan arc discharge!
     if (log.counterAttack) {
       const cTarget = this.enemies.find((e) => e.enemyId === log.counterAttack!.targetEnemyId);
       if (cTarget) {
         soundEngine.play('counterZap');
+        this.counterBackflowLife = 0.34;
         const ePt = this.getSpritePoint(
           cTarget.sprite,
           getShipHardpoints(`ship.enemy.${cTarget.spec.spriteArchetype}`).hit
         );
         this.beams.push({
-          x1: this.playerBaseX + 34,
-          y1: this.playerBaseY,
+          x1: counterMuzzle.x,
+          y1: counterMuzzle.y,
           x2: ePt.x,
           y2: ePt.y,
           color: 0x62d6df,
-          thickness: 4,
+          thickness: 4.2,
           jagged: true,
-          life: 0.36,
-          maxLife: 0.36,
+          life: 0.38,
+          maxLife: 0.38,
         });
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 26, color: 0x62d6df, life: 0.3, maxLife: 0.3 });
+        this.rings.push({ x: counterMuzzle.x, y: counterMuzzle.y, maxR: 22, color: 0x62d6df, life: 0.26, maxLife: 0.26 });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 28, color: 0x62d6df, life: 0.32, maxLife: 0.32 });
         this.spawnPopup(cTarget.baseX, cTarget.baseY - 38, `反击 -${log.counterAttack.appliedDamage}`, '#62D6DF');
       }
     }
@@ -630,6 +957,7 @@ export class V2CombatScene extends Phaser.Scene {
       if (justDied) {
         entry.dead = true;
         entry.sprite.setAlpha(0.18).setTint(0x4b5563);
+        entry.intentTag?.setVisible(false);
         soundEngine.play('enemyDestroy');
         this.rings.push({
           x: entry.baseX,
@@ -656,13 +984,18 @@ export class V2CombatScene extends Phaser.Scene {
       this.elapsed += dt;
     }
 
-    // Step combat playback
-    if (pb?.simulation && !this.externalPaused) {
+    // Step combat playback with Phase-D Round-2 Elite pause support
+    if (pb?.simulation && !this.externalPaused && !this.decisionPaused) {
       const intervalMs = 950 / speed;
       if (this.playbackActive) {
         this.roundTimerMs -= delta;
         if (this.roundTimerMs <= 0) {
-          if (this.nextRoundIdx < pb.simulation.rounds.length) {
+          const pauseAt = pb.pauseAtRound ?? null;
+          if (pauseAt !== null && this.nextRoundIdx + 1 === pauseAt && this.nextRoundIdx < pb.simulation.rounds.length) {
+            this.playbackActive = false;
+            this.decisionPaused = true;
+            pb.onPauseForDecision?.();
+          } else if (this.nextRoundIdx < pb.simulation.rounds.length) {
             this.executeRoundVisual(this.nextRoundIdx, pb.simulation.rounds[this.nextRoundIdx]);
             this.nextRoundIdx += 1;
             this.roundTimerMs = intervalMs;
@@ -675,7 +1008,7 @@ export class V2CombatScene extends Phaser.Scene {
               this.spawnPopup(
                 this.playerBaseX,
                 this.playerBaseY - 28,
-                `修 +${pb.simulation.repairApplied}`,
+                `维修 +${pb.simulation.repairApplied}`,
                 '#62D6DF'
               );
             }
@@ -693,16 +1026,19 @@ export class V2CombatScene extends Phaser.Scene {
     // Camera micro-shake
     if (this.shakeTimerMs > 0 && !reduced) {
       this.shakeTimerMs = Math.max(0, this.shakeTimerMs - delta);
-      const mag = (this.shakeTimerMs / 110) * 3;
+      const mag = (this.shakeTimerMs / 120) * 3.2;
       this.cameras.main.setScroll((Math.random() - 0.5) * mag * 2, (Math.random() - 0.5) * mag * 2);
     } else {
       this.cameras.main.setScroll(0, 0);
     }
 
-    // Ship subtle motion + recoil + hit flash
+    // Ship subtle motion + recoil + modular hardpoints sync
     const bobP = reduced ? 0 : Math.sin(this.elapsed * 2.5) * 3;
     this.playerRecoilX *= Math.pow(0.05, dt);
-    if (this.playerSprite) {
+    for (const m of this.moduleSprites) {
+      m.recoilX *= Math.pow(0.04, dt);
+    }
+    if (this.playerSprite && this.playerSprite.scene) {
       this.playerSprite.setPosition(this.playerBaseX + this.playerRecoilX, this.playerBaseY + bobP);
       if (this.playerFlashMs > 0) {
         this.playerFlashMs -= delta;
@@ -710,7 +1046,13 @@ export class V2CombatScene extends Phaser.Scene {
       } else {
         this.playerSprite.clearTint();
       }
+      this.layoutModules(bobP);
     }
+
+    // Enemy bobbing + damaged hull state (<50% HP darkened tint + rising smoke puffs)
+    this.smokeAccumMs += delta;
+    const emitSmoke = !reduced && !lowQuality && this.smokeAccumMs >= 160;
+    if (emitSmoke) this.smokeAccumMs = 0;
 
     for (let i = 0; i < this.enemies.length; i++) {
       const e = this.enemies[i];
@@ -718,17 +1060,36 @@ export class V2CombatScene extends Phaser.Scene {
       e.recoilX *= Math.pow(0.05, dt);
       const bobE = reduced ? 0 : Math.cos(this.elapsed * 2.2 + i) * 3;
       e.sprite.setPosition(e.baseX + e.recoilX, e.baseY + bobE);
+      if (e.intentTag && e.intentTag.scene) {
+        const yOff = e.sprite.displayHeight * 0.52 + 10;
+        e.intentTag.setPosition(e.baseX + e.recoilX, e.baseY + bobE - yOff);
+      }
+      const isDamaged = e.hp > 0 && e.hp <= e.maxHp * 0.5;
       if (e.flashMs > 0) {
         e.flashMs -= delta;
         e.sprite.setTintFill(0xffffff);
+      } else if (isDamaged) {
+        e.sprite.setTint(0xb6c0cf);
       } else {
         e.sprite.clearTint();
       }
+      if (emitSmoke && isDamaged) {
+        this.smokes.push({
+          x: e.baseX + (Math.random() - 0.5) * 18,
+          y: e.baseY + (Math.random() - 0.5) * 10,
+          vx: 8 + Math.random() * 10,
+          vy: -14 - Math.random() * 10,
+          r: 4 + Math.random() * 4,
+          color: Math.random() < 0.25 ? 0xf6b852 : 0x2a3444,
+          life: 0.75,
+          maxLife: 0.75,
+        });
+      }
     }
 
-    // Draw starfield & subtle dark gradient readability scrim
+    // Starfield
     this.bgGraphics.clear();
-    if (!lowQuality) {
+    if (!lowQuality && pb?.eventBackdrop !== 'wreck') {
       for (const st of this.stars) {
         const sx = (((st.nx - (reduced ? 0 : this.elapsed * st.speed)) % 1) + 1) % 1;
         this.bgGraphics.fillStyle(0xe9edf2, st.a);
@@ -736,53 +1097,93 @@ export class V2CombatScene extends Phaser.Scene {
       }
     }
 
-    // Draw FX: countable drone chevrons, heavy charge halo, shield arc, beams, shockwaves, unit HP mini-bars
     this.fxGraphics.clear();
 
-    // Heavy Cannon amber charging ring (stays clear even in reducedMotion!)
+    // Heavy Cannon amber charging halo directly at the mounted Heavy Railgun barrel
     if (this.heavyChargingCount > 0 && this.playerSprite) {
-      const pulse = reduced ? 0.8 : 0.5 + 0.45 * Math.sin(this.elapsed * 12);
+      const hm = this.getModuleMuzzle('heavy') ?? { x: this.playerBaseX + 26, y: this.playerBaseY - 14 };
+      const pulse = reduced ? 0.8 : 0.45 + 0.5 * Math.sin(this.elapsed * 12);
       this.fxGraphics.lineStyle(2.5, 0xf6b852, pulse);
-      this.fxGraphics.strokeCircle(this.playerBaseX + 26, this.playerBaseY, 18);
+      this.fxGraphics.strokeCircle(hm.x, hm.y, 13);
+      this.fxGraphics.fillStyle(0xffd27d, pulse * 0.35);
+      this.fxGraphics.fillCircle(hm.x, hm.y, 7);
     }
 
-    // Countable orbiting micro-drone chevrons (1..4+ physical sprites, visible in low-motion!)
+    // Active Shield Counter emitter subtle idle hum
+    if (pb?.shipVisualSpec?.counterActive && this.playerSprite?.visible) {
+      const cm = this.getModuleMuzzle('counter_ring');
+      if (cm) {
+        const p = reduced ? 0.55 : 0.35 + 0.35 * Math.sin(this.elapsed * 6);
+        this.fxGraphics.lineStyle(1.8, 0x62d6df, p);
+        this.fxGraphics.strokeCircle(cm.x - 6, cm.y, 9);
+      }
+    }
+
+    // Countable orbiting micro-drone chevrons launched from ventral bay
     if (this.activeDronesCount > 0) {
       const shown = Math.min(8, this.activeDronesCount);
       for (let d = 0; d < shown; d++) {
-        const angle = (reduced ? 0 : this.elapsed * 1.8) + (d / shown) * Math.PI * 2;
-        const dx = this.playerBaseX + 34 + Math.cos(angle) * 14;
+        const angle = (reduced ? 0 : this.elapsed * 2.0) + (d / shown) * Math.PI * 2;
+        const dx = this.playerBaseX + 42 + Math.cos(angle) * 14;
         const dy = this.playerBaseY - 26 + d * 14 + (reduced ? 0 : Math.sin(angle) * 4);
         this.fxGraphics.fillStyle(0x62d6df, 0.95);
-        this.fxGraphics.fillTriangle(dx + 7, dy, dx - 5, dy - 4, dx - 5, dy + 4);
-        this.fxGraphics.lineStyle(1, 0xf6b852, 0.9);
-        this.fxGraphics.strokeTriangle(dx + 7, dy, dx - 5, dy - 4, dx - 5, dy + 4);
+        this.fxGraphics.fillTriangle(dx + 8, dy, dx - 5, dy - 4.5, dx - 5, dy + 4.5);
+        this.fxGraphics.lineStyle(1.2, 0xf6b852, 0.92);
+        this.fxGraphics.strokeTriangle(dx + 8, dy, dx - 5, dy - 4.5, dx - 5, dy + 4.5);
       }
     }
 
-    // Shield deflection arc
+    // Localized curved hexagonal shield deflection ripple + energy backflow to counter ring
     if (this.shieldArcLife > 0) {
       this.shieldArcLife = Math.max(0, this.shieldArcLife - dt);
-      const a = Math.min(1, this.shieldArcLife / 0.34);
-      this.fxGraphics.lineStyle(4, 0x62d6df, a * 0.9);
+      const a = Math.min(1, this.shieldArcLife / 0.36);
+      const sx = this.playerBaseX + 30;
+      const sy = this.playerBaseY;
+      this.fxGraphics.lineStyle(3.5, 0x62d6df, a * 0.92);
       this.fxGraphics.beginPath();
-      this.fxGraphics.arc(this.playerBaseX + 24, this.playerBaseY, 34, -Math.PI * 0.42, Math.PI * 0.42);
+      this.fxGraphics.arc(sx, sy, 36, -Math.PI * 0.42, Math.PI * 0.42);
+      this.fxGraphics.strokePath();
+      this.fxGraphics.lineStyle(1.5, 0xb8f3ff, a * 0.65);
+      this.fxGraphics.beginPath();
+      this.fxGraphics.arc(sx - 4, sy, 29, -Math.PI * 0.34, Math.PI * 0.34);
       this.fxGraphics.strokePath();
     }
-
-    // Unit micro HP bars under each multi-unit enemy so swarm & elite targets are immediately readable
-    if (this.enemies.length > 1) {
-      for (const e of this.enemies) {
-        if (e.dead) continue;
-        const barW = e.spec.isBoss ? 58 : 34;
-        const bx = e.baseX - barW / 2;
-        const by = e.baseY + (e.spec.isBoss ? 30 : 20);
-        const pct = Math.max(0, Math.min(1, e.hp / e.maxHp));
-        this.fxGraphics.fillStyle(0x0b121f, 0.85);
-        this.fxGraphics.fillRoundedRect(bx - 1, by - 1, barW + 2, 7, 3);
-        this.fxGraphics.fillStyle(e.spec.isBoss ? 0xf6b852 : 0xf27564, 0.95);
-        this.fxGraphics.fillRoundedRect(bx, by, barW * pct, 5, 2);
+    if (this.counterBackflowLife > 0) {
+      this.counterBackflowLife = Math.max(0, this.counterBackflowLife - dt);
+      const a = Math.min(1, this.counterBackflowLife / 0.34);
+      const cm = this.getModuleMuzzle('counter_ring');
+      if (cm) {
+        this.fxGraphics.lineStyle(2.8, 0x7be8ff, a);
+        this.fxGraphics.beginPath();
+        this.fxGraphics.moveTo(this.playerBaseX + 34, this.playerBaseY);
+        this.fxGraphics.lineTo(cm.x, cm.y);
+        this.fxGraphics.strokePath();
       }
+    }
+
+    // Damaged hull smoke puffs
+    this.smokes = this.smokes.filter((s) => {
+      s.life -= dt;
+      if (s.life <= 0) return false;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      const a = (s.life / s.maxLife) * 0.6;
+      this.fxGraphics.fillStyle(s.color, a);
+      this.fxGraphics.fillCircle(s.x, s.y, s.r * (1.3 - (s.life / s.maxLife) * 0.4));
+      return true;
+    });
+
+    // Enemy HP bars (shown for ALL combat enemies so battlefield stays readable without side tables!)
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      const barW = e.spec.isBoss ? 68 : this.enemies.length === 1 ? 56 : 38;
+      const bx = e.baseX - barW / 2;
+      const by = e.baseY + e.sprite.displayHeight * 0.46 + 4;
+      const pct = Math.max(0, Math.min(1, e.hp / e.maxHp));
+      this.fxGraphics.fillStyle(0x0b121f, 0.88);
+      this.fxGraphics.fillRoundedRect(bx - 1, by - 1, barW + 2, 7, 3);
+      this.fxGraphics.fillStyle(e.spec.isBoss ? 0xf6b852 : 0xf27564, 0.95);
+      this.fxGraphics.fillRoundedRect(bx, by, barW * pct, 5, 2);
     }
 
     // Beams & jagged counter lightning
@@ -804,20 +1205,22 @@ export class V2CombatScene extends Phaser.Scene {
         this.fxGraphics.lineTo(b.x2, b.y2);
         this.fxGraphics.strokePath();
       } else {
-        this.fxGraphics.lineBetween(b.x1, b.y1, b.x2, b.y2);
-        this.fxGraphics.lineStyle(Math.max(1, b.thickness * 0.4), 0xffffff, a * 0.9);
-        this.fxGraphics.lineBetween(b.x1, b.y1, b.x2, b.y2);
+        this.fxGraphics.beginPath();
+        this.fxGraphics.moveTo(b.x1, b.y1);
+        this.fxGraphics.lineTo(b.x2, b.y2);
+        this.fxGraphics.strokePath();
       }
       return true;
     });
 
-    // Expanding impact & destruction rings
+    // Impact rings
     this.rings = this.rings.filter((r) => {
       r.life -= dt;
       if (r.life <= 0) return false;
       const p = 1 - r.life / r.maxLife;
-      this.fxGraphics.lineStyle(2.5, r.color, (1 - p) * 0.9);
-      this.fxGraphics.strokeCircle(r.x, r.y, Math.max(4, r.maxR * p));
+      const rad = 4 + r.maxR * p;
+      this.fxGraphics.lineStyle(2.5, r.color, Math.max(0, 1 - p));
+      this.fxGraphics.strokeCircle(r.x, r.y, rad);
       return true;
     });
 
@@ -825,13 +1228,13 @@ export class V2CombatScene extends Phaser.Scene {
     this.popups = this.popups.filter((p) => {
       p.life -= dt;
       if (p.life <= 0) {
-        p.textObj.destroy();
+        if (p.textObj?.scene) p.textObj.destroy();
         return false;
       }
-      if (!reduced) {
+      if (p.textObj?.scene) {
         p.textObj.y += p.vy * dt;
+        p.textObj.setAlpha(Math.min(1, p.life / (p.maxLife * 0.45)));
       }
-      p.textObj.setAlpha(Math.min(1, p.life / (p.maxLife * 0.45)));
       return true;
     });
   }

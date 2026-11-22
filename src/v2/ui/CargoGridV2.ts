@@ -27,6 +27,7 @@ import {
   validateV2Placement,
 } from '../domain/inventoryV2';
 import { getAnyV2ItemDef } from '../domain/itemCatalog';
+import type { V2TacticalDelta } from '../domain/tacticalDelta';
 import type {
   V2CargoBayState,
   V2ItemInstance,
@@ -38,6 +39,11 @@ export interface CargoGridV2Callbacks {
   readonly onBayChange: (nextBay: V2CargoBayState) => void;
   /** Optional prepare-mode remove callback when user removes a slot back to the pool */
   readonly onPrepareRemoveItem?: (instanceId: string) => void;
+  /** Optional authoritative tactical delta provider for the currently selected item */
+  readonly getTacticalDelta?: (
+    item: V2ItemInstance,
+    zone: 'grid' | 'staging'
+  ) => V2TacticalDelta | null;
 }
 
 interface SelectedRef {
@@ -310,11 +316,34 @@ export class CargoGridV2Component {
     cellsWrap.style.gridTemplateRows = `repeat(${ship.rows}, 1fr)`;
     const preview = this.computeActivePreview();
 
+    // Compute optional tactical delta & recommended optimal synergy spot once per render
+    const selInfoForDelta = this.getSelectedItemInfo();
+    const activeDelta =
+      selInfoForDelta && this.callbacks.getTacticalDelta
+        ? this.callbacks.getTacticalDelta(selInfoForDelta.item, selInfoForDelta.zone)
+        : null;
+    const recommendedCellSet = new Set<string>();
+    if (editable && selInfoForDelta && activeDelta?.recommendedSpot) {
+      const sDef = getAnyV2ItemDef(selInfoForDelta.item.definitionId);
+      if (sDef) {
+        const recCells = getV2OccupiedCells(
+          sDef.shapeId,
+          activeDelta.recommendedSpot.x,
+          activeDelta.recommendedSpot.y,
+          activeDelta.recommendedSpot.rotation
+        );
+        for (const rc of recCells) recommendedCellSet.add(`${rc.x},${rc.y}`);
+      }
+    }
+
     for (let y = 0; y < ship.rows; y++) {
       for (let x = 0; x < ship.cols; x++) {
         const cellEl = document.createElement('div');
         const disabled = isCellDisabledForShip(bay.shipId, x, y);
-        cellEl.className = `cargo-cell${disabled ? ' v2-cell-disabled' : ''}`;
+        const isRecommended = !disabled && !preview && recommendedCellSet.has(`${x},${y}`);
+        cellEl.className = `cargo-cell${disabled ? ' v2-cell-disabled' : ''}${
+          isRecommended ? ' cell-recommended' : ''
+        }`;
         cellEl.dataset.cx = String(x);
         cellEl.dataset.cy = String(y);
         cellEl.setAttribute('role', 'gridcell');
@@ -481,7 +510,9 @@ export class CargoGridV2Component {
     }
     board.appendChild(itemLayer);
 
-    // 2c. Synergy Energy Beam Overlay SVG
+    // 2c. Uncluttered Synergy Indicator Layer:
+    // - Always shows subtle glowing connector pins right on the shared orthogonal seam (zero art obstruction!)
+    // - Illuminates full energy conduit beam + bonus pill ONLY when a linked item is selected, dragged, or just snapped!
     if (stats.links.length > 0) {
       const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
       svg.setAttribute('class', 'synergy-overlay-svg');
@@ -498,32 +529,101 @@ export class CargoGridV2Component {
         return { x: avgX * 100, y: avgY * 100 };
       };
 
+      const seamMidpointOf = (idA: string, idB: string): { x: number; y: number } | null => {
+        const pA = bay.placed.find((item) => item.item.instanceId === idA);
+        const pB = bay.placed.find((item) => item.item.instanceId === idB);
+        if (!pA || !pB) return null;
+        const cellsA = getV2PlacedCells(pA);
+        const cellsB = getV2PlacedCells(pB);
+        for (const a of cellsA) {
+          for (const b of cellsB) {
+            if (Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1) {
+              return { x: ((a.x + b.x) * 0.5 + 0.5) * 100, y: ((a.y + b.y) * 0.5 + 0.5) * 100 };
+            }
+          }
+        }
+        return null;
+      };
+
+      const focusIds = new Set<string>();
+      if (this.selected?.zone === 'grid') focusIds.add(this.selected.instanceId);
+      if (this.drag?.active) focusIds.add(this.drag.item.instanceId);
+      if (this.lastSnappedId) focusIds.add(this.lastSnappedId);
+
       for (const lnk of stats.links) {
         const p1 = centerOf(lnk.sourceInstanceId);
         const p2 = centerOf(lnk.targetInstanceId);
+        const seam = seamMidpointOf(lnk.sourceInstanceId, lnk.targetInstanceId);
         if (!p1 || !p2) continue;
         const col = computeSynergyColor(lnk.sourceKind);
-        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        line.setAttribute('x1', String(p1.x));
-        line.setAttribute('y1', String(p1.y));
-        line.setAttribute('x2', String(p2.x));
-        line.setAttribute('y2', String(p2.y));
-        line.setAttribute('stroke', col);
-        line.setAttribute('stroke-width', '7');
-        line.setAttribute('stroke-linecap', 'round');
-        line.setAttribute('stroke-dasharray', '12 8');
-        line.setAttribute('opacity', '0.9');
-        svg.appendChild(line);
+        const highlighted =
+          focusIds.has(lnk.sourceInstanceId) || focusIds.has(lnk.targetInstanceId);
 
-        for (const pt of [p1, p2]) {
-          const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-          dot.setAttribute('cx', String(pt.x));
-          dot.setAttribute('cy', String(pt.y));
-          dot.setAttribute('r', '9');
-          dot.setAttribute('fill', col);
-          dot.setAttribute('stroke', '#111A29');
-          dot.setAttribute('stroke-width', '3');
-          svg.appendChild(dot);
+        if (highlighted) {
+          const glow = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          glow.setAttribute('x1', String(p1.x));
+          glow.setAttribute('y1', String(p1.y));
+          glow.setAttribute('x2', String(p2.x));
+          glow.setAttribute('y2', String(p2.y));
+          glow.setAttribute('stroke', col);
+          glow.setAttribute('stroke-width', '10');
+          glow.setAttribute('stroke-linecap', 'round');
+          glow.setAttribute('opacity', '0.26');
+          svg.appendChild(glow);
+
+          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          line.setAttribute('x1', String(p1.x));
+          line.setAttribute('y1', String(p1.y));
+          line.setAttribute('x2', String(p2.x));
+          line.setAttribute('y2', String(p2.y));
+          line.setAttribute('stroke', col);
+          line.setAttribute('stroke-width', '4.5');
+          line.setAttribute('stroke-linecap', 'round');
+          line.setAttribute('stroke-dasharray', '10 6');
+          line.setAttribute('opacity', '0.95');
+          svg.appendChild(line);
+
+          const midX = seam ? seam.x : (p1.x + p2.x) * 0.5;
+          const midY = seam ? seam.y : (p1.y + p2.y) * 0.5;
+          const pill = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+          const pillW = Math.max(46, lnk.label.length * 16 + 16);
+          pill.setAttribute('x', String(midX - pillW * 0.5));
+          pill.setAttribute('y', String(midY - 14));
+          pill.setAttribute('width', String(pillW));
+          pill.setAttribute('height', '28');
+          pill.setAttribute('rx', '14');
+          pill.setAttribute('fill', '#0D1726');
+          pill.setAttribute('stroke', col);
+          pill.setAttribute('stroke-width', '2.5');
+          svg.appendChild(pill);
+
+          const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          txt.setAttribute('x', String(midX));
+          txt.setAttribute('y', String(midY + 6));
+          txt.setAttribute('text-anchor', 'middle');
+          txt.setAttribute('fill', col);
+          txt.setAttribute('font-size', '16');
+          txt.setAttribute('font-weight', '700');
+          txt.textContent = lnk.label;
+          svg.appendChild(txt);
+        } else if (seam) {
+          // Subtle connector pin right at the shared seam so module art stays 100% clean!
+          const pinHalo = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          pinHalo.setAttribute('cx', String(seam.x));
+          pinHalo.setAttribute('cy', String(seam.y));
+          pinHalo.setAttribute('r', '10');
+          pinHalo.setAttribute('fill', col);
+          pinHalo.setAttribute('opacity', '0.28');
+          svg.appendChild(pinHalo);
+
+          const pin = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          pin.setAttribute('cx', String(seam.x));
+          pin.setAttribute('cy', String(seam.y));
+          pin.setAttribute('r', '5.5');
+          pin.setAttribute('fill', col);
+          pin.setAttribute('stroke', '#0D1726');
+          pin.setAttribute('stroke-width', '2.2');
+          svg.appendChild(pin);
         }
       }
       board.appendChild(svg);
@@ -684,8 +784,8 @@ export class CargoGridV2Component {
       this.root.appendChild(stagingBox);
     }
 
-    // 4. Compact Selected Item Action & Inspector Strip
-    this.renderSelectedInspector(editable);
+    // 4. Compact Selected Item Action & Tactical Delta Inspector Strip
+    this.renderSelectedInspector(editable, activeDelta);
 
     // Restore keyboard focus to the active cell when re-rendered via keyboard navigation
     if (wasCellFocused && this.gridHasFocus) {
@@ -696,7 +796,7 @@ export class CargoGridV2Component {
     }
   }
 
-  private renderSelectedInspector(editable: boolean): void {
+  private renderSelectedInspector(editable: boolean, delta: V2TacticalDelta | null): void {
     const sel = this.getSelectedItemInfo();
     const box = document.createElement('div');
     box.className = 'inspector-bar v2-inspector-bar';
@@ -705,9 +805,9 @@ export class CargoGridV2Component {
       box.innerHTML = `<div class="inspector-empty">${
         editable
           ? this.prepareMode
-            ? '点击下方仓库/借用设备放入舱格，或点击舱内设备调整位置与旋转（方向键/回车/R）。'
-            : '点选或拖拽物品整理船舱；快捷键：方向键移格 · 回车拿取/放置 · R 旋转 · Del 舍弃。'
-          : '点击任意已装设备查看详细参数与联动说明。'
+            ? '点选舱内设备微调位置与旋转，或从左侧选件装入船舱（快捷键：方向键 / 回车 / R）。'
+            : '点选或拖拽整理船舱（快捷键：方向键移格 · 回车拿放 · R 旋转 · Del 舍弃）。'
+          : '点击任意已装设备查看联动与战力变化。'
       }</div>`;
       this.root.appendChild(box);
       return;
@@ -716,6 +816,16 @@ export class CargoGridV2Component {
     const def = getAnyV2ItemDef(sel.item.definitionId);
     if (!def) return;
     const eqDef = sel.item.category === 'equipment' ? V2_EQUIPMENT_DEFS[sel.item.definitionId] : undefined;
+
+    const deltaHtml = delta
+      ? `<div class="v2-delta-strip ${delta.positiveImpact ? 'positive' : ''}">
+          <div class="v2-delta-row"><span class="v2-delta-k">联动</span><span>${delta.synergyLine}</span></div>
+          <div class="v2-delta-row"><span class="v2-delta-k">收益</span><strong>${delta.combatDeltaLine}</strong></div>
+          <div class="v2-delta-row"><span class="v2-delta-k">舱位</span><span>${delta.spaceLine}</span></div>
+        </div>`
+      : `<div class="inspector-desc">${def.summary}${
+          sel.item.fixedValue > 0 ? ` · 回收估价 <strong>${sel.item.fixedValue}¤</strong>` : ''
+        }</div>`;
 
     box.innerHTML = `
       <div class="inspector-main">
@@ -732,9 +842,7 @@ export class CargoGridV2Component {
                 : ''
             }
           </div>
-          <div class="inspector-desc">${def.summary} ${
-      sel.item.fixedValue > 0 ? `· 回收估价 <strong>${sel.item.fixedValue}¤</strong>` : ''
-    }</div>
+          ${deltaHtml}
         </div>
       </div>
       ${
@@ -743,14 +851,16 @@ export class CargoGridV2Component {
               <button type="button" class="btn btn-sm btn-secondary" id="btn-v2-rotate">↻ 旋转 (R)</button>
               ${
                 sel.zone === 'staging'
-                  ? `<button type="button" class="btn btn-sm btn-primary" id="btn-v2-autoplace">↓ 放入船舱</button>`
+                  ? `<button type="button" class="btn btn-sm btn-primary" id="btn-v2-autoplace">${
+                      delta?.recommendedSpot ? '↓ 装入推荐位' : '↓ 放入船舱'
+                    }</button>`
                   : this.prepareMode
                   ? `<button type="button" class="btn btn-sm btn-danger" id="btn-v2-prep-remove">✕ 移出配装</button>`
                   : `<button type="button" class="btn btn-sm btn-ghost" id="btn-v2-to-staging">↑ 移至暂存</button>`
               }
               ${
                 !this.prepareMode
-                  ? `<button type="button" class="btn btn-sm btn-danger" id="btn-v2-discard">🗑 舍弃</button>`
+                  ? `<button type="button" class="btn btn-sm btn-danger" id="btn-v2-discard">✕ 舍弃</button>`
                   : ''
               }
             </div>`
@@ -764,7 +874,8 @@ export class CargoGridV2Component {
       });
       box.querySelector('#btn-v2-autoplace')?.addEventListener('click', () => {
         if (!this.bay || sel.zone !== 'staging') return;
-        const spot = findFirstLegalV2Placement(this.bay, sel.item.definitionId);
+        const spot =
+          delta?.recommendedSpot ?? findFirstLegalV2Placement(this.bay, sel.item.definitionId);
         if (!spot) {
           this.showInvalidReason('overlap');
           return;

@@ -668,6 +668,58 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
     source: 'public/assets/events/event_distress.webp',
     license: 'Original Starline First-Party Illustrated',
   },
+
+  // V2 Experience Polish (v007): 5 Modular External Ship Hardpoint Sprites
+  'ship.mod.laser_turret': {
+    key: 'ship.mod.laser_turret',
+    version: 'v007',
+    view: 'side',
+    canvasWidth: 256,
+    canvasHeight: 128,
+    anchor: { x: 0.45, y: 0.68 },
+    source: 'public/assets/modules/mod_laser_turret.webp',
+    license: 'Original Starline First-Party Illustrated',
+  },
+  'ship.mod.heavy_railgun': {
+    key: 'ship.mod.heavy_railgun',
+    version: 'v007',
+    view: 'side',
+    canvasWidth: 256,
+    canvasHeight: 128,
+    anchor: { x: 0.42, y: 0.72 },
+    source: 'public/assets/modules/mod_heavy_railgun.webp',
+    license: 'Original Starline First-Party Illustrated',
+  },
+  'ship.mod.drone_bay': {
+    key: 'ship.mod.drone_bay',
+    version: 'v007',
+    view: 'side',
+    canvasWidth: 256,
+    canvasHeight: 128,
+    anchor: { x: 0.50, y: 0.25 },
+    source: 'public/assets/modules/mod_drone_bay.webp',
+    license: 'Original Starline First-Party Illustrated',
+  },
+  'ship.mod.counter_ring': {
+    key: 'ship.mod.counter_ring',
+    version: 'v007',
+    view: 'side',
+    canvasWidth: 192,
+    canvasHeight: 192,
+    anchor: { x: 0.45, y: 0.76 },
+    source: 'public/assets/modules/mod_counter_ring.webp',
+    license: 'Original Starline First-Party Illustrated',
+  },
+  'ship.mod.cargo_rack': {
+    key: 'ship.mod.cargo_rack',
+    version: 'v007',
+    view: 'side',
+    canvasWidth: 256,
+    canvasHeight: 128,
+    anchor: { x: 0.50, y: 0.30 },
+    source: 'public/assets/modules/mod_cargo_rack.webp',
+    license: 'Original Starline First-Party Illustrated',
+  },
 };
 
 export function getShipHardpoints(textureKey: string): ShipHardpoints {

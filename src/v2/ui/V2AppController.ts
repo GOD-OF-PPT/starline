@@ -14,6 +14,7 @@ import { V2_CREW, V2_CREW_ORDER, type V2CrewId } from '../data/crew';
 import {
   V2_ARCHETYPE_LABELS,
   V2_EQUIPMENT_DEFS,
+  V2_RESEARCH_COST_CREDITS,
   V2_WAREHOUSE_CAPACITY,
   getMerchantBuybackPrice,
   getV2EquipmentDefByKind,
@@ -22,13 +23,27 @@ import {
 } from '../data/equipment';
 import {
   V2_FACILITIES,
-  V2_FACILITY_ORDER,
+  V2_RELICS,
+  V2_RELIC_ORDER,
   type V2FacilityId,
 } from '../data/facilities';
 import { V2_SHAPES } from '../data/shapes';
 import { V2_SHIPS, V2_SHIP_ORDER, type V2ShipId } from '../data/ships';
+import { createV2ShowcaseRun } from '../data/showcaseRun';
+import {
+  V2_TRIAL_BUILD_ORDER,
+  V2_TRIAL_BUILDS,
+  buildTrialPrepareSlots,
+  getTrialDemoUnits,
+} from '../data/trialBuilds';
 import { V2_TUTORIAL_HINTS, createV2TutorialRun } from '../data/tutorialV2';
-import { previewV2CombatNode, completeV2CombatAtCurrentNode, startV2CombatAtCurrentNode } from '../domain/combatV2';
+import {
+  commitV2EliteTacticDecision,
+  completeV2CombatAtCurrentNode,
+  previewV2CombatNode,
+  simulateV2Combat,
+  startV2CombatAtCurrentNode,
+} from '../domain/combatV2';
 import {
   abortActiveV2Contract,
   canPerformSurveyAtCurrentNode,
@@ -57,7 +72,7 @@ import {
   selectV2MapNode,
   sellV2ItemToMerchant,
 } from '../domain/encounter';
-import { createEmptyV2Bay, findFirstLegalV2Placement } from '../domain/inventoryV2';
+import { findFirstLegalV2Placement } from '../domain/inventoryV2';
 import { createV2EquipmentInstance, getAnyV2ItemDef } from '../domain/itemCatalog';
 import {
   V2_MAX_SAVED_PRESETS,
@@ -83,6 +98,8 @@ import {
 } from '../domain/persistenceV2';
 import {
   canBuildV2Facility,
+  canResearchV2Instance,
+  canRestoreV2Relic,
   claimV2PendingGiftToWarehouse,
   craftV2CommonEquipment,
   getV2RelicSummary,
@@ -93,32 +110,43 @@ import {
   sellV2WarehouseItem,
 } from '../domain/progressionV2';
 import { applyV2Settlement, calculateV2Settlement } from '../domain/settlementV2';
+import { deriveV2ShipVisualSpec } from '../domain/shipVisualSpec';
+import { computeV2PlacementTacticalDelta } from '../domain/tacticalDelta';
 import {
   V2_TAB_CHANNEL,
   V2_TAB_LOCK_KEY,
   type V2CargoBayState,
   type V2CombatRoundLog,
+  type V2EliteTacticChoice,
   type V2MapNode,
   type V2NodeType,
   type V2PlacedItem,
+  type V2ProfileState,
   type V2RunState,
   type V2SaveData,
   type V2SettlementDisposition,
   type V2TargetPolicy,
+  type V2TrialBuildId,
+  type V2WreckChoice,
 } from '../domain/types';
 import {
   CargoGridV2Component,
   originTagText,
   renderV2MiniMaskHtml,
 } from './CargoGridV2';
+import { svgIcon, type V2IconName } from './icons';
 import {
   openV1MigrationModal,
   openV2BackupRecoveryModal,
+  openV2CargoPeekModal,
   openV2CodexModal,
+  openV2ContractsDrawerModal,
   openV2DiscardConfirmModal,
+  openV2FacilitiesDrawerModal,
   openV2HelpModal,
   openV2RelicGalleryModal,
   openV2SettingsModal,
+  openV2ShowcasePickerModal,
   openV2WarehouseModal,
 } from './V2Modals';
 
@@ -129,6 +157,9 @@ interface V2PrepareDraft {
   shipId: V2ShipId;
   crewId: V2CrewId | null;
   primaryArchetype: V2ArchetypeId;
+  trialBuildId: V2TrialBuildId | null;
+  playingDemo: boolean;
+  demoPlaybackKey: string | null;
   slots: V2PrepareSlotEntry[];
   missingPresetEntries: readonly V2ResolvedPresetSlot[];
   presetNotice: string | null;
@@ -147,13 +178,24 @@ interface V2ReturnDockingNotice {
   progress: number;
 }
 
-const NODE_TYPE_META: Record<V2NodeType, { readonly label: string; readonly icon: string; readonly cls: string }> = {
-  combat: { label: '敌舰巡逻', icon: '⚔', cls: 'node-combat' },
-  elite: { label: '精英旗舰', icon: '☠', cls: 'node-elite' },
-  wreck: { label: '废船打捞', icon: '🔧', cls: 'node-wreck' },
-  merchant: { label: '流动商人', icon: '⚖', cls: 'node-merchant' },
-  anomaly: { label: '异常星区', icon: '✦', cls: 'node-anomaly' },
-  distress: { label: '求救信号', icon: '📡', cls: 'node-distress' },
+interface NextBaseGoal {
+  readonly title: string;
+  readonly detail: string;
+  readonly actionKind: 'facilities' | 'warehouse' | 'relics';
+  readonly targetCost?: number;
+  readonly ready: boolean;
+}
+
+const NODE_TYPE_META: Record<
+  V2NodeType,
+  { readonly label: string; readonly icon: V2IconName; readonly cls: string }
+> = {
+  combat: { label: '敌舰巡逻', icon: 'combat', cls: 'node-combat' },
+  elite: { label: '精英旗舰', icon: 'elite', cls: 'node-elite' },
+  wreck: { label: '废船打捞', icon: 'wreck', cls: 'node-wreck' },
+  merchant: { label: '流动商人', icon: 'merchant', cls: 'node-merchant' },
+  anomaly: { label: '异常星区', icon: 'anomaly', cls: 'node-anomaly' },
+  distress: { label: '求救信号', icon: 'distress', cls: 'node-distress' },
 };
 
 const ARCHETYPE_ORDER: readonly V2ArchetypeId[] = ['laser', 'heavy', 'hangar', 'counter'];
@@ -167,6 +209,8 @@ export class V2AppController {
   private readonly options: V2ControllerOptions;
 
   private save: V2SaveData;
+  /** Isolated 4-node showcase run (strictly in-memory; NEVER mutates formal profile/save!) */
+  private showcaseRun: V2RunState | null = null;
   private phaserHost: PhaserHost | null = null;
   private cargoGrid: CargoGridV2Component | null = null;
   private tabGuard: MultiTabGuard;
@@ -185,12 +229,17 @@ export class V2AppController {
   private sceneCollapseOverride: boolean | null = null;
   private activeDockingNotice: V2ReturnDockingNotice | null = null;
 
+  // Interactive focus states for unified Map & 3-hotspot Wreck
+  private selectedMapNodeId: string | null = null;
+  private selectedWreckHotspot: 'armory' | 'reactor' | 'cargo' = 'armory';
+
   // Live combat playback display telemetry (pure presentation)
   private activeCombatPlaybackKey: string | null = null;
   private liveCombatRound = 0;
   private liveCombatPlayerHp = 30;
   private liveCombatPlayerShield = 0;
   private liveCombatEnemiesAlive = 0;
+  private awaitingEliteDecision = false;
   private showCombatLogDetails = false;
 
   // Persistent DOM anchors so Phaser canvas never flickers
@@ -220,6 +269,19 @@ export class V2AppController {
       },
       { lockKey: V2_TAB_LOCK_KEY, channelName: V2_TAB_CHANNEL }
     );
+  }
+
+  private getCurrentRun(): V2RunState | null {
+    return this.showcaseRun ?? this.save.activeRun;
+  }
+
+  private setCurrentRun(next: V2RunState | null): void {
+    if (this.showcaseRun) {
+      this.showcaseRun = next;
+      return;
+    }
+    this.save = { ...this.save, activeRun: next };
+    this.persist();
   }
 
   init(): void {
@@ -262,7 +324,6 @@ export class V2AppController {
       });
     }
 
-    // Active run skips title overlay immediately so refresh lands straight back into voyage
     if (this.save.activeRun) {
       this.titleEntered = true;
       this.writeTitleSession(true);
@@ -272,15 +333,14 @@ export class V2AppController {
 
     this.phaserHost = new PhaserHost(this.sceneCanvasHostEl);
     this.phaserHost.onBuildingClick((buildingId) => {
-      if (hasOpenModal() || this.save.activeRun || this.prepareDraft) return;
+      if (hasOpenModal() || this.getCurrentRun() || this.prepareDraft) return;
       soundEngine.play('click');
       if (buildingId === 'workbench') {
         this.openWarehouseModal('warehouse');
       } else if (buildingId === 'display') {
         this.openRelicGalleryModal();
       } else if (buildingId === 'drydock') {
-        this.leftPanelEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        this.showToast('在基地经营面板可扩建船坞并解锁护盾巡洋舰与重型货船。');
+        this.openFacilitiesModal();
       }
     });
 
@@ -292,7 +352,6 @@ export class V2AppController {
 
     this.syncAll();
 
-    // Auto-prompt V1 migration once if player has V1 save and fresh V2 (no runs, no migration record)
     if (
       this.titleEntered &&
       this.shouldOfferMigrationPrompt() &&
@@ -324,6 +383,7 @@ export class V2AppController {
   };
 
   private canMutate(): boolean {
+    if (this.showcaseRun) return !hasOpenModal();
     return !this.isReadOnlyTab && this.tabGuard.canWrite() && !hasOpenModal();
   }
 
@@ -341,7 +401,8 @@ export class V2AppController {
       this.v1Inspection.hasV1Save &&
       !this.save.profile.migrationRecord &&
       this.save.profile.totalRuns === 0 &&
-      !this.save.activeRun
+      !this.save.activeRun &&
+      !this.showcaseRun
     );
   }
 
@@ -376,6 +437,7 @@ export class V2AppController {
   }
 
   private persist(): void {
+    if (this.showcaseRun) return;
     if (this.isReadOnlyTab || !this.tabGuard.canWrite()) return;
     const res = persistV2SaveData(window.localStorage, this.save);
     if (!res.ok) {
@@ -390,6 +452,91 @@ export class V2AppController {
     document.body.classList.toggle('reduced-motion', this.save.settings.reducedMotion);
     document.body.classList.toggle('low-quality', this.save.settings.lowQuality);
     this.phaserHost?.updateCombatSettings(this.save.settings);
+  }
+
+  private computeNextBaseGoal(p: V2ProfileState, projectedCredits = p.credits): NextBaseGoal {
+    // 1. Any researchable equipment ready in warehouse?
+    if (p.buildings.research_lab) {
+      const researchable = p.equipmentWarehouse.find((w) => canResearchV2Instance(p, w.instanceId).canResearch);
+      if (researchable) {
+        const def = V2_EQUIPMENT_DEFS[researchable.definitionId];
+        const ready = projectedCredits >= V2_RESEARCH_COST_CREDITS;
+        return {
+          title: `研究台：解锁「${def?.name ?? '新设备'}」蓝图`,
+          detail: ready
+            ? `资金已就绪（${V2_RESEARCH_COST_CREDITS}¤），立即研究永久掌握`
+            : `还差 ${Math.max(0, V2_RESEARCH_COST_CREDITS - projectedCredits)}¤`,
+          actionKind: 'warehouse',
+          targetCost: V2_RESEARCH_COST_CREDITS,
+          ready,
+        };
+      }
+    }
+
+    // 2. Any restorable relic waiting in gallery?
+    for (const rid of V2_RELIC_ORDER) {
+      const st = p.relics[rid];
+      if (st && st.storedCount > 0 && !st.restored) {
+        const relic = V2_RELICS[rid];
+        const chk = canRestoreV2Relic(p, rid);
+        return {
+          title: `展台修复：${relic.name}`,
+          detail: chk.canRestore
+            ? `库藏已就绪，花费 ${relic.restoreCost}¤ 陈列展台`
+            : chk.reason ?? `需 ${relic.restoreCost}¤`,
+          actionKind: 'relics',
+          targetCost: relic.restoreCost,
+          ready: chk.canRestore,
+        };
+      }
+    }
+
+    // 3. Closest unbuilt paid facility
+    const priorityOrder: V2FacilityId[] = [
+      'research_lab',
+      'drydock',
+      'display',
+      'drydock_tier2',
+    ];
+    for (const fid of priorityOrder) {
+      if (p.buildings[fid]) continue;
+      const fac = V2_FACILITIES[fid];
+      const chk = canBuildV2Facility(p, fid);
+      const diff = Math.max(0, fac.cost - projectedCredits);
+      return {
+        title: `扩建目标：${fac.name}`,
+        detail:
+          chk.canBuild || diff === 0
+            ? `${fac.effectSummary.slice(0, 22)}（资金已够！）`
+            : `还差 ${diff}¤ · ${fac.effectSummary.slice(0, 18)}`,
+        actionKind: 'facilities',
+        targetCost: fac.cost,
+        ready: chk.canBuild,
+      };
+    }
+
+    return {
+      title: '拆解站主力设施已全建成',
+      detail: '挑战深入委托与搜集全部 4 件星际遗物',
+      actionKind: 'relics',
+      ready: true,
+    };
+  }
+
+  private pickRecommendedContractId(p: V2ProfileState): string {
+    const board = getAvailableContractBoard(p);
+    const nextStd = board.standardTemplates.find(
+      (c) => !p.completedContractIds.includes(c.templateId)
+    );
+    if (nextStd) return nextStd.templateId;
+    if (board.deepUnlocked) {
+      const nextDeep = board.deepTemplates.find(
+        (c) => !p.completedContractIds.includes(c.templateId)
+      );
+      if (nextDeep) return nextDeep.templateId;
+      return board.deepTemplates[0]?.templateId ?? 'transport_std';
+    }
+    return board.standardTemplates[0]?.templateId ?? 'transport_std';
   }
 
   private buildShellDom(): void {
@@ -447,13 +594,25 @@ export class V2AppController {
   }
 
   private applyViewportClasses(): void {
-    const run = this.save.activeRun;
+    const run = this.getCurrentRun();
+    const curNode = run?.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
+    const isBaseHero = !run && !this.prepareDraft;
+    const isPrepare = Boolean(!run && this.prepareDraft);
     const isArrange = run?.phase === 'ARRANGE';
+    const isLiveCombat = Boolean(run?.phase === 'ENCOUNTER' && run.activeCombat);
+    const isPreCombat = Boolean(run?.phase === 'ENCOUNTER' && curNode?.combat && !run.activeCombat);
+    const isWreckHero = Boolean(run?.phase === 'ENCOUNTER' && curNode?.type === 'wreck');
+    const isMapHero = Boolean(run?.phase === 'MAP');
     const collapsed = isArrange && this.isArrangeSceneCollapsed();
+
     this.sceneWrapEl.classList.toggle('scene-collapsed', collapsed);
+    this.appShellEl.classList.toggle('phase-base-hero', isBaseHero);
+    this.appShellEl.classList.toggle('phase-prepare', isPrepare);
     this.appShellEl.classList.toggle('phase-arrange', Boolean(isArrange));
-    this.appShellEl.classList.toggle('phase-combat', Boolean(run?.phase === 'ENCOUNTER' && run.activeCombat));
-    this.appShellEl.classList.toggle('phase-prepare', Boolean(!run && this.prepareDraft));
+    this.appShellEl.classList.toggle('phase-combat', isLiveCombat || isPreCombat);
+    this.appShellEl.classList.toggle('phase-combat-live', isLiveCombat);
+    this.appShellEl.classList.toggle('phase-wreck-hero', isWreckHero);
+    this.appShellEl.classList.toggle('phase-map-hero', isMapHero);
   }
 
   private syncAll(): void {
@@ -470,7 +629,7 @@ export class V2AppController {
   // --- Title Screen Overlay ---
 
   private renderTitleOverlay(): void {
-    const showTitle = !this.titleEntered && !this.save.activeRun;
+    const showTitle = !this.titleEntered && !this.getCurrentRun();
     this.appShellEl.dataset.titleLocked = showTitle ? '1' : '0';
     if ('inert' in this.appShellEl) {
       (this.appShellEl as HTMLElement & { inert: boolean }).inert = showTitle || hasOpenModal();
@@ -485,16 +644,17 @@ export class V2AppController {
     this.titleHostEl.style.display = 'block';
     const p = this.save.profile;
     const relicSum = getV2RelicSummary(p);
-    const hasProgress = p.totalRuns > 0 || p.tutorialCompleted || p.credits > 0 || Boolean(p.migrationRecord);
-    const ctaText = hasProgress ? '▶ 继续远航经营' : '▶ 开始首航（V2 远航经营）';
+    const hasProgress =
+      p.totalRuns > 0 || p.tutorialCompleted || p.credits > 0 || Boolean(p.migrationRecord);
+    const ctaText = hasProgress ? '进入拆解站 · 继续远航' : '进入拆解站 · 开启首航';
 
     this.titleHostEl.innerHTML = `
       <div class="title-screen-backdrop" style="background-image:url('${getTitleKeyArtUrl()}')">
         <div class="title-screen-scrim">
           <div class="title-card v2-title-card">
-            <div class="title-eyebrow">STARLINE SALVAGE · V2 VOYAGE MANAGEMENT</div>
+            <div class="title-eyebrow">STARLINE SALVAGE STATION</div>
             <h1 class="title-heading">星际拆解站</h1>
-            <p class="title-tagline">接取委托 · 选舰配装 · 六层分支探索 · 拼装取舍 · 返航研究扩建</p>
+            <p class="title-tagline">选舰配装 · 航路探索 · 船舱取舍 · 返航扩建</p>
 
             <div class="title-telemetry">
               <div class="title-stat"><span>信用点</span><strong class="num">${p.credits}¤</strong></div>
@@ -504,15 +664,16 @@ export class V2AppController {
             </div>
 
             <div class="title-actions">
-              <button type="button" class="btn btn-primary btn-launch-hero" id="v2-title-enter">${ctaText}</button>
+              <button type="button" class="btn btn-primary btn-launch-hero" id="v2-title-enter">${svgIcon('rocket', 16)} ${ctaText}</button>
+              <button type="button" class="btn btn-secondary btn-showcase-hero" id="v2-title-showcase">${svgIcon('bolt', 15)} 4 站精华试玩（试航三流派 · 不改正式档）</button>
               <div class="title-sub-actions">
                 ${
                   this.shouldOfferMigrationPrompt()
-                    ? `<button type="button" class="btn btn-secondary" id="v2-title-migrate">导入旧版 V1 存档</button>`
+                    ? `<button type="button" class="btn btn-secondary" id="v2-title-migrate">导入经典旧档</button>`
                     : ''
                 }
-                <button type="button" class="btn btn-ghost" id="v2-title-help">规则说明</button>
-                <button type="button" class="btn btn-ghost" id="v2-title-v1">切回 V1 经典模式</button>
+                <button type="button" class="btn btn-ghost" id="v2-title-help">${svgIcon('help', 14)} 远航指南</button>
+                <button type="button" class="btn btn-ghost" id="v2-title-v1">经典模式</button>
               </div>
             </div>
           </div>
@@ -525,6 +686,12 @@ export class V2AppController {
       this.titleEntered = true;
       this.writeTitleSession(true);
       this.syncAll();
+    });
+    this.titleHostEl.querySelector('#v2-title-showcase')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      openV2ShowcasePickerModal(this.modalHostEl, (trialId) => {
+        this.startShowcaseRun(trialId);
+      });
     });
     this.titleHostEl.querySelector('#v2-title-migrate')?.addEventListener('click', () => {
       soundEngine.play('click');
@@ -543,30 +710,44 @@ export class V2AppController {
     });
   }
 
-  // --- Top HUD (Clean 3-pill max during runs, §13) ---
+  private startShowcaseRun(trialId: V2TrialBuildId): void {
+    this.titleEntered = true;
+    this.writeTitleSession(true);
+    this.prepareDraft = null;
+    this.activeDockingNotice = null;
+    this.settlementDispositions = {};
+    this.selectedMapNodeId = null;
+    this.selectedWreckHotspot = 'armory';
+    this.awaitingEliteDecision = false;
+    this.showcaseRun = createV2ShowcaseRun(trialId);
+    soundEngine.play('warpJump');
+    this.syncAll();
+  }
+
+  // --- Top HUD (Clean, icon-unified, zero dev jargon) ---
 
   private formatContractHudPill(run: V2RunState): string {
     const c = run.contract;
-    if (c.status === 'aborted') return '已弃约 · 自由返航';
+    if (c.status === 'aborted') return '自由返航';
     if (c.type === 'free') return '自由打捞';
     if (c.type === 'transport') {
       const hasReactor = run.bay.placed.some(
         (p) => p.item.origin === 'mission' && p.item.definitionId === 'mission.sealed_reactor'
       );
-      return hasReactor ? '大件运输 · 已装载 ✓' : '大件运输 · 待取反应堆';
+      return hasReactor ? '运输 · 已装反应堆' : '运输 · 待取反应堆';
     }
     if (c.type === 'rescue') {
       const pods = countEscapePodsInBay(run.bay);
-      return `失联救援 · 救生舱 ${pods}/${c.missionItemCount}`;
+      return `救援 · 救生舱 ${pods}/${c.missionItemCount}`;
     }
     if (c.type === 'survey') {
-      return `航迹勘测 · ${c.completedNodeIds.length}/${c.requiredCompletions}`;
+      return `勘测 · ${c.completedNodeIds.length}/${c.requiredCompletions}`;
     }
     return c.name;
   }
 
   private renderTopHud(): void {
-    const run = this.save.activeRun;
+    const run = this.getCurrentRun();
     const p = this.save.profile;
     const relicSum = getV2RelicSummary(p);
 
@@ -576,25 +757,25 @@ export class V2AppController {
       if (run.phase === 'SETTLEMENT') {
         const sum = calculateV2Settlement(run, p, this.settlementDispositions);
         pillsHtml = `
-          <div class="hud-pill"><span class="k">状态</span><strong class="v">${
-            sum.reason === 'defeat' ? '战败拖回' : '安全返航'
+          <div class="hud-pill"><span class="k">${svgIcon('beacon', 13)} 状态</span><strong class="v">${
+            sum.reason === 'defeat' ? '拖回拆解站' : '安全靠泊'
           }</strong></div>
-          <div class="hud-pill"><span class="k">委托</span><strong class="v">${
-            sum.contractCompleted ? '可交付 ✓' : run.contract.type === 'free' ? '自由打捞' : '未完成'
+          <div class="hud-pill"><span class="k">${svgIcon('star', 13)} 委托</span><strong class="v">${
+            sum.contractCompleted ? '可交付' : run.contract.type === 'free' ? '自由打捞' : '未完成'
           }</strong></div>
-          <div class="hud-pill pill-accent"><span class="k">本次实得</span><strong class="v num">+${
+          <div class="hud-pill pill-accent"><span class="k">${svgIcon('credits', 13)} 实得</span><strong class="v num">+${
             sum.finalCreditsEarned
           }¤</strong></div>
         `;
       } else {
         pillsHtml = `
-          <div class="hud-pill ${run.hp <= 8 ? 'pill-danger' : ''}"><span class="k">耐久</span><strong class="v num">${
+          <div class="hud-pill ${run.hp <= 8 ? 'pill-danger' : ''}"><span class="k">${svgIcon('hull', 13)} 耐久</span><strong class="v num">${
             run.hp
           }/${run.maxHp}</strong></div>
-          <div class="hud-pill ${fuelLow ? 'pill-warn' : ''}"><span class="k">燃料</span><strong class="v num">${
+          <div class="hud-pill ${fuelLow ? 'pill-warn' : ''}"><span class="k">${svgIcon('fuel', 13)} 燃料</span><strong class="v num">${
             run.fuel
           }/${run.maxFuel}</strong></div>
-          <div class="hud-pill"><span class="k">委托</span><strong class="v">${this.formatContractHudPill(
+          <div class="hud-pill"><span class="k">${svgIcon('star', 13)} 任务</span><strong class="v">${this.formatContractHudPill(
             run
           )}</strong></div>
         `;
@@ -609,9 +790,9 @@ export class V2AppController {
             )
           : p.credits;
       pillsHtml = `
-        <div class="hud-pill pill-accent"><span class="k">信用点</span><strong class="v num">${displayCredits}¤</strong></div>
-        <div class="hud-pill"><span class="k">设备库</span><strong class="v num">${p.equipmentWarehouse.length}/${V2_WAREHOUSE_CAPACITY}</strong></div>
-        <div class="hud-pill"><span class="k">蓝图/藏品</span><strong class="v num">${p.blueprints.length}/10 · ${relicSum.restoredCount}/${relicSum.totalCount}</strong></div>
+        <div class="hud-pill pill-accent"><span class="k">${svgIcon('credits', 13)} 信用点</span><strong class="v num">${displayCredits}¤</strong></div>
+        <div class="hud-pill"><span class="k">${svgIcon('warehouse', 13)} 库存</span><strong class="v num">${p.equipmentWarehouse.length}/${V2_WAREHOUSE_CAPACITY}</strong></div>
+        <div class="hud-pill"><span class="k">${svgIcon('museum', 13)} 藏品</span><strong class="v num">${relicSum.restoredCount}/${relicSum.totalCount}</strong></div>
       `;
     }
 
@@ -622,38 +803,43 @@ export class V2AppController {
       <div class="hud-brand">
         <span class="hud-logo-dot"></span>
         <span class="hud-title">星际拆解站</span>
-        <span class="v2-ver-chip">V2</span>
+        ${
+          run?.isShowcase
+            ? `<span class="v2-showcase-chip">4 站试玩</span>`
+            : ''
+        }
       </div>
       <div class="hud-actions">
         ${
-          showCollapseBtn
-            ? `<button type="button" class="btn btn-sm btn-secondary" id="v2-btn-toggle-scene">${
-                collapsed ? '展开场景' : '收起场景'
-              }</button>`
+          run?.isShowcase
+            ? `<button type="button" class="btn btn-sm btn-secondary" id="v2-btn-exit-showcase">退出试玩</button>`
             : ''
         }
         ${
-          !run
-            ? `<button type="button" class="btn btn-sm btn-secondary" id="v2-hud-warehouse">设备库${
-                p.pendingGiftQueue.length > 0 ? ` (+${p.pendingGiftQueue.length})` : ''
+          showCollapseBtn
+            ? `<button type="button" class="btn btn-sm btn-secondary" id="v2-btn-toggle-scene">${
+                collapsed ? '展开舰体' : '收起舰体'
               }</button>`
             : ''
         }
-        <button type="button" class="btn btn-sm btn-ghost" id="v2-hud-help" aria-label="帮助">规则</button>
-        <button type="button" class="btn btn-sm btn-ghost" id="v2-hud-settings" aria-label="设置">设置</button>
+        <button type="button" class="btn btn-sm btn-ghost" id="v2-hud-help" aria-label="远航指南">${svgIcon('help', 14)} 指南</button>
+        <button type="button" class="btn btn-sm btn-ghost" id="v2-hud-settings" aria-label="设置">${svgIcon('settings', 14)} 设置</button>
       </div>
       <div class="hud-pills">${pillsHtml}</div>
     `;
 
+    this.topHudEl.querySelector('#v2-btn-exit-showcase')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      this.showcaseRun = null;
+      this.activeCombatPlaybackKey = null;
+      this.awaitingEliteDecision = false;
+      this.syncAll();
+    });
     this.topHudEl.querySelector('#v2-btn-toggle-scene')?.addEventListener('click', () => {
       this.sceneCollapseOverride = !collapsed;
       this.applyViewportClasses();
       this.renderTopHud();
       this.phaserHost?.resize();
-    });
-    this.topHudEl.querySelector('#v2-hud-warehouse')?.addEventListener('click', () => {
-      soundEngine.play('click');
-      this.openWarehouseModal('warehouse');
     });
     this.topHudEl.querySelector('#v2-hud-help')?.addEventListener('click', () => {
       soundEngine.play('click');
@@ -668,24 +854,24 @@ export class V2AppController {
   private renderBanners(): void {
     const items: string[] = [];
 
-    if (this.isReadOnlyTab) {
+    if (this.isReadOnlyTab && !this.showcaseRun) {
       items.push(`
         <div class="system-banner banner-warn" role="alert">
-          <span>🔒 当前标签页为<strong>只读保护模式</strong>（检测到另一个活动标签页正在写入进度）。</span>
-          <button type="button" class="btn btn-sm btn-primary" id="v2-btn-takeover">接管控制权</button>
+          <span>${svgIcon('lock', 14)} 另一个窗口正在保存进度，当前窗口暂为只读。</span>
+          <button type="button" class="btn btn-sm btn-primary" id="v2-btn-takeover">切换至此窗口继续</button>
         </div>
       `);
     }
 
     if (this.storageError) {
-      items.push(`<div class="system-banner banner-danger" role="alert">⚠ ${this.storageError}</div>`);
+      items.push(`<div class="system-banner banner-danger" role="alert">${this.storageError}</div>`);
     }
 
     if (this.actionToast) {
       items.push(`<div class="system-banner banner-warn" role="status">${this.actionToast}</div>`);
     }
 
-    const run = this.save.activeRun;
+    const run = this.getCurrentRun();
     if (run?.isTutorial) {
       const currentLayer = run.currentNodeId ? run.graph.nodes[run.currentNodeId]?.layer ?? 1 : 0;
       const hint = V2_TUTORIAL_HINTS[currentLayer] ?? V2_TUTORIAL_HINTS[0];
@@ -697,7 +883,7 @@ export class V2AppController {
           : hint.mapHint || hint.arrangeHint;
       items.push(`
         <div class="tutorial-banner">
-          <span class="tutorial-badge">教学 L${currentLayer}/3</span>
+          <span class="tutorial-badge">首航教学 ${currentLayer}/3</span>
           <span>${hintText}</span>
         </div>
       `);
@@ -706,10 +892,10 @@ export class V2AppController {
     if (!run && this.shouldOfferMigrationPrompt()) {
       items.push(`
         <div class="system-banner banner-warn">
-          <span>检测到旧版 V1 存档（信用点 ${this.v1Inspection.baseCredits}¤${
-        this.v1Inspection.activeRunPreview ? ' · 含进行中航次' : ''
-      }），可随时安全导入并保留旧档。</span>
-          <button type="button" class="btn btn-sm btn-primary" id="v2-banner-migrate">打开迁移向导</button>
+          <span>检测到经典版旧档（信用点 ${this.v1Inspection.baseCredits}¤${
+        this.v1Inspection.activeRunPreview ? ' · 含未完成航次' : ''
+      }），可安全导入并保留旧档。</span>
+          <button type="button" class="btn btn-sm btn-primary" id="v2-banner-migrate">导入旧档</button>
         </div>
       `);
     }
@@ -725,7 +911,7 @@ export class V2AppController {
       this.isReadOnlyTab = !this.tabGuard.canWrite();
       this.phaserHost?.setCombatPaused(this.isReadOnlyTab);
       soundEngine.play('click');
-      this.showToast('已接管 V2 存档写权限并同步最新状态。');
+      this.showToast('已切换至当前窗口并同步最新进度。');
       this.syncAll();
     });
 
@@ -760,11 +946,12 @@ export class V2AppController {
 
   private syncPhaserStage(): void {
     if (!this.phaserHost) return;
-    const run = this.save.activeRun;
+    const run = this.getCurrentRun();
 
-    // 1. BASE Diorama (reuses 2:1 isometric BaseScene + V2 pins & 3-ship docking!)
+    // 1. BASE HERO STAGE (Interactive Orbital Station Diorama!)
     if (!run && !this.prepareDraft) {
       this.activeCombatPlaybackKey = null;
+      this.awaitingEliteDecision = false;
       const p = this.save.profile;
       const relicSum = getV2RelicSummary(p);
       this.phaserHost.showBase({
@@ -774,39 +961,101 @@ export class V2AppController {
         v2Override: {
           shipId: p.selectedShipId,
           wbText: p.buildings.research_lab
-            ? `工作台 · 研究台 ✓`
+            ? `研究工作台 · ${p.blueprints.length}/10 蓝图`
             : p.buildings.workbench
-            ? `工作台 · 设备库 (${p.equipmentWarehouse.length}/12)`
-            : '首航后免费启用工作台',
+            ? `工作台 · 设备库 ${p.equipmentWarehouse.length}/12`
+            : '首航启用工作台',
           dispText: p.buildings.display
-            ? `藏品馆 ${relicSum.restoredCount}/${relicSum.totalCount}`
+            ? `藏品展台 ${relicSum.restoredCount}/${relicSum.totalCount}`
             : `收藏展台 · ${V2_FACILITIES.display.cost}¤`,
           dockText: p.buildings.drydock_tier2
-            ? '船坞二阶 · 3/3 舰 ✓'
+            ? '船坞二阶 · 3 舰就绪'
             : p.buildings.drydock
-            ? '船坞一阶 · 2/3 舰'
-            : `船坞一阶 · ${V2_FACILITIES.drydock.cost}¤`,
+            ? '船坞一阶 · 2 舰就绪'
+            : `扩建船坞 · ${V2_FACILITIES.drydock.cost}¤`,
           showAllPins: true,
         },
       });
-      this.renderBaseSceneOverlay();
+      this.renderBaseHeroOverlay();
       return;
     }
 
-    // 2. PREPARE Preview Stage (shows chosen hull floating in orbital sector!)
+    // 2. PREPARE Stage (Live Modular Ship Exterior OR 5-second Skippable Trial Demo!)
     if (!run && this.prepareDraft) {
       this.activeCombatPlaybackKey = null;
+      this.awaitingEliteDecision = false;
+      const draft = this.prepareDraft;
+      const previewBay = this.buildPreparePreviewBay(draft);
+      const visualSpec = deriveV2ShipVisualSpec(previewBay);
+      const ship = V2_SHIPS[draft.shipId];
+
+      if (draft.playingDemo && draft.trialBuildId) {
+        const trial = V2_TRIAL_BUILDS[draft.trialBuildId];
+        const demoUnits = getTrialDemoUnits(draft.trialBuildId);
+        const demoKey = `demo_${draft.shipId}_${draft.trialBuildId}`;
+        if (draft.demoPlaybackKey !== demoKey) {
+          draft.demoPlaybackKey = demoKey;
+          const demoSim = simulateV2Combat({
+            resultId: demoKey,
+            bay: previewBay,
+            startingHp: ship.maxHp,
+            maxHp: ship.maxHp,
+            units: demoUnits,
+            targetPolicy: 'weakest',
+          });
+          // Cap demo playback to first 3 action-packed rounds (~3-4 seconds!)
+          const shortSim = { ...demoSim, rounds: demoSim.rounds.slice(0, 3) };
+          this.phaserHost.showV2Stage({
+            shipId: draft.shipId,
+            shipVisualSpec: visualSpec,
+            sectorIndex: draft.trialBuildId === 'trial_heavy' ? 4 : draft.trialBuildId === 'trial_hangar' ? 2 : 5,
+            eventBackdrop: null,
+            units: demoUnits,
+            simulation: shortSim,
+            settings: { ...this.save.settings, combatSpeed: 2 },
+            onComplete: () => {
+              if (this.prepareDraft === draft) {
+                draft.playingDemo = false;
+                draft.demoPlaybackKey = null;
+                this.syncPhaserStage();
+              }
+            },
+          });
+        }
+        this.sceneOverlayEl.innerHTML = `
+          <div class="scene-stage-tag">${svgIcon('bolt', 13)} 实战微演示 · ${trial.shortName} 对阵 ${trial.demoEnemyTitle}</div>
+          <div class="v2-demo-bar">
+            <span>${trial.demoHint}</span>
+            <button type="button" class="btn btn-sm btn-secondary" id="v2-stop-demo">跳过演示</button>
+          </div>
+        `;
+        this.sceneOverlayEl.querySelector('#v2-stop-demo')?.addEventListener('click', () => {
+          draft.playingDemo = false;
+          draft.demoPlaybackKey = null;
+          this.syncPhaserStage();
+        });
+        return;
+      }
+
+      draft.demoPlaybackKey = null;
       this.phaserHost.showV2Stage({
-        shipId: this.prepareDraft.shipId,
+        shipId: draft.shipId,
+        shipVisualSpec: visualSpec,
         sectorIndex: 1,
         eventBackdrop: null,
         units: [],
         simulation: null,
         settings: this.save.settings,
       });
-      const ship = V2_SHIPS[this.prepareDraft.shipId];
+
+      const mountChips =
+        visualSpec.mountSummaryTags.length > 0
+          ? visualSpec.mountSummaryTags.map((t) => `<span class="v2-mount-pill">${t}</span>`).join('')
+          : `<span class="v2-mount-pill muted">仅舰载核心小炮</span>`;
+
       this.sceneOverlayEl.innerHTML = `
-        <div class="scene-stage-tag">出航整备 · ${ship.name} (${ship.cols}×${ship.rows} · ${ship.validCellCount}可用格)</div>
+        <div class="scene-stage-tag">${svgIcon('rocket', 13)} ${ship.name} · 外部挂点实时联动</div>
+        <div class="v2-mount-strip">${mountChips}</div>
       `;
       return;
     }
@@ -815,42 +1064,60 @@ export class V2AppController {
 
     const currentNode = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
     const sectorIndex = currentNode?.sectorBg ?? 1;
+    const visualSpec = deriveV2ShipVisualSpec(run.bay);
 
-    // 3. Active Combat Playback
+    // 3. LIVE COMBAT HERO STAGE
     if (run.phase === 'ENCOUNTER' && run.activeCombat && currentNode?.combat) {
       const sim = run.activeCombat.simulation;
-      const pbKey = `${run.runId}_${currentNode.nodeId}_${sim.resultId}`;
+      const pending = run.activeCombat.pendingDecision;
+      const needsDecision = Boolean(pending && pending.chosen === null);
+      const resumeRound = pending && pending.chosen !== null ? 1 : 0;
+      const pbKey = `${run.runId}_${currentNode.nodeId}_${sim.resultId}_${pending?.chosen ?? 'open'}`;
+
       if (this.activeCombatPlaybackKey !== pbKey) {
         this.activeCombatPlaybackKey = pbKey;
-        this.liveCombatRound = 0;
-        this.liveCombatPlayerHp = sim.startingPlayerHp;
-        this.liveCombatPlayerShield = sim.startingPlayerShield;
-        this.liveCombatEnemiesAlive = sim.initialEnemies.length;
+        this.awaitingEliteDecision = false;
+        this.liveCombatRound = resumeRound;
+        const prevLog = resumeRound > 0 ? sim.rounds[resumeRound - 1] : null;
+        this.liveCombatPlayerHp = prevLog ? prevLog.playerHpAfter : sim.startingPlayerHp;
+        this.liveCombatPlayerShield = prevLog ? prevLog.playerShieldAfter : sim.startingPlayerShield;
+        this.liveCombatEnemiesAlive = prevLog
+          ? prevLog.enemiesAfter.filter((e) => e.hp > 0).length
+          : sim.initialEnemies.length;
 
         this.phaserHost.showV2Stage({
           shipId: run.shipId,
+          shipVisualSpec: visualSpec,
           sectorIndex,
           eventBackdrop: null,
           units: currentNode.combat.units,
           simulation: sim,
           settings: this.save.settings,
+          pauseAtRound: needsDecision ? pending!.roundNumber : null,
+          resumeFromRound: resumeRound,
+          onPauseForDecision: () => {
+            this.awaitingEliteDecision = true;
+            soundEngine.play('bossAlarm');
+            this.renderCombatPlaybackOverlay(this.getCurrentRun() ?? run);
+          },
           onRoundStep: (_idx: number, log: V2CombatRoundLog) => {
             this.liveCombatRound = log.round;
             this.liveCombatPlayerHp = log.playerHpAfter;
             this.liveCombatPlayerShield = log.playerShieldAfter;
             this.liveCombatEnemiesAlive = log.enemiesAfter.filter((e) => e.hp > 0).length;
-            this.renderCombatPlaybackOverlay(run);
+            this.renderCombatPlaybackOverlay(this.getCurrentRun() ?? run);
           },
           onComplete: () => {
-            if (!this.save.activeRun || !this.save.activeRun.activeCombat) return;
+            const activeRun = this.getCurrentRun();
+            if (!activeRun || !activeRun.activeCombat) return;
             const res = completeV2CombatAtCurrentNode(
-              this.save.activeRun,
+              activeRun,
               this.save.profile.unlockedFamilies
             );
             if (res.ok) {
-              this.save = { ...this.save, activeRun: res.run };
               this.activeCombatPlaybackKey = null;
-              this.persist();
+              this.awaitingEliteDecision = false;
+              this.setCurrentRun(res.run);
               soundEngine.play(sim.outcome === 'victory' ? 'enemyDestroy' : 'hullHit');
               this.syncAll();
             }
@@ -861,12 +1128,28 @@ export class V2AppController {
       return;
     }
 
-    // 4. Static Event / Pre-Combat / Map / Arrange / Settlement Stage
+    // 4. WRECK 3-HOTSPOT HERO STAGE
+    if (run.phase === 'ENCOUNTER' && currentNode?.type === 'wreck' && currentNode.wreck) {
+      this.activeCombatPlaybackKey = null;
+      this.phaserHost.showV2Stage({
+        shipId: run.shipId,
+        shipVisualSpec: visualSpec,
+        sectorIndex,
+        eventBackdrop: 'wreck',
+        units: [],
+        simulation: null,
+        settings: this.save.settings,
+      });
+      this.renderWreckHotspotOverlay(run, currentNode);
+      return;
+    }
+
+    // 5. Static Event / Pre-Combat / Map / Arrange / Settlement Stage
     this.activeCombatPlaybackKey = null;
+    this.awaitingEliteDecision = false;
     const eventBg =
       currentNode &&
-      (currentNode.type === 'wreck' ||
-        currentNode.type === 'merchant' ||
+      (currentNode.type === 'merchant' ||
         currentNode.type === 'anomaly' ||
         currentNode.type === 'distress')
         ? currentNode.type
@@ -876,6 +1159,7 @@ export class V2AppController {
 
     this.phaserHost.showV2Stage({
       shipId: run.shipId,
+      shipVisualSpec: visualSpec,
       sectorIndex,
       eventBackdrop: eventBg,
       units: previewUnits,
@@ -885,81 +1169,277 @@ export class V2AppController {
 
     const stageLabel =
       run.phase === 'MAP'
-        ? `六层航路 · 第 ${currentNode ? currentNode.layer : 0}/${run.graph.maxLayers} 层`
+        ? `${svgIcon('radar', 13)} 航路第 ${currentNode ? currentNode.layer : 0}/${run.graph.maxLayers} 层`
         : run.phase === 'SHOP'
-        ? `流动商人 · 航行钱包 ${run.wallet}¤`
+        ? `${svgIcon('merchant', 13)} 流动商人 · 航行钱包 ${run.wallet}¤`
         : run.phase === 'REWARD'
-        ? `战利品打捞 · 选择 1 项战后补给`
+        ? `${svgIcon('crate', 13)} 战利品打捞 · 选择 1 项补给`
         : run.phase === 'ARRANGE'
-        ? `船舱整理 · ${V2_SHIPS[run.shipId].name}`
+        ? `${svgIcon('grid', 13)} ${V2_SHIPS[run.shipId].name} · 船舱外观联动`
         : run.phase === 'SETTLEMENT'
-        ? `远航结算 · ${run.settlementReason === 'defeat' ? '战败折算' : '安全返航'}`
+        ? `${svgIcon('beacon', 13)} ${run.settlementReason === 'defeat' ? '紧急拖回结算' : '安全靠泊清点'}`
         : currentNode
-        ? `${NODE_TYPE_META[currentNode.type].icon} 第 ${currentNode.layer} 层 · ${
+        ? `${svgIcon(NODE_TYPE_META[currentNode.type].icon, 13)} 第 ${currentNode.layer} 层 · ${
             NODE_TYPE_META[currentNode.type].label
           }`
-        : '远航执行中';
+        : '深空巡航中';
 
-    this.sceneOverlayEl.innerHTML = `<div class="scene-stage-tag">${stageLabel}</div>`;
+    const showMountPills = run.phase === 'ARRANGE' || run.phase === 'MAP';
+    this.sceneOverlayEl.innerHTML = `
+      <div class="scene-stage-tag">${stageLabel}</div>
+      ${
+        showMountPills && visualSpec.mountSummaryTags.length > 0
+          ? `<div class="v2-mount-strip">${visualSpec.mountSummaryTags
+              .map((t) => `<span class="v2-mount-pill">${t}</span>`)
+              .join('')}</div>`
+          : ''
+      }
+    `;
   }
 
-  private renderBaseSceneOverlay(): void {
-    if (!this.activeDockingNotice) {
-      this.sceneOverlayEl.innerHTML = `<div class="scene-stage-tag">2:1 星际拆解站 · 点击设施图标快速管理</div>`;
-      return;
-    }
-    const n = this.activeDockingNotice;
-    const shownCredits = n.animating
-      ? Math.round(n.creditsBefore + (n.creditsAfter - n.creditsBefore) * n.progress)
-      : n.creditsAfter;
-    this.sceneOverlayEl.innerHTML = `
-      <div class="docking-overlay-card">
-        <div class="docking-title">${
-          n.wasDefeat
-            ? '拖船已将残骸拖回拆解站'
-            : n.contractCompleted
-            ? '✦ 委托交付完成 · 货船安全靠泊'
-            : '⚓ 货船安全返航 · 卸货入账完毕'
-        }</div>
-        <div class="docking-stats">
-          <span>本次入账 <strong class="num">+${n.earnedCredits}¤</strong></span>
-          <span>基地余额 <strong class="num">${shownCredits}¤</strong></span>
+  // --- BASE HERO OVERLAY (Space Station = 72%+ Hero Viewport, Zero Dashboard!) ---
+
+  private renderBaseHeroOverlay(): void {
+    const p = this.save.profile;
+    const readOnly = this.isReadOnlyTab;
+    const relicSum = getV2RelicSummary(p);
+    const nextGoal = this.computeNextBaseGoal(p);
+    const recContractId = this.pickRecommendedContractId(p);
+    const recTpl = V2_CONTRACT_TEMPLATES[recContractId] ?? V2_CONTRACT_TEMPLATES.transport_std;
+
+    const dockingHtml = this.activeDockingNotice
+      ? (() => {
+          const n = this.activeDockingNotice!;
+          const shownCredits = n.animating
+            ? Math.round(n.creditsBefore + (n.creditsAfter - n.creditsBefore) * n.progress)
+            : n.creditsAfter;
+          return `
+            <div class="docking-overlay-card">
+              <div class="docking-title">${
+                n.wasDefeat
+                  ? '拖船已将受损舰体拖回拆解站'
+                  : n.contractCompleted
+                  ? '委托交付完成 · 货船安全靠泊'
+                  : '货船安全返航 · 卸货入账完毕'
+              }</div>
+              <div class="docking-stats">
+                <span>本次入账 <strong class="num">+${n.earnedCredits}¤</strong></span>
+                <span>基地余额 <strong class="num">${shownCredits}¤</strong></span>
+              </div>
+              ${n.unlockedText ? `<div class="docking-unlock">${n.unlockedText}</div>` : ''}
+              <div class="docking-actions">
+                ${
+                  n.animating
+                    ? `<button type="button" class="btn btn-sm btn-secondary" id="v2-skip-dock">跳过靠泊</button>`
+                    : `<button type="button" class="btn btn-sm btn-primary" id="v2-close-dock">收起</button>`
+                }
+              </div>
+            </div>
+          `;
+        })()
+      : '';
+
+    const commandCardHtml = !p.tutorialCompleted
+      ? `
+        <div class="v2-base-cmd-card">
+          <div class="v2-cmd-eyebrow">${svgIcon('star', 13)} 推荐首航</div>
+          <div class="v2-cmd-title">首航教学 · 2×3 密封反应堆</div>
+          <div class="v2-cmd-desc">3 层示范航路，亲手体验空间取舍、旋转拼装与安全返航，完成后免费解锁工作台并奖 +40¤。</div>
+          <div class="v2-cmd-actions">
+            <button type="button" class="btn btn-primary btn-launch-hero" id="v2-base-start-tut" ${
+              readOnly ? 'disabled' : ''
+            }>${svgIcon('rocket', 16)} 启动首航教学</button>
+            <button type="button" class="btn btn-secondary" id="v2-base-all-contracts">委托终端</button>
+          </div>
         </div>
-        ${n.unlockedText ? `<div class="docking-unlock">✦ ${n.unlockedText}</div>` : ''}
-        <div class="docking-actions">
-          ${
-            n.animating
-              ? `<button type="button" class="btn btn-sm btn-secondary" id="v2-skip-dock">跳过靠泊演出</button>`
-              : `<button type="button" class="btn btn-sm btn-primary" id="v2-close-dock">收起通知</button>`
-          }
+      `
+      : `
+        <div class="v2-base-cmd-card">
+          <div class="v2-cmd-eyebrow">${svgIcon('star', 13)} 当前推荐委托 · ${
+          recTpl.rewardCredits > 0 ? `+${recTpl.rewardCredits}¤` : '自由打捞'
+        }</div>
+          <div class="v2-cmd-title">${recTpl.name}</div>
+          <div class="v2-cmd-desc">${recTpl.gameplayNote}</div>
+          <div class="v2-cmd-actions">
+            <button type="button" class="btn btn-primary btn-launch-hero" id="v2-base-launch-rec" ${
+              readOnly ? 'disabled' : ''
+            }>${svgIcon('rocket', 16)} 接取并整备出航</button>
+            <button type="button" class="btn btn-secondary" id="v2-base-all-contracts">全部委托</button>
+          </div>
+        </div>
+      `;
+
+    const utilityDockHtml = `
+      <div class="v2-base-utility-col">
+        <button type="button" class="v2-next-goal-pill ${nextGoal.ready ? 'is-ready' : ''}" id="v2-base-next-goal">
+          <span class="v2-goal-k">${nextGoal.ready ? '下一步就绪' : '下一个基地目标'}</span>
+          <strong>${nextGoal.title}</strong>
+          <small>${nextGoal.detail}</small>
+        </button>
+        <div class="v2-station-dock" role="toolbar" aria-label="空间站功能区">
+          <button type="button" class="v2-dock-btn" id="v2-dock-wh">
+            ${svgIcon('warehouse', 17)}
+            <span>设备库</span>
+            <small class="num">${p.equipmentWarehouse.length}/${V2_WAREHOUSE_CAPACITY}${
+      p.pendingGiftQueue.length > 0 ? ` +${p.pendingGiftQueue.length}` : ''
+    }</small>
+          </button>
+          <button type="button" class="v2-dock-btn" id="v2-dock-fac">
+            ${svgIcon('wrench', 17)}
+            <span>设施扩建</span>
+            <small class="num">${p.unlockedShips.length}/3 舰</small>
+          </button>
+          <button type="button" class="v2-dock-btn" id="v2-dock-relics">
+            ${svgIcon('museum', 17)}
+            <span>藏品馆</span>
+            <small class="num">${relicSum.restoredCount}/${relicSum.totalCount}</small>
+          </button>
+          <button type="button" class="v2-dock-btn" id="v2-dock-codex">
+            ${svgIcon('book', 17)}
+            <span>图鉴</span>
+            <small class="num">${p.blueprints.length}/10 蓝图</small>
+          </button>
         </div>
       </div>
     `;
+
+    this.sceneOverlayEl.innerHTML = `
+      <div class="scene-stage-tag">${svgIcon('beacon', 13)} 星际拆解站 · 点击站内设施或下方指令泊位管理</div>
+      ${dockingHtml}
+      <div class="v2-base-hero-hud">
+        ${commandCardHtml}
+        ${utilityDockHtml}
+      </div>
+    `;
+
     this.sceneOverlayEl.querySelector('#v2-skip-dock')?.addEventListener('click', () => {
       this.phaserHost?.skipBaseReturnDocking();
     });
     this.sceneOverlayEl.querySelector('#v2-close-dock')?.addEventListener('click', () => {
       this.activeDockingNotice = null;
-      this.renderBaseSceneOverlay();
+      this.renderBaseHeroOverlay();
+    });
+    this.sceneOverlayEl.querySelector('#v2-base-start-tut')?.addEventListener('click', () => {
+      this.startTutorialRun();
+    });
+    this.sceneOverlayEl.querySelector('#v2-base-launch-rec')?.addEventListener('click', () => {
+      if (!this.canMutate()) return;
+      soundEngine.play('click');
+      this.openPrepareForContract(recTpl.templateId);
+    });
+    this.sceneOverlayEl.querySelector('#v2-base-all-contracts')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      openV2ContractsDrawerModal(this.modalHostEl, this.save.profile, {
+        readOnly: this.isReadOnlyTab,
+        onSelectContract: (tplId) => {
+          if (!this.canMutate()) return;
+          this.openPrepareForContract(tplId);
+        },
+        onStartTutorial: () => this.startTutorialRun(),
+      });
+    });
+    this.sceneOverlayEl.querySelector('#v2-base-next-goal')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      if (nextGoal.actionKind === 'warehouse') this.openWarehouseModal('warehouse');
+      else if (nextGoal.actionKind === 'relics') this.openRelicGalleryModal();
+      else this.openFacilitiesModal();
+    });
+    this.sceneOverlayEl.querySelector('#v2-dock-wh')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      this.openWarehouseModal('warehouse');
+    });
+    this.sceneOverlayEl.querySelector('#v2-dock-fac')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      this.openFacilitiesModal();
+    });
+    this.sceneOverlayEl.querySelector('#v2-dock-relics')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      this.openRelicGalleryModal();
+    });
+    this.sceneOverlayEl.querySelector('#v2-dock-codex')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      openV2CodexModal(this.modalHostEl, this.save.profile);
     });
   }
+
+  private startTutorialRun(): void {
+    if (!this.canMutate()) return;
+    const run = createV2TutorialRun(`v2tut_${Date.now().toString(36)}`);
+    this.save = { ...this.save, activeRun: run };
+    this.activeDockingNotice = null;
+    this.persist();
+    soundEngine.play('warpJump');
+    this.syncAll();
+  }
+
+  // --- COMBAT LIVE HERO OVERLAY (72%+ Battlefield + Elite Round-2 Tactic Decision!) ---
 
   private renderCombatPlaybackOverlay(run: V2RunState): void {
     const sim = run.activeCombat?.simulation;
     if (!sim) return;
+    const pending = run.activeCombat?.pendingDecision;
+    const showDecisionBar = Boolean(this.awaitingEliteDecision && pending && pending.chosen === null);
+    const hpPct = Math.max(0, Math.min(100, Math.round((this.liveCombatPlayerHp / run.maxHp) * 100)));
+
+    const decisionHtml = showDecisionBar
+      ? `
+        <div class="v2-elite-tactic-overlay" role="region" aria-label="精英战第2回合战术抉择">
+          <div class="v2-et-head">
+            <strong>${svgIcon('bolt', 15)} 第 ${pending!.roundNumber} 回合战术抉择</strong>
+            <span>我方 ${pending!.playerHpAtPause} HP / ${pending!.playerShieldAtPause} 盾 · 敌方本轮齐射 <strong class="text-danger">${pending!.enemyThreatDamage}</strong> 伤</span>
+          </div>
+          <div class="v2-et-options">
+            ${pending!.options
+              .map(
+                (opt) => `<button type="button" class="v2-et-btn ${
+                  opt.choice === 'overload' ? 'is-amber' : opt.choice === 'emergency_defense' ? 'is-cyan' : ''
+                }" data-elite-tactic="${opt.choice}" ${!opt.enabled ? 'disabled' : ''}>
+                  <div class="v2-et-btn-head">
+                    <strong>${opt.label}</strong>
+                    <span class="v2-et-pred ${opt.predictedOutcome === 'victory' ? 'ok' : 'risk'}">${
+                  opt.predictedOutcome === 'victory'
+                    ? `预计胜 · 余 ${opt.predictedFinalHp} HP (${opt.predictedRounds}轮)`
+                    : `预计危 (${opt.predictedRounds}轮)`
+                }</span>
+                  </div>
+                  <div class="v2-et-btn-sub">${opt.enabled ? opt.summary : opt.disabledReason ?? '当前不可用'}</div>
+                </button>`
+              )
+              .join('')}
+          </div>
+        </div>
+      `
+      : '';
+
     this.sceneOverlayEl.innerHTML = `
-      <div class="combat-hud-bar">
-        <span class="combat-pill">回合 <strong class="num">${this.liveCombatRound}/${sim.roundsCount}</strong></span>
-        <span class="combat-pill">我方 <strong class="num">${this.liveCombatPlayerHp} HP · ${this.liveCombatPlayerShield} 盾</strong></span>
-        <span class="combat-pill">敌方存活 <strong class="num">${this.liveCombatEnemiesAlive}</strong></span>
-        <div style="display:flex;gap:6px;">
+      <div class="combat-hud-bar v2-combat-hero-hud">
+        <div class="v2-combat-status-group">
+          <span class="combat-pill">回合 <strong class="num">${this.liveCombatRound}/${sim.roundsCount}</strong></span>
+          <span class="combat-pill v2-hp-pill">
+            ${svgIcon('hull', 13)}
+            <span class="v2-mini-bar"><span style="width:${hpPct}%"></span></span>
+            <strong class="num">${this.liveCombatPlayerHp}/${run.maxHp}</strong>
+          </span>
+          <span class="combat-pill">${svgIcon('shield', 13)} <strong class="num">${this.liveCombatPlayerShield}</strong></span>
+          <span class="combat-pill">${svgIcon('combat', 13)} 敌 <strong class="num">${this.liveCombatEnemiesAlive}</strong></span>
+        </div>
+        <div class="v2-combat-ctrl-group">
+          <button type="button" class="btn btn-sm btn-ghost" id="v2-combat-peek-bay">${svgIcon('grid', 13)} 查看船舱</button>
           <button type="button" class="btn btn-sm btn-secondary" id="v2-combat-speed">${
             this.save.settings.combatSpeed
           }×</button>
-          <button type="button" class="btn btn-sm btn-primary" id="v2-combat-skip">跳过演出</button>
+          <button type="button" class="btn btn-sm btn-primary" id="v2-combat-skip" ${
+            showDecisionBar ? 'disabled' : ''
+          }>${showDecisionBar ? '等待指令' : '跳过演出'}</button>
         </div>
       </div>
+      ${decisionHtml}
     `;
+
+    this.sceneOverlayEl.querySelector('#v2-combat-peek-bay')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      openV2CargoPeekModal(this.modalHostEl, run.bay, `参战配装 · ${V2_SHIPS[run.shipId].name}`);
+    });
     this.sceneOverlayEl.querySelector('#v2-combat-speed')?.addEventListener('click', () => {
       const nextSpd = this.save.settings.combatSpeed === 1 ? 2 : 1;
       this.save = {
@@ -971,19 +1451,150 @@ export class V2AppController {
       this.renderCombatPlaybackOverlay(run);
     });
     this.sceneOverlayEl.querySelector('#v2-combat-skip')?.addEventListener('click', () => {
+      if (showDecisionBar) return;
       this.phaserHost?.skipCombatPlayback();
+    });
+    this.sceneOverlayEl.querySelectorAll<HTMLButtonElement>('[data-elite-tactic]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (!this.canMutate() || !pending) return;
+        const choice = btn.dataset.eliteTactic as V2EliteTacticChoice;
+        const cur = this.getCurrentRun();
+        if (!cur) return;
+        const res = commitV2EliteTacticDecision(cur, pending.decisionId, choice);
+        if (!res.ok) {
+          this.showToast(res.error ?? '战术指令无效');
+          return;
+        }
+        this.awaitingEliteDecision = false;
+        this.activeCombatPlaybackKey = null; // Force seamless resume from Round 2
+        this.setCurrentRun(res.run);
+        soundEngine.play('energyLink');
+        this.syncAll();
+      });
+    });
+  }
+
+  // --- WRECK 3-HOTSPOT SPATIAL OVERLAY (Anchored on event_wreck.webp!) ---
+
+  private renderWreckHotspotOverlay(run: V2RunState, node: V2MapNode): void {
+    const w = node.wreck;
+    if (!w) return;
+    const readOnly = this.isReadOnlyTab && !run.isShowcase;
+    const peek = run.crewId === 'salvager';
+    const armDef = getAnyV2ItemDef(w.armoryItem.definitionId);
+    const cargoSummary = w.cargoItems
+      .map((c) => `${getAnyV2ItemDef(c.definitionId)?.name ?? c.definitionId}(${c.fixedValue}¤)`)
+      .join(' + ');
+    const fuelGain = Math.min(w.reactorFuelGain ?? 2, run.maxFuel - run.fuel);
+    const repairGain = Math.min(w.reactorRepairGain ?? 8, run.maxHp - run.hp);
+
+    const sel = this.selectedWreckHotspot;
+
+    let detailHtml = '';
+    if (sel === 'armory') {
+      detailHtml = `
+        <div class="v2-wh-confirm-text">
+          <strong>军械舱（1 件设备）</strong>
+          <span>${
+            peek && armDef
+              ? `拆解专家透视：${armDef.name}（${w.armoryItem.quality === 'improved' ? '优良' : '普通'} · ${V2_SHAPES[armDef.shapeId].label} · 回收 ${w.armoryItem.fixedValue}¤）`
+              : `预计占格 ${w.armorySizeRange} · ${w.armoryValueRange}`
+          }</span>
+        </div>
+        <button type="button" class="btn btn-primary" data-cut-wreck="armory" ${
+          readOnly ? 'disabled' : ''
+        }>${svgIcon('cannon', 15)} 切开军械舱</button>
+      `;
+    } else if (sel === 'reactor') {
+      detailHtml = `
+        <div class="v2-wh-confirm-text">
+          <strong>反应舱（深潜续航补给）</strong>
+          <span>不占船舱格位：可抽取剩余燃料 +${w.reactorFuelGain ?? 2} 或应急抢修 +${w.reactorRepairGain ?? 8} 耐久</span>
+        </div>
+        <div class="v2-wh-reactor-btns">
+          <button type="button" class="btn btn-primary" data-cut-wreck="reactor_fuel" ${
+            readOnly || fuelGain <= 0 ? 'disabled' : ''
+          }>${svgIcon('fuel', 14)} ${fuelGain > 0 ? `抽取 +${fuelGain} 燃料` : '燃料已满'}</button>
+          <button type="button" class="btn btn-secondary" data-cut-wreck="reactor_repair" ${
+            readOnly || repairGain <= 0 ? 'disabled' : ''
+          }>${svgIcon('wrench', 14)} ${repairGain > 0 ? `抢修 +${repairGain} 耐久` : '耐久已满'}</button>
+        </div>
+      `;
+    } else {
+      detailHtml = `
+        <div class="v2-wh-confirm-text">
+          <strong>货舱（${w.cargoItems.length} 件货物）</strong>
+          <span>${
+            peek ? `拆解专家透视：${cargoSummary}` : `预计占格 ${w.cargoSizeRange} · ${w.cargoValueRange}`
+          }</span>
+        </div>
+        <button type="button" class="btn btn-primary" data-cut-wreck="cargo" ${
+          readOnly ? 'disabled' : ''
+        }>${svgIcon('crate', 15)} 切开货舱</button>
+      `;
+    }
+
+    this.sceneOverlayEl.innerHTML = `
+      <div class="scene-stage-tag">${svgIcon('wreck', 13)} 第 ${node.layer} 层 · 漂流残骸（选择 1 处舱室切开）</div>
+
+      <button type="button" class="v2-wreck-hotspot ${sel === 'armory' ? 'active' : ''}"
+        style="left:22%;top:48%;" data-wreck-spot="armory" aria-pressed="${sel === 'armory'}">
+        <span class="v2-hotspot-ring"></span>
+        <span class="v2-hotspot-tag">${svgIcon('cannon', 13)} 军械舱</span>
+      </button>
+
+      <button type="button" class="v2-wreck-hotspot ${sel === 'reactor' ? 'active' : ''}"
+        style="left:50%;top:46%;" data-wreck-spot="reactor" aria-pressed="${sel === 'reactor'}">
+        <span class="v2-hotspot-ring"></span>
+        <span class="v2-hotspot-tag">${svgIcon('fuel', 13)} 反应舱</span>
+      </button>
+
+      <button type="button" class="v2-wreck-hotspot ${sel === 'cargo' ? 'active' : ''}"
+        style="left:79%;top:51%;" data-wreck-spot="cargo" aria-pressed="${sel === 'cargo'}">
+        <span class="v2-hotspot-ring"></span>
+        <span class="v2-hotspot-tag">${svgIcon('crate', 13)} 货舱</span>
+      </button>
+
+      <div class="v2-wreck-confirm-dock">
+        ${detailHtml}
+      </div>
+    `;
+
+    this.sceneOverlayEl.querySelectorAll<HTMLButtonElement>('[data-wreck-spot]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.selectedWreckHotspot = btn.dataset.wreckSpot as 'armory' | 'reactor' | 'cargo';
+        soundEngine.play('click');
+        this.renderWreckHotspotOverlay(run, node);
+      });
+    });
+
+    this.sceneOverlayEl.querySelectorAll<HTMLButtonElement>('[data-cut-wreck]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (!this.canMutate()) return;
+        const room = btn.dataset.cutWreck as V2WreckChoice;
+        const spotCoords =
+          room === 'armory' ? [0.22, 0.48] : room === 'cargo' ? [0.79, 0.51] : [0.5, 0.46];
+        this.phaserHost?.triggerV2WreckCutFx(spotCoords[0], spotCoords[1]);
+        const res = resolveV2WreckChoice(run, room, this.save.profile.unlockedFamilies);
+        if (!res.ok) return this.showToast(res.error ?? '无法切割该舱室');
+        this.setCurrentRun(res.run);
+        soundEngine.play('place');
+        this.syncAll();
+      });
     });
   }
 
   // --- Main Panel Dispatcher ---
 
   private renderPanels(): void {
-    const run = this.save.activeRun;
+    const run = this.getCurrentRun();
     if (!run) {
       if (this.prepareDraft) {
         this.renderPreparePanels();
       } else {
-        this.renderBasePanels();
+        // Base Hero mode: Station canvas & overlay carry the full experience!
+        this.leftPanelEl.innerHTML = '';
+        this.rightPanelEl.innerHTML = '';
       }
       return;
     }
@@ -1010,196 +1621,7 @@ export class V2AppController {
     }
   }
 
-  // --- 1. BASE Panels (Contract Board + Facilities Management) ---
-
-  private renderBasePanels(): void {
-    const p = this.save.profile;
-    const readOnly = this.isReadOnlyTab;
-    const board = getAvailableContractBoard(p);
-    const relicSum = getV2RelicSummary(p);
-
-    // Left Panel: Contract Board & Tutorial
-    const renderContractCard = (tplId: string, lockedReason?: string) => {
-      const tpl = V2_CONTRACT_TEMPLATES[tplId];
-      if (!tpl) return '';
-      const completedBefore = p.completedContractIds.includes(tpl.templateId);
-      const isDeep = tpl.tier === 'deep';
-      return `
-        <div class="v2-contract-card ${isDeep ? 'tier-deep' : ''} ${lockedReason ? 'is-locked' : ''}">
-          <div class="v2-contract-head">
-            <span class="v2-contract-name">${tpl.name}</span>
-            <span class="v2-contract-reward num">${
-              tpl.rewardCredits > 0 ? `+${tpl.rewardCredits}¤` : '按货物结算'
-            }</span>
-          </div>
-          <div class="v2-contract-desc">${tpl.gameplayNote}</div>
-          <div class="v2-contract-meta">
-            <span>${tpl.spaceNote}</span>
-            ${completedBefore ? '<span class="v2-done-chip">已通关 ✓</span>' : ''}
-          </div>
-          <div class="v2-contract-foot">
-            ${
-              lockedReason
-                ? `<span class="v2-lock-note">🔒 ${lockedReason}</span>`
-                : `<button type="button" class="btn btn-sm btn-primary" data-pick-contract="${tpl.templateId}" ${
-                    readOnly ? 'disabled' : ''
-                  }>接取并整备</button>`
-            }
-          </div>
-        </div>
-      `;
-    };
-
-    this.leftPanelEl.innerHTML = `
-      <div class="panel-header">
-        <h2>委托终端 · 选择远航合同</h2>
-        <span class="panel-sub">${
-          p.completedContractTypes.length
-        }/3 种标准委托已达成</span>
-      </div>
-      ${
-        !p.tutorialCompleted
-          ? `<div class="v2-tutorial-hero">
-              <div class="v2-tut-title">★ 首航教学 · 2×3 密封反应堆装舱演示</div>
-              <div class="v2-tut-desc">3 层固定示范航路，亲身体验空间取舍、旋转拼装与安全返航；完成后免费启用「拆解工作台」与「委托终端」，交付成功额外奖 +40¤！</div>
-              <button type="button" class="btn btn-primary btn-launch-hero" id="v2-btn-start-tutorial" ${
-                readOnly ? 'disabled' : ''
-              }>▶ 启动首航教学（免费）</button>
-            </div>`
-          : ''
-      }
-      <div class="v2-contract-section-title">标准委托（第 1–4 层目标 · 首次完成解锁新设备体系与船员）</div>
-      <div class="v2-contract-grid">
-        ${board.standardTemplates.map((c) => renderContractCard(c.templateId)).join('')}
-      </div>
-      <div class="v2-contract-section-title">深入委托（第 5–6 层高风险高回报${
-        board.deepUnlocked ? ' · 已解锁' : ' · 完成任意 1 份标准委托解锁'
-      }）</div>
-      <div class="v2-contract-grid">
-        ${board.deepTemplates
-          .map((c) =>
-            renderContractCard(
-              c.templateId,
-              board.deepUnlocked ? undefined : '需先完成任意 1 份标准委托'
-            )
-          )
-          .join('')}
-      </div>
-      <div class="v2-contract-section-title">免费兜底与重玩</div>
-      <div class="v2-contract-grid">
-        ${renderContractCard(board.freeTemplate.templateId)}
-      </div>
-      ${
-        p.tutorialCompleted
-          ? `<div style="margin-top:8px;display:flex;justify-content:flex-end;">
-              <button type="button" class="btn btn-sm btn-ghost" id="v2-btn-start-tutorial" ${
-                readOnly ? 'disabled' : ''
-              }>重玩 3 层首航教学</button>
-            </div>`
-          : ''
-      }
-    `;
-
-    this.leftPanelEl.querySelector('#v2-btn-start-tutorial')?.addEventListener('click', () => {
-      if (!this.canMutate()) return;
-      const run = createV2TutorialRun(`v2tut_${Date.now().toString(36)}`);
-      this.save = { ...this.save, activeRun: run };
-      this.activeDockingNotice = null;
-      this.persist();
-      soundEngine.play('warpJump');
-      this.syncAll();
-    });
-
-    this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-pick-contract]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        if (!this.canMutate()) return;
-        const tplId = btn.dataset.pickContract!;
-        soundEngine.play('click');
-        this.openPrepareForContract(tplId);
-      });
-    });
-
-    // Right Panel: Base Facilities, Warehouse, Museum & Codex
-    this.rightPanelEl.innerHTML = `
-      <div class="panel-header">
-        <h2>基地经营 · 设施与研究</h2>
-        <span class="panel-sub">已解锁舰船 ${p.unlockedShips.length}/3 · 船员 ${p.unlockedCrew.length}/3</span>
-      </div>
-      <div class="v2-base-quick-bar">
-        <button type="button" class="btn btn-sm btn-secondary" id="v2-open-wh">📦 设备库 (${p.equipmentWarehouse.length}/${V2_WAREHOUSE_CAPACITY})${
-      p.pendingGiftQueue.length > 0 ? ` 🎁${p.pendingGiftQueue.length}` : ''
-    }</button>
-        <button type="button" class="btn btn-sm btn-secondary" id="v2-open-res">🔬 蓝图研究 (${p.blueprints.length}/10)</button>
-        <button type="button" class="btn btn-sm btn-secondary" id="v2-open-relics">🏛 藏品展馆 (${relicSum.restoredCount}/${relicSum.totalCount})</button>
-        <button type="button" class="btn btn-sm btn-ghost" id="v2-open-codex">📖 图鉴</button>
-      </div>
-      <div class="v2-facility-list">
-        ${V2_FACILITY_ORDER.map((fid) => {
-          const def = V2_FACILITIES[fid];
-          const built = p.buildings[fid];
-          const check = canBuildV2Facility(p, fid);
-          return `<div class="v2-facility-card ${built ? 'built' : ''}">
-            <div class="v2-fac-main">
-              <div class="v2-fac-title">
-                <strong>${def.name}</strong>
-                <span class="v2-fac-badge ${built ? 'done' : ''}">${
-            built ? '已启用 ✓' : def.cost === 0 ? '教学免费' : `${def.cost}¤`
-          }</span>
-              </div>
-              <div class="v2-fac-desc">${def.effectSummary}</div>
-              ${!built && check.reason ? `<div class="v2-fac-req">${check.reason}</div>` : ''}
-            </div>
-            <div class="v2-fac-act">
-              ${
-                built
-                  ? `<span class="v2-built-ok">运行中</span>`
-                  : `<button type="button" class="btn btn-sm btn-primary" data-build-fac="${fid}" ${
-                      readOnly || !check.canBuild ? 'disabled' : ''
-                    }>${def.cost === 0 ? '首航解锁' : `建造 ${def.cost}¤`}</button>`
-              }
-            </div>
-          </div>`;
-        }).join('')}
-      </div>
-    `;
-
-    this.rightPanelEl.querySelector('#v2-open-wh')?.addEventListener('click', () => {
-      soundEngine.play('click');
-      this.openWarehouseModal('warehouse');
-    });
-    this.rightPanelEl.querySelector('#v2-open-res')?.addEventListener('click', () => {
-      soundEngine.play('click');
-      this.openWarehouseModal('research');
-    });
-    this.rightPanelEl.querySelector('#v2-open-relics')?.addEventListener('click', () => {
-      soundEngine.play('click');
-      this.openRelicGalleryModal();
-    });
-    this.rightPanelEl.querySelector('#v2-open-codex')?.addEventListener('click', () => {
-      soundEngine.play('click');
-      openV2CodexModal(this.modalHostEl, this.save.profile);
-    });
-    this.rightPanelEl.querySelectorAll<HTMLButtonElement>('[data-build-fac]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        if (!this.canMutate()) return;
-        const fid = btn.dataset.buildFac as V2FacilityId;
-        const res = purchaseV2Facility(this.save.profile, fid);
-        if (!res.ok) {
-          this.showToast(res.error ?? '无法建造该设施');
-          return;
-        }
-        this.save = { ...this.save, profile: res.profile };
-        this.recentlyBuiltPin =
-          fid === 'display' ? 'display' : fid === 'drydock' || fid === 'drydock_tier2' ? 'drydock' : 'workbench';
-        this.persist();
-        soundEngine.play('buildComplete');
-        this.showToast(`「${V2_FACILITIES[fid].name}」建成启用！`);
-        this.syncAll();
-      });
-    });
-  }
-
-  // --- 2. PREPARE Panels (Ship + Crew + Archetype + Budget + Presets + Interactive Bay) ---
+  // --- 2. PREPARE Panels (3 Trial Builds + Live Modular Ship + Custom Bay) ---
 
   private openPrepareForContract(contractTemplateId: string): void {
     const p = this.save.profile;
@@ -1214,6 +1636,9 @@ export class V2AppController {
       shipId,
       crewId,
       primaryArchetype: p.selectedArchetype,
+      trialBuildId: null,
+      playingDemo: false,
+      demoPlaybackKey: null,
       slots,
       missingPresetEntries: [],
       presetNotice: null,
@@ -1270,7 +1695,13 @@ export class V2AppController {
     const readOnly = this.isReadOnlyTab;
     const contractTpl =
       V2_CONTRACT_TEMPLATES[draft.contractTemplateId] ?? V2_CONTRACT_TEMPLATES.free_salvage;
-    const check = validateV2PrepareLoadout(p, draft.shipId, draft.crewId, draft.slots);
+    const check = validateV2PrepareLoadout(
+      p,
+      draft.shipId,
+      draft.crewId,
+      draft.slots,
+      draft.trialBuildId
+    );
     const usedOwnedIds = new Set(check.ownedInstancesUsed);
     const previewBay = this.buildPreparePreviewBay(draft);
 
@@ -1280,18 +1711,33 @@ export class V2AppController {
         <button type="button" class="btn btn-sm btn-ghost" id="v2-prep-back">← 返回基地</button>
       </div>
 
-      <div class="v2-prep-contract-strip">
-        <strong>${contractTpl.name}</strong>
-        <span>${contractTpl.gameplayNote}</span>
-        ${
-          contractTpl.rewardCredits > 0
-            ? `<span class="v2-contract-reward num">+${contractTpl.rewardCredits}¤</span>`
-            : ''
-        }
+      <div class="v2-prep-group v2-trial-section">
+        <div class="v2-prep-label-row">
+          <span class="v2-prep-label">${svgIcon('bolt', 13)} 零门槛试航方案（一键试玩三大流派 + 实战微演示）</span>
+          ${
+            draft.trialBuildId
+              ? `<button type="button" class="btn btn-sm btn-ghost" id="v2-trial-exit">切回自由配装</button>`
+              : ''
+          }
+        </div>
+        <div class="v2-trial-strip">
+          ${V2_TRIAL_BUILD_ORDER.map((tid) => {
+            const spec = V2_TRIAL_BUILDS[tid];
+            const active = draft.trialBuildId === tid;
+            const ico = tid === 'trial_heavy' ? 'cannon' : tid === 'trial_hangar' ? 'drone' : 'counter';
+            return `<button type="button" class="v2-trial-mini-card ${active ? 'active' : ''}" data-pick-trial="${tid}" ${
+              readOnly ? 'disabled' : ''
+            }>
+              <div class="v2-tm-head">${svgIcon(ico, 15)} <strong>${spec.shortName}</strong></div>
+              <div class="v2-tm-pro">${spec.advantage}</div>
+              <div class="v2-tm-con">${spec.tradeoff}</div>
+            </button>`;
+          }).join('')}
+        </div>
       </div>
 
       <div class="v2-prep-group">
-        <div class="v2-prep-label">1. 选择舰船</div>
+        <div class="v2-prep-label">舰船与船员</div>
         <div class="v2-ship-cards">
           ${V2_SHIP_ORDER.map((sid) => {
             const s = V2_SHIPS[sid];
@@ -1310,11 +1756,7 @@ export class V2AppController {
             </button>`;
           }).join('')}
         </div>
-      </div>
-
-      <div class="v2-prep-group">
-        <div class="v2-prep-label">2. 选择船员</div>
-        <div class="v2-crew-row">
+        <div class="v2-crew-row" style="margin-top:6px;">
           ${V2_CREW_ORDER.map((cid) => {
             const c = V2_CREW[cid];
             const unlocked = p.unlockedCrew.includes(cid);
@@ -1323,37 +1765,36 @@ export class V2AppController {
               !unlocked ? 'disabled' : ''
             }>
               <strong>${c.name}</strong>
-              <small>${unlocked ? c.abilitySummary : `🔒 ${c.unlockHint}`}</small>
+              <small>${unlocked ? c.abilitySummary : c.unlockHint}</small>
             </button>`;
           }).join('')}
         </div>
       </div>
 
       <div class="v2-prep-group">
-        <div class="v2-prep-label">3. 主构筑倾向（保底航路至少 1 次出现对应支援件）</div>
+        <div class="v2-prep-label">航路支援倾向（第 2–4 层保底出现对应配件）</div>
         <div class="v2-arch-row">
           ${ARCHETYPE_ORDER.map((aid) => {
             const info = V2_ARCHETYPE_LABELS[aid];
             return `<button type="button" class="btn btn-sm ${
               draft.primaryArchetype === aid ? 'btn-primary' : 'btn-secondary'
-            }" data-prep-arch="${aid}">${info.name}（保底${info.supportName}）</button>`;
+            }" data-prep-arch="${aid}">${info.name}（${info.supportName}）</button>`;
           }).join('')}
         </div>
       </div>
 
       <div class="v2-prep-group">
         <div class="v2-prep-label-row">
-          <span class="v2-prep-label">4. 装配预算 <strong class="num">${check.totalBudget}/${
+          <span class="v2-prep-label">装配预算 <strong class="num">${check.totalBudget}/${
       check.maxBudget
     }</strong></span>
           <div style="display:flex;gap:6px;">
-            <button type="button" class="btn btn-sm btn-ghost" id="v2-prep-fallback">免费推荐配装</button>
+            <button type="button" class="btn btn-sm btn-ghost" id="v2-prep-fallback">标准配装</button>
             <button type="button" class="btn btn-sm btn-ghost" id="v2-prep-clear">清空</button>
           </div>
         </div>
-        <div class="v2-risk-note">⚠ <strong>自有设备</strong>战败将损失实物；<strong>借用设备</strong>免费且返航自动归还。</div>
 
-        <div class="v2-pool-subtitle">借用普通蓝图（免费 · 计预算）</div>
+        <div class="v2-pool-subtitle">永久蓝图借用（免费 · 返航归还）</div>
         <div class="v2-pool-chips">
           ${p.blueprints
             .map((kind) => {
@@ -1370,11 +1811,11 @@ export class V2AppController {
             .join('')}
         </div>
 
-        <div class="v2-pool-subtitle">仓库自有设备（${p.equipmentWarehouse.length} 件 · 优良/普通均可用）</div>
+        <div class="v2-pool-subtitle">仓库自有设备（${p.equipmentWarehouse.length} 件 · 战败将损失实物）</div>
         <div class="v2-pool-chips">
           ${
             p.equipmentWarehouse.length === 0
-              ? `<span class="v2-empty-inline">设备库暂无自有设备（可从航路入库或在研究台制造）</span>`
+              ? `<span class="v2-empty-inline">设备库暂无自有设备（可返航入库或研究台制造）</span>`
               : p.equipmentWarehouse
                   .map((w) => {
                     const def = V2_EQUIPMENT_DEFS[w.definitionId];
@@ -1398,7 +1839,7 @@ export class V2AppController {
 
       <div class="v2-prep-group v2-preset-box">
         <div class="v2-prep-label-row">
-          <span class="v2-prep-label">5. 配装预设 (${p.loadoutPresets.length}/${V2_MAX_SAVED_PRESETS})</span>
+          <span class="v2-prep-label">配装预设 (${p.loadoutPresets.length}/${V2_MAX_SAVED_PRESETS})</span>
           <div style="display:flex;gap:6px;align-items:center;">
             <input type="text" id="v2-preset-name" class="v2-preset-input" maxlength="16" placeholder="预设名称" value="${
               V2_SHIPS[draft.shipId].name.slice(0, 4)
@@ -1437,7 +1878,7 @@ export class V2AppController {
                   )
                   .join('')}
               </div>`
-            : `<div class="v2-empty-inline">保存最多 3 套常用配装，下次出航一键装载（绝不静默替换缺失的自有件）。</div>`
+            : ''
         }
       </div>
 
@@ -1448,7 +1889,7 @@ export class V2AppController {
       }
       <button type="button" class="btn btn-primary btn-launch-hero" id="v2-btn-launch-run" ${
         readOnly || !check.valid ? 'disabled' : ''
-      }>▶ 确认整备 · 启动六层远航</button>
+      }>${svgIcon('rocket', 16)} 确认整备 · 启动远航</button>
     `;
 
     // Wire prepare controls
@@ -1458,12 +1899,41 @@ export class V2AppController {
       this.syncAll();
     });
 
+    this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-pick-trial]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const tid = btn.dataset.pickTrial as V2TrialBuildId;
+        const spec = V2_TRIAL_BUILDS[tid];
+        draft.trialBuildId = tid;
+        draft.primaryArchetype = spec.archetypeId;
+        draft.slots = [...buildTrialPrepareSlots(tid, draft.shipId)];
+        draft.playingDemo = true;
+        draft.demoPlaybackKey = null;
+        draft.missingPresetEntries = [];
+        draft.presetNotice = null;
+        soundEngine.play('energyLink');
+        this.syncAll();
+      });
+    });
+
+    this.leftPanelEl.querySelector('#v2-trial-exit')?.addEventListener('click', () => {
+      draft.trialBuildId = null;
+      draft.playingDemo = false;
+      draft.demoPlaybackKey = null;
+      draft.slots = [...buildFreeFallbackPrepareSlots(draft.shipId, p.blueprints)];
+      soundEngine.play('click');
+      this.syncAll();
+    });
+
     this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-prep-ship]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const nextShip = btn.dataset.prepShip as V2ShipId;
         if (nextShip === draft.shipId) return;
         draft.shipId = nextShip;
-        draft.slots = [...buildFreeFallbackPrepareSlots(nextShip, p.blueprints)];
+        draft.playingDemo = false;
+        draft.demoPlaybackKey = null;
+        draft.slots = draft.trialBuildId
+          ? [...buildTrialPrepareSlots(draft.trialBuildId, nextShip)]
+          : [...buildFreeFallbackPrepareSlots(nextShip, p.blueprints)];
         draft.missingPresetEntries = [];
         draft.presetNotice = null;
         soundEngine.play('click');
@@ -1488,6 +1958,9 @@ export class V2AppController {
     });
 
     this.leftPanelEl.querySelector('#v2-prep-fallback')?.addEventListener('click', () => {
+      draft.trialBuildId = null;
+      draft.playingDemo = false;
+      draft.demoPlaybackKey = null;
       draft.slots = [...buildFreeFallbackPrepareSlots(draft.shipId, p.blueprints)];
       draft.missingPresetEntries = [];
       draft.presetNotice = null;
@@ -1496,6 +1969,9 @@ export class V2AppController {
     });
 
     this.leftPanelEl.querySelector('#v2-prep-clear')?.addEventListener('click', () => {
+      draft.trialBuildId = null;
+      draft.playingDemo = false;
+      draft.demoPlaybackKey = null;
       draft.slots = [];
       draft.missingPresetEntries = [];
       draft.presetNotice = null;
@@ -1508,9 +1984,11 @@ export class V2AppController {
         const defId = btn.dataset.addLoan!;
         const spot = findFirstLegalV2Placement(previewBay, defId);
         if (!spot) {
-          this.showToast('当前船舱没有足够空位放入该设备，请先调整或移出其他设备。');
+          this.showToast('当前船舱没有足够空位放入该设备，请先移位或卸下旧件。');
           return;
         }
+        draft.playingDemo = false;
+        draft.demoPlaybackKey = null;
         draft.slots = [
           ...draft.slots,
           {
@@ -1537,6 +2015,8 @@ export class V2AppController {
           this.showToast('当前船舱没有足够空位放入该自有设备。');
           return;
         }
+        draft.playingDemo = false;
+        draft.demoPlaybackKey = null;
         draft.slots = [
           ...draft.slots,
           {
@@ -1595,11 +2075,14 @@ export class V2AppController {
         draft.shipId = pr.shipId;
         draft.crewId = pr.crewId && p.unlockedCrew.includes(pr.crewId) ? pr.crewId : draft.crewId;
         draft.primaryArchetype = pr.primaryArchetype;
+        draft.trialBuildId = null;
+        draft.playingDemo = false;
+        draft.demoPlaybackKey = null;
         draft.slots = goodSlots;
         draft.missingPresetEntries = missing;
         draft.presetNotice =
           missing.length > 0
-            ? `预设「${pr.name}」有 ${missing.length} 件自有设备当前不在仓库中，已空出对应槽位（未自动替换）。`
+            ? `预设「${pr.name}」有 ${missing.length} 件自有设备当前不在仓库中，已空出对应槽位。`
             : `已完整载入预设「${pr.name}」。`;
         soundEngine.play('click');
         this.syncAll();
@@ -1656,6 +2139,7 @@ export class V2AppController {
         crewId: draft.crewId,
         primaryArchetype: draft.primaryArchetype,
         slots: draft.slots,
+        trialBuildId: draft.trialBuildId,
       });
       if (!res.ok || !res.run) {
         this.showToast(res.errors.join('；') || '无法出航');
@@ -1668,17 +2152,30 @@ export class V2AppController {
       };
       this.prepareDraft = null;
       this.settlementDispositions = {};
+      this.selectedMapNodeId = null;
       this.persist();
       soundEngine.play('warpJump');
       this.syncAll();
     });
 
-    // Right Panel: Interactive Prepare Bay
+    // Right Panel: Interactive Prepare Bay with live Modular Ship sync & Instant Tactical Delta!
+    const shipMaxHp = V2_SHIPS[draft.shipId].maxHp;
     this.mountV2CargoBay(previewBay, !readOnly, {
       title: `整备船舱 · ${V2_SHIPS[draft.shipId].name}`,
       prepareMode: true,
+      getTacticalDelta: (item, zone) =>
+        computeV2PlacementTacticalDelta({
+          run: null,
+          bay: previewBay,
+          startingHp: shipMaxHp,
+          maxHp: shipMaxHp,
+          targetPolicy: 'weakest',
+          item,
+          zone,
+        }),
       onChange: (nextBay) => {
-        // Map updated placed coordinates back to draft.slots
+        draft.playingDemo = false;
+        draft.demoPlaybackKey = null;
         draft.slots = nextBay.placed.map((pl) => {
           const prev = draft.slots.find(
             (s) =>
@@ -1698,6 +2195,8 @@ export class V2AppController {
         this.syncAll();
       },
       onPrepareRemove: (instanceId) => {
+        draft.playingDemo = false;
+        draft.demoPlaybackKey = null;
         draft.slots = draft.slots.filter(
           (s) => s.slotKey !== instanceId && s.warehouseInstanceId !== instanceId
         );
@@ -1706,122 +2205,168 @@ export class V2AppController {
     });
   }
 
-  // --- 3. MAP Phase (6-Layer Branching DAG + Reachable Cards + Safe Return) ---
+  // --- 3. MAP Phase (Unified Interactive Star Map — Zero Duplication!) ---
 
   private renderMapPhase(run: V2RunState): void {
-    const readOnly = this.isReadOnlyTab;
+    const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const reachableIds = getReachableNextNodeIds(run);
     const fuelInfo = computeV2JumpFuelCost(run);
     const canJump = run.fuel >= fuelInfo.totalCost;
 
-    // Next-hop prominent decision cards
-    const nextCardsHtml = reachableIds
-      .map((nid) => {
-        const node = run.graph.nodes[nid];
-        if (!node) return '';
-        const meta = NODE_TYPE_META[node.type];
-        let previewHtml = '';
-        if (node.combat) {
-          const pv = previewV2CombatNode(run, node.nodeId, run.targetPolicy);
-          const unitList = node.combat.units
-            .map((u) => `${u.name}(${u.maxHp}HP/${u.damagePerRound}攻${u.armor ? `/${u.armor}甲` : ''}${u.pierceRatio ? '/穿盾' : ''})`)
-            .join(' + ');
-          previewHtml = `
-            <div class="v2-map-combat-preview ${pv?.outcome === 'victory' ? 'ok' : 'risk'}">
-              <span>${unitList}</span>
-              <strong>预测：${
-                pv?.outcome === 'victory'
-                  ? `胜 · 剩 ${pv.finalPlayerHpAfterRepair} HP (${pv.roundsCount}回合)`
-                  : `⚠ 战败风险 (${pv?.roundsCount ?? '?'}回合)`
-              } · 赏金 ${node.combat.bounty}¤</strong>
-            </div>
-          `;
-        } else if (node.type === 'wreck') {
-          previewHtml = `<div class="v2-map-event-hint">二选一：军械舱（设备）或 货舱（高价货物）${
-            run.crewId === 'salvager' ? ' · 拆解专家已透视全明细' : ''
-          }</div>`;
-        } else if (node.type === 'merchant') {
-          previewHtml = `<div class="v2-map-event-hint">可购 2 件设备 / +2 燃料(12¤) / +10 耐久(15¤) / 折价出售拾获物</div>`;
-        } else if (node.type === 'anomaly') {
-          previewHtml = `<div class="v2-map-event-hint">安全穿越(-1燃料) 或 强行破入(-4耐久得双份货物)</div>`;
-        } else if (node.type === 'distress') {
-          previewHtml = `<div class="v2-map-event-hint">救援船员(-1燃料回8耐久) 或 打捞高价货舱</div>`;
-        }
+    // Auto-select first reachable node if current selection isn't valid
+    if (!this.selectedMapNodeId || !reachableIds.includes(this.selectedMapNodeId)) {
+      this.selectedMapNodeId = reachableIds[0] ?? null;
+    }
 
-        return `
-          <div class="v2-next-node-card ${meta.cls} ${node.contractMarker ? 'is-contract' : ''}">
-            <div class="v2-next-node-head">
-              <span class="v2-node-title">${meta.icon} 第 ${node.layer} 层 ${
-          node.lane === 0 ? 'A路' : 'B路'
-        } · ${meta.label}</span>
-              <span class="v2-fuel-tag ${canJump ? '' : 'no-fuel'}">⛽ 耗燃料 ${fuelInfo.totalCost}</span>
-            </div>
-            <div class="v2-node-badges">
-              ${
-                node.contractMarker
-                  ? `<span class="v2-badge-contract">★ 委托目标点</span>`
-                  : ''
-              }
-              ${
-                node.hasSupportGuarantee
-                  ? `<span class="v2-badge-support">⚙ ${
-                      V2_ARCHETYPE_LABELS[run.primaryArchetype].supportName
-                    }保底</span>`
-                  : ''
-              }
-              ${
-                fuelInfo.navigatorDiscountApplied
-                  ? `<span class="v2-badge-info">领航员首跳免基础燃料</span>`
-                  : ''
-              }
-              ${
-                fuelInfo.rescueSurcharge > 0
-                  ? `<span class="v2-badge-warn">救生舱负载 +1 燃料</span>`
-                  : ''
-              }
-            </div>
-            ${previewHtml}
-            <button type="button" class="btn btn-sm btn-primary v2-jump-btn" data-jump-node="${nid}" ${
-          readOnly || !canJump ? 'disabled' : ''
-        }>${canJump ? `跃迁至第 ${node.layer} 层 · ${meta.label}` : '燃料不足，请安全返航'}</button>
-          </div>
-        `;
-      })
-      .join('');
-
-    // Full 6-layer interactive DAG overview
+    // Build unified interactive star map graph with connecting edges SVG!
     const layers = Array.from({ length: run.graph.maxLayers }, (_, i) => i + 1);
+    const colW = 100 / layers.length;
+
+    const nodeCoord = (layer: number, lane: 0 | 1) => ({
+      x: (layer - 0.5) * colW,
+      y: lane === 0 ? 28 : 74,
+    });
+
+    const edgeLines: string[] = [];
+    for (const node of Object.values(run.graph.nodes)) {
+      const from = nodeCoord(node.layer, node.lane);
+      const isFromCurrent = run.currentNodeId === node.nodeId;
+      for (const nxtId of node.nextNodeIds) {
+        const target = run.graph.nodes[nxtId];
+        if (!target) continue;
+        const to = nodeCoord(target.layer, target.lane);
+        const activeEdge = isFromCurrent && reachableIds.includes(nxtId);
+        const visitedEdge =
+          run.visitedNodeIds.includes(node.nodeId) && run.visitedNodeIds.includes(nxtId);
+        const stroke = activeEdge ? '#F6B852' : visitedEdge ? '#62D6DF' : 'rgba(148,163,184,0.28)';
+        const sw = activeEdge ? '1.3' : '0.8';
+        edgeLines.push(
+          `<line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" stroke="${stroke}" stroke-width="${sw}" ${
+            activeEdge ? '' : 'stroke-dasharray="2 2"'
+          } />`
+        );
+      }
+    }
+
     const layerColsHtml = layers
       .map((layer) => {
         const laneA = Object.values(run.graph.nodes).find((n) => n.layer === layer && n.lane === 0);
         const laneB = Object.values(run.graph.nodes).find((n) => n.layer === layer && n.lane === 1);
-        const renderChip = (n?: V2MapNode) => {
+        const renderNodeBtn = (n?: V2MapNode) => {
           if (!n) return `<div class="v2-dag-spacer"></div>`;
           const meta = NODE_TYPE_META[n.type];
           const visited = run.visitedNodeIds.includes(n.nodeId);
           const isCur = run.currentNodeId === n.nodeId;
           const isNext = reachableIds.includes(n.nodeId);
+          const isSelected = this.selectedMapNodeId === n.nodeId;
           return `<button type="button" class="v2-dag-node ${meta.cls} ${visited ? 'visited' : ''} ${
             isCur ? 'current' : ''
-          } ${isNext ? 'reachable' : ''}" data-dag-node="${n.nodeId}" ${
-            !isNext || readOnly || !canJump ? 'disabled' : ''
-          } title="第${n.layer}层 ${meta.label}">
-            <span class="v2-dag-icon">${meta.icon}</span>
-            <span class="v2-dag-name">${meta.label.slice(0, 4)}</span>
-            ${n.contractMarker ? '<span class="v2-dag-star" aria-label="委托目标">★</span>' : ''}
+          } ${isNext ? 'reachable' : ''} ${isSelected ? 'selected' : ''}" data-select-node="${
+            n.nodeId
+          }" ${!isNext ? 'disabled' : ''} title="第${n.layer}层 ${meta.label}">
+            <span class="v2-dag-icon">${svgIcon(meta.icon, 16)}</span>
+            <span class="v2-dag-name">${meta.label}</span>
+            ${n.contractMarker ? `<span class="v2-dag-star" aria-label="委托目标">${svgIcon('star', 11)}</span>` : ''}
+            ${n.hasSupportGuarantee ? `<span class="v2-dag-sup">配</span>` : ''}
           </button>`;
         };
         return `
           <div class="v2-dag-col">
             <div class="v2-dag-layer-lbl">L${layer}</div>
             <div class="v2-dag-pair">
-              ${renderChip(laneA)}
-              ${renderChip(laneB)}
+              ${renderNodeBtn(laneA)}
+              ${renderNodeBtn(laneB)}
             </div>
           </div>
         `;
       })
       .join('');
+
+    // Single sleek comparison card for the currently selected reachable node
+    const selNode = this.selectedMapNodeId ? run.graph.nodes[this.selectedMapNodeId] : null;
+    let selectedCardHtml = `<div class="v2-empty-hint">已抵达最深层，点击下方免费安全返航完成结算！</div>`;
+
+    if (selNode) {
+      const meta = NODE_TYPE_META[selNode.type];
+      let forecastHtml = '';
+      if (selNode.combat) {
+        const pv = previewV2CombatNode(run, selNode.nodeId, run.targetPolicy);
+        const unitBrief = selNode.combat.units
+          .map((u) => `${u.name}(${u.maxHp}HP/${u.damagePerRound}攻${u.armor ? `/甲${u.armor}` : ''}${u.pierceRatio ? '/穿盾' : ''})`)
+          .join(' + ');
+        forecastHtml = `
+          <div class="v2-map-combat-preview ${pv?.outcome === 'victory' ? 'ok' : 'risk'}">
+            <span>${unitBrief}</span>
+            <strong>${
+              pv?.outcome === 'victory'
+                ? `预计获胜 · 余 ${pv.finalPlayerHpAfterRepair} HP (${pv.roundsCount} 轮)`
+                : `高危战败风险 (${pv?.roundsCount ?? '?'} 轮)`
+            } · 赏金 +${selNode.combat.bounty}¤</strong>
+          </div>
+        `;
+      } else if (selNode.type === 'wreck') {
+        forecastHtml = `<div class="v2-map-event-hint">漂流残骸三热点：军械舱（设备）/ 反应舱（+2 燃料或 +8 耐久）/ 货舱（2 件货物）${
+          run.crewId === 'salvager' ? ' · 拆解专家已透视全明细' : ''
+        }</div>`;
+      } else if (selNode.type === 'merchant') {
+        forecastHtml = `<div class="v2-map-event-hint">2 件固定设备 / +2 燃料(12¤) / +10 耐久(15¤) / 变卖拾获物</div>`;
+      } else if (selNode.type === 'anomaly') {
+        forecastHtml = `<div class="v2-map-event-hint">安全穿越 (-1 燃料得 1 货) 或 强行切入 (-4 耐久得 2 货)</div>`;
+      } else if (selNode.type === 'distress') {
+        forecastHtml = `<div class="v2-map-event-hint">施救船员 (-1 燃料回 10 耐久) 或 免费打捞高价货物</div>`;
+      }
+
+      // Also provide quick switch pills if 2 nodes are reachable (great for 1-tap mobile & comparison!)
+      const quickTabs =
+        reachableIds.length > 1
+          ? `<div class="v2-map-switch-row">
+              ${reachableIds
+                .map((rid) => {
+                  const rn = run.graph.nodes[rid];
+                  if (!rn) return '';
+                  const rm = NODE_TYPE_META[rn.type];
+                  return `<button type="button" class="v2-map-tab-pill ${
+                    rid === selNode.nodeId ? 'active' : ''
+                  }" data-select-node="${rid}">${svgIcon(rm.icon, 13)} ${
+                    rn.lane === 0 ? 'A线' : 'B线'
+                  }·${rm.label}${rn.contractMarker ? ' ★' : ''}</button>`;
+                })
+                .join('')}
+            </div>`
+          : '';
+
+      selectedCardHtml = `
+        ${quickTabs}
+        <div class="v2-next-node-card ${meta.cls} ${selNode.contractMarker ? 'is-contract' : ''}">
+          <div class="v2-next-node-head">
+            <span class="v2-node-title">${svgIcon(meta.icon, 16)} 第 ${selNode.layer} 层 ${
+        selNode.lane === 0 ? 'A线' : 'B线'
+      } · ${meta.label}</span>
+            <span class="v2-fuel-tag ${canJump ? '' : 'no-fuel'}">${svgIcon('fuel', 13)} 耗油 ${
+        fuelInfo.totalCost
+      }</span>
+          </div>
+          <div class="v2-node-badges">
+            ${selNode.contractMarker ? `<span class="v2-badge-contract">${svgIcon('star', 11)} 委托目标</span>` : ''}
+            ${
+              selNode.hasSupportGuarantee
+                ? `<span class="v2-badge-support">${V2_ARCHETYPE_LABELS[run.primaryArchetype].supportName}保底</span>`
+                : ''
+            }
+            ${fuelInfo.navigatorDiscountApplied ? `<span class="v2-badge-info">领航员首跳省油</span>` : ''}
+            ${fuelInfo.rescueSurcharge > 0 ? `<span class="v2-badge-warn">救生舱负载 +1 油</span>` : ''}
+          </div>
+          ${forecastHtml}
+          <button type="button" class="btn btn-primary btn-launch-hero" data-jump-node="${
+            selNode.nodeId
+          }" ${readOnly || !canJump ? 'disabled' : ''}>${
+        canJump
+          ? `${svgIcon('rocket', 15)} 跃迁至第 ${selNode.layer} 层 · ${meta.label}`
+          : '燃料不足 · 请免费安全返航'
+      }</button>
+        </div>
+      `;
+    }
 
     const canAbort =
       run.contract.status === 'active' &&
@@ -1831,28 +2376,27 @@ export class V2AppController {
 
     this.leftPanelEl.innerHTML = `
       <div class="panel-header">
-        <h2>分支航路图 · ${run.contract.name}</h2>
+        <h2>${svgIcon('radar', 16)} 星际航路 · ${run.contract.name}</h2>
         <span class="panel-sub">航行钱包 <strong class="num">${run.wallet}¤</strong></span>
       </div>
 
-      <div class="v2-next-nodes-list">
-        ${
-          nextCardsHtml ||
-          `<div class="v2-empty-hint">已抵达本航次最深层，点击下方免费安全返航完成结算！</div>`
-        }
-      </div>
-
-      <div class="v2-dag-box">
-        <div class="v2-dag-title">全航路预览（L1–L${run.graph.maxLayers} · ★ 为委托目标节点）</div>
+      <div class="v2-dag-box v2-dag-hero">
         <div class="v2-dag-scroll">
-          <div class="v2-dag-grid">${layerColsHtml}</div>
+          <div class="v2-dag-stage">
+            <svg class="v2-dag-edges-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              ${edgeLines.join('')}
+            </svg>
+            <div class="v2-dag-grid">${layerColsHtml}</div>
+          </div>
         </div>
       </div>
+
+      <div class="v2-selected-node-deck">${selectedCardHtml}</div>
 
       <div class="v2-map-footer-actions">
         <button type="button" class="btn btn-secondary" id="v2-btn-safe-return" ${
           readOnly ? 'disabled' : ''
-        }>⚓ 免费安全返航结算</button>
+        }>${svgIcon('beacon', 14)} 免费安全返航</button>
         ${
           canAbort
             ? `<button type="button" class="btn btn-ghost" id="v2-btn-abort-contract" ${
@@ -1863,36 +2407,39 @@ export class V2AppController {
       </div>
     `;
 
-    const handleJump = (nid: string) => {
-      if (!this.canMutate()) return;
-      const res = selectV2MapNode(run, nid);
-      if (!res.ok) {
-        this.showToast(res.error ?? '无法跃迁至该节点');
-        return;
-      }
-      this.save = { ...this.save, activeRun: res.run };
-      this.persist();
-      soundEngine.play('click');
-      this.syncAll();
-    };
+    this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-select-node]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const nid = btn.dataset.selectNode!;
+        if (!reachableIds.includes(nid)) return;
+        this.selectedMapNodeId = nid;
+        soundEngine.play('click');
+        this.renderMapPhase(run);
+      });
+    });
 
     this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-jump-node]').forEach((btn) => {
-      btn.addEventListener('click', () => handleJump(btn.dataset.jumpNode!));
-    });
-    this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-dag-node]').forEach((btn) => {
-      btn.addEventListener('click', () => handleJump(btn.dataset.dagNode!));
+      btn.addEventListener('click', () => {
+        if (!this.canMutate()) return;
+        const nid = btn.dataset.jumpNode!;
+        const res = selectV2MapNode(run, nid);
+        if (!res.ok) {
+          this.showToast(res.error ?? '无法跃迁至该节点');
+          return;
+        }
+        this.selectedMapNodeId = null;
+        this.selectedWreckHotspot = 'armory';
+        this.setCurrentRun(res.run);
+        soundEngine.play('warpJump');
+        this.syncAll();
+      });
     });
 
     this.leftPanelEl.querySelector('#v2-btn-safe-return')?.addEventListener('click', () => {
       if (!this.canMutate()) return;
       const res = initiateV2SafeReturnFromMap(run);
-      if (!res.ok) {
-        this.showToast(res.error ?? '当前无法返航');
-        return;
-      }
-      this.save = { ...this.save, activeRun: res.run };
+      if (!res.ok) return this.showToast(res.error ?? '当前无法返航');
       this.settlementDispositions = {};
-      this.persist();
+      this.setCurrentRun(res.run);
       soundEngine.play('returnDock');
       this.syncAll();
     });
@@ -1900,55 +2447,47 @@ export class V2AppController {
     this.leftPanelEl.querySelector('#v2-btn-abort-contract')?.addEventListener('click', () => {
       if (!this.canMutate()) return;
       const nextRun = abortActiveV2Contract(run);
-      this.save = { ...this.save, activeRun: nextRun };
-      this.persist();
+      this.setCurrentRun(nextRun);
       soundEngine.play('click');
       this.showToast(
         run.contract.type === 'rescue'
-          ? '已放弃救援委托：已发射信标安全移交救生舱并释放船舱空位与额外燃料消耗。'
-          : '已放弃当前委托（无信用点罚金），可继续自由探索或安全返航。'
+          ? '已放弃救援委托：救生舱已由信标移交，释放船舱空位与额外油耗。'
+          : '已放弃当前委托，可继续自由探索或免费返航。'
       );
       this.syncAll();
     });
 
     this.mountV2CargoBay(run.bay, false, {
-      title: `当前船舱状态 · ${V2_SHIPS[run.shipId].name}`,
-      prepareMode: false,
+      title: `当前船舱 · ${V2_SHIPS[run.shipId].name}`,
+      statusBadge: '航行中',
     });
   }
 
-  // --- 4. ENCOUNTER Phase (Combat Pre/Live + Wreck / Anomaly / Distress) ---
+  // --- 4. ENCOUNTER Phase (Combat Hero / Wreck 3-Hotspot / Anomaly / Distress) ---
 
   private renderEncounterPhase(run: V2RunState): void {
     const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
     if (!node) return;
-    const readOnly = this.isReadOnlyTab;
+    const readOnly = this.isReadOnlyTab && !run.isShowcase;
 
     // 4a. Combat / Elite Node
     if (node.combat) {
       if (run.activeCombat) {
-        const sim = run.activeCombat.simulation;
-        this.leftPanelEl.innerHTML = `
-          <div class="panel-header">
-            <h2>交火进行中 · ${NODE_TYPE_META[node.type].label}</h2>
-            <span class="panel-sub">目标策略：${
-              run.activeCombat.targetPolicy === 'weakest' ? '优先最弱' : '优先最大威胁'
-            }</span>
-          </div>
-          <div class="v2-empty-hint">
-            正在按确定性战斗结果回放交火演出（${sim.roundsCount} 回合）。可随时点击上方「跳过演出」直接进入战后打捞或结算。
-          </div>
-        `;
-        this.mountV2CargoBay(run.bay, false, { title: '参战船舱配置（战斗锁定）' });
+        // Live combat hero mode: Battlefield fills 72%+ of screen, cargo grid collapsed into modal button!
+        this.leftPanelEl.innerHTML = '';
+        this.rightPanelEl.innerHTML = '';
         return;
       }
 
-      // Pre-combat tactical screen with target policy switch & exact preview
+      // Pre-combat compact tactical bar
       const pv = previewV2CombatNode(run, node.nodeId, run.targetPolicy);
+      const isEliteWithTactic =
+        node.type === 'elite' && Boolean(this.save.settings.eliteTacticExperiment);
+
       this.leftPanelEl.innerHTML = `
         <div class="panel-header">
-          <h2>${NODE_TYPE_META[node.type].icon} 第 ${node.layer} 层 · ${NODE_TYPE_META[node.type].label}</h2>
-          <span class="panel-sub">击破赏金 +${node.combat.bounty}¤</span>
+          <h2>${svgIcon(NODE_TYPE_META[node.type].icon, 16)} 第 ${node.layer} 层 · ${NODE_TYPE_META[node.type].label}</h2>
+          <span class="panel-sub">击破赏金 <strong class="num">+${node.combat.bounty}¤</strong></span>
         </div>
 
         <div class="v2-enemy-roster">
@@ -1956,7 +2495,7 @@ export class V2AppController {
             .map(
               (u) => `<div class="v2-enemy-chip ${u.isBoss ? 'is-boss' : ''}">
                 <strong>${u.name}</strong>
-                <span>HP ${u.maxHp} · 攻 ${u.damagePerRound}${u.armor > 0 ? ` · 护甲 ${u.armor}` : ''}${
+                <span>HP ${u.maxHp} · 攻 ${u.damagePerRound}${u.armor > 0 ? ` · 甲 ${u.armor}` : ''}${
                 u.pierceRatio > 0 ? ` · 穿盾 ${Math.round(u.pierceRatio * 100)}%` : ''
               }</span>
               </div>`
@@ -1965,14 +2504,14 @@ export class V2AppController {
         </div>
 
         <div class="v2-policy-box">
-          <span class="v2-prep-label">集火目标策略（预测与实战严格同源）</span>
+          <span class="v2-prep-label">集火策略</span>
           <div style="display:flex;gap:8px;margin-top:6px;">
             <button type="button" class="btn btn-sm ${
               run.targetPolicy === 'weakest' ? 'btn-primary' : 'btn-secondary'
-            }" data-policy="weakest" ${readOnly ? 'disabled' : ''}>优先最弱（快速减员）</button>
+            }" data-policy="weakest" ${readOnly ? 'disabled' : ''}>优先最弱</button>
             <button type="button" class="btn btn-sm ${
               run.targetPolicy === 'highest_threat' ? 'btn-primary' : 'btn-secondary'
-            }" data-policy="highest_threat" ${readOnly ? 'disabled' : ''}>优先最大威胁（压制高攻）</button>
+            }" data-policy="highest_threat" ${readOnly ? 'disabled' : ''}>优先最大威胁</button>
           </div>
         </div>
 
@@ -1980,28 +2519,29 @@ export class V2AppController {
           pv
             ? `<div class="v2-combat-preview-card ${pv.outcome === 'victory' ? 'ok' : 'danger'}">
                 <div class="v2-cp-head">
-                  <strong>${pv.outcome === 'victory' ? '✓ 战术推演：我方获胜' : '⚠ 战术推演：我方战败'}</strong>
+                  <strong>${pv.outcome === 'victory' ? '战果预估：获胜' : '战果预估：有战败风险'}</strong>
                   <span class="num">${pv.roundsCount} 回合</span>
                 </div>
                 <div class="v2-cp-body">
-                  起始耐久 ${pv.startingPlayerHp} · 护盾 ${pv.startingPlayerShield} → 战后耐久 <strong>${
+                  耐久 ${pv.startingPlayerHp} · 护盾 ${pv.startingPlayerShield} → 战后 <strong>${
                 pv.finalPlayerHpAfterRepair
-              }</strong>${pv.repairApplied > 0 ? `（含胜后维修 +${pv.repairApplied}）` : ''}
+              }</strong>${pv.repairApplied > 0 ? `（含维修 +${pv.repairApplied}）` : ''}
+                  ${isEliteWithTactic ? ' · <strong>第 2 回合可发战术指令</strong>' : ''}
                 </div>
-                <button type="button" class="btn btn-sm btn-ghost" id="v2-toggle-log" style="margin-top:6px;">${
-                  this.showCombatLogDetails ? '收起逐回合推演' : '展开逐回合推演'
+                <button type="button" class="btn btn-sm btn-ghost" id="v2-toggle-log" style="margin-top:4px;">${
+                  this.showCombatLogDetails ? '收起回合推演' : '查看回合推演'
                 }</button>
                 ${
                   this.showCombatLogDetails
                     ? `<div class="v2-combat-log-list">
                         ${pv.rounds
-                          .slice(0, 12)
+                          .slice(0, 10)
                           .map(
                             (r) => `<div class="v2-log-row">R${r.round}: 我方 ${
                               r.playerAttacks.reduce((s, a) => s + a.appliedDamage, 0)
                             }伤${r.counterAttack ? `+反击${r.counterAttack.appliedDamage}` : ''} · 敌方 ${
                               r.enemyAttacks.reduce((s, a) => s + a.hullDamage, 0)
-                            }直伤(盾吸${r.shieldAbsorbedTotal}) → 我方 ${r.playerHpAfter}HP</div>`
+                            }直伤(盾吸${r.shieldAbsorbedTotal}) → ${r.playerHpAfter}HP</div>`
                           )
                           .join('')}
                       </div>`
@@ -2013,18 +2553,14 @@ export class V2AppController {
 
         <button type="button" class="btn btn-primary btn-launch-hero" id="v2-btn-start-combat" ${
           readOnly ? 'disabled' : ''
-        }>⚔ 确认战术 · 开始交火</button>
+        }>${svgIcon('combat', 16)} 开始交火</button>
       `;
 
       this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-policy]').forEach((btn) => {
         btn.addEventListener('click', () => {
           if (!this.canMutate()) return;
           const policy = btn.dataset.policy as V2TargetPolicy;
-          this.save = {
-            ...this.save,
-            activeRun: { ...run, targetPolicy: policy },
-          };
-          this.persist();
+          this.setCurrentRun({ ...run, targetPolicy: policy });
           soundEngine.play('click');
           this.syncAll();
         });
@@ -2037,86 +2573,80 @@ export class V2AppController {
 
       this.leftPanelEl.querySelector('#v2-btn-start-combat')?.addEventListener('click', () => {
         if (!this.canMutate()) return;
-        const res = startV2CombatAtCurrentNode(run, run.targetPolicy);
+        const res = startV2CombatAtCurrentNode(run, run.targetPolicy, {
+          enableEliteTactic: Boolean(this.save.settings.eliteTacticExperiment),
+        });
         if (!res.ok) {
           this.showToast(res.error ?? '无法开始战斗');
           return;
         }
-        this.save = { ...this.save, activeRun: res.run };
-        this.persist();
+        this.setCurrentRun(res.run);
         soundEngine.play('click');
         this.syncAll();
       });
 
-      this.mountV2CargoBay(run.bay, false, { title: '参战船舱配置' });
+      this.mountV2CargoBay(run.bay, false, {
+        title: `参战船舱 · ${V2_SHIPS[run.shipId].name}`,
+        statusBadge: '战前锁定',
+      });
       return;
     }
 
-    // 4b. Non-Combat Events (Wreck / Anomaly / Distress)
+    // 4b. Wreck 3-Hotspot Hero Mode (Main choice happens directly on the wreck image!)
+    if (node.type === 'wreck' && node.wreck) {
+      this.leftPanelEl.innerHTML = `
+        <div class="panel-header">
+          <h2>${svgIcon('wreck', 16)} 废船打捞 · 空间与续航抉择</h2>
+          <button type="button" class="btn btn-sm btn-ghost" id="v2-btn-abandon-event" ${
+            readOnly ? 'disabled' : ''
+          }>放弃并返航</button>
+        </div>
+        <div class="v2-empty-hint">
+          直接在上方残骸画面中点击<strong>军械舱</strong>、<strong>反应舱</strong>或<strong>货舱</strong>切开对应舱室（只能选一处）。
+        </div>
+      `;
+      this.leftPanelEl.querySelector('#v2-btn-abandon-event')?.addEventListener('click', () => {
+        if (!this.canMutate()) return;
+        const res = abandonV2EventAndReturn(run);
+        if (!res.ok) return this.showToast(res.error ?? '无法放弃返航');
+        this.settlementDispositions = {};
+        this.setCurrentRun(res.run);
+        soundEngine.play('returnDock');
+        this.syncAll();
+      });
+      this.mountV2CargoBay(run.bay, false, { title: '当前船舱参考', statusBadge: '参考空位' });
+      return;
+    }
+
+    // 4c. Anomaly / Distress Non-Combat Events
     const unaffordable = areAllEventOptionsUnaffordable(run);
     let eventBodyHtml = '';
 
-    if (node.type === 'wreck' && node.wreck) {
-      const w = node.wreck;
-      const peek = run.crewId === 'salvager';
-      const armDef = getAnyV2ItemDef(w.armoryItem.definitionId);
-      const cargoSummary = w.cargoItems
-        .map((c) => `${getAnyV2ItemDef(c.definitionId)?.name ?? c.definitionId}(${c.fixedValue}¤)`)
-        .join(' + ');
-      eventBodyHtml = `
-        <div class="v2-event-desc">一艘失去动力的轨道运输残骸正缓缓漂过。你只有时间切开其中一个主舱室：</div>
-        <div class="v2-event-choices">
-          <div class="v2-event-choice-card">
-            <div class="v2-ec-title">🔫 切开军械舱（获得 1 件设备）</div>
-            <div class="v2-ec-meta">${
-              peek && armDef
-                ? `👁 拆解专家透视：<strong>${armDef.name}</strong>（${
-                    w.armoryItem.quality === 'improved' ? '优良' : '普通'
-                  } · ${V2_SHAPES[armDef.shapeId].label} · 回收 ${w.armoryItem.fixedValue}¤）`
-                : `预计占格 ${w.armorySizeRange} · 回收区间 ${w.armoryValueRange}`
-            }</div>
-            <button type="button" class="btn btn-primary" data-wreck-room="armory" ${
-              readOnly ? 'disabled' : ''
-            }>切开军械舱</button>
-          </div>
-          <div class="v2-event-choice-card">
-            <div class="v2-ec-title">📦 切开货舱（获得 ${w.cargoItems.length} 件货物）</div>
-            <div class="v2-ec-meta">${
-              peek
-                ? `👁 拆解专家透视：<strong>${cargoSummary}</strong>`
-                : `预计占格 ${w.cargoSizeRange} · 价值区间 ${w.cargoValueRange}`
-            }</div>
-            <button type="button" class="btn btn-secondary" data-wreck-room="cargo" ${
-              readOnly ? 'disabled' : ''
-            }>切开货舱</button>
-          </div>
-        </div>
-      `;
-    } else if (node.type === 'anomaly' && node.anomaly) {
+    if (node.type === 'anomaly' && node.anomaly) {
       const a = node.anomaly;
       const canTraverse = run.fuel >= a.safeFuelCost;
       const canBreach = run.hp > a.breachHpCost;
       eventBodyHtml = `
-        <div class="v2-event-desc">高能电离云团中漂浮着稀有 ${a.cargoCategoryLabel} 信号。选择平稳绕行或顶着电弧硬闯：</div>
+        <div class="v2-event-desc">电离云团中漂浮着稀有 ${a.cargoCategoryLabel} 信号。选择平稳穿越或顶着电弧硬闯：</div>
         <div class="v2-event-choices">
           <div class="v2-event-choice-card">
-            <div class="v2-ec-title">🧭 安全穿越（消耗 ${a.safeFuelCost} 燃料）</div>
+            <div class="v2-ec-title">${svgIcon('fuel', 15)} 安全穿越（耗 ${a.safeFuelCost} 燃料）</div>
             <div class="v2-ec-meta">无损获取 1 件高价货物（${
               getAnyV2ItemDef(a.safeCargoItem.definitionId)?.name ?? '货物'
             } · ${a.safeCargoItem.fixedValue}¤）</div>
             <button type="button" class="btn btn-primary" data-anomaly-opt="traverse" ${
               readOnly || !canTraverse ? 'disabled' : ''
-            }>${canTraverse ? `消耗 ${a.safeFuelCost} 燃料穿越` : '燃料不足'}</button>
+            }>${canTraverse ? `耗 ${a.safeFuelCost} 燃料穿越` : '燃料不足'}</button>
           </div>
           <div class="v2-event-choice-card">
-            <div class="v2-ec-title">⚡ 强行破入（扣 ${a.breachHpCost} 耐久 · 需 HP > ${a.breachHpCost}）</div>
+            <div class="v2-ec-title">${svgIcon('bolt', 15)} 强行破入（扣 ${a.breachHpCost} 耐久）</div>
             <div class="v2-ec-meta">不耗燃料，直接带走 2 件货物（共 ${a.breachCargoItems.reduce(
               (s, c) => s + c.fixedValue,
               0
             )}¤）</div>
             <button type="button" class="btn btn-danger" data-anomaly-opt="breach" ${
               readOnly || !canBreach ? 'disabled' : ''
-            }>${canBreach ? `硬闯破入 (-${a.breachHpCost} HP)` : `耐久不足（需 > ${a.breachHpCost}）`}</button>
+            }>${canBreach ? `硬闯破入 (-${a.breachHpCost} HP)` : `耐久需 > ${a.breachHpCost}`}</button>
           </div>
         </div>
       `;
@@ -2124,23 +2654,23 @@ export class V2AppController {
       const d = node.distress;
       const canRescue = run.fuel >= d.rescueFuelCost;
       eventBodyHtml = `
-        <div class="v2-event-desc">收到近轨道民船的断续求救信标。你可以耗油施救换取现场抢修，或优先打捞漂散货箱：</div>
+        <div class="v2-event-desc">收到近轨道民船求救信标。可耗油施救换取现场抢修，或直接打捞漂散货箱：</div>
         <div class="v2-event-choices">
           <div class="v2-event-choice-card">
-            <div class="v2-ec-title">🚑 救援遇险船员（消耗 ${d.rescueFuelCost} 燃料）</div>
-            <div class="v2-ec-meta">获救技师协助抢修舰体：立即恢复 <strong>+${d.repairAmount} 耐久</strong>（不超过上限）</div>
+            <div class="v2-ec-title">${svgIcon('wrench', 15)} 救援遇险船员（耗 ${d.rescueFuelCost} 燃料）</div>
+            <div class="v2-ec-meta">立即抢修恢复 <strong>+${d.repairAmount} 耐久</strong>（不超过上限）</div>
             <button type="button" class="btn btn-primary" data-distress-opt="rescue_crew" ${
               readOnly || !canRescue ? 'disabled' : ''
-            }>${canRescue ? `施救 (-${d.rescueFuelCost} 燃料 · +${d.repairAmount} HP)` : '燃料不足'}</button>
+            }>${canRescue ? `施救 (-${d.rescueFuelCost} 油 · +${d.repairAmount} HP)` : '燃料不足'}</button>
           </div>
           <div class="v2-event-choice-card">
-            <div class="v2-ec-title">📦 打捞高价货舱（不耗燃料）</div>
+            <div class="v2-ec-title">${svgIcon('crate', 15)} 打捞高价货舱（0 燃料）</div>
             <div class="v2-ec-meta">带走 1 件高价货物（${
               getAnyV2ItemDef(d.haulCargoItem.definitionId)?.name ?? '货物'
             } · ${d.haulCargoItem.fixedValue}¤）</div>
             <button type="button" class="btn btn-secondary" data-distress-opt="haul_cargo" ${
               readOnly ? 'disabled' : ''
-            }>打捞高价货舱</button>
+            }>打捞货舱</button>
           </div>
         </div>
       `;
@@ -2148,17 +2678,17 @@ export class V2AppController {
 
     this.leftPanelEl.innerHTML = `
       <div class="panel-header">
-        <h2>${NODE_TYPE_META[node.type].icon} 第 ${node.layer} 层 · ${NODE_TYPE_META[node.type].label}</h2>
-        <span class="panel-sub">非战斗抉择</span>
+        <h2>${svgIcon(NODE_TYPE_META[node.type].icon, 16)} 第 ${node.layer} 层 · ${NODE_TYPE_META[node.type].label}</h2>
+        <span class="panel-sub">星区事件</span>
       </div>
       ${eventBodyHtml}
       ${
         unaffordable
           ? `<div class="system-banner banner-warn" style="margin-top:10px;">
-              <span>当前资源不足以支付任何选项，你可以安全放弃本次事件并免费返航。</span>
+              <span>当前资源不足以支付任何选项，可放弃事件并免费返航。</span>
               <button type="button" class="btn btn-sm btn-primary" id="v2-btn-abandon-event" ${
                 readOnly ? 'disabled' : ''
-              }>放弃事件并安全返航</button>
+              }>放弃并安全返航</button>
             </div>`
           : `<div style="margin-top:10px;display:flex;justify-content:flex-end;">
               <button type="button" class="btn btn-sm btn-ghost" id="v2-btn-abandon-event" ${
@@ -2168,29 +2698,12 @@ export class V2AppController {
       }
     `;
 
-    this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-wreck-room]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        if (!this.canMutate()) return;
-        const res = resolveV2WreckChoice(
-          run,
-          btn.dataset.wreckRoom as 'armory' | 'cargo',
-          this.save.profile.unlockedFamilies
-        );
-        if (!res.ok) return this.showToast(res.error ?? '操作失败');
-        this.save = { ...this.save, activeRun: res.run };
-        this.persist();
-        soundEngine.play('place');
-        this.syncAll();
-      });
-    });
-
     this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-anomaly-opt]').forEach((btn) => {
       btn.addEventListener('click', () => {
         if (!this.canMutate()) return;
         const res = resolveV2AnomalyChoice(run, btn.dataset.anomalyOpt as 'traverse' | 'breach');
         if (!res.ok) return this.showToast(res.error ?? '操作失败');
-        this.save = { ...this.save, activeRun: res.run };
-        this.persist();
+        this.setCurrentRun(res.run);
         soundEngine.play('place');
         this.syncAll();
       });
@@ -2204,8 +2717,7 @@ export class V2AppController {
           btn.dataset.distressOpt as 'rescue_crew' | 'haul_cargo'
         );
         if (!res.ok) return this.showToast(res.error ?? '操作失败');
-        this.save = { ...this.save, activeRun: res.run };
-        this.persist();
+        this.setCurrentRun(res.run);
         soundEngine.play('place');
         this.syncAll();
       });
@@ -2215,14 +2727,13 @@ export class V2AppController {
       if (!this.canMutate()) return;
       const res = abandonV2EventAndReturn(run);
       if (!res.ok) return this.showToast(res.error ?? '无法放弃返航');
-      this.save = { ...this.save, activeRun: res.run };
       this.settlementDispositions = {};
-      this.persist();
+      this.setCurrentRun(res.run);
       soundEngine.play('returnDock');
       this.syncAll();
     });
 
-    this.mountV2CargoBay(run.bay, false, { title: '当前船舱一览' });
+    this.mountV2CargoBay(run.bay, false, { title: '当前船舱一览', statusBadge: '参考空位' });
   }
 
   // --- 5. SHOP Phase (Mobile Merchant) ---
@@ -2231,9 +2742,8 @@ export class V2AppController {
     const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
     const shop = node?.merchant;
     if (!node || !shop) return;
-    const readOnly = this.isReadOnlyTab;
+    const readOnly = this.isReadOnlyTab && !run.isShowcase;
 
-    // Only loot items are sellable at Merchant (strictly excludes loan/owned/mission, AC06!)
     const sellableLoot = [
       ...run.bay.placed.map((p) => p.item),
       ...run.bay.staging.map((s) => s.item),
@@ -2241,12 +2751,12 @@ export class V2AppController {
 
     this.leftPanelEl.innerHTML = `
       <div class="panel-header">
-        <h2>⚖ 流动商人补给站</h2>
+        <h2>${svgIcon('merchant', 16)} 流动商人补给站</h2>
         <span class="panel-sub">航行钱包 <strong class="num">${run.wallet}¤</strong></span>
       </div>
 
       <div class="v2-shop-section">
-        <div class="v2-prep-label">限购设备（2 件固定货单 · 刷新不变）</div>
+        <div class="v2-prep-label">限购设备</div>
         <div class="v2-shop-offers">
           ${shop.offers
             .map((off) => {
@@ -2278,17 +2788,17 @@ export class V2AppController {
             readOnly || shop.fuelBought || run.wallet < shop.fuelPrice || run.fuel >= run.maxFuel
               ? 'disabled'
               : ''
-          }>⛽ 燃料 +${shop.fuelAmount}（${shop.fuelBought ? '已购' : `${shop.fuelPrice}¤`}）</button>
+          }>${svgIcon('fuel', 13)} 燃料 +${shop.fuelAmount}（${shop.fuelBought ? '已购' : `${shop.fuelPrice}¤`}）</button>
           <button type="button" class="btn btn-sm btn-secondary" id="v2-shop-repair" ${
             readOnly || shop.repairBought || run.wallet < shop.repairPrice || run.hp >= run.maxHp
               ? 'disabled'
               : ''
-          }>🔧 维修 +${shop.repairAmount} HP（${shop.repairBought ? '已购' : `${shop.repairPrice}¤`}）</button>
+          }>${svgIcon('wrench', 13)} 维修 +${shop.repairAmount} HP（${shop.repairBought ? '已购' : `${shop.repairPrice}¤`}）</button>
         </div>
       </div>
 
       <div class="v2-shop-section">
-        <div class="v2-prep-label">向商人变卖拾获物（按 50% 收购 · 借用/自有/任务物禁售）</div>
+        <div class="v2-prep-label">向商人变卖拾获物（80% 折价收购）</div>
         ${
           sellableLoot.length === 0
             ? `<div class="v2-empty-inline">当前舱内无拾获物可向商人出售。</div>`
@@ -2327,8 +2837,7 @@ export class V2AppController {
           this.save.profile.unlockedFamilies
         );
         if (!res.ok) return this.showToast(res.error ?? '购买失败');
-        this.save = { ...this.save, activeRun: res.run };
-        this.persist();
+        this.setCurrentRun(res.run);
         soundEngine.play('place');
         this.syncAll();
       });
@@ -2338,8 +2847,7 @@ export class V2AppController {
       if (!this.canMutate()) return;
       const res = buyV2MerchantFuel(run, `tx_fuel_${node.nodeId}`);
       if (!res.ok) return this.showToast(res.error ?? '无法购买燃料');
-      this.save = { ...this.save, activeRun: res.run };
-      this.persist();
+      this.setCurrentRun(res.run);
       soundEngine.play('click');
       this.syncAll();
     });
@@ -2348,8 +2856,7 @@ export class V2AppController {
       if (!this.canMutate()) return;
       const res = buyV2MerchantRepair(run, `tx_repair_${node.nodeId}`);
       if (!res.ok) return this.showToast(res.error ?? '无法购买维修');
-      this.save = { ...this.save, activeRun: res.run };
-      this.persist();
+      this.setCurrentRun(res.run);
       soundEngine.play('click');
       this.syncAll();
     });
@@ -2360,8 +2867,7 @@ export class V2AppController {
         const iid = btn.dataset.sellLoot!;
         const res = sellV2ItemToMerchant(run, iid, `tx_sell_${node.nodeId}_${iid}`);
         if (!res.ok) return this.showToast(res.error ?? '出售失败');
-        this.save = { ...this.save, activeRun: res.run };
-        this.persist();
+        this.setCurrentRun(res.run);
         soundEngine.play('click');
         this.syncAll();
       });
@@ -2371,35 +2877,54 @@ export class V2AppController {
       if (!this.canMutate()) return;
       const res = finishV2MerchantVisit(run);
       if (!res.ok) return this.showToast(res.error ?? '无法离开商人节点');
-      this.save = { ...this.save, activeRun: res.run };
-      this.persist();
+      this.setCurrentRun(res.run);
       soundEngine.play('click');
       this.syncAll();
     });
 
     this.mountV2CargoBay(run.bay, !readOnly, {
       title: '商人节点船舱整理',
+      getTacticalDelta: (item, zone) =>
+        computeV2PlacementTacticalDelta({
+          run,
+          bay: run.bay,
+          startingHp: run.hp,
+          maxHp: run.maxHp,
+          targetPolicy: run.targetPolicy,
+          item,
+          zone,
+        }),
       onChange: (nextBay) => {
         if (!this.canMutate()) return;
-        this.save = { ...this.save, activeRun: { ...run, bay: nextBay } };
-        this.persist();
+        this.setCurrentRun({ ...run, bay: nextBay });
         this.syncAll();
       },
     });
   }
 
-  // --- 6. REWARD Phase (Post-Combat 3-Choice Salvage) ---
+  // --- 6. REWARD Phase (Post-Combat 3-Choice Salvage with Build Motivation!) ---
 
   private renderRewardPhase(run: V2RunState): void {
     const bundle = run.pendingReward;
     if (!bundle) return;
-    const readOnly = this.isReadOnlyTab;
+    const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const eqDef = V2_EQUIPMENT_DEFS[bundle.equipmentOption.definitionId];
     const cargoDef = getAnyV2ItemDef(bundle.cargoOption.definitionId);
 
+    // Quick simulated tactical delta for the equipment option so player sees WHY taking it changes next fight!
+    const eqDelta = computeV2PlacementTacticalDelta({
+      run,
+      bay: run.bay,
+      startingHp: run.hp,
+      maxHp: run.maxHp,
+      targetPolicy: run.targetPolicy,
+      item: bundle.equipmentOption,
+      zone: 'staging',
+    });
+
     this.leftPanelEl.innerHTML = `
       <div class="panel-header">
-        <h2>✦ 战斗胜利 · 3 选 1 战利品</h2>
+        <h2>${svgIcon('star', 16)} 战斗胜利 · 3 选 1 战利品</h2>
         <span class="panel-sub">航行钱包 <strong class="num">${run.wallet}¤</strong></span>
       </div>
 
@@ -2413,9 +2938,9 @@ export class V2AppController {
       bundle.equipmentOption.quality
     }">${bundle.equipmentOption.quality === 'improved' ? '优良' : '普通'}</span></div>
             <div class="v2-reward-sub">${
-              eqDef ? `${renderV2MiniMaskHtml(eqDef.shapeId)} ${V2_SHAPES[eqDef.shapeId].label} · ${eqDef.summary}` : ''
+              eqDef ? `${renderV2MiniMaskHtml(eqDef.shapeId)} ${V2_SHAPES[eqDef.shapeId].label} · ${eqDelta.synergyLine}` : ''
             }</div>
-            <div class="v2-reward-val">回收价 ${bundle.equipmentOption.fixedValue}¤ · 返航可入库/研究</div>
+            <div class="v2-reward-val">${eqDelta.combatDeltaLine}</div>
           </div>
         </button>
 
@@ -2428,18 +2953,18 @@ export class V2AppController {
             <div class="v2-reward-sub">${
               cargoDef ? `${renderV2MiniMaskHtml(cargoDef.shapeId)} ${V2_SHAPES[cargoDef.shapeId].label} · ${cargoDef.summary}` : ''
             }</div>
-            <div class="v2-reward-val">返航售价 <strong>${bundle.cargoOption.fixedValue}¤</strong></div>
+            <div class="v2-reward-val">返航售价 <strong>+${bundle.cargoOption.fixedValue}¤</strong></div>
           </div>
         </button>
 
         <button type="button" class="v2-reward-card" data-pick-reward="repair" ${
           readOnly ? 'disabled' : ''
         }>
-          <div class="v2-reward-repair-icon">🔧</div>
+          <div class="v2-reward-repair-icon">${svgIcon('wrench', 24)}</div>
           <div class="v2-reward-info">
             <div class="v2-reward-title">战地抢修：恢复 +${bundle.repairAmount} 耐久</div>
             <div class="v2-reward-sub">当前耐久 ${run.hp}/${run.maxHp} · 不占船舱格位</div>
-            <div class="v2-reward-val">稳健推进深层的可靠选择</div>
+            <div class="v2-reward-val">保住血线继续向深层推进</div>
           </div>
         </button>
       </div>
@@ -2451,24 +2976,24 @@ export class V2AppController {
         const choice = btn.dataset.pickReward as 'equipment' | 'cargo' | 'repair';
         const res = pickV2CombatReward(run, choice, this.save.profile.unlockedFamilies);
         if (!res.ok) return this.showToast(res.error ?? '领取奖励失败');
-        this.save = { ...this.save, activeRun: res.run };
-        this.persist();
+        this.setCurrentRun(res.run);
         soundEngine.play('place');
         this.syncAll();
       });
     });
 
-    this.mountV2CargoBay(run.bay, false, { title: '当前船舱参考（规划空间）' });
+    this.mountV2CargoBay(run.bay, false, { title: '当前船舱参考', statusBadge: '参考空位' });
   }
 
-  // --- 7. ARRANGE Phase (Full Grid + Engineer Swap + Survey Scan + Discard Confirm) ---
+  // --- 7. ARRANGE Phase (Cargo Board Hero + Instant Tactical Delta + Modular Exterior!) ---
 
   private renderArrangePhase(run: V2RunState): void {
-    const readOnly = this.isReadOnlyTab;
+    const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const surveyCheck = canPerformSurveyAtCurrentNode(run);
     const terminal = isAtTerminalLayer(run);
     const hasStaging = run.bay.staging.length > 0;
-    const engOffer = run.activeEngineerOffer && !run.activeEngineerOffer.used ? run.activeEngineerOffer : null;
+    const engOffer =
+      run.activeEngineerOffer && !run.activeEngineerOffer.used ? run.activeEngineerOffer : null;
     const currentLayer = run.currentNodeId ? run.graph.nodes[run.currentNodeId]?.layer ?? 0 : 0;
     const canAbort =
       run.contract.status === 'active' &&
@@ -2476,18 +3001,27 @@ export class V2AppController {
       (!run.isTutorial || currentLayer >= 3) &&
       !isContractReadyForDelivery(run, 'safe_return');
 
+    const hasMissionInStaging = run.bay.staging.some((s) => s.item.origin === 'mission');
+    const goalLine = hasMissionInStaging
+      ? '委托大件在暂存区：请腾出对应连续格位装舱，或放弃委托带货返航'
+      : hasStaging
+      ? `暂存区还有 ${run.bay.staging.length} 件待处理，点选即可查看下一战收益差值`
+      : '船舱整理就绪 · 调整相邻位置可立即点亮联动并同步更新舰体外挂';
+
     this.leftPanelEl.innerHTML = `
       <div class="panel-header">
-        <h2>船舱整理 · 空间与联动取舍</h2>
-        <span class="panel-sub">${
-          hasStaging ? `⚠ 暂存区剩 ${run.bay.staging.length} 件待处理` : '✓ 暂存区已清空'
-        }</span>
+        <h2>${svgIcon('grid', 16)} 船舱整理</h2>
+        <span class="panel-sub">${hasStaging ? `待处理 ${run.bay.staging.length} 件` : '已清空暂存区'}</span>
+      </div>
+
+      <div class="v2-arrange-goal-strip ${hasMissionInStaging ? 'is-mission' : ''}">
+        ${goalLine}
       </div>
 
       ${
         engOffer
           ? `<div class="v2-engineer-banner">
-              <div class="v2-eng-title">🛠 改装工程师技能：将本趟首件获得设备免费改装为其他普通蓝图（每趟 1 次）</div>
+              <div class="v2-eng-title">${svgIcon('swap', 14)} 工程师现场改装（每趟 1 次）</div>
               <div class="v2-eng-btns">
                 ${engOffer.candidates
                   .map((kind) => {
@@ -2506,12 +3040,12 @@ export class V2AppController {
         surveyCheck.canSurvey
           ? `<div class="v2-survey-banner">
               <div>
-                <strong>📡 委托标定勘测点</strong>
-                <div style="font-size:12px;color:var(--text-secondary);">消耗 ${run.contract.surveyFuelCost} 燃料完成本点位测绘（已完成 ${run.contract.completedNodeIds.length}/${run.contract.requiredCompletions}）</div>
+                <strong>${svgIcon('radar', 14)} 委托勘测点</strong>
+                <div style="font-size:12px;color:var(--text-secondary);">消耗 ${run.contract.surveyFuelCost} 燃料完成测绘（${run.contract.completedNodeIds.length}/${run.contract.requiredCompletions}）</div>
               </div>
               <button type="button" class="btn btn-sm btn-primary" id="v2-btn-survey-scan" ${
                 readOnly ? 'disabled' : ''
-              }>执行勘测 (-${run.contract.surveyFuelCost} 燃料)</button>
+              }>执行勘测 (-${run.contract.surveyFuelCost} 油)</button>
             </div>`
           : ''
       }
@@ -2523,8 +3057,8 @@ export class V2AppController {
       hasStaging
         ? '请先放置或舍弃暂存区物品'
         : terminal
-        ? '⚓ 抵达终层 · 进入返航结算'
-        : '▶ 整理完毕 · 返回分支航路'
+        ? `${svgIcon('beacon', 15)} 抵达终层 · 进入返航结算`
+        : `${svgIcon('rocket', 15)} 整理完毕 · 返回航路`
     }</button>
         ${
           canAbort
@@ -2542,10 +3076,9 @@ export class V2AppController {
         const kind = btn.dataset.engSwap as V2EquipmentKind;
         const res = applyV2EngineerSwap(run, kind);
         if (!res.ok) return this.showToast(res.error ?? '改装失败');
-        this.save = { ...this.save, activeRun: res.run };
-        this.persist();
+        this.setCurrentRun(res.run);
         soundEngine.play('place');
-        this.showToast(`工程师已将设备改装为「${getV2EquipmentDefByKind(kind, 'common').name}」！`);
+        this.showToast(`工程师已改装为「${getV2EquipmentDefByKind(kind, 'common').name}」。`);
         this.syncAll();
       });
     });
@@ -2554,18 +3087,16 @@ export class V2AppController {
       if (!this.canMutate()) return;
       const res = performSurveyAtCurrentNode(run);
       if (!res.ok) return this.showToast(res.reason ?? '无法执行勘测');
-      this.save = { ...this.save, activeRun: res.run };
-      this.persist();
+      this.setCurrentRun(res.run);
       soundEngine.play('energyLink');
-      this.showToast('航迹勘测完成！进度已记录。');
+      this.showToast('航迹勘测完成！');
       this.syncAll();
     });
 
     this.leftPanelEl.querySelector('#v2-arrange-abort')?.addEventListener('click', () => {
       if (!this.canMutate()) return;
       const nextRun = abortActiveV2Contract(run);
-      this.save = { ...this.save, activeRun: nextRun };
-      this.persist();
+      this.setCurrentRun(nextRun);
       soundEngine.play('click');
       this.showToast('已放弃当前委托。');
       this.syncAll();
@@ -2575,15 +3106,11 @@ export class V2AppController {
       if (!this.canMutate()) return;
       const proceed = () => {
         const res = finishV2ArrangeAndProceed(run, terminal ? 'safe_return' : 'map');
-        if (!res.ok) {
-          this.showToast(res.error ?? '当前无法离开整理');
-          return;
-        }
-        this.save = { ...this.save, activeRun: res.run };
+        if (!res.ok) return this.showToast(res.error ?? '当前无法离开整理');
         if (res.run.phase === 'SETTLEMENT') {
           this.settlementDispositions = {};
         }
-        this.persist();
+        this.setCurrentRun(res.run);
         soundEngine.play('click');
         this.syncAll();
       };
@@ -2597,27 +3124,50 @@ export class V2AppController {
 
     this.mountV2CargoBay(run.bay, !readOnly, {
       title: `整舱拼装 · ${V2_SHIPS[run.shipId].name}`,
+      statusBadge: '可调整',
+      getTacticalDelta: (item, zone) =>
+        computeV2PlacementTacticalDelta({
+          run,
+          bay: run.bay,
+          startingHp: run.hp,
+          maxHp: run.maxHp,
+          targetPolicy: run.targetPolicy,
+          item,
+          zone,
+        }),
       onChange: (nextBay) => {
         if (!this.canMutate()) return;
-        this.save = { ...this.save, activeRun: { ...run, bay: nextBay } };
-        this.persist();
+        this.setCurrentRun({ ...run, bay: nextBay });
+        this.phaserHost?.updateV2ShipVisualSpec(deriveV2ShipVisualSpec(nextBay));
         this.syncAll();
       },
     });
   }
 
-  // --- 8. SETTLEMENT Phase (Unified Receipt + Mutually Exclusive Per-Item Disposition) ---
+  // --- 8. SETTLEMENT Phase (Next-Run Motivation + Side-by-Side Comparison + Showcase Isolation!) ---
 
-  private dispositionLabel(d: V2SettlementDisposition, fixedValue: number): string {
+  private dispositionLabel(
+    d: V2SettlementDisposition,
+    item: V2PlacedItem['item'],
+    profile: V2ProfileState
+  ): string {
     switch (d) {
       case 'deliver':
         return '交付委托';
       case 'sell':
-        return `出售 +${fixedValue}¤`;
-      case 'store':
+        return `出售 +${item.fixedValue}¤`;
+      case 'store': {
+        const eq = V2_EQUIPMENT_DEFS[item.definitionId];
+        if (eq && !profile.blueprints.includes(eq.kind)) {
+          return '入库（可研究蓝图）';
+        }
+        if (item.quality === 'improved') {
+          return '入库（下趟自带优良）';
+        }
         return '入设备库';
+      }
       case 'keep_relic':
-        return '保留藏品';
+        return '保留藏品（展台修复）';
       case 'return_loan':
         return '归还借用';
     }
@@ -2625,14 +3175,24 @@ export class V2AppController {
 
   private renderSettlementPhase(run: V2RunState): void {
     const p = this.save.profile;
-    const readOnly = this.isReadOnlyTab;
+    const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const summary = calculateV2Settlement(run, p, this.settlementDispositions);
     const isSafe = summary.reason === 'safe_return';
+    const projectedCredits = p.credits + summary.finalCreditsEarned;
+    const nextGoal = this.computeNextBaseGoal(p, projectedCredits);
 
     this.leftPanelEl.innerHTML = `
       <div class="panel-header">
-        <h2>${isSafe ? '⚓ 安全返航结算单' : '⚠ 战败紧急回收结算'}</h2>
-        <span class="panel-sub">单一口径 · 与顶部 HUD 实时同步</span>
+        <h2>${svgIcon('beacon', 16)} ${
+      run.isShowcase
+        ? '4 站精华试玩结算'
+        : isSafe
+        ? '安全返航清点'
+        : '紧急拖回结算'
+    }</h2>
+        <span class="panel-sub">${
+          run.isShowcase ? '独立试玩 · 不影响正式存档' : '每件战利品择一去向'
+        }</span>
       </div>
 
       ${
@@ -2641,15 +3201,15 @@ export class V2AppController {
               <strong>${
                 summary.contractCompleted
                   ? run.isTutorial
-                    ? '✦ 首航教学大件交付成功！免费启用工作台与委托终端'
-                    : `✦ 委托「${run.contract.name}」交付成功！`
+                    ? '首航教学交付成功！免费启用工作台并获得额外悬赏'
+                    : `委托「${run.contract.name}」交付完成！`
                   : run.contract.type === 'free'
                   ? '自由打捞安全返航'
                   : `委托「${run.contract.name}」未完成（无信用点罚金）`
               }</strong>
             </div>`
           : `<div class="system-banner banner-danger" style="margin-bottom:8px;">
-              舰体损毁由拖船拖回。按规则折算 40%（含钱包与非借用物估价），本次携带的 ${summary.lostOwnedCount} 件自有设备与 ${summary.lostLootCount} 件拾获物已损失；<strong>基地设备库原有库存不受影响</strong>。
+              舰体损毁由拖船拖回。按规则折算 40% 回收，本次带出的 ${summary.lostOwnedCount} 件自有设备与 ${summary.lostLootCount} 件拾获物已损失；基地仓库原有库存不受影响。
             </div>`
       }
 
@@ -2658,20 +3218,24 @@ export class V2AppController {
         ${
           isSafe
             ? `
-              <div class="v2-mig-row"><span>本次出售物品收益</span><strong class="num">+${summary.soldItemsCredits}¤</strong></div>
+              <div class="v2-mig-row"><span>出售物品收益</span><strong class="num">+${summary.soldItemsCredits}¤</strong></div>
               ${
                 summary.contractRewardCredits > 0
-                  ? `<div class="v2-mig-row"><span>委托交付奖金</span><strong class="num">+${summary.contractRewardCredits}¤</strong></div>`
+                  ? `<div class="v2-mig-row"><span>委托悬赏奖金</span><strong class="num">+${summary.contractRewardCredits}¤</strong></div>`
                   : ''
               }
               ${
                 summary.tutorialBonusCredits > 0
-                  ? `<div class="v2-mig-row"><span>首航教学交付奖励</span><strong class="num">+${summary.tutorialBonusCredits}¤</strong></div>`
+                  ? `<div class="v2-mig-row"><span>首航交付奖励</span><strong class="num">+${summary.tutorialBonusCredits}¤</strong></div>`
                   : ''
               }
-              <div class="v2-mig-row"><span>入库后设备库容量</span><strong class="num ${
-                summary.warehouseOverflow ? 'text-danger' : ''
-              }">${summary.warehouseProjectedCount}/${V2_WAREHOUSE_CAPACITY}</strong></div>
+              ${
+                !run.isShowcase
+                  ? `<div class="v2-mig-row"><span>入库后仓库容量</span><strong class="num ${
+                      summary.warehouseOverflow ? 'text-danger' : ''
+                    }">${summary.warehouseProjectedCount}/${V2_WAREHOUSE_CAPACITY}</strong></div>`
+                  : ''
+              }
             `
             : `<div class="v2-mig-row"><span>可回收总额 × 40%</span><strong class="num">${summary.defeatRecoverableBase} × 40%</strong></div>`
         }
@@ -2679,15 +3243,24 @@ export class V2AppController {
       </div>
 
       ${
-        summary.warehouseOverflow
+        !run.isShowcase
+          ? `<div class="v2-settle-goal-hint ${nextGoal.ready ? 'is-ready' : ''}">
+              <span>下一基地目标：<strong>${nextGoal.title}</strong></span>
+              <small>${nextGoal.detail}</small>
+            </div>`
+          : ''
+      }
+
+      ${
+        summary.warehouseOverflow && !run.isShowcase
           ? `<div class="system-banner banner-danger" style="margin:8px 0;">
-              设备库容量超出上限（${summary.warehouseProjectedCount}/${V2_WAREHOUSE_CAPACITY}），请将下方部分「入设备库」改为「出售」后再确认入账。
+              设备库容量超出上限（${summary.warehouseProjectedCount}/${V2_WAREHOUSE_CAPACITY}），请将部分「入库」改为「出售」。
             </div>`
           : ''
       }
 
       <div class="v2-settle-items">
-        <div class="v2-prep-label">舱内物品去向清点（每件互斥择一）</div>
+        <div class="v2-prep-label">战利品去向对比（变现 vs 留用推进下趟）</div>
         ${
           summary.lines.length === 0
             ? `<div class="v2-empty-inline">本次船舱为空。</div>`
@@ -2714,7 +3287,7 @@ export class V2AppController {
                             line.selectedDisposition === d ? 'btn-primary' : 'btn-secondary'
                           }" data-settle-item="${line.item.instanceId}" data-settle-disp="${d}" ${
                             readOnly || line.allowedDispositions.length <= 1 ? 'disabled' : ''
-                          }>${this.dispositionLabel(d, line.item.fixedValue)}</button>`
+                          }>${this.dispositionLabel(d, line.item, p)}</button>`
                         )
                         .join('')}
                     </div>
@@ -2724,9 +3297,16 @@ export class V2AppController {
         }
       </div>
 
-      <button type="button" class="btn btn-primary btn-launch-hero" id="v2-btn-confirm-settle" ${
-        readOnly || summary.warehouseOverflow ? 'disabled' : ''
-      }>${readOnly ? '只读锁定' : '▶ 确认入账 · 返回拆解站'}</button>
+      ${
+        run.isShowcase
+          ? `<div class="v2-showcase-finish-actions">
+              <button type="button" class="btn btn-secondary" id="v2-showcase-retry">${svgIcon('bolt', 14)} 换套流派再试一次</button>
+              <button type="button" class="btn btn-primary btn-launch-hero" id="v2-showcase-to-base">${svgIcon('rocket', 15)} 进入正式拆解站</button>
+            </div>`
+          : `<button type="button" class="btn btn-primary btn-launch-hero" id="v2-btn-confirm-settle" ${
+              readOnly || summary.warehouseOverflow ? 'disabled' : ''
+            }>${readOnly ? '只读锁定' : `${svgIcon('beacon', 15)} 确认入账 · 靠泊拆解站`}</button>`
+      }
     `;
 
     this.leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-settle-item]').forEach((btn) => {
@@ -2739,6 +3319,18 @@ export class V2AppController {
         this.renderTopHud();
         this.renderSettlementPhase(run);
       });
+    });
+
+    this.leftPanelEl.querySelector('#v2-showcase-retry')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      openV2ShowcasePickerModal(this.modalHostEl, (tid) => this.startShowcaseRun(tid));
+    });
+
+    this.leftPanelEl.querySelector('#v2-showcase-to-base')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      this.showcaseRun = null;
+      this.settlementDispositions = {};
+      this.syncAll();
     });
 
     this.leftPanelEl.querySelector('#v2-btn-confirm-settle')?.addEventListener('click', () => {
@@ -2756,7 +3348,6 @@ export class V2AppController {
         return;
       }
 
-      // Authoritative payout & persistence strictly BEFORE visual docking playback!
       this.save = {
         ...this.save,
         profile: result.profile,
@@ -2768,8 +3359,8 @@ export class V2AppController {
       soundEngine.play(result.summary.contractCompleted ? 'contractDeliver' : 'returnDock');
 
       const unlockedParts = [
-        result.unlockedFamilyName ? `解锁设备体系：${result.unlockedFamilyName}` : null,
-        result.unlockedCrewName ? `解锁船员：${result.unlockedCrewName}` : null,
+        result.unlockedFamilyName ? `解锁体系：${result.unlockedFamilyName}` : null,
+        result.unlockedCrewName ? `新船员加入：${result.unlockedCrewName}` : null,
       ].filter(Boolean);
 
       const reduced = this.save.settings.reducedMotion;
@@ -2798,14 +3389,14 @@ export class V2AppController {
             if (this.activeDockingNotice !== notice) return;
             notice.progress = prog;
             this.renderTopHud();
-            this.renderBaseSceneOverlay();
+            this.renderBaseHeroOverlay();
           },
           onFinish: () => {
             if (this.activeDockingNotice !== notice) return;
             notice.animating = false;
             notice.progress = 1;
             this.renderTopHud();
-            this.renderBaseSceneOverlay();
+            this.renderBaseHeroOverlay();
           },
         });
       }
@@ -2813,6 +3404,7 @@ export class V2AppController {
 
     this.mountV2CargoBay(run.bay, false, {
       title: isSafe ? '返航船舱清点' : '战败前最终布局',
+      statusBadge: '结算清点',
     });
   }
 
@@ -2823,7 +3415,12 @@ export class V2AppController {
     editable: boolean,
     opts: {
       readonly title: string;
+      readonly statusBadge?: string;
       readonly prepareMode?: boolean;
+      readonly getTacticalDelta?: (
+        item: V2PlacedItem['item'],
+        zone: 'grid' | 'staging'
+      ) => ReturnType<typeof computeV2PlacementTacticalDelta> | null;
       readonly onChange?: (nextBay: V2CargoBayState) => void;
       readonly onPrepareRemove?: (instanceId: string) => void;
     }
@@ -2831,7 +3428,7 @@ export class V2AppController {
     this.rightPanelEl.innerHTML = `
       <div class="panel-header">
         <h2>${opts.title}</h2>
-        <span class="panel-sub">${editable ? '可编辑' : '只读预览'}</span>
+        <span class="panel-sub">${opts.statusBadge ?? (editable ? '可调整' : '当前配置')}</span>
       </div>
       <div class="cargo-mount-root" id="v2-cargo-mount"></div>
     `;
@@ -2840,11 +3437,37 @@ export class V2AppController {
     this.cargoGrid = new CargoGridV2Component(mount, {
       onBayChange: (nextBay) => opts.onChange?.(nextBay),
       onPrepareRemoveItem: (id) => opts.onPrepareRemove?.(id),
+      getTacticalDelta: opts.getTacticalDelta,
     });
     this.cargoGrid.render(bay, editable, { prepareMode: opts.prepareMode });
   }
 
   // --- Modal Launchers ---
+
+  private openFacilitiesModal(): void {
+    openV2FacilitiesDrawerModal(this.modalHostEl, () => this.save.profile, {
+      readOnly: this.isReadOnlyTab,
+      onBuild: (fid: V2FacilityId) => {
+        if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
+          return { ok: false, error: '当前窗口为只读状态' };
+        }
+        const res = purchaseV2Facility(this.save.profile, fid);
+        if (res.ok) {
+          this.save = { ...this.save, profile: res.profile };
+          this.recentlyBuiltPin =
+            fid === 'display'
+              ? 'display'
+              : fid === 'drydock' || fid === 'drydock_tier2'
+              ? 'drydock'
+              : 'workbench';
+          this.persist();
+          soundEngine.play('buildComplete');
+          this.syncAll();
+        }
+        return res;
+      },
+    });
+  }
 
   private openSettingsModal(): void {
     openV2SettingsModal(this.modalHostEl, this.save.settings, {
@@ -2861,11 +3484,12 @@ export class V2AppController {
         if (!this.canMutate()) return;
         clearV2SaveData(window.localStorage);
         this.save = createFreshV2SaveData();
+        this.showcaseRun = null;
         this.prepareDraft = null;
         this.activeDockingNotice = null;
         this.persist();
         soundEngine.play('click');
-        this.showToast('V2 存档已重置（旧版 V1 存档不受影响）。');
+        this.showToast('远航进度已重置（经典版旧档不受影响）。');
         this.syncAll();
       },
     });
@@ -2877,7 +3501,7 @@ export class V2AppController {
       initialTab,
       onResearch: (instanceId) => {
         if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
-          return { ok: false, error: '当前标签页为只读模式' };
+          return { ok: false, error: '当前窗口为只读状态' };
         }
         const res = researchV2Equipment(this.save.profile, instanceId);
         if (res.ok) {
@@ -2890,7 +3514,7 @@ export class V2AppController {
       },
       onCraft: (kind) => {
         if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
-          return { ok: false, error: '当前标签页为只读模式' };
+          return { ok: false, error: '当前窗口为只读状态' };
         }
         const res = craftV2CommonEquipment(this.save.profile, kind);
         if (res.ok) {
@@ -2903,7 +3527,7 @@ export class V2AppController {
       },
       onSellItem: (instanceId) => {
         if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
-          return { ok: false, error: '当前标签页为只读模式' };
+          return { ok: false, error: '当前窗口为只读状态' };
         }
         const res = sellV2WarehouseItem(this.save.profile, instanceId);
         if (res.ok) {
@@ -2916,7 +3540,7 @@ export class V2AppController {
       },
       onClaimGift: (instanceId) => {
         if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
-          return { ok: false, error: '当前标签页为只读模式' };
+          return { ok: false, error: '当前窗口为只读状态' };
         }
         const res = claimV2PendingGiftToWarehouse(this.save.profile, instanceId);
         if (res.ok) {
@@ -2929,7 +3553,7 @@ export class V2AppController {
       },
       onSellGift: (instanceId) => {
         if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
-          return { ok: false, error: '当前标签页为只读模式' };
+          return { ok: false, error: '当前窗口为只读状态' };
         }
         const res = sellV2PendingGift(this.save.profile, instanceId);
         if (res.ok) {
@@ -2948,14 +3572,14 @@ export class V2AppController {
       readOnly: this.isReadOnlyTab,
       onRestore: (relicId) => {
         if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
-          return { ok: false, error: '当前标签页为只读模式' };
+          return { ok: false, error: '当前窗口为只读状态' };
         }
         const res = restoreV2Relic(this.save.profile, relicId);
         if (res.ok) {
           this.save = { ...this.save, profile: res.profile };
           this.recentlyBuiltPin = 'display';
           this.persist();
-          soundEngine.play('relicRestore');
+          soundEngine.play('buildComplete');
           this.syncAll();
         }
         return res;
@@ -2969,27 +3593,29 @@ export class V2AppController {
       onContinueV1: () => {
         this.options.onSwitchToV1();
       },
+      onConfirmMigrate: () => {
+        if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
+          this.showToast('当前窗口为只读状态，请先接管控制权再导入。');
+          return;
+        }
+        if (!this.v1Inspection.v1Save) {
+          this.showToast('旧档数据无效，无法导入');
+          return;
+        }
+        const migrated = migrateV1ToV2SaveData(this.v1Inspection.v1Save);
+        this.save = migrated;
+        this.migrationPromptDismissed = true;
+        this.persist();
+        soundEngine.play('contractDeliver');
+        this.showToast(
+          `导入完成！已结转 ${migrated.profile.credits}¤ 并完整保留藏品馆进度（经典旧档未受影响）。`
+        );
+        this.syncAll();
+      },
       onStartFreshV2: () => {
         this.migrationPromptDismissed = true;
         this.syncAll();
       },
-      onConfirmMigrate: () => {
-        if (this.isReadOnlyTab || !this.tabGuard.canWrite()) return;
-        if (!this.v1Inspection.v1Save) return;
-        const migrated = migrateV1ToV2SaveData(this.v1Inspection.v1Save, this.save);
-        this.save = migrated;
-        this.prepareDraft = null;
-        this.persist();
-        soundEngine.play('contractDeliver');
-        this.showToast(
-          `V1 存档迁移完成！当前 V2 信用点 ${migrated.profile.credits}¤（旧版 starline_save_v1 原样保留）。`
-        );
-        this.syncAll();
-      },
     });
   }
-}
-
-export function createEmptyV2BayForDebug(shipId: V2ShipId): V2CargoBayState {
-  return createEmptyV2Bay(shipId);
 }

@@ -98,3 +98,15 @@ export function getBaseLayerImageUrl(
   if (layer === 'worn') return assetUrl('base/station_worn.webp');
   return assetUrl(`base/overlay_${layer}.webp`);
 }
+
+export type V2ShipModuleArtKey =
+  | 'laser_turret'
+  | 'heavy_railgun'
+  | 'drone_bay'
+  | 'counter_ring'
+  | 'cargo_rack';
+
+export function getShipModuleImageUrl(mod: V2ShipModuleArtKey): string {
+  return assetUrl(`modules/mod_${mod}.webp`);
+}
+

@@ -261,6 +261,18 @@ export class PhaserHost {
     }
   }
 
+  updateV2ShipVisualSpec(spec: import('../v2/domain/shipVisualSpec').V2ShipVisualSpec | null): void {
+    if (this.ready && this.game.scene.isActive('V2CombatScene')) {
+      this.v2CombatScene.updateShipVisualSpec(spec);
+    }
+  }
+
+  triggerV2WreckCutFx(normX: number, normY: number): void {
+    if (this.ready && this.game.scene.isActive('V2CombatScene')) {
+      this.v2CombatScene.triggerWreckCutFx(normX, normY);
+    }
+  }
+
   playBaseReturnDocking(playback: ReturnDockingPlayback): void {
     this.baseScene.startReturnDocking(playback);
   }
