@@ -1,14 +1,18 @@
 import {
+  V2_ALL_FORMAL_CONTRACT_TYPES,
   V2_CONTRACT_TEMPLATES,
   V2_CORE_CONTRACT_TYPES,
   type V2ContractTemplate,
 } from '../data/contracts';
-import { removeV2ItemsByOriginAndDef } from './inventoryV2';
+import { addV2ItemToStaging, removeV2ItemsByOriginAndDef } from './inventoryV2';
+import { createV2CargoInstance } from './itemCatalog';
 import type {
   V2CargoBayState,
   V2ContractInstance,
+  V2MapNode,
   V2ProfileState,
   V2RunState,
+  V3RunBonusObjective,
 } from './types';
 
 export function isDeepTierUnlocked(profile: V2ProfileState): boolean {
@@ -34,8 +38,10 @@ export interface V2LockedContractEntry {
 }
 
 /**
- * Returns the V2 contract board: always one template per core type (transport/rescue/survey)
- * plus free salvage, and ALWAYS returns all 3 deep-tier templates with lock status & reason (§4.2).
+ * Returns the V3 contract board:
+ * - 5 standard templates (transport / rescue / survey / bounty / derelict)
+ * - 3 deep-tier templates with lock status & reason (transport_deep / rescue_deep / survey_deep)
+ * - free_salvage template
  */
 export function getAvailableContractBoard(profile: V2ProfileState): {
   readonly standardTemplates: readonly V2ContractTemplate[];
@@ -47,12 +53,12 @@ export function getAvailableContractBoard(profile: V2ProfileState): {
 } {
   const deepUnlocked = isDeepTierUnlocked(profile);
   const deepLockReason = getDeepTierLockReason(profile);
-  const standardTemplates = V2_CORE_CONTRACT_TYPES.map(
+  const standardTemplates = V2_ALL_FORMAL_CONTRACT_TYPES.map(
     (type) => V2_CONTRACT_TEMPLATES[`${type}_std`]
-  );
+  ).filter((tpl): tpl is V2ContractTemplate => Boolean(tpl));
   const deepTemplates = V2_CORE_CONTRACT_TYPES.map(
     (type) => V2_CONTRACT_TEMPLATES[`${type}_deep`]
-  );
+  ).filter((tpl): tpl is V2ContractTemplate => Boolean(tpl));
   const deepEntries: V2LockedContractEntry[] = deepTemplates.map((template) => ({
     template,
     locked: !deepUnlocked,
@@ -68,12 +74,124 @@ export function getAvailableContractBoard(profile: V2ProfileState): {
   };
 }
 
+interface BonusObjectiveSpec {
+  readonly id: string;
+  readonly label: string;
+}
+
+const BONUS_OBJECTIVE_POOL: readonly BonusObjectiveSpec[] = [
+  { id: 'bonus_high_hp', label: '返航时船体耐久 ≥ 60%' },
+  { id: 'bonus_no_discard', label: '全程不丢弃任何物资' },
+  { id: 'bonus_fuel_reserve', label: '返航时保留至少 3 点燃料' },
+  { id: 'bonus_deep_dive', label: '至少推进至目标深层并安全返航' },
+];
+
+/**
+ * Deterministically generates an Optional Bonus Objective (+30% credits) for formal contracts.
+ * Returns undefined for free salvage contracts.
+ */
+export function generateContractBonusObjective(
+  tpl: V2ContractTemplate,
+  seed: number
+): V3RunBonusObjective | undefined {
+  if (tpl.type === 'free' || tpl.rewardCredits <= 0) return undefined;
+  const rewardCredits = Math.max(10, Math.round(tpl.rewardCredits * 0.3));
+  let hash = (seed >>> 0) ^ 0x9e3779b9;
+  for (let i = 0; i < tpl.templateId.length; i++) {
+    hash = Math.imul(hash ^ tpl.templateId.charCodeAt(i), 0x85ebca6b) >>> 0;
+  }
+  const picked = BONUS_OBJECTIVE_POOL[hash % BONUS_OBJECTIVE_POOL.length];
+  return {
+    id: picked.id,
+    label: picked.label,
+    completed: false,
+    rewardCredits,
+  };
+}
+
+export function previewContractBonusHint(tpl: V2ContractTemplate): {
+  readonly label: string;
+  readonly rewardCredits: number;
+} | null {
+  if (tpl.type === 'free' || tpl.rewardCredits <= 0) return null;
+  const rewardCredits = Math.max(10, Math.round(tpl.rewardCredits * 0.3));
+  const labelByType: Record<string, string> = {
+    transport: '返航时船体 ≥ 60% 或全程零舍弃',
+    rescue: '保留余油 ≥ 3 或船体 ≥ 60%',
+    survey: '全程零舍弃或深层勘测返航',
+    bounty: '返航时船体 ≥ 60% 或全程零舍弃',
+    derelict: '全程零舍弃或船体 ≥ 60% 返航',
+  };
+  return {
+    label: labelByType[tpl.type] ?? '满足附加战术条件',
+    rewardCredits,
+  };
+}
+
+/**
+ * Live evaluator for run bonus objectives (used for Map/Arrange status tracker AND frozen on transition to SETTLEMENT).
+ */
+export function evaluateRunBonusObjective(
+  run: V2RunState,
+  reason: 'safe_return' | 'defeat' = 'safe_return'
+): boolean {
+  const bonus = run.bonusObjective ?? run.contract.bonusObjective;
+  if (!bonus) return false;
+  if (reason === 'defeat' || run.hp <= 0) return false;
+
+  switch (bonus.id) {
+    case 'bonus_high_hp':
+    case 'bonus_hp_60':
+      return run.hp >= Math.ceil(run.maxHp * 0.6);
+    case 'bonus_no_discard':
+      return (run.discardedCountThisRun ?? 0) === 0 && run.bay.discardedThisArrange.length === 0;
+    case 'bonus_fuel_reserve':
+      return run.fuel >= 3;
+    case 'bonus_deep_dive': {
+      let maxLayer = 0;
+      for (const nid of run.visitedNodeIds) {
+        const ly = run.graph.nodes[nid]?.layer ?? 0;
+        if (ly > maxLayer) maxLayer = ly;
+      }
+      const targetLayer = run.contract.targetLayer ?? (run.contract.tier === 'deep' ? 5 : 4);
+      return maxLayer >= targetLayer;
+    }
+    default:
+      return bonus.completed;
+  }
+}
+
+/**
+ * Evaluates and freezes `bonusObjective.completed` ONLY when transitioning into SETTLEMENT.
+ * Preserves seeded SETTLEMENT fixtures by never being called inside calculateV2Settlement!
+ */
+export function freezeRunBonusObjectiveForSettlement(
+  run: V2RunState,
+  reason: 'safe_return' | 'defeat'
+): V2RunState {
+  const bonus = run.bonusObjective ?? run.contract.bonusObjective;
+  if (!bonus) return run;
+  const completed = evaluateRunBonusObjective(run, reason);
+  const frozen: V3RunBonusObjective = { ...bonus, completed };
+  return {
+    ...run,
+    bonusObjective: frozen,
+    contract: {
+      ...run.contract,
+      bonusObjective: frozen,
+    },
+  };
+}
+
 export function createV2ContractInstance(
   templateId: string,
   markedNodeIds: readonly string[],
-  runId: string
+  runId: string,
+  bonusObjective?: V3RunBonusObjective
 ): V2ContractInstance {
   const tpl = V2_CONTRACT_TEMPLATES[templateId] ?? V2_CONTRACT_TEMPLATES.free_salvage;
+  const targetLayer =
+    tpl.targetLayers.length > 0 ? tpl.targetLayers[tpl.targetLayers.length - 1] : undefined;
   return {
     contractId: `ct_${runId}_${tpl.templateId}`,
     templateId: tpl.templateId,
@@ -87,8 +205,70 @@ export function createV2ContractInstance(
     missionItemDefId: tpl.missionItemDefId,
     missionItemCount: tpl.missionItemCount ?? 0,
     surveyFuelCost: tpl.surveyFuelCost ?? 0,
+    ...(tpl.factionId ? { factionId: tpl.factionId } : {}),
+    ...(tpl.factionRepReward !== undefined ? { factionRepReward: tpl.factionRepReward } : {}),
+    ...(targetLayer !== undefined ? { targetLayer } : {}),
+    ...(bonusObjective ? { bonusObjective } : {}),
     status: 'active',
     rewardClaimed: false,
+  };
+}
+
+/**
+ * Grants contract objective items (transport / rescue / derelict) or records bounty target kills.
+ * Guaranteed idempotent via `claimedEventIds`.
+ */
+export function grantContractObjectiveItemsForNode(run: V2RunState, node: V2MapNode): V2RunState {
+  if (!node.contractMarker) return run;
+  const c = run.contract;
+  if (c.status !== 'active') return run;
+
+  if (c.type === 'bounty') {
+    if (
+      (node.type === 'combat' || node.type === 'elite' || node.type === 'boss') &&
+      node.resolved &&
+      !c.completedNodeIds.includes(node.nodeId)
+    ) {
+      return {
+        ...run,
+        contract: {
+          ...c,
+          completedNodeIds: [...c.completedNodeIds, node.nodeId],
+        },
+      };
+    }
+    return run;
+  }
+
+  if (c.type !== 'transport' && c.type !== 'rescue' && c.type !== 'derelict') return run;
+  if (!c.missionItemDefId || c.missionItemCount <= 0) return run;
+
+  const claimKey = `mission_grant_${node.nodeId}`;
+  if (run.claimedEventIds.includes(claimKey)) return run;
+
+  let nextBay = run.bay;
+  for (let i = 0; i < c.missionItemCount; i++) {
+    const item = createV2CargoInstance({
+      instanceId: `${run.runId}_mis_${node.nodeId}_${i + 1}`,
+      defId: c.missionItemDefId,
+      origin: 'mission',
+      acquiredDepth: node.layer,
+      location: 'staging',
+      missionBinding: c.contractId,
+    });
+    nextBay = addV2ItemToStaging(nextBay, item, 0);
+  }
+
+  return {
+    ...run,
+    bay: nextBay,
+    claimedEventIds: [...run.claimedEventIds, claimKey],
+    contract: {
+      ...c,
+      completedNodeIds: c.completedNodeIds.includes(node.nodeId)
+        ? c.completedNodeIds
+        : [...c.completedNodeIds, node.nodeId],
+    },
   };
 }
 
@@ -141,7 +321,7 @@ export function computeV2JumpFuelCost(run: V2RunState): {
 }
 
 /**
- * Checks whether the run's contract satisfies all delivery conditions upon safe return (§4.2).
+ * Checks whether the run's contract satisfies all delivery conditions upon safe return (§4.2 + F13).
  * Never satisfied on defeat or after explicit abort!
  */
 export function isContractReadyForDelivery(
@@ -173,8 +353,18 @@ export function isContractReadyForDelivery(
     return pods.length >= c.missionItemCount;
   }
 
-  if (c.type === 'survey') {
+  if (c.type === 'survey' || c.type === 'bounty') {
     return c.completedNodeIds.length >= c.requiredCompletions;
+  }
+
+  if (c.type === 'derelict') {
+    const boxes = run.bay.placed.filter(
+      (p) =>
+        p.item.definitionId === 'mission.black_box' &&
+        p.item.origin === 'mission' &&
+        (!p.item.missionBinding || p.item.missionBinding === c.contractId)
+    );
+    return boxes.length >= Math.max(1, c.missionItemCount);
   }
 
   return false;
@@ -183,7 +373,7 @@ export function isContractReadyForDelivery(
 /**
  * Voluntarily aborts the active contract (§4.1 & §4.2):
  * - Marks contract status = 'aborted' (zero penalty to base credits)
- * - Removes bound mission cargo (escape pods transferred cleanly via rescue beacon, reactor released)
+ * - Removes bound mission cargo (escape pods transferred cleanly via rescue beacon, reactor/black box released)
  */
 export function abortActiveV2Contract(run: V2RunState): V2RunState {
   if (run.contract.type === 'free' || run.contract.status !== 'active') {

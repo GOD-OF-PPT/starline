@@ -844,7 +844,7 @@ export class CargoGridV2Component {
     const eqDef = sel.item.category === 'equipment' ? V2_EQUIPMENT_DEFS[sel.item.definitionId] : undefined;
 
     const deltaHtml = delta
-      ? `<div class="v2-delta-strip ${delta.positiveImpact ? 'positive' : ''}">
+      ? `<div class="v2-delta-strip ${delta.positiveImpact ? 'positive' : ''}" data-testid="tactical-delta">
           <div class="v2-delta-row"><span class="v2-delta-k">联动</span><span>${delta.synergyLine}</span></div>
           <div class="v2-delta-row"><span class="v2-delta-k">收益</span><strong>${delta.combatDeltaLine}</strong></div>
           <div class="v2-delta-row"><span class="v2-delta-k">舱位</span><span>${delta.spaceLine}</span></div>

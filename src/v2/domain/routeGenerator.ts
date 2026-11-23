@@ -31,6 +31,7 @@ import {
   type V2CombatPayload,
   type V2ContractInstance,
   type V2DistressPayload,
+  type V2EventState,
   type V2ItemInstance,
   type V2MapNode,
   type V2MerchantPayload,
@@ -222,6 +223,15 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
           layerAssignments[gId] = eliteOnG ? 'elite' : nonCombatType;
           layerAssignments[oId] = eliteOnG ? nonCombatType : 'elite';
         }
+      } else if (tpl.type === 'bounty' && contractMarkers.has(gId)) {
+        // Bounty contract marker: combat target on guaranteed path, non-combat/merchant on sibling lane
+        layerAssignments[gId] = 'combat';
+        layerAssignments[oId] =
+          layer === merchantLayer ? 'merchant' : rng.pick(nonCombatPool);
+      } else if (tpl.type === 'derelict' && contractMarkers.has(gId)) {
+        // Derelict extraction contract marker: wreck target on guaranteed path, merchant/combat on sibling lane
+        layerAssignments[gId] = 'wreck';
+        layerAssignments[oId] = layer === merchantLayer ? 'merchant' : 'combat';
       } else if (layer === merchantLayer) {
         // Guaranteed reachable merchant in Layers 2..4
         const merchantOnG = !contractMarkers.has(gId) && rng.nextInt(3) !== 0;
@@ -360,6 +370,7 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
       let merchant: V2MerchantPayload | undefined;
       let anomaly: V2AnomalyPayload | undefined;
       let distress: V2DistressPayload | undefined;
+      let eventState: V2EventState | undefined;
       let bossId: string | undefined;
       let eventId: string | undefined;
 
@@ -500,6 +511,8 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
             nextUid,
             guaranteedRelicDefId: isRelicSignalNode ? guaranteedRelicDefId : null,
             cargoPriceMult: sector.cargoPriceMult,
+            unlockedFamilies: params.unlockedFamilies,
+            nodeId,
           })
         );
         eventId = res.value.eventId;
@@ -508,6 +521,7 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
         }
         anomaly = res.value.anomaly;
         distress = res.value.distress;
+        eventState = res.value.eventState;
         streams = res.nextStreams;
       }
 
@@ -530,6 +544,7 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
         merchant,
         anomaly,
         distress,
+        ...(eventState ? { eventState } : {}),
         resolved: false,
       };
     }

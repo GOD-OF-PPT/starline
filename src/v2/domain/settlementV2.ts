@@ -1,4 +1,5 @@
 import type { RelicProgress } from '../../domain/progression';
+import { V2_CONTRACT_TEMPLATES } from '../data/contracts';
 import { V2_CREW, type V2CrewId } from '../data/crew';
 import {
   V2_CONTRACT_FAMILY_UNLOCK_ORDER,
@@ -8,17 +9,25 @@ import {
 import { V2_TUTORIAL_SUCCESS_BONUS } from '../data/facilities';
 import { advanceCampaignAfterRun } from './campaign';
 import { isContractReadyForDelivery } from './contracts';
+import { canDismantleV2Item, getDismantleSalvagePartsYield } from './dismantle';
+import {
+  addFactionRep,
+  getGuildContractBonusCredits,
+  getSurveyInstituteBonusParts,
+} from './factions';
 import { createV2EquipmentInstance, getAnyV2ItemDef } from './itemCatalog';
+import { V3_MAX_RUN_HISTORY } from './persistenceV2';
 import type {
   CampaignActId,
+  FactionId,
   SectorId,
   V2ItemInstance,
   V2ProfileState,
   V2RunState,
   V2SettlementDisposition,
+  V3RunBonusObjective,
   V3RunHistoryEntry,
 } from './types';
-import { V3_MAX_RUN_HISTORY } from './persistenceV2';
 
 export interface V2SettlementItemLine {
   readonly item: V2ItemInstance;
@@ -26,6 +35,7 @@ export interface V2SettlementItemLine {
   readonly allowedDispositions: readonly V2SettlementDisposition[];
   readonly selectedDisposition: V2SettlementDisposition;
   readonly creditsPayout: number;
+  readonly partsPayout?: number;
   readonly relicId?: string;
 }
 
@@ -38,6 +48,20 @@ export interface V2SettlementSummary {
   readonly soldItemsCredits: number;
   /** Optional Salvager Mastery T1+ cargo appraisal bonus credits (0 at Tier 0) */
   readonly crewMasteryBonusCredits?: number;
+  /** Optional Bonus Objective state & credits paid (F13) */
+  readonly bonusObjective?: V3RunBonusObjective | null;
+  readonly bonusObjectiveCredits: number;
+  /** Starport Guild Lv3 +10% guild contract bonus credits (0 at Lv1/Lv2) */
+  readonly factionContractBonusCredits?: number;
+  /** Salvage Parts earned from wreck dissection & expedition events/perks */
+  readonly runSalvagePartsEarned: number;
+  /** Salvage Parts earned from items dismantled at Settlement */
+  readonly dismantledPartsEarned: number;
+  /** Total Salvage Parts credited to profile on settlement confirmation */
+  readonly totalSalvagePartsEarned: number;
+  readonly dismantledItemsCount: number;
+  /** Faction reputation deltas credited on settlement confirmation */
+  readonly factionRepGains?: Partial<Record<FactionId, number>>;
   /** Defeat 40% recoverable total before 0.4 floor */
   readonly defeatRecoverableBase: number;
   /** Exact final delta added to profile.credits (single source of truth for HUD & receipt, AC13!) */
@@ -75,7 +99,7 @@ export function getDefaultDispositionForItem(
       }
     }
   }
-  return 'sell'; // Loot cargo & loot equipment default to sell
+  return 'sell'; // Loot cargo & loot equipment default to sell (NEVER 'dismantle'!)
 }
 
 export function getAllowedDispositionsForItem(
@@ -88,28 +112,34 @@ export function getAllowedDispositionsForItem(
     return [getDefaultDispositionForItem(item, reason, false)];
   }
   if (item.origin === 'loan') return ['return_loan'];
-  if (item.origin === 'mission') return [contractCompleted ? 'deliver' : 'return_loan'];
+  if (item.origin === 'mission' || item.category === 'mission') {
+    return [contractCompleted ? 'deliver' : 'return_loan'];
+  }
 
   const def = getAnyV2ItemDef(item.definitionId);
+  const canDismantle = canDismantleV2Item(item).ok;
+
   if (item.category === 'equipment') {
     if (item.origin === 'owned') {
-      // Owned base equipment can always return to warehouse or be sold (§10.3)
-      return ['store', 'sell'];
+      return canDismantle ? ['store', 'sell', 'dismantle'] : ['store', 'sell'];
     }
-    // Loot equipment can be stored in warehouse once Research Lab is built (or sold)
-    return profile.buildings.research_lab ? ['sell', 'store'] : ['sell'];
+    if (profile.buildings.research_lab) {
+      return canDismantle ? ['sell', 'store', 'dismantle'] : ['sell', 'store'];
+    }
+    return canDismantle ? ['sell', 'dismantle'] : ['sell'];
   }
 
   // Cargo
   if (def?.isCollectible && def.relicId) {
     return ['sell', 'keep_relic'];
   }
-  return ['sell'];
+  return canDismantle ? ['sell', 'dismantle'] : ['sell'];
 }
 
 /**
- * Single authoritative settlement calculator (§10.3, §10.5, AC13, AC14).
- * Enforces strict mutual exclusivity: EVERY item has exactly ONE disposition (deliver / sell / store / keep_relic / return_loan).
+ * Single authoritative settlement calculator (§10.3, §10.5, AC13, AC14, F11, F13).
+ * Enforces strict mutual exclusivity: EVERY item has exactly ONE disposition
+ * (deliver / sell / store / dismantle / keep_relic / return_loan).
  */
 export function calculateV2Settlement(
   run: V2RunState,
@@ -118,6 +148,7 @@ export function calculateV2Settlement(
 ): V2SettlementSummary {
   const reason = run.settlementReason ?? (run.hp <= 0 ? 'defeat' : 'safe_return');
   const contractCompleted = isContractReadyForDelivery(run, reason);
+  const activeBonus = run.bonusObjective ?? run.contract.bonusObjective ?? null;
 
   // Only placed items participate in settlement (staging must be empty before combat/return)
   const placedItems = run.bay.placed.map((p) => p.item);
@@ -148,12 +179,14 @@ export function calculateV2Settlement(
         allowedDispositions: [disp],
         selectedDisposition: disp,
         creditsPayout: 0,
+        partsPayout: 0,
         relicId: def?.relicId,
       };
     });
 
     const defeatRecoverableBase = run.wallet + nonLoanRecoverable;
     const finalCreditsEarned = Math.floor(defeatRecoverableBase * 0.4);
+    const runSalvagePartsEarned = Math.floor(Math.max(0, Math.floor(run.salvagePartsEarned ?? 0)) * 0.4);
 
     return {
       reason: 'defeat',
@@ -162,6 +195,14 @@ export function calculateV2Settlement(
       contractRewardCredits: 0,
       tutorialBonusCredits: 0,
       soldItemsCredits: 0,
+      bonusObjective: activeBonus ? { ...activeBonus, completed: false } : null,
+      bonusObjectiveCredits: 0,
+      factionContractBonusCredits: 0,
+      runSalvagePartsEarned,
+      dismantledPartsEarned: 0,
+      totalSalvagePartsEarned: runSalvagePartsEarned,
+      dismantledItemsCount: 0,
+      factionRepGains: {},
       defeatRecoverableBase,
       finalCreditsEarned,
       lines,
@@ -175,9 +216,11 @@ export function calculateV2Settlement(
     };
   }
 
-  // Safe Return (§10.3)
+  // Safe Return (§10.3 + F11 + F13)
   let soldItemsCredits = 0;
   let soldLootCargoCredits = 0;
+  let dismantledPartsEarned = 0;
+  let dismantledItemsCount = 0;
   const storedToWarehouseItems: V2ItemInstance[] = [];
   const keptRelicsById: Record<string, number> = {};
 
@@ -191,12 +234,17 @@ export function calculateV2Settlement(
         : getDefaultDispositionForItem(item, 'safe_return', contractCompleted, profile);
 
     let creditsPayout = 0;
+    let partsPayout = 0;
     if (selected === 'sell') {
       creditsPayout = item.fixedValue;
       soldItemsCredits += creditsPayout;
       if (item.category === 'cargo' && item.origin === 'loot') {
         soldLootCargoCredits += creditsPayout;
       }
+    } else if (selected === 'dismantle') {
+      partsPayout = getDismantleSalvagePartsYield(item, profile, run.shipId);
+      dismantledPartsEarned += partsPayout;
+      dismantledItemsCount += 1;
     } else if (selected === 'store') {
       storedToWarehouseItems.push({ ...item, origin: 'owned', location: 'warehouse' });
     } else if (selected === 'keep_relic' && def?.relicId) {
@@ -209,6 +257,7 @@ export function calculateV2Settlement(
       allowedDispositions: allowed,
       selectedDisposition: selected,
       creditsPayout,
+      partsPayout,
       relicId: def?.relicId,
     };
   });
@@ -229,11 +278,59 @@ export function calculateV2Settlement(
       ? V2_TUTORIAL_SUCCESS_BONUS
       : 0;
 
+  // Optional Bonus Objective (F13): trust frozen `activeBonus.completed` — NEVER clobber pre-seeded false!
+  const bonusObjectiveCredits =
+    contractCompleted && !run.isTutorial && activeBonus?.completed === true
+      ? activeBonus.rewardCredits
+      : 0;
+
+  // Faction Perks (F13): Starport Guild Lv3 +10% guild contract bonus; Deep Institute Lv3 +6 survey parts
+  const tplFallback = V2_CONTRACT_TEMPLATES[run.contract.templateId];
+  const effectiveFactionId = run.contract.factionId ?? tplFallback?.factionId;
+  const factionContractBonusCredits =
+    contractCompleted && !run.isTutorial
+      ? getGuildContractBonusCredits(
+          { factionId: effectiveFactionId, rewardCredits: run.contract.rewardCredits },
+          profile.factionRep.starport_guild
+        )
+      : 0;
+
+  const surveyBonusParts =
+    contractCompleted && !run.isTutorial
+      ? getSurveyInstituteBonusParts(run.contract, profile.factionRep.deep_institute)
+      : 0;
+
+  const runSalvagePartsEarned =
+    Math.max(0, Math.floor(run.salvagePartsEarned ?? 0)) + surveyBonusParts;
+  const totalSalvagePartsEarned = runSalvagePartsEarned + dismantledPartsEarned;
+
+  // Faction reputation gains (event rep + completed formal contract rep)
+  const factionRepGains: Partial<Record<FactionId, number>> = {};
+  if (!run.isShowcase) {
+    if (run.factionRepEarnedThisRun) {
+      for (const [fid, val] of Object.entries(run.factionRepEarnedThisRun) as [FactionId, number | undefined][]) {
+        if (val && val > 0) {
+          factionRepGains[fid] = (factionRepGains[fid] ?? 0) + Math.round(val);
+        }
+      }
+    }
+    if (contractCompleted && !run.isTutorial && effectiveFactionId) {
+      const baseRep = run.contract.factionRepReward ?? tplFallback?.factionRepReward ?? 35;
+      const bonusRep = activeBonus?.completed === true ? 10 : 0;
+      if (baseRep + bonusRep > 0) {
+        factionRepGains[effectiveFactionId] =
+          (factionRepGains[effectiveFactionId] ?? 0) + baseRep + bonusRep;
+      }
+    }
+  }
+
   const finalCreditsEarned =
     run.wallet +
     soldItemsCredits +
     crewMasteryBonusCredits +
     contractRewardCredits +
+    bonusObjectiveCredits +
+    factionContractBonusCredits +
     tutorialBonusCredits;
 
   const warehouseProjectedCount =
@@ -248,6 +345,14 @@ export function calculateV2Settlement(
     tutorialBonusCredits,
     soldItemsCredits,
     crewMasteryBonusCredits,
+    bonusObjective: activeBonus,
+    bonusObjectiveCredits,
+    factionContractBonusCredits,
+    runSalvagePartsEarned,
+    dismantledPartsEarned,
+    totalSalvagePartsEarned,
+    dismantledItemsCount,
+    factionRepGains,
     defeatRecoverableBase: 0,
     finalCreditsEarned,
     lines,
@@ -267,6 +372,7 @@ export interface V2ApplySettlementResult {
   readonly summary: V2SettlementSummary;
   readonly unlockedFamilyName?: string;
   readonly unlockedCrewName?: string;
+  readonly factionRepGains?: Partial<Record<FactionId, number>>;
   readonly actTransition?: { readonly from: CampaignActId; readonly to: CampaignActId } | null;
   readonly newlyUnlockedSectors?: readonly SectorId[];
   readonly newlyCompletedMilestones?: readonly string[];
@@ -300,7 +406,7 @@ export function applyV2Settlement(
       ok: false,
       profile,
       summary,
-      error: `设备库容量不足（预计 ${summary.warehouseProjectedCount}/${V2_WAREHOUSE_CAPACITY}），请将部分设备改为出售后再确认结算`,
+      error: `设备库容量不足（预计 ${summary.warehouseProjectedCount}/${V2_WAREHOUSE_CAPACITY}），请将部分设备改为出售或拆解后再确认结算`,
     };
   }
 
@@ -340,7 +446,7 @@ export function applyV2Settlement(
     nextFacilityTiers.contract_hub = Math.max(1, nextFacilityTiers.contract_hub ?? 0);
   }
 
-  // Contract completion unlocks: crew + ordered equipment families (§6.2 & §10.4)
+  // Contract completion unlocks: crew + ordered equipment families (§6.2 & §10.4 + F13)
   const nextCompletedTypes = [...profile.completedContractTypes];
   const nextCompletedIds = [...profile.completedContractIds];
   const nextCrew = [...profile.unlockedCrew];
@@ -366,7 +472,7 @@ export function applyV2Settlement(
       unlockedCrewName = `${V2_CREW.navigator.name}（领航员）`;
     }
 
-    // First-time completion of each distinct standard contract type unlocks next ordered family (§10.4)
+    // Record completion of any of the 5 formal contract types (transport/rescue/survey/bounty/derelict)
     if (run.contract.tier === 'standard' && !nextCompletedTypes.includes(cType)) {
       nextCompletedTypes.push(cType);
       const nextUnlock = V2_CONTRACT_FAMILY_UNLOCK_ORDER.find(
@@ -391,7 +497,17 @@ export function applyV2Settlement(
     }
   }
 
-  const salvageEarned = Math.max(0, Math.floor(run.salvagePartsEarned ?? 0));
+  // Apply faction reputation gains (strictly clamped 0..300)
+  let nextFactionRep = profile.factionRep;
+  if (summary.factionRepGains) {
+    for (const [fid, delta] of Object.entries(summary.factionRepGains) as [FactionId, number | undefined][]) {
+      if (delta && delta > 0) {
+        nextFactionRep = addFactionRep(nextFactionRep, fid, delta);
+      }
+    }
+  }
+
+  const salvageEarned = summary.totalSalvagePartsEarned;
   const historyEntry: V3RunHistoryEntry = {
     runId: run.runId,
     finishedAt: new Date().toISOString(),
@@ -416,6 +532,9 @@ export function applyV2Settlement(
     totalSafeReturns: profile.career.totalSafeReturns + (summary.reason === 'safe_return' ? 1 : 0),
     totalCreditsEarned: profile.career.totalCreditsEarned + Math.max(0, summary.finalCreditsEarned),
     totalSalvagePartsEarned: profile.career.totalSalvagePartsEarned + salvageEarned,
+    totalWrecksDissected:
+      profile.career.totalWrecksDissected + Math.max(0, Math.floor(run.wrecksDissectedThisRun ?? 0)),
+    totalItemsDismantled: profile.career.totalItemsDismantled + summary.dismantledItemsCount,
   };
 
   const baseNextProfile: V2ProfileState = {
@@ -443,6 +562,7 @@ export function applyV2Settlement(
     tutorialBonusClaimed:
       profile.tutorialBonusClaimed || summary.tutorialBonusCredits > 0,
     settledRunIds: [...profile.settledRunIds, run.runId],
+    factionRep: nextFactionRep,
     runHistory: nextRunHistory,
     career: nextCareer,
   };
@@ -455,6 +575,7 @@ export function applyV2Settlement(
     summary,
     unlockedFamilyName,
     unlockedCrewName,
+    factionRepGains: summary.factionRepGains,
     actTransition: campaignAdvance.actTransition,
     newlyUnlockedSectors: campaignAdvance.newlyUnlockedSectors,
     newlyCompletedMilestones: campaignAdvance.newlyCompletedMilestones,

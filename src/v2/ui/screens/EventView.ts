@@ -1,8 +1,13 @@
+import { V2_CREW } from '../../data/crew';
 import { getV3SectorDef } from '../../data/sectors';
 import { areAllEventOptionsUnaffordable } from '../../domain/encounter';
+import {
+  buildFallbackEventStateFromLegacyNode,
+  evaluateV2EventOption,
+} from '../../domain/events';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
 import type { V2MapNode, V2RunState } from '../../domain/types';
-import { svgIcon } from '../icons';
+import { crewPortraitSvg, svgIcon } from '../icons';
 import { NODE_TYPE_META } from './screenTypes';
 
 export interface EventViewProps {
@@ -12,6 +17,7 @@ export interface EventViewProps {
 }
 
 export interface EventViewActions {
+  readonly onSelectEventOption: (optionIndex: number) => void;
   readonly onAnomalyChoice: (choice: 'traverse' | 'breach') => void;
   readonly onDistressChoice: (choice: 'rescue_crew' | 'haul_cargo') => void;
   readonly onAbandon: () => void;
@@ -23,6 +29,117 @@ export function renderEventView(
   actions: EventViewActions
 ): void {
   const { run, node, readOnly } = props;
+  const sector = getV3SectorDef(run.sectorId);
+  const activeEvent =
+    run.activeEvent && run.activeEvent.nodeId === node.nodeId
+      ? run.activeEvent
+      : node.eventState ?? buildFallbackEventStateFromLegacyNode(run, node);
+
+  if (activeEvent) {
+    const unaffordable = areAllEventOptionsUnaffordable(run);
+    const choicesHtml = activeEvent.options
+      .map((opt) => {
+        const evalRes = evaluateV2EventOption(run, opt);
+        const isCrewOpt = Boolean(opt.requiredCrewId);
+        const crewDef = opt.requiredCrewId ? V2_CREW[opt.requiredCrewId] : null;
+        const crewMatched = !opt.requiredCrewId || run.crewId === opt.requiredCrewId;
+        const isDisabled = readOnly || !evalRes.enabled;
+
+        const btnClass = opt.isFallback
+          ? 'v3-event-choice-btn is-fallback'
+          : isCrewOpt
+          ? `v3-event-choice-btn is-crew-bonus ${crewMatched ? 'is-matched' : 'is-locked'}`
+          : 'v3-event-choice-btn';
+
+        return `
+          <button type="button" class="${btnClass} ${
+          !evalRes.enabled ? 'is-unaffordable' : ''
+        }" data-event-option="${opt.index}" data-testid="event-choice-${opt.index}" ${
+          isDisabled ? 'disabled' : ''
+        }>
+            <div class="v3-ec-btn-head">
+              <span class="v3-ec-btn-label">${opt.label}</span>
+              ${
+                crewDef && opt.requiredCrewId
+                  ? `<span class="v3-crew-event-tag">
+                      ${crewPortraitSvg(opt.requiredCrewId, 20)}
+                      <span>${crewDef.name} · ${crewDef.roleTitle}专属</span>
+                    </span>`
+                  : opt.isFallback
+                  ? `<span class="v3-fallback-tag">安全退路</span>`
+                  : ''
+              }
+            </div>
+            <div class="v3-tradeoff-row">
+              <span class="v3-cost-pill ${!evalRes.enabled ? 'is-blocked' : ''}">代价：${
+          opt.costSummary
+        }</span>
+              <span class="v3-reward-pill">收益：${opt.rewardSummary}</span>
+            </div>
+            ${
+              !evalRes.enabled && evalRes.reason
+                ? `<div class="v3-ec-disabled-reason">${svgIcon('warning', 12)} ${evalRes.reason}</div>`
+                : ''
+            }
+          </button>
+        `;
+      })
+      .join('');
+
+    leftPanelEl.innerHTML = `
+      <div class="v3-screen-root" data-testid="event-screen">
+        <div class="panel-header">
+          <h2>${svgIcon(NODE_TYPE_META[node.type].icon, 16)} ${activeEvent.title}</h2>
+          <span class="panel-sub">${sector.name} · ${
+      activeEvent.flavorTag ?? NODE_TYPE_META[node.type].label
+    }</span>
+        </div>
+
+        ${
+          node.hasRelicSignal
+            ? `<div class="v3-relic-pity-banner">${svgIcon('museum', 13)} 保底遗物信号源：选择回收货物分支即可获取本星区古代遗物！</div>`
+            : ''
+        }
+
+        <div class="v3-event-narrative">
+          <p>${activeEvent.description}</p>
+        </div>
+
+        <div class="v3-event-choices">
+          ${choicesHtml}
+        </div>
+
+        ${
+          unaffordable
+            ? `<div class="system-banner banner-warn" style="margin-top:8px;">
+                <span>当前资源不足以执行任何分支，可放弃事件并免费安全返航。</span>
+                <button type="button" class="btn btn-sm btn-primary" id="v2-btn-abandon-event" ${
+                  readOnly ? 'disabled' : ''
+                }>放弃并安全返航</button>
+              </div>`
+            : `<div style="margin-top:8px;display:flex;justify-content:flex-end;">
+                <button type="button" class="btn btn-sm btn-ghost" id="v2-btn-abandon-event" ${
+                  readOnly ? 'disabled' : ''
+                }>放弃事件并免费返航</button>
+              </div>`
+        }
+      </div>
+    `;
+
+    leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-event-option]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.dataset.eventOption);
+        if (Number.isFinite(idx)) {
+          actions.onSelectEventOption(idx);
+        }
+      });
+    });
+
+    leftPanelEl.querySelector('#v2-btn-abandon-event')?.addEventListener('click', actions.onAbandon);
+    return;
+  }
+
+  // Legacy fallback (only used if a node lacks both activeEvent and eventState)
   const unaffordable = areAllEventOptionsUnaffordable(run);
   let eventBodyHtml = '';
 
@@ -80,18 +197,12 @@ export function renderEventView(
     `;
   }
 
-  const sector = getV3SectorDef(run.sectorId);
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root" data-testid="event-screen">
       <div class="panel-header">
         <h2>${svgIcon(NODE_TYPE_META[node.type].icon, 16)} 第 ${node.layer} 层 · ${NODE_TYPE_META[node.type].label}</h2>
         <span class="panel-sub">${sector.name} · 星区事件</span>
       </div>
-      ${
-        node.hasRelicSignal
-          ? `<div class="v3-relic-pity-banner">${svgIcon('museum', 13)} 保底遗物信号源：回收货物即可获得本星区古代遗物！</div>`
-          : ''
-      }
       ${eventBodyHtml}
       ${
         unaffordable

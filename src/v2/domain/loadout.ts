@@ -11,7 +11,8 @@ import { V3_SECTORS, getV3SectorDef } from '../data/sectors';
 import type { V2Rotation } from '../data/shapes';
 import { V2_SHIPS, type V2ShipId } from '../data/ships';
 import { shouldTriggerRelicPitySignal } from './campaign';
-import { createV2ContractInstance } from './contracts';
+import { createV2ContractInstance, generateContractBonusObjective } from './contracts';
+import { getEffectiveShipLoadoutBudget, getEffectiveShipMaxHp } from './dismantle';
 import {
   createEmptyV2Bay,
   findFirstLegalV2Placement,
@@ -63,10 +64,11 @@ export interface V2PrepareValidation {
  */
 export function buildFreeFallbackPrepareSlots(
   shipId: V2ShipId,
-  blueprints: readonly V2EquipmentKind[]
+  blueprints: readonly V2EquipmentKind[],
+  budgetOverride?: number
 ): readonly V2PrepareSlotEntry[] {
   const ship = V2_SHIPS[shipId];
-  const budget = ship.loadoutBudget;
+  const budget = budgetOverride ?? ship.loadoutBudget;
   let usedBudget = 0;
   let tempBay: V2CargoBayState = createEmptyV2Bay(shipId);
   const out: V2PrepareSlotEntry[] = [];
@@ -131,8 +133,7 @@ export function validateV2PrepareLoadout(
     errors.push('所选船员尚未解锁');
   }
 
-  const ship = V2_SHIPS[shipId];
-  const maxBudget = ship.loadoutBudget;
+  const maxBudget = getEffectiveShipLoadoutBudget(profile, shipId);
   let totalBudget = 0;
   const ownedUsedSet = new Set<string>();
   let tempBay = createEmptyV2Bay(shipId);
@@ -287,7 +288,13 @@ export function launchV2Expedition(params: {
     guaranteedRelicDefId: pity.triggered ? pity.relicDefId : null,
   });
 
-  const contract = createV2ContractInstance(tpl.templateId, generated.markedNodeIds, runId);
+  const bonusObjective = generateContractBonusObjective(tpl, seed);
+  const contract = createV2ContractInstance(
+    tpl.templateId,
+    generated.markedNodeIds,
+    runId,
+    bonusObjective
+  );
 
   // Atomically move selected owned items from warehouse into run bay, and mint loan items
   const usedOwnedIds = new Set<string>(check.ownedInstancesUsed);
@@ -327,7 +334,7 @@ export function launchV2Expedition(params: {
     }
   }
 
-  const ship = V2_SHIPS[params.shipId];
+  const effectiveMaxHp = getEffectiveShipMaxHp(params.profile, params.shipId);
   const crewMasteryTier = params.crewId
     ? Math.max(0, Math.min(2, Math.floor(params.profile.crewMastery[params.crewId] ?? 0)))
     : 0;
@@ -349,8 +356,8 @@ export function launchV2Expedition(params: {
     primaryArchetype: params.primaryArchetype,
     fuel: startingFuel,
     maxFuel: V2_MAX_FUEL,
-    hp: ship.maxHp,
-    maxHp: ship.maxHp,
+    hp: effectiveMaxHp,
+    maxHp: effectiveMaxHp,
     wallet: 0,
     graph: generated.graph,
     visitedNodeIds: [],
@@ -376,6 +383,7 @@ export function launchV2Expedition(params: {
     endlessMutatorIds: params.endlessMutatorIds ? [...params.endlessMutatorIds] : [],
     recentEquipmentKinds: [],
     usedEventIds: [...generated.usedEventIds],
+    ...(bonusObjective ? { bonusObjective } : {}),
     tacticalChargesMax: 1,
     tacticalChargesUsed: 0,
     salvagePartsEarned: 0,
@@ -383,6 +391,11 @@ export function launchV2Expedition(params: {
     crewMasteryTier,
     defeatedBossIdsThisRun: [],
     defeatedEnemyKindsThisRun: [],
+    activeWreck: null,
+    activeEvent: null,
+    discardedCountThisRun: 0,
+    wrecksDissectedThisRun: 0,
+    factionRepEarnedThisRun: {},
   };
 
   const nextProfile: V2ProfileState = {

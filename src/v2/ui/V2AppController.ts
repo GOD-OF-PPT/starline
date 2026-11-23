@@ -8,7 +8,6 @@ import { CAMPAIGN_CHAPTERS, type CampaignCommTrigger } from '../data/campaign';
 import { V2_CREW, type V2CrewId } from '../data/crew';
 import {
   V2_EQUIPMENT_DEFS,
-  V2_RESEARCH_COST_CREDITS,
   V2_WAREHOUSE_CAPACITY,
   getV2EquipmentDefByKind,
   type V2EquipmentKind,
@@ -19,6 +18,7 @@ import {
   V2_RELIC_ORDER,
   type V2FacilityId,
 } from '../data/facilities';
+import { V3_FACTIONS } from '../data/factions';
 import { getV3SectorDef } from '../data/sectors';
 import { V2_SHIPS, type V2ShipId } from '../data/ships';
 import { createV2ShowcaseRun } from '../data/showcaseRun';
@@ -49,18 +49,27 @@ import {
   performSurveyAtCurrentNode,
 } from '../domain/contracts';
 import {
+  craftV2EquipmentWithParts,
+  dismantleV2WarehouseItem,
+  getEffectiveShipLoadoutBudget,
+  tuneV2ShipHull,
+  upgradeV2EquipmentToImproved,
+} from '../domain/dismantle';
+import {
   abandonV2EventAndReturn,
   applyV2EngineerSwap,
   buyV2MerchantFuel,
   buyV2MerchantOffer,
   buyV2MerchantRepair,
+  cutV2WreckHotspot,
+  extractV2Wreck,
   finishV2ArrangeAndProceed,
   finishV2MerchantVisit,
   initiateV2SafeReturnFromMap,
   pickV2CombatReward,
   resolveV2AnomalyChoice,
   resolveV2DistressChoice,
-  resolveV2WreckChoice,
+  resolveV2EventOption,
   selectV2MapNode,
   sellV2ItemToMerchant,
 } from '../domain/encounter';
@@ -96,6 +105,7 @@ import {
   canRestoreV2Relic,
   claimV2PendingGiftToWarehouse,
   craftV2CommonEquipment,
+  getEffectiveV2ResearchCost,
   getV2RelicSummary,
   purchaseV2Facility,
   researchV2Equipment,
@@ -111,6 +121,7 @@ import {
   V2_TAB_CHANNEL,
   V2_TAB_LOCK_KEY,
   isPureAutoCombat,
+  type FactionId,
   type SectorId,
   type V2CargoBayState,
   type V2CombatRoundLog,
@@ -122,7 +133,8 @@ import {
   type V2SaveData,
   type V2SettlementDisposition,
   type V2TrialBuildId,
-  type V2WreckChoice,
+  type V2WreckSpotId,
+  type V3HullTuningTrack,
 } from '../domain/types';
 import { CargoGridV2Component } from './CargoGridV2';
 import { crewPortraitSvg, svgIcon } from './icons';
@@ -507,14 +519,15 @@ export class V2AppController {
       );
       if (researchable) {
         const def = V2_EQUIPMENT_DEFS[researchable.definitionId];
-        const ready = projectedCredits >= V2_RESEARCH_COST_CREDITS;
+        const effResearchCost = getEffectiveV2ResearchCost(p);
+        const ready = projectedCredits >= effResearchCost;
         return {
           title: `研究台：解锁「${def?.name ?? '新设备'}」蓝图`,
           detail: ready
-            ? `资金已就绪（${V2_RESEARCH_COST_CREDITS}¤），立即研究永久掌握`
-            : `还差 ${Math.max(0, V2_RESEARCH_COST_CREDITS - projectedCredits)}¤`,
+            ? `资金已就绪（${effResearchCost}¤），立即研究永久掌握`
+            : `还差 ${Math.max(0, effResearchCost - projectedCredits)}¤`,
           actionKind: 'warehouse',
-          targetCost: V2_RESEARCH_COST_CREDITS,
+          targetCost: effResearchCost,
           ready,
         };
       }
@@ -650,7 +663,9 @@ export class V2AppController {
     const isSettlement = run?.phase === 'SETTLEMENT';
     const isLiveCombat = Boolean(run?.phase === 'ENCOUNTER' && run.activeCombat);
     const isPreCombat = Boolean(run?.phase === 'ENCOUNTER' && curNode?.combat && !run.activeCombat);
-    const isWreckHero = Boolean(run?.phase === 'ENCOUNTER' && curNode?.type === 'wreck');
+    const isWreckHero = Boolean(
+      run?.phase === 'ENCOUNTER' && curNode?.type === 'wreck' && !curNode.combat && !run.activeCombat
+    );
     const isMapHero = Boolean(run?.phase === 'MAP');
     const collapsed = isArrange && this.isArrangeSceneCollapsed();
 
@@ -776,7 +791,7 @@ export class V2AppController {
       const hasReactor = run.bay.placed.some(
         (p) => p.item.origin === 'mission' && p.item.definitionId === 'mission.sealed_reactor'
       );
-      return hasReactor ? '运输 · 已装反应堆' : '运输 · 待取反应堆';
+      return hasReactor ? '转运 · 已装反应堆' : '转运 · 待取反应堆';
     }
     if (c.type === 'rescue') {
       const pods = countEscapePodsInBay(run.bay);
@@ -784,6 +799,15 @@ export class V2AppController {
     }
     if (c.type === 'survey') {
       return `勘测 · ${c.completedNodeIds.length}/${c.requiredCompletions}`;
+    }
+    if (c.type === 'bounty') {
+      return `悬赏 · ${c.completedNodeIds.length}/${c.requiredCompletions}`;
+    }
+    if (c.type === 'derelict') {
+      const hasBox = run.bay.placed.some(
+        (p) => p.item.origin === 'mission' && p.item.definitionId === 'mission.black_box'
+      );
+      return hasBox ? '黑匣 · 已装黑匣' : '黑匣 · 待取黑匣';
     }
     return c.name;
   }
@@ -800,7 +824,7 @@ export class V2AppController {
         const sum = calculateV2Settlement(run, p, this.settlementDispositions);
         pillsHtml = `
           <div class="hud-pill"><span class="k">${svgIcon('beacon', 13)} 状态</span><strong class="v">${
-            sum.reason === 'defeat' ? '拖回拆解站' : '安全靠泊'
+            sum.reason === 'defeat' ? '拖回基地' : '安全靠泊'
           }</strong></div>
           <div class="hud-pill"><span class="k">${svgIcon('star', 13)} 委托</span><strong class="v">${
             sum.contractCompleted ? '可交付' : run.contract.type === 'free' ? '自由打捞' : '未完成'
@@ -808,6 +832,11 @@ export class V2AppController {
           <div class="hud-pill pill-accent"><span class="k">${svgIcon('credits', 13)} 实得</span><strong class="v num">+${
             sum.finalCreditsEarned
           }¤</strong></div>
+          ${
+            sum.totalSalvagePartsEarned > 0
+              ? `<div class="hud-pill"><span class="k">${svgIcon('parts', 13)} 零件</span><strong class="v num">+${sum.totalSalvagePartsEarned}</strong></div>`
+              : ''
+          }
         `;
       } else {
         pillsHtml = `
@@ -833,6 +862,7 @@ export class V2AppController {
           : p.credits;
       pillsHtml = `
         <div class="hud-pill pill-accent"><span class="k">${svgIcon('credits', 13)} 信用点</span><strong class="v num">${displayCredits}¤</strong></div>
+        <div class="hud-pill"><span class="k">${svgIcon('parts', 13)} 精密零件</span><strong class="v num">${p.salvageParts}</strong></div>
         <div class="hud-pill"><span class="k">${svgIcon('warehouse', 13)} 库存</span><strong class="v num">${p.equipmentWarehouse.length}/${V2_WAREHOUSE_CAPACITY}</strong></div>
         <div class="hud-pill"><span class="k">${svgIcon('museum', 13)} 藏品</span><strong class="v num">${relicSum.restoredCount}/${relicSum.totalCount}</strong></div>
       `;
@@ -1317,8 +1347,13 @@ export class V2AppController {
       return;
     }
 
-    // 4. WRECK 3-HOTSPOT HERO STAGE
-    if (run.phase === 'ENCOUNTER' && currentNode?.type === 'wreck' && currentNode.wreck) {
+    // 4. WRECK MULTI-CUT HERO STAGE (skip into pre-combat when ambush combat is attached!)
+    if (
+      run.phase === 'ENCOUNTER' &&
+      currentNode?.type === 'wreck' &&
+      (currentNode.wreck || run.activeWreck) &&
+      !currentNode.combat
+    ) {
       this.activeCombatPlaybackKey = null;
       this.phaserHost.showV2Stage({
         shipId: run.shipId,
@@ -1533,6 +1568,7 @@ export class V2AppController {
       {
         run,
         node,
+        profile: this.save.profile,
         readOnly: this.isReadOnlyTab && !run.isShowcase,
         selectedHotspot: this.selectedWreckHotspot,
       },
@@ -1541,17 +1577,7 @@ export class V2AppController {
           this.selectedWreckHotspot = spot;
           soundEngine.play('click');
           this.renderWreckOverlay(run, node);
-        },
-        onCutWreck: (room: V2WreckChoice) => {
-          if (!this.canMutate()) return;
-          const spotCoords =
-            room === 'armory' ? [0.22, 0.48] : room === 'cargo' ? [0.79, 0.51] : [0.5, 0.46];
-          this.phaserHost?.triggerV2WreckCutFx(spotCoords[0], spotCoords[1]);
-          const res = resolveV2WreckChoice(run, room, this.save.profile.unlockedFamilies);
-          if (!res.ok) return this.showToast(res.error ?? '无法切割该舱室');
-          this.setCurrentRun(res.run);
-          soundEngine.play('place');
-          this.syncAll();
+          this.renderEncounterPhase(run);
         },
       }
     );
@@ -1604,7 +1630,13 @@ export class V2AppController {
       p.selectedCrewId && p.unlockedCrew.includes(p.selectedCrewId)
         ? p.selectedCrewId
         : p.unlockedCrew[0] ?? null;
-    const slots = [...buildFreeFallbackPrepareSlots(shipId, p.blueprints)];
+    const slots = [
+      ...buildFreeFallbackPrepareSlots(
+        shipId,
+        p.blueprints,
+        getEffectiveShipLoadoutBudget(p, shipId)
+      ),
+    ];
     this.prepareDraft = {
       contractTemplateId,
       sectorId: chosenSector,
@@ -1756,7 +1788,13 @@ export class V2AppController {
           draft.trialBuildId = null;
           draft.playingDemo = false;
           draft.demoPlaybackKey = null;
-          draft.slots = [...buildFreeFallbackPrepareSlots(draft.shipId, p.blueprints)];
+          draft.slots = [
+            ...buildFreeFallbackPrepareSlots(
+              draft.shipId,
+              p.blueprints,
+              getEffectiveShipLoadoutBudget(p, draft.shipId)
+            ),
+          ];
           soundEngine.play('click');
           this.syncAll();
         },
@@ -1767,7 +1805,13 @@ export class V2AppController {
           draft.demoPlaybackKey = null;
           draft.slots = draft.trialBuildId
             ? [...buildTrialPrepareSlots(draft.trialBuildId, nextShip)]
-            : [...buildFreeFallbackPrepareSlots(nextShip, p.blueprints)];
+            : [
+                ...buildFreeFallbackPrepareSlots(
+                  nextShip,
+                  p.blueprints,
+                  getEffectiveShipLoadoutBudget(p, nextShip)
+                ),
+              ];
           draft.missingPresetEntries = [];
           draft.presetNotice = null;
           soundEngine.play('click');
@@ -1788,7 +1832,13 @@ export class V2AppController {
           draft.trialBuildId = null;
           draft.playingDemo = false;
           draft.demoPlaybackKey = null;
-          draft.slots = [...buildFreeFallbackPrepareSlots(draft.shipId, p.blueprints)];
+          draft.slots = [
+            ...buildFreeFallbackPrepareSlots(
+              draft.shipId,
+              p.blueprints,
+              getEffectiveShipLoadoutBudget(p, draft.shipId)
+            ),
+          ];
           draft.missingPresetEntries = [];
           draft.presetNotice = null;
           soundEngine.play('click');
@@ -2022,6 +2072,7 @@ export class V2AppController {
           if (!this.canMutate()) return;
           const res = selectV2MapNode(run, nid, {
             bonusBossCharges: this.getBonusBossCharges(),
+            profile: this.save.profile,
           });
           if (!res.ok) {
             this.showToast(res.error ?? '无法跃迁至该节点');
@@ -2131,11 +2182,54 @@ export class V2AppController {
       return;
     }
 
-    if (node.type === 'wreck' && node.wreck) {
+    if (node.type === 'wreck' && (node.wreck || run.activeWreck)) {
       renderWreckLeftPanel(
         this.leftPanelEl,
-        { readOnly },
         {
+          run,
+          node,
+          profile: this.save.profile,
+          readOnly,
+          selectedHotspot: this.selectedWreckHotspot,
+        },
+        {
+          onSelectHotspot: (spot) => {
+            this.selectedWreckHotspot = spot;
+            soundEngine.play('click');
+            this.renderWreckOverlay(run, node);
+            this.renderEncounterPhase(run);
+          },
+          onCutSpot: (spotId: V2WreckSpotId) => {
+            if (!this.canMutate()) return;
+            const spotCoords =
+              spotId === 'armory' ? [0.22, 0.48] : spotId === 'cargo' ? [0.78, 0.5] : [0.5, 0.45];
+            this.phaserHost?.triggerV2WreckCutFx(spotCoords[0], spotCoords[1]);
+            const res = cutV2WreckHotspot(run, spotId, this.save.profile.unlockedFamilies);
+            if (!res.ok) return this.showToast(res.error ?? '无法切割该舱室');
+            this.selectedWreckHotspot = spotId;
+            this.setCurrentRun(res.run);
+            if (res.ambushTriggered) {
+              soundEngine.play('bossAlarm');
+              this.showToast('残骸警报触发！敌舰伏击来袭，战利品已暂封待战后返还！');
+            } else if (res.tookHazard) {
+              soundEngine.play('hullHit');
+              if (res.summaryText) this.showToast(res.summaryText);
+            } else {
+              soundEngine.play('place');
+            }
+            this.syncAll();
+          },
+          onExtract: () => {
+            if (!this.canMutate()) return;
+            const res = extractV2Wreck(run);
+            if (!res.ok) return this.showToast(res.error ?? '无法撤离残骸');
+            if (res.run.phase === 'SETTLEMENT') {
+              this.settlementDispositions = {};
+            }
+            this.setCurrentRun(res.run);
+            soundEngine.play('click');
+            this.syncAll();
+          },
           onAbandon: () => {
             if (!this.canMutate()) return;
             const res = abandonV2EventAndReturn(run);
@@ -2155,6 +2249,20 @@ export class V2AppController {
       this.leftPanelEl,
       { run, node, readOnly },
       {
+        onSelectEventOption: (optionIndex) => {
+          if (!this.canMutate()) return;
+          const res = resolveV2EventOption(run, optionIndex, this.save.profile.unlockedFamilies);
+          if (!res.ok) return this.showToast(res.error ?? '操作失败');
+          if (res.run.phase === 'SETTLEMENT') {
+            this.settlementDispositions = {};
+          }
+          this.setCurrentRun(res.run);
+          if (res.hadDamage) soundEngine.play('hullHit');
+          else if (res.hadHeal) soundEngine.play('repairPulse');
+          else if ((res.gainedItemsCount ?? 0) > 0) soundEngine.play('rewardRare');
+          else soundEngine.play('click');
+          this.syncAll();
+        },
         onAnomalyChoice: (choice) => {
           if (!this.canMutate()) return;
           const res = resolveV2AnomalyChoice(run, choice);
@@ -2202,10 +2310,11 @@ export class V2AppController {
     const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
     if (!node || !node.merchant) return;
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
+    const guildRep = this.save.profile.factionRep.starport_guild ?? 0;
 
     renderShopView(
       this.leftPanelEl,
-      { run, node, readOnly },
+      { run, node, readOnly, starportGuildRep: guildRep },
       {
         onBuyOffer: (oid) => {
           if (!this.canMutate()) return;
@@ -2213,7 +2322,8 @@ export class V2AppController {
             run,
             oid,
             `tx_offer_${node.nodeId}_${oid}`,
-            this.save.profile.unlockedFamilies
+            this.save.profile.unlockedFamilies,
+            guildRep
           );
           if (!res.ok) return this.showToast(res.error ?? '购买失败');
           this.setCurrentRun(res.run);
@@ -2222,7 +2332,7 @@ export class V2AppController {
         },
         onBuyFuel: () => {
           if (!this.canMutate()) return;
-          const res = buyV2MerchantFuel(run, `tx_fuel_${node.nodeId}`);
+          const res = buyV2MerchantFuel(run, `tx_fuel_${node.nodeId}`, guildRep);
           if (!res.ok) return this.showToast(res.error ?? '无法购买燃料');
           this.setCurrentRun(res.run);
           soundEngine.play('click');
@@ -2230,7 +2340,7 @@ export class V2AppController {
         },
         onBuyRepair: () => {
           if (!this.canMutate()) return;
-          const res = buyV2MerchantRepair(run, `tx_repair_${node.nodeId}`);
+          const res = buyV2MerchantRepair(run, `tx_repair_${node.nodeId}`, guildRep);
           if (!res.ok) return this.showToast(res.error ?? '无法购买维修');
           this.setCurrentRun(res.run);
           soundEngine.play('click');
@@ -2428,6 +2538,10 @@ export class V2AppController {
 
           soundEngine.play(result.summary.contractCompleted ? 'contractDeliver' : 'returnDock');
 
+          const repNotes = Object.entries(result.factionRepGains ?? {})
+            .filter(([, delta]) => typeof delta === 'number' && delta > 0)
+            .map(([fid, delta]) => `${V3_FACTIONS[fid as FactionId]?.name ?? fid}声望 +${delta}`);
+
           const unlockedParts = [
             result.actTransition
               ? `主线推进：${CAMPAIGN_CHAPTERS[result.actTransition.to].title}`
@@ -2440,6 +2554,7 @@ export class V2AppController {
               : null,
             result.unlockedFamilyName ? `解锁体系：${result.unlockedFamilyName}` : null,
             result.unlockedCrewName ? `新船员加入：${result.unlockedCrewName}` : null,
+            ...repNotes,
           ].filter(Boolean);
 
           // Trigger non-blocking crew comm banner on major campaign/crew/relic beats (never auto-opens modal!)
@@ -2462,6 +2577,7 @@ export class V2AppController {
             creditsBefore,
             creditsAfter: result.profile.credits,
             earnedCredits: result.summary.finalCreditsEarned,
+            earnedParts: result.summary.totalSalvagePartsEarned,
             contractCompleted: result.summary.contractCompleted,
             unlockedText: unlockedParts.length > 0 ? unlockedParts.join(' · ') : null,
             crateCount: Math.max(1, result.summary.lines.length),
@@ -2654,6 +2770,58 @@ export class V2AppController {
           return { ok: false, error: '当前窗口为只读状态' };
         }
         const res = craftV2CommonEquipment(this.save.profile, kind);
+        if (res.ok) {
+          this.save = { ...this.save, profile: res.profile };
+          this.persist();
+          soundEngine.play('buildComplete');
+          this.syncAll();
+        }
+        return res;
+      },
+      onCraftWithParts: (kind) => {
+        if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
+          return { ok: false, error: '当前窗口为只读状态' };
+        }
+        const res = craftV2EquipmentWithParts(this.save.profile, kind);
+        if (res.ok) {
+          this.save = { ...this.save, profile: res.profile };
+          this.persist();
+          soundEngine.play('buildComplete');
+          this.syncAll();
+        }
+        return res;
+      },
+      onUpgradeItem: (instanceId) => {
+        if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
+          return { ok: false, error: '当前窗口为只读状态' };
+        }
+        const res = upgradeV2EquipmentToImproved(this.save.profile, instanceId);
+        if (res.ok) {
+          this.save = { ...this.save, profile: res.profile };
+          this.persist();
+          soundEngine.play('energyLink');
+          this.syncAll();
+        }
+        return res;
+      },
+      onDismantleItem: (instanceId) => {
+        if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
+          return { ok: false, error: '当前窗口为只读状态' };
+        }
+        const res = dismantleV2WarehouseItem(this.save.profile, instanceId);
+        if (res.ok) {
+          this.save = { ...this.save, profile: res.profile };
+          this.persist();
+          soundEngine.play('place');
+          this.syncAll();
+        }
+        return res;
+      },
+      onTuneHull: (shipId: V2ShipId, track: V3HullTuningTrack) => {
+        if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
+          return { ok: false, error: '当前窗口为只读状态' };
+        }
+        const res = tuneV2ShipHull(this.save.profile, shipId, track);
         if (res.ok) {
           this.save = { ...this.save, profile: res.profile };
           this.persist();

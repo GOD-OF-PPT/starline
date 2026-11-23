@@ -1,0 +1,903 @@
+/* ==========================================================================
+   V3 Milestone M4 Styles — Dismantling, Sector Events, Factions & Workshop
+   Scoped strictly to .v2-shell / .v3-* / .modal-card.v3-* (V1 100% isolated).
+   ========================================================================== */
+
+/* ---------- Desktop Fold-Safe Wreck Dissection Layout (1366x768) ---------- */
+@media (min-width: 860px) and (min-height: 540px) {
+  .v2-shell.phase-wreck-hero {
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow: hidden;
+    padding-bottom: 10px;
+  }
+
+  .v2-shell.phase-wreck-hero .v2-top-hud,
+  .v2-shell.phase-wreck-hero .banners-stack {
+    flex-shrink: 0;
+  }
+
+  .v2-shell.phase-wreck-hero .main-layout {
+    flex: 1 1 0;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .v2-shell.phase-wreck-hero .scene-card {
+    height: 224px;
+  }
+
+  .v2-shell.phase-wreck-hero .panel-left {
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    padding-bottom: 0;
+  }
+
+  .v2-shell.phase-wreck-hero .panel-right {
+    max-height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .v2-shell.phase-wreck-hero .v3-panel-scroll-body {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+    padding-bottom: 8px;
+  }
+}
+
+/* ---------- Wreck Stage Overlay & Hotspot Pin Modifiers ---------- */
+.v3-wreck-stage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px 0;
+  flex-wrap: wrap;
+}
+
+.v3-wreck-stage-head .scene-stage-tag {
+  position: static;
+}
+
+.v3-wreck-stage-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgba(15, 25, 40, 0.86);
+  border: 1px solid rgba(122, 229, 130, 0.45);
+  color: var(--text-primary, #e9edf2);
+  pointer-events: none;
+}
+
+.v3-wreck-stage-meter.tone-warn {
+  border-color: rgba(246, 184, 82, 0.65);
+  color: #f8d48b;
+}
+
+.v3-wreck-stage-meter.tone-critical {
+  border-color: rgba(242, 117, 100, 0.8);
+  color: #ffada3;
+}
+
+.v3-wreck-hotspot-pin .v2-hotspot-tag em {
+  font-style: normal;
+  font-size: 10.5px;
+  opacity: 0.9;
+}
+
+.v3-wreck-hotspot-pin.is-cut {
+  opacity: 0.58;
+  filter: grayscale(0.45);
+}
+
+.v3-wreck-hotspot-pin.is-risky .v2-hotspot-tag {
+  border-color: rgba(246, 184, 82, 0.72);
+  color: #f8d48b;
+}
+
+.v3-wreck-hotspot-pin.is-lethal .v2-hotspot-tag {
+  border-color: rgba(242, 117, 100, 0.85);
+  border-style: dashed;
+  color: #ffada3;
+  background: rgba(64, 18, 22, 0.88);
+}
+
+/* ---------- Wreck Stability Meter & Dissection Cards ---------- */
+.v3-wreck-stability-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md, 10px);
+  background: rgba(16, 28, 44, 0.82);
+  border: 1px solid rgba(122, 229, 130, 0.36);
+}
+
+.v3-wreck-stability-card.tone-warn {
+  border-color: rgba(246, 184, 82, 0.56);
+}
+
+.v3-wreck-stability-card.tone-critical {
+  border-color: rgba(242, 117, 100, 0.74);
+  background: rgba(54, 20, 24, 0.45);
+}
+
+.v3-ws-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.v3-ws-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+}
+
+.v3-ws-alarm {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #7ae582;
+}
+
+.v3-wreck-stability-card.tone-warn .v3-ws-alarm {
+  color: #f6b852;
+}
+
+.v3-wreck-stability-card.tone-critical .v3-ws-alarm {
+  color: #f27564;
+}
+
+.v3-stability-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(10, 18, 30, 0.9);
+  overflow: hidden;
+  border: 1px solid rgba(126, 162, 206, 0.22);
+}
+
+.v3-stability-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.22s ease;
+}
+
+.v3-stability-fill.tone-safe {
+  background: linear-gradient(90deg, #4cc970, #7ae582);
+}
+
+.v3-stability-fill.tone-warn {
+  background: linear-gradient(90deg, #d98d2b, #f6b852);
+}
+
+.v3-stability-fill.tone-critical {
+  background: linear-gradient(90deg, #cf453a, #f27564);
+  animation: v3StabilityPulse 1.3s ease-in-out infinite;
+}
+
+@keyframes v3StabilityPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.62;
+  }
+}
+
+body.reduced-motion .v3-stability-fill.tone-critical {
+  animation: none;
+}
+
+.v3-ws-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--text-secondary, #afbdcd);
+}
+
+.v3-salvager-intel-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(20, 48, 44, 0.52);
+  border: 1px solid rgba(122, 229, 130, 0.44);
+  font-size: 12px;
+  color: #c9f7ce;
+}
+
+.v3-wreck-last-cut {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(98, 214, 223, 0.12);
+  border: 1px solid rgba(98, 214, 223, 0.34);
+  font-size: 12px;
+  color: #bfeff4;
+}
+
+.v3-wreck-cut-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.v3-wreck-cut-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md, 10px);
+  background: rgba(20, 32, 48, 0.86);
+  border: 1px solid rgba(110, 148, 192, 0.3);
+  transition: border-color 0.15s ease, background 0.15s ease;
+  min-width: 0;
+}
+
+.v3-wreck-cut-card.is-selected {
+  border-color: rgba(246, 184, 82, 0.72);
+  background: rgba(28, 42, 60, 0.92);
+}
+
+.v3-wreck-cut-card.is-cut {
+  opacity: 0.72;
+  border-color: rgba(110, 148, 192, 0.22);
+}
+
+.v3-wreck-cut-card.is-lethal {
+  border-color: rgba(242, 117, 100, 0.68);
+  background: rgba(56, 20, 24, 0.42);
+}
+
+.v3-wcc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.v3-wcc-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+  flex-wrap: wrap;
+}
+
+.v3-parts-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #f6d38b;
+  background: rgba(246, 184, 82, 0.14);
+  border: 1px solid rgba(246, 184, 82, 0.36);
+}
+
+.v3-wcc-status {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.v3-wcc-status.safe {
+  color: #7ae582;
+  background: rgba(122, 229, 130, 0.14);
+  border: 1px solid rgba(122, 229, 130, 0.36);
+}
+
+.v3-wcc-status.warn {
+  color: #f6b852;
+  background: rgba(246, 184, 82, 0.14);
+  border: 1px solid rgba(246, 184, 82, 0.42);
+}
+
+.v3-wcc-status.lethal {
+  color: #ffada3;
+  background: rgba(242, 117, 100, 0.2);
+  border: 1px solid rgba(242, 117, 100, 0.56);
+}
+
+.v3-wcc-status.done {
+  color: #9db4ce;
+  background: rgba(126, 152, 184, 0.14);
+  border: 1px solid rgba(126, 152, 184, 0.28);
+}
+
+.v3-wcc-preview {
+  font-size: 12.5px;
+  color: var(--text-primary, #e9edf2);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.v3-risk-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.v3-risk-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.v3-risk-pill.risk-safe {
+  color: #8ee895;
+  background: rgba(122, 229, 130, 0.12);
+}
+
+.v3-risk-pill.risk-hull,
+.v3-risk-pill.risk-fuel,
+.v3-risk-pill.risk-warn {
+  color: #f8cf7a;
+  background: rgba(246, 184, 82, 0.14);
+}
+
+.v3-risk-pill.risk-ambush,
+.v3-risk-pill.risk-lethal {
+  color: #ffaea5;
+  background: rgba(242, 117, 100, 0.18);
+  border: 1px solid rgba(242, 117, 100, 0.42);
+}
+
+.v3-risk-pill.risk-done {
+  color: #9bb1c9;
+  background: rgba(110, 140, 175, 0.12);
+}
+
+.v3-wcc-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.v3-wreck-cut-btn,
+.v3-wreck-extract-btn {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.v3-wreck-cut-btn {
+  width: 100%;
+  justify-content: center;
+}
+
+/* ---------- Sector Event Deck (F12 Button-as-Card Choices) ---------- */
+.v3-event-narrative {
+  padding: 11px 13px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(15, 26, 42, 0.82);
+  border: 1px solid rgba(98, 214, 223, 0.24);
+  border-left: 3px solid var(--accent-energy, #62d6df);
+}
+
+.v3-event-narrative p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-primary, #e9edf2);
+}
+
+.v3-event-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.v3-event-choice-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  width: 100%;
+  min-width: 44px;
+  min-height: 54px;
+  padding: 11px 13px;
+  border-radius: var(--radius-md, 10px);
+  background: rgba(22, 35, 52, 0.9);
+  border: 1px solid rgba(110, 148, 192, 0.38);
+  color: var(--text-primary, #e9edf2);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+  font-family: inherit;
+}
+
+.v3-event-choice-btn:hover:not(:disabled) {
+  border-color: rgba(246, 184, 82, 0.78);
+  background: rgba(30, 47, 68, 0.95);
+}
+
+.v3-event-choice-btn.is-crew-bonus.is-matched {
+  border-color: rgba(98, 214, 223, 0.72);
+  background: rgba(18, 44, 62, 0.82);
+}
+
+.v3-event-choice-btn.is-fallback {
+  border-style: dashed;
+  border-color: rgba(145, 174, 206, 0.44);
+  background: rgba(16, 26, 40, 0.78);
+}
+
+.v3-event-choice-btn:disabled,
+.v3-event-choice-btn.is-unaffordable {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
+.v3-ec-btn-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.v3-ec-btn-label {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text-primary, #e9edf2);
+}
+
+.v3-crew-event-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 4px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #9beff6;
+  background: rgba(98, 214, 223, 0.16);
+  border: 1px solid rgba(98, 214, 223, 0.45);
+}
+
+.v3-fallback-tag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #b7c8da;
+  background: rgba(140, 165, 195, 0.14);
+}
+
+.v3-tradeoff-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.v3-cost-pill {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(246, 184, 82, 0.12);
+  color: #f6cf84;
+}
+
+.v3-cost-pill.is-blocked {
+  background: rgba(242, 117, 100, 0.18);
+  color: #ffb0a7;
+}
+
+.v3-reward-pill {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(122, 229, 130, 0.12);
+  color: #9ef0a4;
+}
+
+.v3-ec-disabled-reason {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: #ffada3;
+}
+
+/* ---------- Workshop Modal (F11) ---------- */
+.modal-card.v3-workshop-modal {
+  width: min(100%, 740px);
+}
+
+.v3-parts-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #f6d38b;
+}
+
+.v3-workshop-discount-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(98, 214, 223, 0.12);
+  border: 1px solid rgba(98, 214, 223, 0.34);
+  font-size: 12px;
+  color: #a9eef4;
+}
+
+.v3-max-quality-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #ffe299;
+  background: rgba(246, 184, 82, 0.18);
+  border: 1px solid rgba(246, 184, 82, 0.48);
+}
+
+.v3-wh-upgrade-note {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: #f5b3a9;
+}
+
+.v3-hull-tuning-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(110, 148, 192, 0.24);
+}
+
+.v3-hull-tuning-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.v3-hull-tune-card {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(17, 29, 46, 0.8);
+  border: 1px solid rgba(110, 148, 192, 0.28);
+}
+
+.v3-htc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.v3-htc-head small {
+  color: var(--text-secondary, #afbdcd);
+}
+
+.v3-htc-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.v3-htc-track-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(26, 40, 58, 0.65);
+}
+
+.v3-htc-track-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+}
+
+.v3-htc-track-info small {
+  font-size: 11px;
+  color: var(--text-secondary, #afbdcd);
+}
+
+/* ---------- Contracts & 3 Orbital Factions Modal (F13) ---------- */
+.modal-card.v3-contracts-modal {
+  width: min(100%, 780px);
+}
+
+.v3-faction-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.v3-faction-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(16, 28, 44, 0.84);
+  border: 1px solid rgba(110, 148, 192, 0.28);
+  min-width: 0;
+}
+
+.v3-faction-card.faction-starport_guild {
+  border-top: 2px solid #f6b852;
+}
+
+.v3-faction-card.faction-deep_institute {
+  border-top: 2px solid #62d6df;
+}
+
+.v3-faction-card.faction-free_salvagers {
+  border-top: 2px solid #7ae582;
+}
+
+.v3-fc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.v3-fc-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.v3-rank-badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(110, 148, 192, 0.18);
+  color: var(--text-primary, #e9edf2);
+}
+
+.v3-rank-badge.rank-2 {
+  background: rgba(98, 214, 223, 0.18);
+  color: #8eeff7;
+}
+
+.v3-rank-badge.rank-3 {
+  background: rgba(246, 184, 82, 0.22);
+  color: #ffe299;
+}
+
+.v3-fc-rep-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-secondary, #afbdcd);
+}
+
+.v3-rep-bar {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(10, 18, 30, 0.88);
+  overflow: hidden;
+}
+
+.v3-rep-fill {
+  height: 100%;
+  border-radius: 999px;
+}
+
+.v3-fc-perk {
+  font-size: 11.5px;
+  line-height: 1.38;
+  color: var(--text-primary, #dce6f2);
+}
+
+.v3-contract-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 4px 0;
+}
+
+.v3-faction-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.v3-faction-chip.faction-starport_guild {
+  color: #f8d48b;
+  background: rgba(246, 184, 82, 0.14);
+  border: 1px solid rgba(246, 184, 82, 0.38);
+}
+
+.v3-faction-chip.faction-deep_institute {
+  color: #9beff6;
+  background: rgba(98, 214, 223, 0.14);
+  border: 1px solid rgba(98, 214, 223, 0.38);
+}
+
+.v3-faction-chip.faction-free_salvagers {
+  color: #a6f2ac;
+  background: rgba(122, 229, 130, 0.14);
+  border: 1px solid rgba(122, 229, 130, 0.38);
+}
+
+.v3-bonus-obj-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #dfccff;
+  background: rgba(201, 160, 255, 0.13);
+  border: 1px solid rgba(201, 160, 255, 0.34);
+}
+
+/* ---------- Shop, Prepare, Map & Settlement M4 Strips ---------- */
+.v3-shop-faction-banner {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(246, 184, 82, 0.12);
+  border: 1px solid rgba(246, 184, 82, 0.44);
+  font-size: 12px;
+  color: #fce0a2;
+}
+
+.v3-prep-contract-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(17, 29, 46, 0.8);
+  border: 1px solid rgba(110, 148, 192, 0.3);
+}
+
+.v3-pcc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.v3-pcc-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.v3-pcc-note {
+  font-size: 12px;
+  color: var(--text-secondary, #afbdcd);
+}
+
+.v3-pcc-bonus {
+  font-size: 11.5px;
+  color: #dfccff;
+}
+
+.v3-bonus-tracker-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(201, 160, 255, 0.1);
+  border: 1px solid rgba(201, 160, 255, 0.32);
+  font-size: 12px;
+  color: #e6d7ff;
+}
+
+.v3-bonus-tracker-strip.is-met {
+  background: rgba(122, 229, 130, 0.12);
+  border-color: rgba(122, 229, 130, 0.36);
+  color: #bdf4c1;
+}
+
+.v3-bonus-tracker-strip.is-failed {
+  background: rgba(242, 117, 100, 0.12);
+  border-color: rgba(242, 117, 100, 0.36);
+  color: #ffbab2;
+}
+
+.v3-bonus-status-chip {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(10, 18, 30, 0.45);
+}
+
+.v3-bonus-row.is-done strong {
+  color: #7ae582;
+}
+
+.v3-bonus-row.is-missed strong {
+  color: var(--text-secondary, #afbdcd);
+}
+
+.v3-parts-row strong {
+  color: #f6d38b;
+}
+
+.v3-faction-rep-row strong {
+  color: #62d6df;
+}
+
+/* ---------- Mobile (390x844) & Short Landscape Touch/Overflow Safety ---------- */
+@media (max-width: 859px) {
+  .v2-shell.phase-wreck-hero .scene-card {
+    height: 196px;
+  }
+
+  .v3-faction-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .v3-wreck-cut-btn,
+  .v3-wreck-extract-btn,
+  .v3-event-choice-btn,
+  .v2-shell #v2-btn-confirm-settle {
+    min-width: 44px;
+    min-height: 46px;
+  }
+
+  .v3-wreck-cut-card,
+  .v3-event-choice-btn,
+  .v3-faction-card,
+  .v3-hull-tune-card {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+}

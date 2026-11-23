@@ -38,6 +38,7 @@ export interface V2ReturnDockingNotice {
   readonly creditsBefore: number;
   readonly creditsAfter: number;
   readonly earnedCredits: number;
+  readonly earnedParts?: number;
   readonly contractCompleted: boolean;
   readonly unlockedText: string | null;
   readonly crateCount: number;

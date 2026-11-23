@@ -23,6 +23,7 @@ function assetUrl(relPath: string): string {
 const ITEM_ALIASES: Record<string, string> = {
   'equipment.repair.common': 'equipment.drone.common',
   'equipment.repair.improved': 'equipment.drone.improved',
+  'mission.black_box': 'cargo.data_box',
 };
 
 const KNOWN_ITEM_IDS = new Set([

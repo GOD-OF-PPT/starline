@@ -4,7 +4,7 @@ import {
   V2_REGULAR_CARGO_KINDS,
   computeV2CargoPrice,
 } from '../data/cargo';
-import { isActBossEncounterKind } from '../data/enemies';
+import { buildSectorEnemyEncounter, isActBossEncounterKind } from '../data/enemies';
 import {
   getMerchantBuybackPrice,
   getUnlockedEquipmentKinds,
@@ -13,23 +13,50 @@ import {
   type V2UnlockFamilyId,
 } from '../data/equipment';
 import { getV3SectorDef } from '../data/sectors';
-import { computeV2JumpFuelCost } from './contracts';
+import {
+  canPerformSurveyAtCurrentNode,
+  computeV2JumpFuelCost,
+  freezeRunBonusObjectiveForSettlement,
+  grantContractObjectiveItemsForNode,
+} from './contracts';
+import { buildActiveWreckStateForNode, evaluateWreckHotspotCut } from './dismantle';
+import {
+  buildFallbackEventStateFromLegacyNode,
+  evaluateV2EventOption,
+  maybeCreateEngineerSwapOffer,
+  resolveV2EventOption,
+} from './events';
+import {
+  getEffectiveMerchantEquipmentPrice,
+  getEffectiveMerchantServicePrice,
+} from './factions';
 import { addV2ItemToStaging, removeV2ItemById } from './inventoryV2';
 import { createV2CargoInstance, createV2EquipmentInstance } from './itemCatalog';
 import { withV2Stream } from './rngStreams';
 import type {
+  V2CombatPayload,
   V2CombatRewardBundle,
-  V2EngineerSwapOffer,
   V2ItemInstance,
   V2MapNode,
+  V2ProfileState,
   V2RngStreams,
   V2RunState,
+  V2WreckSpotId,
+  V2WreckState,
 } from './types';
+
+export { evaluateV2EventOption, maybeCreateEngineerSwapOffer, resolveV2EventOption };
 
 export interface V2ActionOutcome {
   readonly ok: boolean;
   readonly run: V2RunState;
   readonly error?: string;
+}
+
+export interface V3WreckCutOutcome extends V2ActionOutcome {
+  readonly ambushTriggered?: boolean;
+  readonly tookHazard?: boolean;
+  readonly summaryText?: string;
 }
 
 export function getReachableNextNodeIds(run: V2RunState): readonly string[] {
@@ -46,47 +73,7 @@ export function isAtTerminalLayer(run: V2RunState): boolean {
   return Boolean(cur && cur.layer >= run.graph.maxLayers);
 }
 
-/**
- * Generates an Engineer swap offer (3 distinct common candidates from unlocked pool)
- * on the FIRST non-loan, non-mission equipment acquired during a run (§6.2).
- */
-export function maybeCreateEngineerSwapOffer(
-  run: V2RunState,
-  acquiredItem: V2ItemInstance,
-  unlockedFamilies: readonly V2UnlockFamilyId[]
-): V2RunState {
-  if (!run.engineerSwapAvailable || run.crewId !== 'engineer') return run;
-  if (acquiredItem.category !== 'equipment') return run;
-  if (acquiredItem.origin === 'loan' || acquiredItem.origin === 'mission') return run;
 
-  const acquiredKind = acquiredItem.definitionId.split('.')[1] as V2EquipmentKind;
-  const pool = getUnlockedEquipmentKinds(unlockedFamilies).filter((k) => k !== acquiredKind);
-  if (pool.length === 0) return run;
-
-  const candidateCount = (run.crewMasteryTier ?? 0) >= 1 ? 4 : 3;
-  const draw = withV2Stream(run.rngStreams, 'rewards', (rng) => {
-    const remaining = [...pool];
-    const picked: V2EquipmentKind[] = [];
-    while (picked.length < candidateCount && remaining.length > 0) {
-      const idx = rng.nextInt(remaining.length);
-      picked.push(remaining.splice(idx, 1)[0]);
-    }
-    return picked;
-  });
-
-  const offer: V2EngineerSwapOffer = {
-    targetInstanceId: acquiredItem.instanceId,
-    candidates: draw.value,
-    used: false,
-  };
-
-  return {
-    ...run,
-    rngStreams: draw.nextStreams,
-    engineerSwapAvailable: false,
-    activeEngineerOffer: offer,
-  };
-}
 
 export function applyV2EngineerSwap(
   run: V2RunState,
@@ -137,43 +124,11 @@ export function applyV2EngineerSwap(
 }
 
 /**
- * Spawns mission item(s) (2x3 Sealed Reactor or 1/2 Escape Pods) when resolving a contract objective node.
- * Guaranteed idempotent via claimedEventIds!
+ * Spawns mission item(s) (2x3 Sealed Reactor, 1/2 Escape Pods, or 1x2 Black Box) or records Bounty kill
+ * when resolving a contract objective node. Guaranteed idempotent via claimedEventIds!
  */
 export function maybeGrantContractObjectiveItems(run: V2RunState, node: V2MapNode): V2RunState {
-  if (!node.contractMarker) return run;
-  const c = run.contract;
-  if (c.status !== 'active') return run;
-  if (c.type !== 'transport' && c.type !== 'rescue') return run;
-  if (!c.missionItemDefId || c.missionItemCount <= 0) return run;
-
-  const claimKey = `mission_grant_${node.nodeId}`;
-  if (run.claimedEventIds.includes(claimKey)) return run;
-
-  let nextBay = run.bay;
-  for (let i = 0; i < c.missionItemCount; i++) {
-    const item = createV2CargoInstance({
-      instanceId: `${run.runId}_mis_${node.nodeId}_${i + 1}`,
-      defId: c.missionItemDefId,
-      origin: 'mission',
-      acquiredDepth: node.layer,
-      location: 'staging',
-      missionBinding: c.contractId,
-    });
-    nextBay = addV2ItemToStaging(nextBay, item, 0);
-  }
-
-  return {
-    ...run,
-    bay: nextBay,
-    claimedEventIds: [...run.claimedEventIds, claimKey],
-    contract: {
-      ...c,
-      completedNodeIds: c.completedNodeIds.includes(node.nodeId)
-        ? c.completedNodeIds
-        : [...c.completedNodeIds, node.nodeId],
-    },
-  };
+  return grantContractObjectiveItemsForNode(run, node);
 }
 
 /**
@@ -182,7 +137,7 @@ export function maybeGrantContractObjectiveItems(run: V2RunState, node: V2MapNod
 export function selectV2MapNode(
   run: V2RunState,
   targetNodeId: string,
-  options?: { readonly bonusBossCharges?: number }
+  options?: { readonly bonusBossCharges?: number; readonly profile?: V2ProfileState }
 ): V2ActionOutcome {
   if (run.phase !== 'MAP') {
     return { ok: false, run, error: '当前阶段不可选择航路节点' };
@@ -223,10 +178,23 @@ export function selectV2MapNode(
   const nextChargesMax = node.combat ? (isBossNode ? 2 + bonusBoss : 1) : run.tacticalChargesMax;
   const nextChargesUsed = node.combat ? 0 : run.tacticalChargesUsed;
 
+  let nextStreams = run.rngStreams;
+  let activeWreck: V2WreckState | null = null;
+  let activeEvent = null;
+
+  if (node.type === 'wreck' && node.wreck) {
+    const built = buildActiveWreckStateForNode(run, node, options?.profile);
+    activeWreck = built.wreck;
+    nextStreams = built.nextStreams;
+  } else if (node.type === 'anomaly' || node.type === 'distress') {
+    activeEvent = node.eventState ?? buildFallbackEventStateFromLegacyNode(run, node);
+  }
+
   return {
     ok: true,
     run: {
       ...run,
+      rngStreams: nextStreams,
       fuel: run.fuel - fuelCalc.totalCost,
       navigatorFreeJumpUsed: run.navigatorFreeJumpUsed || fuelCalc.navigatorDiscountApplied,
       currentNodeId: targetNodeId,
@@ -235,10 +203,271 @@ export function selectV2MapNode(
       activeCombat: null,
       pendingReward: null,
       activeEngineerOffer: null,
+      activeWreck,
+      activeEvent,
       tacticalChargesMax: nextChargesMax,
       tacticalChargesUsed: nextChargesUsed,
     },
   };
+}
+
+/**
+ * Multi-cut press-your-luck derelict dissection cut action (F11):
+ * - 1st cut is ALWAYS SAFE (0 hull damage, 0 fuel cost, 0 ambush risk)
+ * - 2nd/3rd greedy cuts apply disclosed hull/fuel/ambush risks with strict lethal-cut guard
+ * - Immediately stages items & awards Salvage Parts / credits; never auto-exits before Extract
+ * - On ambush, stashes bay.staging into activeWreck.stashedItems and attaches node.combat cleanly
+ */
+export function cutV2WreckHotspot(
+  run: V2RunState,
+  spotId: V2WreckSpotId,
+  unlockedFamilies: readonly V2UnlockFamilyId[],
+  reactorMode?: 'fuel' | 'repair'
+): V3WreckCutOutcome {
+  if (run.phase !== 'ENCOUNTER' || !run.currentNodeId) {
+    return { ok: false, run, error: '当前不在残骸拆解节点内' };
+  }
+  const node = run.graph.nodes[run.currentNodeId];
+  if (!node || node.type !== 'wreck') {
+    return { ok: false, run, error: '当前节点不是漂流残骸' };
+  }
+  if (node.combat || run.activeCombat) {
+    return { ok: false, run, error: '当前存在敌舰伏击，请先处理战斗' };
+  }
+
+  const built = buildActiveWreckStateForNode(run, node);
+  const wreck = built.wreck;
+  let nextStreams = built.nextStreams;
+
+  const claimKey = `wreck_cut_${node.nodeId}_${spotId}`;
+  if (run.claimedEventIds.includes(claimKey)) {
+    return { ok: false, run, error: '该残骸舱室已切开' };
+  }
+
+  const evalRes = evaluateWreckHotspotCut(run, wreck, spotId);
+  if (!evalRes.canCut) {
+    return { ok: false, run, error: evalRes.disabledReason ?? '当前无法切割该舱室' };
+  }
+
+  const spot = wreck.hotspots.find((h) => h.spotId === spotId)!;
+  let nextHp = Math.max(1, run.hp - evalRes.effectiveHullDamage);
+  let nextFuel = Math.max(0, run.fuel - evalRes.effectiveFuelCost);
+  let nextWallet = run.wallet + Math.max(0, spot.rewardCredits ?? 0);
+  let nextParts = (run.salvagePartsEarned ?? 0) + Math.max(0, spot.rewardParts ?? 0);
+  let nextBay = run.bay;
+  const acquiredEquips: V2ItemInstance[] = [];
+  const nextRecentKinds = [...(run.recentEquipmentKinds ?? [])];
+
+  const itemsToStage: V2ItemInstance[] =
+    spot.rewardItems && spot.rewardItems.length > 0
+      ? [...spot.rewardItems]
+      : spot.rewardItem
+      ? [spot.rewardItem]
+      : [];
+
+  for (const rawItem of itemsToStage) {
+    const alreadyStaged = nextBay.staging.some((s) => s.item.instanceId === rawItem.instanceId);
+    if (!alreadyStaged) {
+      const stagedItem: V2ItemInstance = { ...rawItem, location: 'staging' };
+      nextBay = addV2ItemToStaging(nextBay, stagedItem, 0);
+      if (stagedItem.category === 'equipment') {
+        acquiredEquips.push(stagedItem);
+        if (node.layer <= 3) {
+          const kind = stagedItem.definitionId.split('.')[1] as V2EquipmentKind;
+          if (kind) nextRecentKinds.push(kind);
+        }
+      }
+    }
+  }
+
+  const summaryParts: string[] = [`切开${spot.label}`];
+  if (itemsToStage.length > 0) {
+    summaryParts.push(`回收 ${itemsToStage.length} 件物资入暂存区`);
+  }
+  if ((spot.rewardParts ?? 0) > 0) {
+    summaryParts.push(`+${spot.rewardParts} 精密零件`);
+  }
+  if ((spot.rewardCredits ?? 0) > 0) {
+    summaryParts.push(`+${spot.rewardCredits}¤`);
+  }
+
+  // Reactor bonus fuel/repair ONLY if hotspot explicitly defines reactorFuelGain / reactorRepairGain
+  if (spotId === 'reactor' && ((spot.reactorFuelGain ?? 0) > 0 || (spot.reactorRepairGain ?? 0) > 0)) {
+    const salvagerT2 = run.crewId === 'salvager' && (run.crewMasteryTier ?? 0) >= 2;
+    const fuelCapGain =
+      (spot.reactorFuelGain ?? 0) > 0
+        ? Math.min((spot.reactorFuelGain ?? 0) + (salvagerT2 ? 1 : 0), run.maxFuel - nextFuel)
+        : 0;
+    const repairCapGain =
+      (spot.reactorRepairGain ?? 0) > 0
+        ? Math.min((spot.reactorRepairGain ?? 0) + (salvagerT2 ? 2 : 0), run.maxHp - nextHp)
+        : 0;
+
+    if (reactorMode === 'repair' && repairCapGain > 0) {
+      nextHp += repairCapGain;
+      summaryParts.push(`应急抢修 +${repairCapGain} HP`);
+    } else if (reactorMode === 'fuel' && fuelCapGain > 0) {
+      nextFuel += fuelCapGain;
+      summaryParts.push(`抽取 +${fuelCapGain} 燃料`);
+    } else if (fuelCapGain > 0) {
+      nextFuel += fuelCapGain;
+      summaryParts.push(`抽取 +${fuelCapGain} 燃料`);
+    } else if (repairCapGain > 0) {
+      nextHp += repairCapGain;
+      summaryParts.push(`应急抢修 +${repairCapGain} HP`);
+    }
+  }
+
+  if (evalRes.effectiveHullDamage > 0) {
+    summaryParts.push(`船体受损 -${evalRes.effectiveHullDamage} HP`);
+  }
+  if (evalRes.effectiveFuelCost > 0) {
+    summaryParts.push(`切割耗油 -${evalRes.effectiveFuelCost}`);
+  }
+
+  const nextHotspots = wreck.hotspots.map((h) =>
+    h.spotId === spotId ? { ...h, cut: true } : h
+  );
+  const nextStability = Math.max(0, wreck.stability - evalRes.stabilityCost);
+  const nextCutsMade = wreck.cutsMade + 1;
+  let summaryText = summaryParts.join(' · ');
+
+  let ambushTriggered = false;
+  let updatedNode: V2MapNode = node;
+  let nextWreck: V2WreckState = {
+    ...wreck,
+    stability: nextStability,
+    cutsMade: nextCutsMade,
+    hotspots: nextHotspots,
+    lastCutSummary: summaryText,
+  };
+  let nextChargesMax = run.tacticalChargesMax;
+  let nextChargesUsed = run.tacticalChargesUsed;
+
+  // Ambush handling (ZERO edits to combatV2.ts: stash bay.staging into activeWreck.stashedItems!)
+  if (!evalRes.isFirstSafeCut && evalRes.effectiveAmbushRisk) {
+    ambushTriggered = true;
+    summaryText = `${summaryText} · 警报触发伏击敌舰！已暂封战利品，击败伏击后自动返还。`;
+    const stashedItems: V2ItemInstance[] = [
+      ...(wreck.stashedItems ?? []),
+      ...nextBay.staging.map((s) => s.item),
+    ];
+    nextBay = { ...nextBay, staging: [] };
+
+    const ambushDraw = withV2Stream(nextStreams, 'enemies', (rng) => {
+      const enc = buildSectorEnemyEncounter(
+        run.sectorId,
+        node.layer,
+        'regular',
+        rng,
+        run.endlessThreat ?? 0,
+        {
+          nodeId: node.nodeId,
+          allowImproved: run.allowImproved,
+        }
+      );
+      const payload: V2CombatPayload = {
+        encounterKind: enc.encounterKind,
+        units: enc.units,
+        bounty: enc.bounty,
+        improvedProb: enc.improvedProb,
+      };
+      return payload;
+    });
+    nextStreams = ambushDraw.nextStreams;
+    updatedNode = { ...node, combat: ambushDraw.value };
+    nextWreck = {
+      ...nextWreck,
+      ambushTriggered: true,
+      stashedItems,
+      lastCutSummary: summaryText,
+    };
+    nextChargesMax = 1;
+    nextChargesUsed = 0;
+  }
+
+  let nextRun: V2RunState = {
+    ...run,
+    rngStreams: nextStreams,
+    hp: nextHp,
+    fuel: nextFuel,
+    wallet: nextWallet,
+    salvagePartsEarned: nextParts,
+    bay: nextBay,
+    activeWreck: nextWreck,
+    claimedEventIds: [...run.claimedEventIds, claimKey],
+    recentEquipmentKinds: nextRecentKinds.slice(-4),
+    tacticalChargesMax: nextChargesMax,
+    tacticalChargesUsed: nextChargesUsed,
+    graph: {
+      ...run.graph,
+      nodes: { ...run.graph.nodes, [node.nodeId]: updatedNode },
+    },
+  };
+
+  for (const eq of acquiredEquips) {
+    nextRun = maybeCreateEngineerSwapOffer(nextRun, eq, unlockedFamilies);
+  }
+
+  return {
+    ok: true,
+    run: nextRun,
+    ambushTriggered,
+    tookHazard: evalRes.effectiveHullDamage > 0 || evalRes.effectiveFuelCost > 0,
+    summaryText,
+  };
+}
+
+/**
+ * Extracts from the current derelict wreck (F11):
+ * - Allowed at any time during non-ambushed wreck encounter (even 0 cuts to prevent softlocks)
+ * - Grants marked contract objective items (e.g. mission.black_box on derelict_std)
+ * - Transitions to ARRANGE if staging has items or survey available; else SETTLEMENT if terminal layer; else MAP!
+ */
+export function extractV2Wreck(run: V2RunState): V2ActionOutcome {
+  if (run.phase !== 'ENCOUNTER' || !run.currentNodeId) {
+    return { ok: false, run, error: '当前不在残骸拆解阶段' };
+  }
+  const node = run.graph.nodes[run.currentNodeId];
+  if (!node || node.type !== 'wreck') {
+    return { ok: false, run, error: '当前节点不是漂流残骸' };
+  }
+  if (run.activeWreck?.ambushTriggered || node.combat) {
+    return { ok: false, run, error: '敌舰伏击尚未清除，无法直接撤离' };
+  }
+
+  const cutsMade = run.activeWreck?.cutsMade ?? 0;
+  const updatedNode: V2MapNode = {
+    ...node,
+    resolved: true,
+  };
+
+  let nextRun: V2RunState = {
+    ...run,
+    activeWreck: null,
+    wrecksDissectedThisRun: (run.wrecksDissectedThisRun ?? 0) + (cutsMade > 0 ? 1 : 0),
+    graph: {
+      ...run.graph,
+      nodes: { ...run.graph.nodes, [node.nodeId]: updatedNode },
+    },
+  };
+
+  nextRun = grantContractObjectiveItemsForNode(nextRun, updatedNode);
+
+  const shouldArrange =
+    nextRun.bay.staging.length > 0 || canPerformSurveyAtCurrentNode(nextRun).canSurvey;
+  if (shouldArrange) {
+    nextRun = { ...nextRun, phase: 'ARRANGE' };
+  } else if (isAtTerminalLayer(nextRun)) {
+    nextRun = freezeRunBonusObjectiveForSettlement(
+      { ...nextRun, phase: 'SETTLEMENT', settlementReason: 'safe_return' },
+      'safe_return'
+    );
+  } else {
+    nextRun = { ...nextRun, phase: 'MAP' };
+  }
+
+  return { ok: true, run: nextRun };
 }
 
 /**
@@ -469,12 +698,18 @@ export function resolveV2DistressChoice(
 }
 
 /**
- * Checks whether ALL options in the current non-combat event are unaffordable (§5.4).
+ * Checks whether ALL options in the current non-combat event are unaffordable (§5.4 + F12).
  */
 export function areAllEventOptionsUnaffordable(run: V2RunState): boolean {
   if (run.phase !== 'ENCOUNTER' || !run.currentNodeId) return false;
+  if (run.activeEvent && run.activeEvent.nodeId === run.currentNodeId) {
+    return run.activeEvent.options.every((opt) => !evaluateV2EventOption(run, opt).enabled);
+  }
   const node = run.graph.nodes[run.currentNodeId];
   if (!node) return false;
+  if (node.eventState) {
+    return node.eventState.options.every((opt) => !evaluateV2EventOption(run, opt).enabled);
+  }
   if (node.type === 'anomaly' && node.anomaly) {
     return run.fuel < node.anomaly.safeFuelCost && run.hp <= node.anomaly.breachHpCost;
   }
@@ -495,10 +730,11 @@ export function abandonV2EventAndReturn(run: V2RunState): V2ActionOutcome {
     return { ok: false, run, error: '战斗节点不可按非战斗事件放弃' };
   }
   const updatedNode: V2MapNode = { ...node, abandoned: true, resolved: false };
-  return {
-    ok: true,
-    run: {
+  const nextRun = freezeRunBonusObjectiveForSettlement(
+    {
       ...run,
+      activeWreck: null,
+      activeEvent: null,
       phase: 'SETTLEMENT',
       settlementReason: 'safe_return',
       graph: {
@@ -506,16 +742,19 @@ export function abandonV2EventAndReturn(run: V2RunState): V2ActionOutcome {
         nodes: { ...run.graph.nodes, [node.nodeId]: updatedNode },
       },
     },
-  };
+    'safe_return'
+  );
+  return { ok: true, run: nextRun };
 }
 
-// --- Merchant Transactions (idempotent via transactionIds, AC06) ---
+// --- Merchant Transactions (idempotent via transactionIds, AC06 + F13 Starport Guild Discount) ---
 
 export function buyV2MerchantOffer(
   run: V2RunState,
   offerId: string,
   transactionId: string,
-  unlockedFamilies: readonly V2UnlockFamilyId[]
+  unlockedFamilies: readonly V2UnlockFamilyId[],
+  starportGuildRep = 0
 ): V2ActionOutcome {
   if (run.phase !== 'SHOP' || !run.currentNodeId) {
     return { ok: false, run, error: '当前不在流动商人界面' };
@@ -530,8 +769,14 @@ export function buyV2MerchantOffer(
   const offer = node.merchant.offers.find((o) => o.offerId === offerId);
   if (!offer) return { ok: false, run, error: '商品不存在' };
   if (offer.sold) return { ok: false, run, error: '该设备已售罄（每件限购 1）' };
-  if (run.wallet < offer.buyPrice) {
-    return { ok: false, run, error: `航行钱包不足（需要 ${offer.buyPrice}¤，当前 ${run.wallet}¤）` };
+
+  const effectivePrice = getEffectiveMerchantEquipmentPrice(
+    offer.buyPrice,
+    offer.item.fixedValue,
+    starportGuildRep
+  );
+  if (run.wallet < effectivePrice) {
+    return { ok: false, run, error: `航行钱包不足（需要 ${effectivePrice}¤，当前 ${run.wallet}¤）` };
   }
 
   const nextOffers = node.merchant.offers.map((o) =>
@@ -543,7 +788,7 @@ export function buyV2MerchantOffer(
   };
   let nextRun: V2RunState = {
     ...run,
-    wallet: run.wallet - offer.buyPrice,
+    wallet: run.wallet - effectivePrice,
     bay: addV2ItemToStaging(run.bay, offer.item, 0),
     transactionIds: [...run.transactionIds, transactionId],
     graph: {
@@ -555,7 +800,11 @@ export function buyV2MerchantOffer(
   return { ok: true, run: nextRun };
 }
 
-export function buyV2MerchantFuel(run: V2RunState, transactionId: string): V2ActionOutcome {
+export function buyV2MerchantFuel(
+  run: V2RunState,
+  transactionId: string,
+  starportGuildRep = 0
+): V2ActionOutcome {
   if (run.phase !== 'SHOP' || !run.currentNodeId) {
     return { ok: false, run, error: '当前不在流动商人界面' };
   }
@@ -573,8 +822,12 @@ export function buyV2MerchantFuel(run: V2RunState, transactionId: string): V2Act
   if (actualGain <= 0) {
     return { ok: false, run, error: '燃料已达上限（禁止无收益购买）' };
   }
-  if (run.wallet < node.merchant.fuelPrice) {
-    return { ok: false, run, error: `航行钱包不足（需要 ${node.merchant.fuelPrice}¤）` };
+  const effectivePrice = getEffectiveMerchantServicePrice(
+    node.merchant.fuelPrice,
+    starportGuildRep
+  );
+  if (run.wallet < effectivePrice) {
+    return { ok: false, run, error: `航行钱包不足（需要 ${effectivePrice}¤）` };
   }
   const updatedNode: V2MapNode = {
     ...node,
@@ -584,7 +837,7 @@ export function buyV2MerchantFuel(run: V2RunState, transactionId: string): V2Act
     ok: true,
     run: {
       ...run,
-      wallet: run.wallet - node.merchant.fuelPrice,
+      wallet: run.wallet - effectivePrice,
       fuel: run.fuel + actualGain,
       transactionIds: [...run.transactionIds, transactionId],
       graph: {
@@ -595,7 +848,11 @@ export function buyV2MerchantFuel(run: V2RunState, transactionId: string): V2Act
   };
 }
 
-export function buyV2MerchantRepair(run: V2RunState, transactionId: string): V2ActionOutcome {
+export function buyV2MerchantRepair(
+  run: V2RunState,
+  transactionId: string,
+  starportGuildRep = 0
+): V2ActionOutcome {
   if (run.phase !== 'SHOP' || !run.currentNodeId) {
     return { ok: false, run, error: '当前不在流动商人界面' };
   }
@@ -613,8 +870,12 @@ export function buyV2MerchantRepair(run: V2RunState, transactionId: string): V2A
   if (actualGain <= 0) {
     return { ok: false, run, error: '船体耐久已满（禁止无收益购买）' };
   }
-  if (run.wallet < node.merchant.repairPrice) {
-    return { ok: false, run, error: `航行钱包不足（需要 ${node.merchant.repairPrice}¤）` };
+  const effectivePrice = getEffectiveMerchantServicePrice(
+    node.merchant.repairPrice,
+    starportGuildRep
+  );
+  if (run.wallet < effectivePrice) {
+    return { ok: false, run, error: `航行钱包不足（需要 ${effectivePrice}¤）` };
   }
   const updatedNode: V2MapNode = {
     ...node,
@@ -624,7 +885,7 @@ export function buyV2MerchantRepair(run: V2RunState, transactionId: string): V2A
     ok: true,
     run: {
       ...run,
-      wallet: run.wallet - node.merchant.repairPrice,
+      wallet: run.wallet - effectivePrice,
       hp: run.hp + actualGain,
       transactionIds: [...run.transactionIds, transactionId],
       graph: {
@@ -823,12 +1084,28 @@ export function pickV2CombatReward(
     nextHp = Math.min(run.maxHp, run.hp + run.pendingReward.repairAmount);
   }
 
+  // Restore any loot stashed during a wreck ambush encounter back into staging!
+  let nextActiveWreck = run.activeWreck ?? null;
+  let nextWrecksDissected = run.wrecksDissectedThisRun ?? 0;
+  if (run.activeWreck?.ambushTriggered) {
+    for (const stashed of run.activeWreck.stashedItems ?? []) {
+      const exists = nextBay.staging.some((s) => s.item.instanceId === stashed.instanceId);
+      if (!exists) {
+        nextBay = addV2ItemToStaging(nextBay, { ...stashed, location: 'staging' }, 0);
+      }
+    }
+    nextActiveWreck = null;
+    nextWrecksDissected += 1;
+  }
+
   const updatedNode: V2MapNode = { ...node, resolved: true };
   let nextRun: V2RunState = {
     ...run,
     hp: nextHp,
     bay: nextBay,
     phase: 'ARRANGE',
+    activeWreck: nextActiveWreck,
+    wrecksDissectedThisRun: nextWrecksDissected,
     pendingReward: { ...run.pendingReward, chosen: choice },
     claimedEventIds: [...run.claimedEventIds, claimKey],
     graph: {
@@ -848,7 +1125,7 @@ export function pickV2CombatReward(
  * Finishes ARRANGE phase:
  * - Requires staging to be completely cleared
  * - Expires any unused Engineer swap offer (§6.2)
- * - Clears discard undo stack (caller shows discard confirm modal beforehand if non-empty!)
+ * - Accumulates discardedCountThisRun and clears discard undo stack
  * - At terminal layer (Layer 6 or Tutorial Layer 3), automatically transitions to safe-return SETTLEMENT!
  */
 export function finishV2ArrangeAndProceed(
@@ -861,22 +1138,26 @@ export function finishV2ArrangeAndProceed(
   if (run.bay.staging.length > 0) {
     return { ok: false, run, error: '暂存区仍有未处理物品，请摆入船舱或舍弃后再离开' };
   }
+  const nextDiscardedCount =
+    (run.discardedCountThisRun ?? 0) + run.bay.discardedThisArrange.length;
   const cleanBay = { ...run.bay, discardedThisArrange: [] };
   const expiredOffer = run.activeEngineerOffer
     ? { ...run.activeEngineerOffer, used: true }
     : null;
 
   if (action === 'safe_return' || isAtTerminalLayer(run)) {
-    return {
-      ok: true,
-      run: {
+    const settlementRun = freezeRunBonusObjectiveForSettlement(
+      {
         ...run,
         bay: cleanBay,
+        discardedCountThisRun: nextDiscardedCount,
         activeEngineerOffer: expiredOffer,
         phase: 'SETTLEMENT',
         settlementReason: 'safe_return',
       },
-    };
+      'safe_return'
+    );
+    return { ok: true, run: settlementRun };
   }
 
   return {
@@ -884,6 +1165,7 @@ export function finishV2ArrangeAndProceed(
     run: {
       ...run,
       bay: cleanBay,
+      discardedCountThisRun: nextDiscardedCount,
       activeEngineerOffer: expiredOffer,
       phase: 'MAP',
     },
@@ -900,14 +1182,20 @@ export function initiateV2SafeReturnFromMap(run: V2RunState): V2ActionOutcome {
   if (run.bay.staging.length > 0) {
     return { ok: false, run, error: '请先处理暂存区物品后再返航' };
   }
-  return {
-    ok: true,
-    run: {
+  const nextDiscardedCount =
+    (run.discardedCountThisRun ?? 0) + run.bay.discardedThisArrange.length;
+  const settlementRun = freezeRunBonusObjectiveForSettlement(
+    {
       ...run,
       bay: { ...run.bay, discardedThisArrange: [] },
+      discardedCountThisRun: nextDiscardedCount,
       activeEngineerOffer: null,
+      activeWreck: null,
+      activeEvent: null,
       phase: 'SETTLEMENT',
       settlementReason: 'safe_return',
     },
-  };
+    'safe_return'
+  );
+  return { ok: true, run: settlementRun };
 }

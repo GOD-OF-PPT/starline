@@ -65,6 +65,11 @@ export function renderBaseHeroView(
             }</div>
             <div class="docking-stats">
               <span>本次入账 <strong class="num">+${n.earnedCredits}¤</strong></span>
+              ${
+                (n.earnedParts ?? 0) > 0
+                  ? `<span>精密零件 <strong class="num">+${n.earnedParts}</strong></span>`
+                  : ''
+              }
               <span>基地余额 <strong class="num">${shownCredits}¤</strong></span>
             </div>
             ${n.unlockedText ? `<div class="docking-unlock">${n.unlockedText}</div>` : ''}
@@ -146,8 +151,8 @@ export function renderBaseHeroView(
       <div class="v2-station-dock" role="toolbar" aria-label="空间站功能区">
         <button type="button" class="v2-dock-btn" id="v2-dock-wh" data-testid="btn-open-warehouse">
           ${svgIcon('warehouse', 17)}
-          <span>设备库</span>
-          <small class="num">${p.equipmentWarehouse.length}/${V2_WAREHOUSE_CAPACITY}${
+          <span>设备工坊</span>
+          <small class="num">${p.equipmentWarehouse.length}/${V2_WAREHOUSE_CAPACITY} · ${p.salvageParts}零件${
     p.pendingGiftQueue.length > 0 ? ` +${p.pendingGiftQueue.length}` : ''
   }</small>
         </button>

@@ -43,7 +43,12 @@ export type V2IconName =
   | 'chevronDown'
   | 'chevronUp'
   | 'target'
-  | 'boss';
+  | 'boss'
+  | 'parts'
+  | 'cut'
+  | 'warning'
+  | 'faction'
+  | 'upgrade';
 
 const ICON_PATHS: Record<V2IconName, string> = {
   fuel: '<path d="M5 4h7a2 2 0 0 1 2 2v13H4V6a2 2 0 0 1 1-2Z"/><path d="M14 8h2l2 2v5a1.5 1.5 0 0 1-3 0v-3"/><path d="M7 10h4"/><path d="M3 19h12"/>',
@@ -84,6 +89,11 @@ const ICON_PATHS: Record<V2IconName, string> = {
   chevronUp: '<path d="m6 15 6-6 6 6"/>',
   target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/><path d="M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22"/>',
   boss: '<path d="m12 2.5 3.5 4.2 5.5-1.2-2.2 5.4 3.2 4.6-5.6.5L12 21.5 7.6 16l-5.6-.5 3.2-4.6L3 5.5l5.5 1.2L12 2.5Z"/><circle cx="12" cy="12" r="2.6"/>',
+  parts: '<circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M4.7 6.2l2.1 1.4M17.2 16.4l2.1 1.4M2.8 12h2.6M18.6 12h2.6M4.7 17.8l2.1-1.4M17.2 7.6l2.1-1.4"/><circle cx="12" cy="12" r="6.8" stroke-dasharray="2.5 2.5" opacity=".6"/>',
+  cut: '<circle cx="6.5" cy="7" r="2.5"/><circle cx="6.5" cy="17" r="2.5"/><path d="M8.7 8.4 20 16M8.7 15.6 20 8"/><path d="M14.5 12h6.5" stroke-dasharray="2 2"/>',
+  warning: '<path d="M12 3.2 21 19.2H3L12 3.2Z"/><path d="M12 9.2v4.6"/><circle cx="12" cy="16.4" r=".8" fill="currentColor"/>',
+  faction: '<path d="M12 2.8 4.5 6.4v5.8c0 4.6 3.2 7.6 7.5 9 4.3-1.4 7.5-4.4 7.5-9V6.4L12 2.8Z"/><path d="m12 7.2 1.6 3.2 3.5.5-2.5 2.4.6 3.4L12 15.1l-3.2 1.6.6-3.4-2.5-2.4 3.5-.5L12 7.2Z"/>',
+  upgrade: '<path d="m6 14 6-6 6 6"/><path d="m6 19.5 6-6 6 6"/><path d="M12 3.5v2.5"/>',
 };
 
 export function svgIcon(name: V2IconName, size = 15, extraClass = ''): string {

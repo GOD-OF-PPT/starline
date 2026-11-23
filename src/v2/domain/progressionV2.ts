@@ -12,8 +12,23 @@ import {
   type V2FacilityId,
 } from '../data/facilities';
 import { syncCampaignProgress } from './campaign';
+import { getEffectiveWorkshopCost } from './factions';
 import { createV2EquipmentInstance } from './itemCatalog';
 import type { V2ProfileState } from './types';
+
+export function getEffectiveV2ResearchCost(
+  profile: Pick<V2ProfileState, 'factionRep'>
+): number {
+  return getEffectiveWorkshopCost(V2_RESEARCH_COST_CREDITS, profile.factionRep.deep_institute);
+}
+
+export function getEffectiveV2CraftCost(
+  profile: Pick<V2ProfileState, 'factionRep'>,
+  kind: V2EquipmentKind
+): number {
+  const def = getV2EquipmentDefByKind(kind, 'common');
+  return getEffectiveWorkshopCost(def.craftCost, profile.factionRep.deep_institute);
+}
 
 export interface V2ProfileActionResult {
   readonly ok: boolean;
@@ -116,10 +131,11 @@ export function canResearchV2Instance(
   if (profile.blueprints.includes(def.kind)) {
     return { canResearch: false, reason: `「${def.name}」普通蓝图已解锁，无需重复研究` };
   }
-  if (profile.credits < V2_RESEARCH_COST_CREDITS) {
+  const researchCost = getEffectiveV2ResearchCost(profile);
+  if (profile.credits < researchCost) {
     return {
       canResearch: false,
-      reason: `信用点不足（需 ${V2_RESEARCH_COST_CREDITS}¤，当前 ${profile.credits}¤）`,
+      reason: `信用点不足（需 ${researchCost}¤，当前 ${profile.credits}¤）`,
     };
   }
   return {
@@ -130,7 +146,7 @@ export function canResearchV2Instance(
 }
 
 /**
- * Researches 1 owned/loot equipment instance from warehouse + 30 credits -> unlocks common blueprint ONCE (§10.4 & AC15).
+ * Researches 1 owned/loot equipment instance from warehouse + researchCost -> unlocks common blueprint ONCE (§10.4 & AC15).
  * Consumes the exact instance atomically so double-clicking can NEVER double-charge!
  */
 export function researchV2Equipment(
@@ -141,12 +157,13 @@ export function researchV2Equipment(
   if (!check.canResearch || !check.kind) {
     return { ok: false, profile, error: check.reason };
   }
+  const researchCost = getEffectiveV2ResearchCost(profile);
   const nextWarehouse = profile.equipmentWarehouse.filter((w) => w.instanceId !== instanceId);
   return {
     ok: true,
     profile: {
       ...profile,
-      credits: profile.credits - V2_RESEARCH_COST_CREDITS,
+      credits: profile.credits - researchCost,
       equipmentWarehouse: nextWarehouse,
       blueprints: [...profile.blueprints, check.kind],
     },
@@ -154,7 +171,7 @@ export function researchV2Equipment(
 }
 
 /**
- * Crafts 1 owned common equipment instance at Base (cost = commonRecycle * 3, instant, §10.4).
+ * Crafts 1 owned common equipment instance at Base (cost = commonRecycle * 3 discounted by Deep Institute rep, instant, §10.4).
  */
 export function craftV2CommonEquipment(
   profile: V2ProfileState,
@@ -174,9 +191,9 @@ export function craftV2CommonEquipment(
       error: `设备库已满（${V2_WAREHOUSE_CAPACITY}/${V2_WAREHOUSE_CAPACITY}），请先腾出空位`,
     };
   }
-  const def = getV2EquipmentDefByKind(kind, 'common');
-  if (profile.credits < def.craftCost) {
-    return { ok: false, profile, error: `信用点不足（制造需 ${def.craftCost}¤）` };
+  const craftCost = getEffectiveV2CraftCost(profile, kind);
+  if (profile.credits < craftCost) {
+    return { ok: false, profile, error: `信用点不足（制造需 ${craftCost}¤）` };
   }
   const item = createV2EquipmentInstance({
     instanceId: `craft_${kind}_${uniqueSuffix ?? `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`}`,
@@ -190,7 +207,7 @@ export function craftV2CommonEquipment(
     ok: true,
     profile: {
       ...profile,
-      credits: profile.credits - def.craftCost,
+      credits: profile.credits - craftCost,
       equipmentWarehouse: [...profile.equipmentWarehouse, item],
       discoveredItems: profile.discoveredItems.includes(item.definitionId)
         ? profile.discoveredItems

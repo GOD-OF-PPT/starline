@@ -4,6 +4,12 @@ import {
   getMerchantBuybackPrice,
   type V2EquipmentKind,
 } from '../../data/equipment';
+import {
+  getEffectiveMerchantEquipmentPrice,
+  getEffectiveMerchantServicePrice,
+  getFactionRank,
+  getMerchantDiscountRate,
+} from '../../domain/factions';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
 import type { V2MapNode, V2RunState } from '../../domain/types';
 import { renderV2MiniMaskHtml } from '../CargoGridV2';
@@ -14,6 +20,7 @@ export interface ShopViewProps {
   readonly run: V2RunState;
   readonly node: V2MapNode;
   readonly readOnly: boolean;
+  readonly starportGuildRep?: number;
 }
 
 export interface ShopViewActions {
@@ -30,9 +37,15 @@ export function renderShopView(
   props: ShopViewProps,
   actions: ShopViewActions
 ): void {
-  const { run, node, readOnly } = props;
+  const { run, node, readOnly, starportGuildRep = 0 } = props;
   const shop = node.merchant;
   if (!shop) return;
+
+  const guildRank = getFactionRank(starportGuildRep);
+  const discountRate = getMerchantDiscountRate(starportGuildRep);
+  const discountPct = Math.round(discountRate * 100);
+  const effFuelPrice = getEffectiveMerchantServicePrice(shop.fuelPrice, starportGuildRep);
+  const effRepairPrice = getEffectiveMerchantServicePrice(shop.repairPrice, starportGuildRep);
 
   const sellableLoot = [
     ...run.bay.placed.map((p) => p.item),
@@ -41,6 +54,14 @@ export function renderShopView(
 
   const engineerBannerHtml = renderEngineerSwapBannerHtml(run, readOnly);
 
+  const guildBannerHtml =
+    discountPct > 0
+      ? `<div class="v3-shop-faction-banner" data-testid="shop-faction-discount">
+          ${svgIcon('faction', 14)}
+          <span><strong>星港行会 Lv${guildRank} 声望特权</strong>：流动商人设备与补给享 <strong>${discountPct}% 折扣</strong>（反套利底价生效）</span>
+        </div>`
+      : '';
+
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root" data-testid="shop-screen">
       <div class="panel-header">
@@ -48,13 +69,21 @@ export function renderShopView(
         <span class="panel-sub">航行钱包 <strong class="num">${run.wallet}¤</strong></span>
       </div>
 
+      ${guildBannerHtml}
+
       <div class="v2-shop-section">
         <div class="v2-prep-label">限购设备</div>
         <div class="v2-shop-offers">
           ${shop.offers
             .map((off) => {
               const def = V2_EQUIPMENT_DEFS[off.item.definitionId];
-              const canBuy = !off.sold && run.wallet >= off.buyPrice;
+              const effPrice = getEffectiveMerchantEquipmentPrice(
+                off.buyPrice,
+                off.item.fixedValue,
+                starportGuildRep
+              );
+              const discounted = effPrice < off.buyPrice;
+              const canBuy = !off.sold && run.wallet >= effPrice;
               return `<div class="v2-shop-card ${off.sold ? 'sold' : ''}">
                 <img class="v2-wh-icon" src="${getItemImageUrl(off.item.definitionId)}" alt="${def?.name ?? ''}" />
                 <div class="v2-wh-info">
@@ -63,11 +92,13 @@ export function renderShopView(
               }">${off.item.quality === 'improved' ? '优良' : '普通'}</span></div>
                   <div class="v2-wh-sub">${
                     def ? `${renderV2MiniMaskHtml(def.shapeId)} ${def.summary}` : ''
-                  }</div>
+                  }${
+                discounted ? ` · 原价 <s>${off.buyPrice}¤</s>` : ''
+              }</div>
                 </div>
                 <button type="button" class="btn btn-sm btn-primary" data-buy-offer="${off.offerId}" ${
                 readOnly || !canBuy ? 'disabled' : ''
-              }>${off.sold ? '已购' : `购买 ${off.buyPrice}¤`}</button>
+              }>${off.sold ? '已购' : `购买 ${effPrice}¤`}</button>
               </div>`;
             })
             .join('')}
@@ -80,15 +111,19 @@ export function renderShopView(
         <div class="v2-prep-label">航行补给（每项限购 1 次）</div>
         <div class="v2-shop-supplies">
           <button type="button" class="btn btn-sm btn-secondary" id="v2-shop-fuel" ${
-            readOnly || shop.fuelBought || run.wallet < shop.fuelPrice || run.fuel >= run.maxFuel
+            readOnly || shop.fuelBought || run.wallet < effFuelPrice || run.fuel >= run.maxFuel
               ? 'disabled'
               : ''
-          }>${svgIcon('fuel', 13)} 燃料 +${shop.fuelAmount}（${shop.fuelBought ? '已购' : `${shop.fuelPrice}¤`}）</button>
+          }>${svgIcon('fuel', 13)} 燃料 +${shop.fuelAmount}（${
+    shop.fuelBought ? '已购' : `${effFuelPrice}¤`
+  }）</button>
           <button type="button" class="btn btn-sm btn-secondary" id="v2-shop-repair" ${
-            readOnly || shop.repairBought || run.wallet < shop.repairPrice || run.hp >= run.maxHp
+            readOnly || shop.repairBought || run.wallet < effRepairPrice || run.hp >= run.maxHp
               ? 'disabled'
               : ''
-          }>${svgIcon('wrench', 13)} 维修 +${shop.repairAmount} HP（${shop.repairBought ? '已购' : `${shop.repairPrice}¤`}）</button>
+          }>${svgIcon('wrench', 13)} 维修 +${shop.repairAmount} HP（${
+    shop.repairBought ? '已购' : `${effRepairPrice}¤`
+  }）</button>
         </div>
       </div>
 

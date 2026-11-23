@@ -1,16 +1,7 @@
 import { getItemImageUrl } from '../../assets/itemArt';
 import { openManagedModal, type ManagedModalHandle } from '../../ui/Modals';
 import { V2_CARGO_DEFS } from '../data/cargo';
-import { V2_CONTRACT_TEMPLATES } from '../data/contracts';
-import {
-  V2_ALL_EQUIPMENT_KINDS,
-  V2_EQUIPMENT_DEFS,
-  V2_RESEARCH_COST_CREDITS,
-  V2_WAREHOUSE_CAPACITY,
-  getEffectiveV2EquipmentBudgetCost,
-  getV2EquipmentDefByKind,
-  type V2EquipmentKind,
-} from '../data/equipment';
+import { V2_EQUIPMENT_DEFS } from '../data/equipment';
 import {
   V2_FACILITIES,
   V2_FACILITY_ORDER,
@@ -20,12 +11,10 @@ import {
 } from '../data/facilities';
 import { V2_SHAPES } from '../data/shapes';
 import { V2_TRIAL_BUILD_ORDER, V2_TRIAL_BUILDS } from '../data/trialBuilds';
-import { getAvailableContractBoard } from '../domain/contracts';
 import { getAnyV2ItemDef } from '../domain/itemCatalog';
 import type { V1MigrationInspection } from '../domain/migration';
 import {
   canBuildV2Facility,
-  canResearchV2Instance,
   canRestoreV2Relic,
   getV2RelicSummary,
 } from '../domain/progressionV2';
@@ -44,6 +33,14 @@ import {
   renderV2MiniMaskHtml,
 } from './CargoGridV2';
 import { svgIcon } from './icons';
+import {
+  openV3ContractsModal,
+  type V3ContractsModalOptions,
+} from './modals/ContractsModal';
+import {
+  openV3WorkshopModal,
+  type V3WorkshopModalOptions,
+} from './modals/WorkshopModal';
 
 let v2ModalSeq = 1;
 
@@ -88,98 +85,9 @@ export function openTitledV2Modal(
 export function openV2ContractsDrawerModal(
   host: HTMLElement,
   profile: V2ProfileState,
-  options: {
-    readonly readOnly: boolean;
-    readonly onSelectContract: (templateId: string) => void;
-    readonly onStartTutorial: () => void;
-  }
+  options: V3ContractsModalOptions
 ): void {
-  const board = getAvailableContractBoard(profile);
-
-  const renderCard = (tplId: string, lockedReason?: string) => {
-    const tpl = V2_CONTRACT_TEMPLATES[tplId];
-    if (!tpl) return '';
-    const completedBefore = profile.completedContractIds.includes(tpl.templateId);
-    const isDeep = tpl.tier === 'deep';
-    return `
-      <div class="v2-contract-card ${isDeep ? 'tier-deep' : ''} ${lockedReason ? 'is-locked' : ''}" ${
-      lockedReason ? 'data-contract-locked="true"' : ''
-    }>
-        <div class="v2-contract-head">
-          <span class="v2-contract-name">${tpl.name}</span>
-          <span class="v2-contract-reward num">${
-            tpl.rewardCredits > 0 ? `+${tpl.rewardCredits}¤` : '按货结算'
-          }</span>
-        </div>
-        <div class="v2-contract-desc">${tpl.gameplayNote}</div>
-        <div class="v2-contract-meta">
-          <span>${tpl.spaceNote}</span>
-          ${completedBefore ? '<span class="v2-done-chip">已达成</span>' : ''}
-        </div>
-        <div class="v2-contract-foot">
-          ${
-            lockedReason
-              ? `<span class="v2-lock-note">${svgIcon('lock', 13)} ${lockedReason}</span>`
-              : `<button type="button" class="btn btn-sm btn-primary" data-modal-contract="${tpl.templateId}" ${
-                  options.readOnly ? 'disabled' : ''
-                }>接取并整备</button>`
-          }
-        </div>
-      </div>
-    `;
-  };
-
-  openTitledV2Modal(
-    host,
-    { title: `委托终端（已完成 ${profile.completedContractTypes.length}/3 类标准合同）`, dismissible: true },
-    (body, modal) => {
-      body.innerHTML = `
-        <div class="v2-contract-section-title">标准委托（第 1–4 层 · 首次完成解锁新体系与船员）</div>
-        <div class="v2-contract-grid">
-          ${board.standardTemplates.map((c) => renderCard(c.templateId)).join('')}
-        </div>
-        <div class="v2-contract-section-title">深入委托（第 5–6 层高危悬赏${
-          board.deepLockReason ? ` · ${board.deepLockReason}` : ''
-        }）</div>
-        <div class="v2-contract-grid">
-          ${board.deepEntries
-            .map((entry) =>
-              renderCard(entry.template.templateId, entry.locked ? entry.lockReason ?? undefined : undefined)
-            )
-            .join('')}
-        </div>
-        <div class="v2-contract-section-title">自由航线与教学</div>
-        <div class="v2-contract-grid">
-          ${renderCard(board.freeTemplate.templateId)}
-          <div class="v2-contract-card">
-            <div class="v2-contract-head">
-              <span class="v2-contract-name">首航教学航次</span>
-              <span class="v2-contract-reward num">3 层示范</span>
-            </div>
-            <div class="v2-contract-desc">重温 2×3 密封反应堆装舱冲突、旋转拼装与免费安全返航。</div>
-            <div class="v2-contract-foot">
-              <button type="button" class="btn btn-sm btn-secondary" id="v2-modal-start-tut" ${
-                options.readOnly ? 'disabled' : ''
-              }>${profile.tutorialCompleted ? '重玩首航教学' : '启动首航教学'}</button>
-            </div>
-          </div>
-        </div>
-      `;
-
-      body.querySelectorAll<HTMLButtonElement>('[data-modal-contract]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const tplId = btn.dataset.modalContract!;
-          modal.close();
-          options.onSelectContract(tplId);
-        });
-      });
-
-      body.querySelector('#v2-modal-start-tut')?.addEventListener('click', () => {
-        modal.close();
-        options.onStartTutorial();
-      });
-    }
-  );
+  openV3ContractsModal(host, profile, options);
 }
 
 export function openV2FacilitiesDrawerModal(
@@ -575,231 +483,9 @@ export function openV2SettingsModal(
 export function openV2WarehouseModal(
   host: HTMLElement,
   getProfile: () => V2ProfileState,
-  options: {
-    readonly readOnly: boolean;
-    readonly initialTab?: 'warehouse' | 'research';
-    readonly onResearch: (instanceId: string) => { readonly ok: boolean; readonly error?: string };
-    readonly onCraft: (kind: V2EquipmentKind) => { readonly ok: boolean; readonly error?: string };
-    readonly onSellItem: (instanceId: string) => { readonly ok: boolean; readonly error?: string };
-    readonly onClaimGift: (instanceId: string) => { readonly ok: boolean; readonly error?: string };
-    readonly onSellGift: (instanceId: string) => { readonly ok: boolean; readonly error?: string };
-  }
+  options: V3WorkshopModalOptions
 ): void {
-  let activeTab: 'warehouse' | 'research' = options.initialTab ?? 'warehouse';
-  let feedbackMsg: { readonly text: string; readonly isError: boolean } | null = null;
-
-  openTitledV2Modal(host, { title: '设备库与研究台', dismissible: true }, (body) => {
-    const renderBody = () => {
-      const profile = getProfile();
-      const hasLab = profile.buildings.research_lab;
-
-      const giftHtml =
-        profile.pendingGiftQueue.length > 0
-          ? `<div class="v2-gift-box">
-              <div class="v2-section-mini-title">${svgIcon('crate', 14)} 待领取赠品队列 (${profile.pendingGiftQueue.length})</div>
-              <div class="v2-wh-list">
-                ${profile.pendingGiftQueue
-                  .map((g) => {
-                    const def = getAnyV2ItemDef(g.definitionId);
-                    return `<div class="v2-wh-row">
-                      <img class="v2-wh-icon" src="${getItemImageUrl(g.definitionId)}" alt="${def?.name ?? g.definitionId}" />
-                      <div class="v2-wh-info">
-                        <div class="v2-wh-name">${def?.name ?? g.definitionId} <span class="v2-q-tag">${
-                      g.quality === 'improved' ? '优良' : '普通'
-                    }</span></div>
-                        <div class="v2-wh-sub">回收价 ${g.fixedValue}¤ · 满库时暂存于此不会丢失</div>
-                      </div>
-                      <div class="v2-wh-actions">
-                        <button type="button" class="btn btn-sm btn-primary" data-claim-gift="${g.instanceId}" ${
-                      options.readOnly || profile.equipmentWarehouse.length >= V2_WAREHOUSE_CAPACITY
-                        ? 'disabled'
-                        : ''
-                    }>收入库</button>
-                        <button type="button" class="btn btn-sm btn-ghost" data-sell-gift="${g.instanceId}" ${
-                      options.readOnly ? 'disabled' : ''
-                    }>出售 +${g.fixedValue}¤</button>
-                      </div>
-                    </div>`;
-                  })
-                  .join('')}
-              </div>
-            </div>`
-          : '';
-
-      const warehouseHtml = `
-        ${giftHtml}
-        <div class="v2-wh-summary">
-          <span>仓库容量：<strong class="num">${profile.equipmentWarehouse.length}/${V2_WAREHOUSE_CAPACITY}</strong></span>
-          <span>当前信用点：<strong class="num">${profile.credits}¤</strong></span>
-          <span>研究台：<strong>${hasLab ? '已建成' : '未建成（需 100¤）'}</strong></span>
-        </div>
-        ${
-          profile.equipmentWarehouse.length === 0
-            ? `<div class="v2-empty-hint">设备库当前为空。安全返航时可将拾获设备选为「入库」，或前往蓝图页制造自有设备。</div>`
-            : `<div class="v2-wh-list">
-                ${profile.equipmentWarehouse
-                  .map((item) => {
-                    const def = V2_EQUIPMENT_DEFS[item.definitionId];
-                    const resCheck = canResearchV2Instance(profile, item.instanceId);
-                    const effBudget = def ? getEffectiveV2EquipmentBudgetCost(def, 'owned') : 0;
-                    const discountTag =
-                      def && effBudget < def.budgetCost ? '（自有-1）' : '';
-                    return `<div class="v2-wh-row">
-                      <img class="v2-wh-icon" src="${getItemImageUrl(item.definitionId)}" alt="${def?.name ?? item.definitionId}" />
-                      <div class="v2-wh-info">
-                        <div class="v2-wh-name">
-                          <span class="v2-origin-badge origin-${item.origin}">${originTagText(item.origin)}</span>
-                          ${def?.name ?? item.definitionId}
-                          <span class="v2-quality-chip ${item.quality}">${
-                      item.quality === 'improved' ? '优良' : '普通'
-                    }</span>
-                        </div>
-                        <div class="v2-wh-sub">${
-                          def
-                            ? `${V2_SHAPES[def.shapeId].label} · 出航预算 ${effBudget}${discountTag} · 回收 ${item.fixedValue}¤`
-                            : ''
-                        }${
-                          resCheck.canResearch && resCheck.isImproved
-                            ? ' · 注意：研究优良件仅解锁普通蓝图'
-                            : !resCheck.canResearch && resCheck.reason
-                            ? ` · ${resCheck.reason}`
-                            : ''
-                        }</div>
-                      </div>
-                      <div class="v2-wh-actions">
-                        <button type="button" class="btn btn-sm btn-secondary" data-research-id="${item.instanceId}" ${
-                      options.readOnly || !resCheck.canResearch ? 'disabled' : ''
-                    }>研究 (-${V2_RESEARCH_COST_CREDITS}¤)</button>
-                        <button type="button" class="btn btn-sm btn-ghost" data-sell-wh="${item.instanceId}" ${
-                      options.readOnly ? 'disabled' : ''
-                    }>出售 +${item.fixedValue}¤</button>
-                      </div>
-                    </div>`;
-                  })
-                  .join('')}
-              </div>`
-        }
-      `;
-
-      const researchHtml = `
-        <div class="v2-wh-summary">
-          <span>永久蓝图：<strong class="num">${profile.blueprints.length}/${V2_ALL_EQUIPMENT_KINDS.length}</strong></span>
-          <span>当前信用点：<strong class="num">${profile.credits}¤</strong></span>
-        </div>
-        <div class="v2-empty-hint" style="margin-bottom:8px;">
-          解锁永久蓝图后，可自由混搭、保存配装预设，或在此制造自有普通设备入库（<strong>出航预算 -1，最低 1</strong>，提升上限但战败损失实物）。优良品质设备仅可通过远航打捞或商人获得。
-        </div>
-        <div class="v2-wh-list">
-          ${V2_ALL_EQUIPMENT_KINDS.map((kind) => {
-            const def = getV2EquipmentDefByKind(kind, 'common');
-            const ownedBudget = getEffectiveV2EquipmentBudgetCost(def, 'owned');
-            const unlocked = profile.blueprints.includes(kind);
-            const canCraft =
-              hasLab &&
-              unlocked &&
-              profile.credits >= def.craftCost &&
-              profile.equipmentWarehouse.length < V2_WAREHOUSE_CAPACITY;
-            return `<div class="v2-wh-row">
-              <img class="v2-wh-icon" src="${getItemImageUrl(def.defId)}" alt="${def.name}" />
-              <div class="v2-wh-info">
-                <div class="v2-wh-name">
-                  ${def.name}
-                  <span class="v2-bp-badge ${unlocked ? 'unlocked' : 'locked'}">${
-              unlocked ? '已掌握' : '待研究'
-            }</span>
-                </div>
-                <div class="v2-wh-sub">${renderV2MiniMaskHtml(def.shapeId)} ${def.summary} · 借用预算 ${
-              def.budgetCost
-            }${ownedBudget < def.budgetCost ? ` → 自有预算 ${ownedBudget}` : ''}</div>
-              </div>
-              <div class="v2-wh-actions">
-                <button type="button" class="btn btn-sm btn-primary" data-craft-kind="${kind}" ${
-              options.readOnly || !canCraft ? 'disabled' : ''
-            }>制造 ${def.craftCost}¤</button>
-              </div>
-            </div>`;
-          }).join('')}
-        </div>
-      `;
-
-      body.innerHTML = `
-        <div class="v2-modal-tabs">
-          <button type="button" class="btn btn-sm ${
-            activeTab === 'warehouse' ? 'btn-primary' : 'btn-secondary'
-          }" id="v2-tab-wh">设备库 (${profile.equipmentWarehouse.length}/${V2_WAREHOUSE_CAPACITY})</button>
-          <button type="button" class="btn btn-sm ${
-            activeTab === 'research' ? 'btn-primary' : 'btn-secondary'
-          }" id="v2-tab-res">蓝图与制造 (${profile.blueprints.length}/10)</button>
-        </div>
-        ${
-          feedbackMsg
-            ? `<div class="system-banner ${
-                feedbackMsg.isError ? 'banner-danger' : 'banner-warn'
-              }" style="margin:8px 0;">${feedbackMsg.text}</div>`
-            : ''
-        }
-        ${activeTab === 'warehouse' ? warehouseHtml : researchHtml}
-      `;
-
-      body.querySelector('#v2-tab-wh')?.addEventListener('click', () => {
-        activeTab = 'warehouse';
-        feedbackMsg = null;
-        renderBody();
-      });
-      body.querySelector('#v2-tab-res')?.addEventListener('click', () => {
-        activeTab = 'research';
-        feedbackMsg = null;
-        renderBody();
-      });
-      body.querySelectorAll<HTMLButtonElement>('[data-research-id]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const res = options.onResearch(btn.dataset.researchId!);
-          feedbackMsg = res.ok
-            ? { text: '研究完成！已永久解锁该设备普通蓝图。', isError: false }
-            : { text: res.error ?? '无法研究', isError: true };
-          renderBody();
-        });
-      });
-      body.querySelectorAll<HTMLButtonElement>('[data-sell-wh]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const res = options.onSellItem(btn.dataset.sellWh!);
-          feedbackMsg = res.ok
-            ? { text: '已出售库存设备并计入信用点。', isError: false }
-            : { text: res.error ?? '出售失败', isError: true };
-          renderBody();
-        });
-      });
-      body.querySelectorAll<HTMLButtonElement>('[data-claim-gift]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const res = options.onClaimGift(btn.dataset.claimGift!);
-          feedbackMsg = res.ok
-            ? { text: '赠品已安全收入设备库。', isError: false }
-            : { text: res.error ?? '领取失败', isError: true };
-          renderBody();
-        });
-      });
-      body.querySelectorAll<HTMLButtonElement>('[data-sell-gift]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const res = options.onSellGift(btn.dataset.sellGift!);
-          feedbackMsg = res.ok
-            ? { text: '已出售赠品并计入信用点。', isError: false }
-            : { text: res.error ?? '出售失败', isError: true };
-          renderBody();
-        });
-      });
-      body.querySelectorAll<HTMLButtonElement>('[data-craft-kind]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const res = options.onCraft(btn.dataset.craftKind as V2EquipmentKind);
-          feedbackMsg = res.ok
-            ? { text: '制造完成！自有设备已放入设备库。', isError: false }
-            : { text: res.error ?? '制造失败', isError: true };
-          renderBody();
-        });
-      });
-    };
-
-    renderBody();
-  });
+  openV3WorkshopModal(host, getProfile, options);
 }
 
 export function openV2CodexModal(host: HTMLElement, profile: V2ProfileState): void {

@@ -182,7 +182,20 @@ export function collectVisibleV2DefIdsForRun(run: V2RunState): readonly string[]
           seen.add(offer.item.definitionId);
         }
       }
-      if (node.wreck) {
+      if (run.activeWreck && run.activeWreck.nodeId === node.nodeId) {
+        for (const spot of run.activeWreck.hotspots) {
+          if (run.crewId === 'salvager' || spot.cut) {
+            if (spot.rewardItem) {
+              seen.add(spot.rewardItem.definitionId);
+            }
+            if (spot.rewardItems) {
+              for (const it of spot.rewardItems) {
+                seen.add(it.definitionId);
+              }
+            }
+          }
+        }
+      } else if (node.wreck) {
         if (run.crewId === 'salvager') {
           seen.add(node.wreck.armoryItem.definitionId);
           for (const cg of node.wreck.cargoItems) {

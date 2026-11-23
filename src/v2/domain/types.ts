@@ -2,7 +2,11 @@ import type { RngCursor } from '../../domain/rng';
 import type { GameSettings, RelicProgress } from '../../domain/progression';
 import type { SectorBgIndex } from '../../data/nodes';
 import type { V3EnemyIntent, V3EnemyIntentKind } from '../data/bosses';
-import type { V2ContractTier, V2ContractType } from '../data/contracts';
+import type {
+  V2ContractTier,
+  V2ContractType,
+  V2FormalContractType,
+} from '../data/contracts';
 import type { V2CrewId } from '../data/crew';
 import type { V2EncounterKind, V2EnemyUnitSpec } from '../data/enemies';
 import type {
@@ -109,6 +113,65 @@ export interface V2ShopEquipmentOffer {
 
 export type V2WreckChoice = 'armory' | 'cargo' | 'reactor_fuel' | 'reactor_repair';
 
+export type V2WreckSpotId = 'armory' | 'cargo' | 'reactor';
+
+export interface V2WreckHotspot {
+  readonly spotId: V2WreckSpotId;
+  readonly label: string;
+  readonly cut: boolean;
+  readonly riskHullDamage: number;
+  readonly riskFuelCost: number;
+  readonly riskAmbush: boolean;
+  readonly rewardItem?: V2ItemInstance;
+  readonly rewardItems?: readonly V2ItemInstance[];
+  readonly rewardParts?: number;
+  readonly rewardCredits?: number;
+  readonly reactorFuelGain?: number;
+  readonly reactorRepairGain?: number;
+}
+
+export interface V2WreckState {
+  readonly nodeId: string;
+  readonly stability: number;
+  readonly maxStability: number;
+  readonly cutsMade: number;
+  readonly extracted: boolean;
+  readonly hotspots: readonly V2WreckHotspot[];
+  readonly lastCutSummary?: string;
+  readonly ambushTriggered?: boolean;
+  readonly stashedItems?: readonly V2ItemInstance[];
+}
+
+export interface V2EventOptionState {
+  readonly index: number;
+  readonly label: string;
+  readonly costSummary: string;
+  readonly rewardSummary: string;
+  readonly requiredCrewId?: V2CrewId;
+  readonly fuelCost?: number;
+  readonly hpCost?: number;
+  readonly walletCost?: number;
+  readonly isFallback?: boolean;
+  readonly rewardCredits?: number;
+  readonly rewardParts?: number;
+  readonly rewardFuel?: number;
+  readonly rewardHp?: number;
+  readonly rewardFactionId?: FactionId;
+  readonly rewardFactionRep?: number;
+  readonly rewardItems?: readonly V2ItemInstance[];
+}
+
+export interface V2EventState {
+  readonly nodeId: string;
+  readonly eventId: string;
+  readonly title: string;
+  readonly description: string;
+  readonly resolved: boolean;
+  readonly chosenIndex: number | null;
+  readonly options: readonly V2EventOptionState[];
+  readonly flavorTag?: string;
+}
+
 export interface V2WreckPayload {
   readonly armoryItem: V2ItemInstance;
   readonly cargoItems: readonly V2ItemInstance[];
@@ -174,6 +237,7 @@ export interface V2MapNode {
   readonly merchant?: V2MerchantPayload;
   readonly anomaly?: V2AnomalyPayload;
   readonly distress?: V2DistressPayload;
+  readonly eventState?: V2EventState;
   readonly resolved: boolean;
   readonly abandoned?: boolean;
 }
@@ -195,9 +259,13 @@ export interface V2ContractInstance {
   readonly markedNodeIds: readonly string[];
   readonly requiredCompletions: number;
   readonly completedNodeIds: readonly string[];
-  readonly missionItemDefId?: 'mission.sealed_reactor' | 'mission.escape_pod';
+  readonly missionItemDefId?: 'mission.sealed_reactor' | 'mission.escape_pod' | 'mission.black_box';
   readonly missionItemCount: number;
   readonly surveyFuelCost: number;
+  readonly factionId?: FactionId;
+  readonly factionRepReward?: number;
+  readonly targetLayer?: number;
+  readonly bonusObjective?: V3RunBonusObjective;
   readonly status: 'active' | 'aborted' | 'completed' | 'failed';
   readonly rewardClaimed: boolean;
 }
@@ -483,6 +551,16 @@ export interface V2RunState {
   readonly defeatedBossIdsThisRun?: readonly string[];
   /** Encounter kinds defeated during this expedition (committed to profile.defeatedEnemyKinds on settlement) */
   readonly defeatedEnemyKindsThisRun?: readonly string[];
+  /** Active multi-cut derelict dissection state while inside a wreck encounter (F11) */
+  readonly activeWreck?: V2WreckState | null;
+  /** Active sector narrative event state while inside an anomaly/distress encounter (F12) */
+  readonly activeEvent?: V2EventState | null;
+  /** Total items discarded across arrange phases during this run (for bonus_no_discard evaluation) */
+  readonly discardedCountThisRun?: number;
+  /** Total derelicts dissected during this run (committed to career.totalWrecksDissected) */
+  readonly wrecksDissectedThisRun?: number;
+  /** Faction reputation gained from narrative events during this run */
+  readonly factionRepEarnedThisRun?: Partial<Record<FactionId, number>>;
 }
 
 export interface V2PresetSlot {
@@ -513,6 +591,14 @@ export interface V2MigrationRecord {
   readonly legacyAbyssalUnlocked: boolean;
 }
 
+export type V3HullTuningTrack = 'hp' | 'salvage' | 'budget';
+
+export interface V3HullTuningState {
+  readonly hpLevel: number;
+  readonly salvageLevel: number;
+  readonly budgetLevel: number;
+}
+
 export interface V2ProfileState {
   readonly credits: number;
   readonly buildings: Record<V2FacilityId, boolean>;
@@ -526,7 +612,7 @@ export interface V2ProfileState {
   readonly discoveredItems: readonly string[];
   readonly seenItems: readonly string[];
   readonly loadoutPresets: readonly V2LoadoutPreset[];
-  readonly completedContractTypes: readonly ('transport' | 'rescue' | 'survey')[];
+  readonly completedContractTypes: readonly V2FormalContractType[];
   readonly completedContractIds: readonly string[];
   readonly deepestLayerReached: number;
   readonly totalRuns: number;
@@ -547,6 +633,7 @@ export interface V2ProfileState {
   readonly defeatedEnemyKinds: readonly string[];
   readonly runHistory: readonly V3RunHistoryEntry[];
   readonly career: V3CareerStats;
+  readonly hullTuning?: Record<string, V3HullTuningState>;
 }
 
 export interface V2SaveData {
@@ -558,4 +645,10 @@ export interface V2SaveData {
   readonly settings: V2GameSettings;
 }
 
-export type V2SettlementDisposition = 'sell' | 'store' | 'keep_relic' | 'deliver' | 'return_loan';
+export type V2SettlementDisposition =
+  | 'sell'
+  | 'store'
+  | 'dismantle'
+  | 'keep_relic'
+  | 'deliver'
+  | 'return_loan';

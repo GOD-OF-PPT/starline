@@ -1,7 +1,10 @@
 import { V2_EQUIPMENT_DEFS, V2_WAREHOUSE_CAPACITY } from '../../data/equipment';
+import { V3_FACTIONS } from '../../data/factions';
 import { previewSettlementCampaignOutcomes } from '../../domain/campaign';
+import { getDismantleSalvagePartsYield } from '../../domain/dismantle';
 import type { V2SettlementSummary } from '../../domain/settlementV2';
 import type {
+  FactionId,
   V2PlacedItem,
   V2ProfileState,
   V2RunState,
@@ -29,13 +32,18 @@ export interface SettlementViewActions {
 function dispositionLabel(
   d: V2SettlementDisposition,
   item: V2PlacedItem['item'],
-  profile: V2ProfileState
+  profile: V2ProfileState,
+  shipId: V2RunState['shipId']
 ): string {
   switch (d) {
     case 'deliver':
       return '交付委托';
     case 'sell':
       return `出售 +${item.fixedValue}¤`;
+    case 'dismantle': {
+      const parts = getDismantleSalvagePartsYield(item, profile, shipId);
+      return `拆解 +${parts} 精密零件`;
+    }
     case 'store': {
       const eq = V2_EQUIPMENT_DEFS[item.definitionId];
       if (eq && !profile.blueprints.includes(eq.kind)) {
@@ -79,6 +87,38 @@ export function renderSettlementView(
               .join('')}
           </div>
         </details>`
+      : '';
+
+  const bonusRowHtml =
+    isSafe && summary.bonusObjective && !run.isTutorial
+      ? summary.bonusObjective.completed && summary.contractCompleted
+        ? `<div class="v2-mig-row v3-bonus-row is-done"><span>额外目标（已达成 · ${summary.bonusObjective.label}）</span><strong class="num">+${summary.bonusObjectiveCredits}¤ 加赏</strong></div>`
+        : `<div class="v2-mig-row v3-bonus-row is-missed"><span>额外目标（未达成 · ${summary.bonusObjective.label}）</span><strong class="num">+0¤</strong></div>`
+      : '';
+
+  const factionRepEntries = Object.entries(summary.factionRepGains ?? {}).filter(
+    ([, val]) => typeof val === 'number' && val > 0
+  ) as [FactionId, number][];
+
+  const factionRepRowsHtml =
+    factionRepEntries.length > 0
+      ? factionRepEntries
+          .map(
+            ([fid, delta]) =>
+              `<div class="v2-mig-row v3-faction-rep-row"><span>${svgIcon('faction', 12)} ${
+                V3_FACTIONS[fid]?.name ?? fid
+              } 声望</span><strong class="num">+${delta}</strong></div>`
+          )
+          .join('')
+      : '';
+
+  const partsRowHtml =
+    summary.totalSalvagePartsEarned > 0
+      ? `<div class="v2-mig-row v3-parts-row"><span>${svgIcon('parts', 12)} 精密零件入账${
+          summary.dismantledPartsEarned > 0
+            ? `（含现场分解 +${summary.dismantledPartsEarned}）`
+            : ''
+        }</span><strong class="num">+${summary.totalSalvagePartsEarned} 精密零件</strong></div>`
       : '';
 
   leftPanelEl.innerHTML = `
@@ -131,11 +171,19 @@ export function renderSettlementView(
                     ? `<div class="v2-mig-row"><span>委托悬赏奖金</span><strong class="num">+${summary.contractRewardCredits}¤</strong></div>`
                     : ''
                 }
+                ${bonusRowHtml}
+                ${
+                  (summary.factionContractBonusCredits ?? 0) > 0
+                    ? `<div class="v2-mig-row"><span>星港行会 Lv.3 委托加赏 (+10%)</span><strong class="num">+${summary.factionContractBonusCredits}¤</strong></div>`
+                    : ''
+                }
                 ${
                   summary.tutorialBonusCredits > 0
                     ? `<div class="v2-mig-row"><span>首航交付奖励</span><strong class="num">+${summary.tutorialBonusCredits}¤</strong></div>`
                     : ''
                 }
+                ${partsRowHtml}
+                ${factionRepRowsHtml}
                 ${
                   !run.isShowcase
                     ? `<div class="v2-mig-row"><span>入库后仓库容量</span><strong class="num ${
@@ -144,7 +192,8 @@ export function renderSettlementView(
                     : ''
                 }
               `
-              : `<div class="v2-mig-row"><span>可回收总额 × 40%</span><strong class="num">${summary.defeatRecoverableBase} × 40%</strong></div>`
+              : `<div class="v2-mig-row"><span>可回收总额 × 40%</span><strong class="num">${summary.defeatRecoverableBase} × 40%</strong></div>
+                 ${partsRowHtml}`
           }
           <div class="v2-mig-row total"><span>本次实得总计</span><strong class="num">+${summary.finalCreditsEarned}¤</strong></div>
         </div>
@@ -179,7 +228,7 @@ export function renderSettlementView(
         }
 
         <div class="v2-settle-items">
-          <div class="v2-prep-label">战利品去向对比（变现 vs 留用推进下趟）</div>
+          <div class="v2-prep-label">战利品去向对比（出售 / 入库 / 转化为精密零件）</div>
           ${
             summary.lines.length === 0
               ? `<div class="v2-empty-inline">本次船舱为空。</div>`
@@ -204,13 +253,18 @@ export function renderSettlementView(
                             </div>
                             <div class="v2-settle-disp-btns">
                               ${line.allowedDispositions
-                                .map(
-                                  (d) => `<button type="button" class="btn btn-sm ${
+                                .map((d) => {
+                                  const isDismantle = d === 'dismantle';
+                                  return `<button type="button" class="btn btn-sm ${
                                     line.selectedDisposition === d ? 'btn-primary' : 'btn-secondary'
                                   }" data-settle-item="${line.item.instanceId}" data-settle-disp="${d}" ${
+                                    isDismantle
+                                      ? `data-testid="btn-dismantle-${line.item.instanceId}" data-action="dismantle"`
+                                      : ''
+                                  } ${
                                     readOnly || line.allowedDispositions.length <= 1 ? 'disabled' : ''
-                                  }>${dispositionLabel(d, line.item, p)}</button>`
-                                )
+                                  }>${dispositionLabel(d, line.item, p, run.shipId)}</button>`;
+                                })
                                 .join('')}
                               ${
                                 isSafe &&
@@ -235,7 +289,7 @@ export function renderSettlementView(
         ${
           summary.warehouseOverflow && !run.isShowcase
             ? `<div class="system-banner banner-danger">
-                设备库容量超出上限（${summary.warehouseProjectedCount}/${V2_WAREHOUSE_CAPACITY}），请将部分「入库」改为「出售」。
+                设备库容量超出上限（${summary.warehouseProjectedCount}/${V2_WAREHOUSE_CAPACITY}），请将部分「入库」改为「出售」或转为零件。
               </div>`
             : ''
         }
@@ -243,11 +297,11 @@ export function renderSettlementView(
           run.isShowcase
             ? `<div class="v2-showcase-finish-actions">
                 <button type="button" class="btn btn-secondary" id="v2-showcase-retry">${svgIcon('bolt', 14)} 换套流派再试一次</button>
-                <button type="button" class="btn btn-primary btn-launch-hero" id="v2-showcase-to-base">${svgIcon('rocket', 15)} 进入正式拆解站</button>
+                <button type="button" class="btn btn-primary btn-launch-hero" id="v2-showcase-to-base">${svgIcon('rocket', 15)} 进入正式星港基地</button>
               </div>`
             : `<button type="button" class="btn btn-primary btn-launch-hero" id="v2-btn-confirm-settle" data-testid="btn-confirm-settlement" ${
                 readOnly || summary.warehouseOverflow ? 'disabled' : ''
-              }>${readOnly ? '只读锁定' : `${svgIcon('beacon', 15)} 确认入账 · 靠泊拆解站`}</button>`
+              }>${readOnly ? '只读锁定' : `${svgIcon('beacon', 15)} 确认入账 · 返回星港基地`}</button>`
         }
       </div>
     </div>

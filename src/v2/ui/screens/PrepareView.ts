@@ -8,11 +8,14 @@ import {
   getV2EquipmentDefByKind,
   type V2ArchetypeId,
 } from '../../data/equipment';
+import { V3_FACTIONS } from '../../data/factions';
 import { V3_SECTORS, V3_SECTOR_ORDER, getV3SectorDef } from '../../data/sectors';
 import { V2_SHAPES } from '../../data/shapes';
 import { V2_SHIPS, V2_SHIP_ORDER, type V2ShipId } from '../../data/ships';
 import { V2_TRIAL_BUILD_ORDER, V2_TRIAL_BUILDS } from '../../data/trialBuilds';
 import { shouldTriggerRelicPitySignal } from '../../domain/campaign';
+import { previewContractBonusHint } from '../../domain/contracts';
+import { getEffectiveShipLoadoutBudget, getEffectiveShipMaxHp } from '../../domain/dismantle';
 import { V2_MAX_SAVED_PRESETS, type V2PrepareValidation } from '../../domain/loadout';
 import type { SectorId, V2ProfileState, V2TrialBuildId } from '../../domain/types';
 import { crewPortraitSvg, svgIcon } from '../icons';
@@ -65,6 +68,9 @@ export function renderPrepareView(
       ? 'gravity'
       : 'radar';
 
+  const contractFaction = contractTpl.factionId ? V3_FACTIONS[contractTpl.factionId] : null;
+  const bonusHint = previewContractBonusHint(contractTpl);
+
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root v3-sticky-panel-root" data-testid="prepare-screen">
       <div class="panel-header">
@@ -73,6 +79,25 @@ export function renderPrepareView(
       </div>
 
       <div class="v3-panel-scroll-body">
+        <div class="v3-prep-contract-card">
+          <div class="v3-pcc-head">
+            <span class="v3-pcc-title">${svgIcon('star', 13)} ${contractTpl.name}</span>
+            ${
+              contractFaction && contractTpl.factionRepReward
+                ? `<span class="v3-faction-chip faction-${contractFaction.id}">${svgIcon('faction', 11)} ${
+                    contractFaction.name
+                  } +${contractTpl.factionRepReward} 声望</span>`
+                : ''
+            }
+          </div>
+          <div class="v3-pcc-note">${contractTpl.gameplayNote} · ${contractTpl.spaceNote}</div>
+          ${
+            bonusHint
+              ? `<div class="v3-pcc-bonus">额外目标（启航随机锁定）：${bonusHint.label} · <strong>+30% 加赏 (+${bonusHint.rewardCredits}¤)</strong></div>`
+              : ''
+          }
+        </div>
+
         <div class="v2-prep-group">
           <div class="v2-prep-label">目标星区（共 3 星区 · 击败首领逐幕解锁）</div>
           <div class="v2-sector-row" data-testid="sector-selector">
@@ -158,13 +183,15 @@ export function renderPrepareView(
               const s = V2_SHIPS[sid];
               const unlocked = p.unlockedShips.includes(sid);
               const active = draft.shipId === sid;
+              const effHp = getEffectiveShipMaxHp(p, sid);
+              const effBudget = getEffectiveShipLoadoutBudget(p, sid);
               return `<button type="button" class="v2-choice-pill ${active ? 'active' : ''}" data-prep-ship="${sid}" ${
                 !unlocked ? 'disabled' : ''
               }>
                 <img class="v2-ship-mini" src="${getPlayerShipImageUrl(sid)}" alt="${s.name}" />
                 <span class="v2-choice-main">
                   <strong>${s.name}</strong>
-                  <small>${s.cols}×${s.rows} (${s.validCellCount}格) · HP ${s.maxHp} · 预算 ${s.loadoutBudget}${
+                  <small>${s.cols}×${s.rows} (${s.validCellCount}格) · HP ${effHp} · 预算 ${effBudget}${
                 s.bonusShield > 0 ? ` · +${s.bonusShield}盾` : ''
               }${!unlocked ? ' · 未解锁' : ''}</small>
                 </span>

@@ -96,7 +96,13 @@ export function buildV2InspectSnapshot(params: {
             awaitingEliteDecision &&
             activeRun.activeCombat.pendingDecision?.chosen === null
         ),
-        wreckStability: null,
+        wreckStability:
+          activeRun.phase === 'ENCOUNTER' &&
+          activeRun.activeWreck &&
+          !activeRun.activeWreck.extracted &&
+          !activeRun.activeWreck.ambushTriggered
+            ? activeRun.activeWreck.stability
+            : null,
         isFinalCampaignRun: Boolean(activeRun.isFinalCampaignRun),
         endlessThreat: activeRun.endlessThreat ?? 0,
       }

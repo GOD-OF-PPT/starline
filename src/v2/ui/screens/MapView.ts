@@ -8,7 +8,11 @@ import {
   previewV2CombatNode,
   resolveNodeBossId,
 } from '../../domain/combatV2';
-import { computeV2JumpFuelCost, isContractReadyForDelivery } from '../../domain/contracts';
+import {
+  computeV2JumpFuelCost,
+  evaluateRunBonusObjective,
+  isContractReadyForDelivery,
+} from '../../domain/contracts';
 import { getReachableNextNodeIds } from '../../domain/encounter';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
 import type { V2MapNode, V2RunState } from '../../domain/types';
@@ -225,9 +229,9 @@ export function renderMapView(
     }
     if (n.type === 'wreck') {
       return {
-        brief: '三热点打捞：设备 / 补油修船 / 货物',
+        brief: '多刀残骸拆解：首刀无伤，贪刀追高收益与精密零件',
         cls: '',
-        detail: run.crewId === 'salvager' ? '苏岚已透视全明细' : '切开任意 1 处舱室',
+        detail: run.crewId === 'salvager' ? '苏岚已透视全明细' : '含船体/燃料/伏击风险预警',
       };
     }
     if (n.type === 'merchant') {
@@ -239,15 +243,15 @@ export function renderMapView(
     }
     if (n.type === 'anomaly') {
       return {
-        brief: '安全穿越(-1油得1货) / 强行切入(-4HP得2货)',
+        brief: n.eventState ? `星区事件：${n.eventState.title}` : '星区异常事件：多分支抉择',
         cls: '',
-        detail: '路线消耗与收益权衡',
+        detail: '含船员专属选项与安全撤离退路',
       };
     }
     return {
-      brief: '施救(-1油回10耐久) / 免费打捞货物',
+      brief: n.eventState ? `求救事件：${n.eventState.title}` : '星区求救信号：多分支抉择',
       cls: '',
-      detail: '续航或现金取舍',
+      detail: '可换取声望、修船或零损耗撤离',
     };
   };
 
@@ -331,6 +335,22 @@ export function renderMapView(
         })()
       : '';
 
+  const activeBonus = run.bonusObjective ?? run.contract.bonusObjective ?? null;
+  const bonusTrackerHtml =
+    activeBonus && !run.isTutorial
+      ? (() => {
+          const currentlyMet = evaluateRunBonusObjective(run, 'safe_return');
+          const failedDiscard =
+            activeBonus.id === 'bonus_no_discard' && (run.discardedCountThisRun ?? 0) > 0;
+          const statusCls = failedDiscard ? 'is-failed' : currentlyMet ? 'is-met' : 'is-pending';
+          const statusText = failedDiscard ? '已失格' : currentlyMet ? '当前满足' : '进行中';
+          return `<div class="v3-bonus-tracker-strip ${statusCls}" data-testid="bonus-objective-tracker">
+            <span>${svgIcon('target', 12)} 额外目标：<strong>${activeBonus.label}</strong>（+${activeBonus.rewardCredits}¤）</span>
+            <span class="v3-bonus-status-chip">${statusText}</span>
+          </div>`;
+        })()
+      : '';
+
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root" data-testid="map-screen">
       <div class="panel-header">
@@ -342,6 +362,8 @@ export function renderMapView(
         <span class="v3-sector-mod-badge">${svgIcon(envIcon, 13)} ${sector.name} · ${sector.envModifier.name}</span>
         <span class="v3-sector-mod-desc">${sector.envModifier.combatRuleSummary}</span>
       </div>
+
+      ${bonusTrackerHtml}
 
       ${relicSignalBannerHtml}
 

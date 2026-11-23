@@ -1,4 +1,5 @@
 import { DEFAULT_SETTINGS, type RelicProgress } from '../../domain/progression';
+import type { V2ContractType, V2FormalContractType } from '../data/contracts';
 import { V2_CREW_ORDER, type V2CrewId } from '../data/crew';
 import {
   V2_ALL_EQUIPMENT_KINDS,
@@ -33,6 +34,8 @@ import {
   type V2ContractInstance,
   type V2DiscardedRecord,
   type V2EngineerSwapOffer,
+  type V2EventOptionState,
+  type V2EventState,
   type V2GameSettings,
   type V2ItemInstance,
   type V2LoadoutPreset,
@@ -45,8 +48,12 @@ import {
   type V2SaveData,
   type V2TacticalCommandId,
   type V2TargetPolicy,
+  type V2WreckHotspot,
+  type V2WreckSpotId,
+  type V2WreckState,
   type V3CampaignState,
   type V3CareerStats,
+  type V3HullTuningState,
   type V3RunHistoryEntry,
 } from './types';
 
@@ -92,10 +99,30 @@ const VALID_UNLOCK_FAMILIES: ReadonlySet<V2UnlockFamilyId> = new Set([
   'hangar_kit',
   'counter_kit',
 ]);
-const VALID_COMPLETED_CONTRACT_TYPES: ReadonlySet<'transport' | 'rescue' | 'survey'> = new Set([
+const VALID_COMPLETED_CONTRACT_TYPES: ReadonlySet<V2FormalContractType> = new Set([
   'transport',
   'rescue',
   'survey',
+  'bounty',
+  'derelict',
+]);
+const VALID_CONTRACT_TYPES: ReadonlySet<V2ContractType> = new Set([
+  'transport',
+  'rescue',
+  'survey',
+  'bounty',
+  'derelict',
+  'free',
+]);
+const VALID_MISSION_DEF_IDS: ReadonlySet<string> = new Set([
+  'mission.sealed_reactor',
+  'mission.escape_pod',
+  'mission.black_box',
+]);
+const VALID_WRECK_SPOT_IDS: ReadonlySet<V2WreckSpotId> = new Set([
+  'armory',
+  'cargo',
+  'reactor',
 ]);
 const VALID_ACTS: ReadonlySet<CampaignActId> = new Set([
   'prologue',
@@ -114,6 +141,7 @@ const ALL_FACTIONS: readonly FactionId[] = [
   'deep_institute',
   'free_salvagers',
 ];
+const VALID_FACTION_SET: ReadonlySet<FactionId> = new Set(ALL_FACTIONS);
 const VALID_ENDINGS: ReadonlySet<EndingId> = new Set([
   'stargate_reignited',
   'free_haven',
@@ -521,6 +549,7 @@ export function createFreshV2Profile(): V2ProfileState {
     defeatedEnemyKinds: [],
     runHistory: [],
     career: createInitialV3CareerStats(),
+    hullTuning: {},
   };
 }
 
@@ -571,6 +600,189 @@ function validateV2Item(raw: unknown, label: string): V2ValidationResult {
   }
   if (!isFiniteInt(item.acquiredDepth) || item.acquiredDepth < 0) {
     return { ok: false, error: `${label}.acquiredDepth 非法` };
+  }
+  return { ok: true };
+}
+
+function validateV2WreckState(
+  raw: unknown,
+  graphNodes: Record<string, unknown>,
+  label: string
+): V2ValidationResult {
+  if (!isPlainObject(raw)) return { ok: false, error: `${label} 不是对象` };
+  const w = raw as Partial<V2WreckState>;
+  if (
+    typeof w.nodeId !== 'string' ||
+    w.nodeId.length === 0 ||
+    !hasOwn(graphNodes, w.nodeId) ||
+    !isPlainObject(graphNodes[w.nodeId])
+  ) {
+    return { ok: false, error: `${label}.nodeId 无效` };
+  }
+  if (
+    !isNonNegInt(w.stability) ||
+    !isFiniteInt(w.maxStability) ||
+    w.maxStability <= 0 ||
+    w.stability > w.maxStability
+  ) {
+    return { ok: false, error: `${label}.stability 越界或非法` };
+  }
+  if (!isNonNegInt(w.cutsMade) || typeof w.extracted !== 'boolean') {
+    return { ok: false, error: `${label} 切割计数或撤离标志非法` };
+  }
+  if (!Array.isArray(w.hotspots)) {
+    return { ok: false, error: `${label}.hotspots 缺失` };
+  }
+  for (let i = 0; i < w.hotspots.length; i += 1) {
+    if (!hasOwn(w.hotspots, i) || !isPlainObject(w.hotspots[i])) {
+      return { ok: false, error: `${label}.hotspots[${i}] 损坏` };
+    }
+    const spot = w.hotspots[i] as Partial<V2WreckHotspot>;
+    if (
+      typeof spot.spotId !== 'string' ||
+      !VALID_WRECK_SPOT_IDS.has(spot.spotId as V2WreckSpotId)
+    ) {
+      return { ok: false, error: `${label}.hotspots[${i}].spotId 非法` };
+    }
+    if (
+      typeof spot.label !== 'string' ||
+      typeof spot.cut !== 'boolean' ||
+      !isNonNegInt(spot.riskHullDamage) ||
+      !isNonNegInt(spot.riskFuelCost) ||
+      typeof spot.riskAmbush !== 'boolean'
+    ) {
+      return { ok: false, error: `${label}.hotspots[${i}] 字段非法` };
+    }
+    if (spot.rewardItem !== undefined) {
+      const itChk = validateV2Item(spot.rewardItem, `${label}.hotspots[${i}].rewardItem`);
+      if (!itChk.ok) return itChk;
+    }
+    if (spot.rewardItems !== undefined) {
+      if (!Array.isArray(spot.rewardItems)) {
+        return { ok: false, error: `${label}.hotspots[${i}].rewardItems 非法` };
+      }
+      for (let j = 0; j < spot.rewardItems.length; j += 1) {
+        const itChk = validateV2Item(spot.rewardItems[j], `${label}.hotspots[${i}].rewardItems[${j}]`);
+        if (!itChk.ok) return itChk;
+      }
+    }
+    if (spot.rewardParts !== undefined && !isNonNegInt(spot.rewardParts)) {
+      return { ok: false, error: `${label}.hotspots[${i}].rewardParts 非法` };
+    }
+    if (spot.rewardCredits !== undefined && !isNonNegInt(spot.rewardCredits)) {
+      return { ok: false, error: `${label}.hotspots[${i}].rewardCredits 非法` };
+    }
+    if (spot.reactorFuelGain !== undefined && !isNonNegInt(spot.reactorFuelGain)) {
+      return { ok: false, error: `${label}.hotspots[${i}].reactorFuelGain 非法` };
+    }
+    if (spot.reactorRepairGain !== undefined && !isNonNegInt(spot.reactorRepairGain)) {
+      return { ok: false, error: `${label}.hotspots[${i}].reactorRepairGain 非法` };
+    }
+  }
+  if (w.stashedItems !== undefined) {
+    if (!Array.isArray(w.stashedItems)) {
+      return { ok: false, error: `${label}.stashedItems 非法` };
+    }
+    for (let i = 0; i < w.stashedItems.length; i += 1) {
+      const itChk = validateV2Item(w.stashedItems[i], `${label}.stashedItems[${i}]`);
+      if (!itChk.ok) return itChk;
+    }
+  }
+  return { ok: true };
+}
+
+function validateV2EventState(
+  raw: unknown,
+  graphNodes: Record<string, unknown>,
+  label: string
+): V2ValidationResult {
+  if (!isPlainObject(raw)) return { ok: false, error: `${label} 不是对象` };
+  const ev = raw as Partial<V2EventState>;
+  if (
+    typeof ev.nodeId !== 'string' ||
+    ev.nodeId.length === 0 ||
+    !hasOwn(graphNodes, ev.nodeId) ||
+    !isPlainObject(graphNodes[ev.nodeId])
+  ) {
+    return { ok: false, error: `${label}.nodeId 无效` };
+  }
+  if (
+    typeof ev.eventId !== 'string' ||
+    ev.eventId.length === 0 ||
+    typeof ev.title !== 'string' ||
+    typeof ev.description !== 'string' ||
+    typeof ev.resolved !== 'boolean'
+  ) {
+    return { ok: false, error: `${label} 核心字段损坏` };
+  }
+  if (ev.chosenIndex !== null && !isNonNegInt(ev.chosenIndex)) {
+    return { ok: false, error: `${label}.chosenIndex 非法` };
+  }
+  if (!Array.isArray(ev.options)) {
+    return { ok: false, error: `${label}.options 缺失` };
+  }
+  for (let i = 0; i < ev.options.length; i += 1) {
+    if (!hasOwn(ev.options, i) || !isPlainObject(ev.options[i])) {
+      return { ok: false, error: `${label}.options[${i}] 损坏` };
+    }
+    const opt = ev.options[i] as Partial<V2EventOptionState>;
+    if (
+      !isNonNegInt(opt.index) ||
+      typeof opt.label !== 'string' ||
+      typeof opt.costSummary !== 'string' ||
+      typeof opt.rewardSummary !== 'string'
+    ) {
+      return { ok: false, error: `${label}.options[${i}] 字段非法` };
+    }
+    if (
+      opt.requiredCrewId !== undefined &&
+      (typeof opt.requiredCrewId !== 'string' || !VALID_CREW_SET.has(opt.requiredCrewId as V2CrewId))
+    ) {
+      return { ok: false, error: `${label}.options[${i}].requiredCrewId 非法` };
+    }
+    if (opt.fuelCost !== undefined && !isNonNegInt(opt.fuelCost)) {
+      return { ok: false, error: `${label}.options[${i}].fuelCost 非法` };
+    }
+    if (opt.hpCost !== undefined && !isNonNegInt(opt.hpCost)) {
+      return { ok: false, error: `${label}.options[${i}].hpCost 非法` };
+    }
+    if (opt.walletCost !== undefined && !isNonNegInt(opt.walletCost)) {
+      return { ok: false, error: `${label}.options[${i}].walletCost 非法` };
+    }
+    if (opt.isFallback !== undefined && typeof opt.isFallback !== 'boolean') {
+      return { ok: false, error: `${label}.options[${i}].isFallback 非法` };
+    }
+    if (opt.rewardCredits !== undefined && !isNonNegInt(opt.rewardCredits)) {
+      return { ok: false, error: `${label}.options[${i}].rewardCredits 非法` };
+    }
+    if (opt.rewardParts !== undefined && !isNonNegInt(opt.rewardParts)) {
+      return { ok: false, error: `${label}.options[${i}].rewardParts 非法` };
+    }
+    if (opt.rewardFuel !== undefined && !isNonNegInt(opt.rewardFuel)) {
+      return { ok: false, error: `${label}.options[${i}].rewardFuel 非法` };
+    }
+    if (opt.rewardHp !== undefined && !isNonNegInt(opt.rewardHp)) {
+      return { ok: false, error: `${label}.options[${i}].rewardHp 非法` };
+    }
+    if (
+      opt.rewardFactionId !== undefined &&
+      (typeof opt.rewardFactionId !== 'string' ||
+        !VALID_FACTION_SET.has(opt.rewardFactionId as FactionId))
+    ) {
+      return { ok: false, error: `${label}.options[${i}].rewardFactionId 非法` };
+    }
+    if (opt.rewardFactionRep !== undefined && !isNonNegInt(opt.rewardFactionRep)) {
+      return { ok: false, error: `${label}.options[${i}].rewardFactionRep 非法` };
+    }
+    if (opt.rewardItems !== undefined) {
+      if (!Array.isArray(opt.rewardItems)) {
+        return { ok: false, error: `${label}.options[${i}].rewardItems 非法` };
+      }
+      for (let j = 0; j < opt.rewardItems.length; j += 1) {
+        const itChk = validateV2Item(opt.rewardItems[j], `${label}.options[${i}].rewardItems[${j}]`);
+        if (!itChk.ok) return itChk;
+      }
+    }
   }
   return { ok: true };
 }
@@ -832,6 +1044,49 @@ function validateV2RunCore(
     return { ok: false, error: 'activeRun.contract.contractId 损坏' };
   }
   if (
+    contract.type !== undefined &&
+    (typeof contract.type !== 'string' || !VALID_CONTRACT_TYPES.has(contract.type as V2ContractType))
+  ) {
+    return { ok: false, error: `activeRun.contract.type 非法: ${String(contract.type)}` };
+  }
+  if (
+    contract.missionItemDefId !== undefined &&
+    (typeof contract.missionItemDefId !== 'string' ||
+      !VALID_MISSION_DEF_IDS.has(contract.missionItemDefId))
+  ) {
+    return {
+      ok: false,
+      error: `activeRun.contract.missionItemDefId 非法: ${String(contract.missionItemDefId)}`,
+    };
+  }
+  if (
+    contract.factionId !== undefined &&
+    (typeof contract.factionId !== 'string' || !VALID_FACTION_SET.has(contract.factionId as FactionId))
+  ) {
+    return { ok: false, error: `activeRun.contract.factionId 非法: ${String(contract.factionId)}` };
+  }
+  if (contract.factionRepReward !== undefined && !isNonNegInt(contract.factionRepReward)) {
+    return { ok: false, error: 'activeRun.contract.factionRepReward 非法' };
+  }
+  if (
+    contract.targetLayer !== undefined &&
+    (!isFiniteInt(contract.targetLayer) || contract.targetLayer < 1)
+  ) {
+    return { ok: false, error: 'activeRun.contract.targetLayer 非法' };
+  }
+  if (contract.bonusObjective !== undefined) {
+    const bo = contract.bonusObjective;
+    if (
+      !isPlainObject(bo) ||
+      typeof bo.id !== 'string' ||
+      typeof bo.label !== 'string' ||
+      typeof bo.completed !== 'boolean' ||
+      !isNonNegInt(bo.rewardCredits)
+    ) {
+      return { ok: false, error: 'activeRun.contract.bonusObjective 非法' };
+    }
+  }
+  if (
     !isDenseArrayOf(contract.markedNodeIds, isString) ||
     !isDenseArrayOf(contract.completedNodeIds, isString)
   ) {
@@ -1083,6 +1338,30 @@ function validateV2RunCore(
     ) {
       return { ok: false, error: 'activeRun.defeatedEnemyKindsThisRun 非法' };
     }
+    if (run.activeWreck !== undefined && run.activeWreck !== null) {
+      const wChk = validateV2WreckState(run.activeWreck, graphNodes, 'activeRun.activeWreck');
+      if (!wChk.ok) return wChk;
+    }
+    if (run.activeEvent !== undefined && run.activeEvent !== null) {
+      const evChk = validateV2EventState(run.activeEvent, graphNodes, 'activeRun.activeEvent');
+      if (!evChk.ok) return evChk;
+    }
+    if (run.discardedCountThisRun !== undefined && !isNonNegInt(run.discardedCountThisRun)) {
+      return { ok: false, error: 'activeRun.discardedCountThisRun 非法' };
+    }
+    if (run.wrecksDissectedThisRun !== undefined && !isNonNegInt(run.wrecksDissectedThisRun)) {
+      return { ok: false, error: 'activeRun.wrecksDissectedThisRun 非法' };
+    }
+    if (run.factionRepEarnedThisRun !== undefined) {
+      if (!isPlainObject(run.factionRepEarnedThisRun)) {
+        return { ok: false, error: 'activeRun.factionRepEarnedThisRun 非法' };
+      }
+      for (const [fk, fv] of Object.entries(run.factionRepEarnedThisRun)) {
+        if (!VALID_FACTION_SET.has(fk as FactionId) || !isNonNegInt(fv)) {
+          return { ok: false, error: `activeRun.factionRepEarnedThisRun.${fk} 非法` };
+        }
+      }
+    }
   }
 
   return validateV2Bay(run.bay, shipId);
@@ -1228,8 +1507,7 @@ function validateSaveDataCore(
       !isDenseArrayOf(
         p.completedContractTypes,
         (ct) =>
-          isString(ct) &&
-          VALID_COMPLETED_CONTRACT_TYPES.has(ct as 'transport' | 'rescue' | 'survey')
+          isString(ct) && VALID_COMPLETED_CONTRACT_TYPES.has(ct as V2FormalContractType)
       )
     ) {
       return { ok: false, error: 'profile.completedContractTypes 非法' };
@@ -1401,6 +1679,30 @@ function validateSaveDataCore(
         return { ok: false, error: `profile.career.${cKey} 为负或非法` };
       }
     }
+    if (p.hullTuning !== undefined) {
+      if (!isPlainObject(p.hullTuning)) {
+        return { ok: false, error: 'profile.hullTuning 不是对象' };
+      }
+      for (const [shipKey, tVal] of Object.entries(p.hullTuning)) {
+        if (!isSafeMapKey(shipKey) || !isPlainObject(tVal)) {
+          return { ok: false, error: `profile.hullTuning.${shipKey} 非法` };
+        }
+        const ht = tVal as Partial<V3HullTuningState>;
+        if (
+          !isFiniteInt(ht.hpLevel) ||
+          ht.hpLevel < 0 ||
+          ht.hpLevel > 3 ||
+          !isFiniteInt(ht.salvageLevel) ||
+          ht.salvageLevel < 0 ||
+          ht.salvageLevel > 2 ||
+          !isFiniteInt(ht.budgetLevel) ||
+          ht.budgetLevel < 0 ||
+          ht.budgetLevel > 1
+        ) {
+          return { ok: false, error: `profile.hullTuning.${shipKey} 等级越界或非法` };
+        }
+      }
+    }
   }
 
   if (d.activeRun !== null) {
@@ -1485,13 +1787,12 @@ export function migrateV2ToV3SaveData(rawV2: unknown): {
   const settledRunIds = Array.isArray(srcProfile.settledRunIds)
     ? srcProfile.settledRunIds.filter((s): s is string => typeof s === 'string')
     : [];
-  const completedContractTypes: ('transport' | 'rescue' | 'survey')[] = Array.isArray(
+  const completedContractTypes: V2FormalContractType[] = Array.isArray(
     srcProfile.completedContractTypes
   )
     ? srcProfile.completedContractTypes.filter(
-        (t): t is 'transport' | 'rescue' | 'survey' =>
-          typeof t === 'string' &&
-          VALID_COMPLETED_CONTRACT_TYPES.has(t as 'transport' | 'rescue' | 'survey')
+        (t): t is V2FormalContractType =>
+          typeof t === 'string' && VALID_COMPLETED_CONTRACT_TYPES.has(t as V2FormalContractType)
       )
     : [];
   const completedContractIds = Array.isArray(srcProfile.completedContractIds)
@@ -1579,6 +1880,7 @@ export function migrateV2ToV3SaveData(rawV2: unknown): {
       completedContractIds,
       credits,
     }),
+    hullTuning: {},
   };
 
   let migratedRun: V2RunState | null = null;
@@ -1726,15 +2028,15 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
       )
     : [...fresh.blueprints];
 
-  const completedContractTypes: ('transport' | 'rescue' | 'survey')[] = Array.isArray(
+  const completedContractTypes: V2FormalContractType[] = Array.isArray(
     rawProfile.completedContractTypes
   )
     ? Array.from(
         new Set(
           rawProfile.completedContractTypes.filter(
-            (t): t is 'transport' | 'rescue' | 'survey' =>
+            (t): t is V2FormalContractType =>
               typeof t === 'string' &&
-              VALID_COMPLETED_CONTRACT_TYPES.has(t as 'transport' | 'rescue' | 'survey')
+              VALID_COMPLETED_CONTRACT_TYPES.has(t as V2FormalContractType)
           )
         )
       )
@@ -1904,6 +2206,19 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
     deepestEndlessCleared: sanitizeNonNegInt(rawCareer.deepestEndlessCleared),
   };
 
+  const hullTuning: Record<string, V3HullTuningState> = {};
+  if (isPlainObject(rawProfile.hullTuning)) {
+    for (const [shipKey, tVal] of Object.entries(rawProfile.hullTuning)) {
+      if (!isSafeMapKey(shipKey) || !isPlainObject(tVal)) continue;
+      const ht = tVal as Partial<V3HullTuningState>;
+      hullTuning[shipKey] = {
+        hpLevel: Math.max(0, Math.min(3, sanitizeNonNegInt(ht.hpLevel))),
+        salvageLevel: Math.max(0, Math.min(2, sanitizeNonNegInt(ht.salvageLevel))),
+        budgetLevel: Math.max(0, Math.min(1, sanitizeNonNegInt(ht.budgetLevel))),
+      };
+    }
+  }
+
   let activeRun: V2RunState | null = null;
   if (raw.activeRun !== null && isPlainObject(raw.activeRun)) {
     const rawRun = raw.activeRun;
@@ -1994,6 +2309,7 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
         maxEndlessThreat,
       },
       career,
+      hullTuning,
     },
     activeRun,
     settings: sanitizeSettings(raw?.settings),
