@@ -61,7 +61,7 @@ export const NODE_TYPE_META: Record<
 > = {
   combat: { label: '敌舰巡逻', icon: 'combat', cls: 'node-combat' },
   elite: { label: '精英旗舰', icon: 'elite', cls: 'node-elite' },
-  boss: { label: '星区首领', icon: 'elite', cls: 'node-elite' },
+  boss: { label: '星区首领', icon: 'boss', cls: 'node-boss' },
   wreck: { label: '废船打捞', icon: 'wreck', cls: 'node-wreck' },
   merchant: { label: '流动商人', icon: 'merchant', cls: 'node-merchant' },
   anomaly: { label: '异常星区', icon: 'anomaly', cls: 'node-anomaly' },

@@ -4,6 +4,7 @@ import {
   V2_REGULAR_CARGO_KINDS,
   computeV2CargoPrice,
 } from '../data/cargo';
+import { isActBossEncounterKind } from '../data/enemies';
 import {
   getMerchantBuybackPrice,
   getUnlockedEquipmentKinds,
@@ -178,7 +179,11 @@ export function maybeGrantContractObjectiveItems(run: V2RunState, node: V2MapNod
 /**
  * Selects and enters a reachable next-layer map node atomically (deducts fuel once, enters encounter/shop).
  */
-export function selectV2MapNode(run: V2RunState, targetNodeId: string): V2ActionOutcome {
+export function selectV2MapNode(
+  run: V2RunState,
+  targetNodeId: string,
+  options?: { readonly bonusBossCharges?: number }
+): V2ActionOutcome {
   if (run.phase !== 'MAP') {
     return { ok: false, run, error: '当前阶段不可选择航路节点' };
   }
@@ -207,6 +212,17 @@ export function selectV2MapNode(run: V2RunState, targetNodeId: string): V2Action
   }
 
   const nextPhase = node.type === 'merchant' ? 'SHOP' : 'ENCOUNTER';
+  const bonusBoss = Math.max(0, Math.floor(options?.bonusBossCharges ?? 0));
+  const isBossNode = Boolean(
+    node.combat &&
+      (node.type === 'boss' ||
+        Boolean(node.bossId || node.combat.bossId) ||
+        isActBossEncounterKind(node.combat.encounterKind) ||
+        (node.type === 'elite' && node.layer >= 6 && !run.isShowcase && !run.isTutorial))
+  );
+  const nextChargesMax = node.combat ? (isBossNode ? 2 + bonusBoss : 1) : run.tacticalChargesMax;
+  const nextChargesUsed = node.combat ? 0 : run.tacticalChargesUsed;
+
   return {
     ok: true,
     run: {
@@ -219,6 +235,8 @@ export function selectV2MapNode(run: V2RunState, targetNodeId: string): V2Action
       activeCombat: null,
       pendingReward: null,
       activeEngineerOffer: null,
+      tacticalChargesMax: nextChargesMax,
+      tacticalChargesUsed: nextChargesUsed,
     },
   };
 }

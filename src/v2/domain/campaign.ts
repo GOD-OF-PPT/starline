@@ -9,6 +9,7 @@ import {
 } from '../data/campaign';
 import { V2_CARGO_DEFS } from '../data/cargo';
 import { V2_CREW, type V2CrewId } from '../data/crew';
+import { isActBossEncounterKind } from '../data/enemies';
 import { V2_RELIC_ORDER } from '../data/facilities';
 import {
   V3_SECTOR_ORDER,
@@ -319,7 +320,12 @@ function collectDefeatedBossIdsFromRun(
     if (!run.claimedEventIds.includes(claimKey)) continue;
     // Never infer combat victory from an unresolved node regardless of currentNodeId!
     if (!node.resolved) continue;
-    const explicitBossId = node.combat?.bossId ?? node.bossId;
+    const explicitBossId =
+      node.combat?.bossId ??
+      node.bossId ??
+      (node.combat && isActBossEncounterKind(node.combat.encounterKind)
+        ? node.combat.encounterKind
+        : undefined);
     if (explicitBossId) {
       bosses.add(explicitBossId);
     } else if ((node.type === 'elite' || node.type === 'boss') && node.layer >= 6) {
@@ -344,7 +350,11 @@ function collectDefeatedEnemyKindsFromRun(
     // Never infer enemy victory from an unresolved node regardless of currentNodeId!
     if (!node.resolved) continue;
     kinds.add(node.combat.encounterKind);
-    if (node.combat.bossId) kinds.add(node.combat.bossId);
+    const bossId =
+      node.combat.bossId ??
+      node.bossId ??
+      (isActBossEncounterKind(node.combat.encounterKind) ? node.combat.encounterKind : undefined);
+    if (bossId) kinds.add(bossId);
   }
   return Array.from(kinds);
 }

@@ -95,3 +95,61 @@ export function getAllValidCellsForShip(shipId: V2ShipId): readonly V2GridCoord[
   }
   return out;
 }
+
+export type V2ShipSignatureCommandId =
+  | 'signature_cannon_skiff'
+  | 'signature_shield_cruiser'
+  | 'signature_heavy_freighter'
+  | 'signature_stargate_cruiser';
+
+export interface V2ShipSignatureCommandDef {
+  readonly shipId: string;
+  readonly choice: V2ShipSignatureCommandId;
+  readonly label: string;
+  readonly shortLabel: string;
+  readonly badge: string;
+  readonly summary: string;
+}
+
+export const V2_SHIP_SIGNATURE_COMMANDS: Record<string, V2ShipSignatureCommandDef> = {
+  cannon_skiff: {
+    shipId: 'cannon_skiff',
+    choice: 'signature_cannon_skiff',
+    label: '双联超频',
+    shortLabel: '双联超频',
+    badge: '炮艇专属',
+    summary: '连射 2 发 4 点无视护甲超频脉冲，且本轮我方直击武器伤害 +1',
+  },
+  shield_cruiser: {
+    shipId: 'shield_cruiser',
+    choice: 'signature_shield_cruiser',
+    label: '相位反震',
+    shortLabel: '相位反震',
+    badge: '护盾艇专属',
+    summary: '立刻 +5 护盾（上限 20），并向全体敌舰释放至少 4 点（当前护盾 50%）无视护甲反震波',
+  },
+  heavy_freighter: {
+    shipId: 'heavy_freighter',
+    choice: 'signature_heavy_freighter',
+    label: '舱壁抢修',
+    shortLabel: '舱壁抢修',
+    badge: '货船专属',
+    summary: '立刻抢修 +5 耐久（不超上限）并 +4 护盾（上限 20），本轮免疫敌方 EMP 削盾',
+  },
+  stargate_cruiser: {
+    shipId: 'stargate_cruiser',
+    choice: 'signature_stargate_cruiser',
+    label: '星门共振',
+    shortLabel: '星门共振',
+    badge: '旗舰专属',
+    summary: '立刻 +4 护盾（上限 20），并引导星门共振波对全体敌舰造成 7 点无视护甲伤害',
+  },
+};
+
+export function getShipSignatureCommand(shipId: string): V2ShipSignatureCommandDef {
+  if (Object.prototype.hasOwnProperty.call(V2_SHIP_SIGNATURE_COMMANDS, shipId)) {
+    return V2_SHIP_SIGNATURE_COMMANDS[shipId];
+  }
+  return V2_SHIP_SIGNATURE_COMMANDS.cannon_skiff;
+}
+

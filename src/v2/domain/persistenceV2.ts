@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, type GameSettings, type RelicProgress } from '../../domain/progression';
+import { DEFAULT_SETTINGS, type RelicProgress } from '../../domain/progression';
 import { V2_CREW_ORDER, type V2CrewId } from '../data/crew';
 import {
   V2_ALL_EQUIPMENT_KINDS,
@@ -33,6 +33,7 @@ import {
   type V2ContractInstance,
   type V2DiscardedRecord,
   type V2EngineerSwapOffer,
+  type V2GameSettings,
   type V2ItemInstance,
   type V2LoadoutPreset,
   type V2MapNode,
@@ -42,6 +43,7 @@ import {
   type V2RunPhase,
   type V2RunState,
   type V2SaveData,
+  type V2TacticalCommandId,
   type V2TargetPolicy,
   type V3CampaignState,
   type V3CareerStats,
@@ -135,6 +137,17 @@ const VALID_CONTRACT_STATUSES: ReadonlySet<V2ContractInstance['status']> = new S
 const VALID_TARGET_POLICIES: ReadonlySet<V2TargetPolicy> = new Set([
   'weakest',
   'highest_threat',
+]);
+const VALID_TACTICAL_COMMANDS: ReadonlySet<V2TacticalCommandId> = new Set([
+  'normal',
+  'overload',
+  'emergency_shield',
+  'emergency_defense',
+  'focus_calibrate',
+  'signature_cannon_skiff',
+  'signature_shield_cruiser',
+  'signature_heavy_freighter',
+  'signature_stargate_cruiser',
 ]);
 const V3_CAREER_KEYS: readonly (keyof V3CareerStats)[] = [
   'totalWins',
@@ -302,7 +315,7 @@ function isValidRunHistoryEntry(raw: unknown): raw is V3RunHistoryEntry {
   return true;
 }
 
-function sanitizeSettings(raw: unknown): GameSettings {
+function sanitizeSettings(raw: unknown): V2GameSettings {
   if (!isPlainObject(raw)) {
     return { ...DEFAULT_SETTINGS };
   }
@@ -324,6 +337,9 @@ function sanitizeSettings(raw: unknown): GameSettings {
     bgmMuted,
     ...(typeof raw.eliteTacticExperiment === 'boolean'
       ? { eliteTacticExperiment: raw.eliteTacticExperiment }
+      : {}),
+    ...(typeof raw.pureAutoCombat === 'boolean'
+      ? { pureAutoCombat: raw.pureAutoCombat }
       : {}),
   };
 }
@@ -919,27 +935,67 @@ function validateV2RunCore(
     ) {
       return { ok: false, error: 'activeRun.activeCombat.simulation 数据损坏' };
     }
+    if (
+      sim.appliedCommands !== undefined &&
+      !isDenseArrayOf(
+        sim.appliedCommands,
+        (c) =>
+          isPlainObject(c) &&
+          isFiniteInt(c.roundNumber) &&
+          c.roundNumber >= 1 &&
+          typeof c.choice === 'string' &&
+          VALID_TACTICAL_COMMANDS.has(c.choice as V2TacticalCommandId)
+      )
+    ) {
+      return { ok: false, error: 'activeRun.activeCombat.simulation.appliedCommands 非法' };
+    }
     if (ac.pendingDecision !== undefined && ac.pendingDecision !== null) {
       const pd = ac.pendingDecision;
       if (
         !isPlainObject(pd) ||
         typeof pd.decisionId !== 'string' ||
         pd.decisionId.length === 0 ||
+        (pd.roundNumber !== undefined && (!isFiniteInt(pd.roundNumber) || pd.roundNumber < 1)) ||
         (pd.chosen !== null &&
-          pd.chosen !== 'normal' &&
-          pd.chosen !== 'overload' &&
-          pd.chosen !== 'emergency_defense') ||
+          (typeof pd.chosen !== 'string' ||
+            !VALID_TACTICAL_COMMANDS.has(pd.chosen as V2TacticalCommandId))) ||
         !isDenseArrayOf(
           pd.options,
           (o) =>
             isPlainObject(o) &&
             typeof o.choice === 'string' &&
-            o.choice.length > 0 &&
+            VALID_TACTICAL_COMMANDS.has(o.choice as V2TacticalCommandId) &&
             typeof o.enabled === 'boolean'
         )
       ) {
         return { ok: false, error: 'activeCombat.pendingDecision 数据损坏' };
       }
+    }
+    if (
+      ac.committedCommands !== undefined &&
+      !isDenseArrayOf(
+        ac.committedCommands,
+        (c) =>
+          isPlainObject(c) &&
+          typeof c.decisionId === 'string' &&
+          c.decisionId.length > 0 &&
+          isFiniteInt(c.roundNumber) &&
+          c.roundNumber >= 1 &&
+          typeof c.choice === 'string' &&
+          VALID_TACTICAL_COMMANDS.has(c.choice as V2TacticalCommandId)
+      )
+    ) {
+      return { ok: false, error: 'activeCombat.committedCommands 数据损坏' };
+    }
+    if (ac.resumeFromRound !== undefined && !isNonNegInt(ac.resumeFromRound)) {
+      return { ok: false, error: 'activeCombat.resumeFromRound 非法' };
+    }
+    if (
+      ac.pausedAtDecisionId !== undefined &&
+      ac.pausedAtDecisionId !== null &&
+      typeof ac.pausedAtDecisionId !== 'string'
+    ) {
+      return { ok: false, error: 'activeCombat.pausedAtDecisionId 非法' };
     }
   }
   if (run.activeEngineerOffer !== null && run.activeEngineerOffer !== undefined) {

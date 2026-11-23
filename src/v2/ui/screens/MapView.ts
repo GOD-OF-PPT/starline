@@ -1,6 +1,13 @@
+import { resolveV3BossDefForEncounter } from '../../data/bosses';
+import { getV2EncounterTemplate } from '../../data/enemies';
 import { V2_ARCHETYPE_LABELS } from '../../data/equipment';
 import { getV3SectorDef } from '../../data/sectors';
-import { getEffectiveV2CombatBounty, previewV2CombatNode } from '../../domain/combatV2';
+import {
+  computeCombatTacticalChargesMax,
+  getEffectiveV2CombatBounty,
+  previewV2CombatNode,
+  resolveNodeBossId,
+} from '../../domain/combatV2';
 import { computeV2JumpFuelCost, isContractReadyForDelivery } from '../../domain/contracts';
 import { getReachableNextNodeIds } from '../../domain/encounter';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
@@ -14,7 +21,8 @@ export interface MapViewProps {
   readonly selectedMapNodeId: string | null;
   readonly mobileMapShowFull: boolean;
   readonly isCompactViewport: boolean;
-  readonly eliteTacticEnabled: boolean;
+  readonly pureAutoCombat: boolean;
+  readonly bonusBossCharges?: number;
 }
 
 export interface MapViewActions {
@@ -36,7 +44,8 @@ export function renderMapView(
     selectedMapNodeId,
     mobileMapShowFull,
     isCompactViewport,
-    eliteTacticEnabled,
+    pureAutoCombat,
+    bonusBossCharges = 0,
   } = props;
 
   const reachableIds = getReachableNextNodeIds(run);
@@ -177,11 +186,23 @@ export function renderMapView(
         </div>
       </div>`;
 
-  const describeNodeForecast = (n: V2MapNode): { brief: string; cls: string; detail: string } => {
+  const describeNodeForecast = (
+    n: V2MapNode
+  ): { brief: string; cls: string; detail: string; traitBadge?: string } => {
     if (n.combat) {
       const pv = previewV2CombatNode(run, n.nodeId, run.targetPolicy);
-      const elitePrefix =
-        n.type === 'elite' && eliteTacticEnabled ? '按正常执行推演：' : '';
+      const chargesMax = computeCombatTacticalChargesMax(n, run, bonusBossCharges);
+      const tacticPrefix = !pureAutoCombat ? `基础推演(含${chargesMax}指令)：` : '';
+      const bossId = resolveNodeBossId(n, run);
+      const bossDef = resolveV3BossDefForEncounter({
+        encounterKind: n.combat.encounterKind,
+        bossId,
+        units: n.combat.units,
+      });
+      const tpl = getV2EncounterTemplate(n.combat.encounterKind);
+      const traitBadge = bossDef
+        ? `首领 · ${bossDef.name} (${bossDef.phaseCountLabel})`
+        : tpl.badge;
       const unitBrief = n.combat.units
         .map(
           (u) =>
@@ -193,12 +214,13 @@ export function renderMapView(
       const effectiveBounty = getEffectiveV2CombatBounty(run, n.combat.bounty);
       const brief =
         pv?.outcome === 'victory'
-          ? `${elitePrefix}预计胜 · 余 ${pv.finalPlayerHpAfterRepair}HP (${pv.roundsCount}轮) · +${effectiveBounty}¤`
-          : `${elitePrefix}高危战败风险 (${pv?.roundsCount ?? '?'}轮) · +${effectiveBounty}¤`;
+          ? `${tacticPrefix}预计胜 · 余 ${pv.finalPlayerHpAfterRepair}HP (${pv.roundsCount}轮) · +${effectiveBounty}¤`
+          : `${tacticPrefix}高危战败风险 (${pv?.roundsCount ?? '?'}轮) · +${effectiveBounty}¤`;
       return {
         brief,
         cls: pv?.outcome === 'victory' ? 'ok' : 'risk',
         detail: unitBrief,
+        traitBadge,
       };
     }
     if (n.type === 'wreck') {
@@ -249,9 +271,10 @@ export function renderMapView(
                     <span class="v2-mc-head-left">${svgIcon(rm.icon, 14)} ${rn.lane === 0 ? 'A线' : 'B线'} · ${rm.label}</span>
                     <span class="v2-fuel-tag ${canJump ? '' : 'no-fuel'}">${svgIcon('fuel', 11)} ${fuelInfo.totalCost}</span>
                   </div>
-                  <div class="v2-mc-tags">
+                  <div class="v2-mc-tags v3-map-intent-tags">
                     ${rn.contractMarker ? `<span class="v2-badge-contract">${svgIcon('star', 10)} 委托目标</span>` : ''}
                     ${rn.hasRelicSignal ? `<span class="v3-badge-relic">${svgIcon('museum', 10)} 保底遗物信号</span>` : ''}
+                    ${fc.traitBadge ? `<span class="v3-badge-intent">${fc.traitBadge}</span>` : ''}
                     ${
                       rn.hasSupportGuarantee
                         ? `<span class="v2-badge-support">${V2_ARCHETYPE_LABELS[run.primaryArchetype].supportName}保底</span>`

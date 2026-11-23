@@ -1,5 +1,4 @@
 import { getItemImageUrl } from '../../assets/itemArt';
-import type { GameSettings } from '../../domain/progression';
 import { openManagedModal, type ManagedModalHandle } from '../../ui/Modals';
 import { V2_CARGO_DEFS } from '../data/cargo';
 import { V2_CONTRACT_TEMPLATES } from '../data/contracts';
@@ -30,11 +29,13 @@ import {
   canRestoreV2Relic,
   getV2RelicSummary,
 } from '../domain/progressionV2';
-import type {
-  V2CargoBayState,
-  V2DiscardedRecord,
-  V2ProfileState,
-  V2TrialBuildId,
+import {
+  isPureAutoCombat,
+  type V2CargoBayState,
+  type V2DiscardedRecord,
+  type V2GameSettings,
+  type V2ProfileState,
+  type V2TrialBuildId,
 } from '../domain/types';
 import {
   CargoGridV2Component,
@@ -383,7 +384,15 @@ export function openV2HelpModal(host: HTMLElement): void {
         </ul>
       </div>
       <div class="help-section">
-        <h3>二、三种主要打法与邻接联动</h3>
+        <h3>二、主动战术指令、敌人意图与首领阶段</h3>
+        <ul>
+          <li><strong>主动战术指令（默认开启）</strong>：常规战拥有 <strong>1 次</strong>指令充能，星区首领战拥有 <strong>2 次</strong>充能（复原「黑曜冠徽」后提升至 <strong>3 次</strong>）；可在 <strong>火力过载 / 紧急护盾 / 聚焦校准</strong> 与当前艇体的<strong>专属指令</strong>间择机施放，也可在设置中切换为纯自动战斗。</li>
+          <li><strong>敌人意图预告</strong>：战前与战中实时展示敌舰多轮行动节拍（蓄力重炮、护盾再生、无人机召唤、EMP 削盾、加速撞击），可提前抬盾或破甲反制。</li>
+          <li><strong>三大星区多阶段首领</strong>：第一幕「铁砧号」（2 阶段）、第二幕「铁壁无畏」（2 阶段）、第三幕「黑曜利维坦」（3 阶段）会在血线阈值切换形态并触发新攻击节奏。</li>
+        </ul>
+      </div>
+      <div class="help-section">
+        <h3>三、三种主要打法与邻接联动</h3>
         <ul>
           <li><strong>重炮破甲</strong>：单发高伤击穿重甲；贴邻<strong>蓄能器</strong>抢占第 1、3、5 轮先手开火。</li>
           <li><strong>无人机编队</strong>：机库每轮自动扩编可数无人机群；贴邻<strong>编队中继</strong>将上限升至 4 架。</li>
@@ -391,17 +400,11 @@ export function openV2HelpModal(host: HTMLElement): void {
         </ul>
       </div>
       <div class="help-section">
-        <h3>三、物品来源标记</h3>
+        <h3>四、物品来源标记与操作</h3>
         <ul>
-          <li><span class="v2-origin-chip origin-loan">借</span> 借用设备：出航免费借用，返航自动归还，不可售卖或入库。</li>
-          <li><span class="v2-origin-chip origin-owned">自</span> 自有设备：来自基地设备库，普通自有件出航预算 -1（最低 1），战败将损失实物，安全返航可回库或出售。</li>
-          <li><span class="v2-origin-chip origin-loot">拾</span> 拾获物品：途中获取，可向商人折价变卖或返航后出售/入库研究。</li>
-          <li><span class="v2-origin-chip origin-mission">任</span> 任务物品：仅用于完成委托交付，不可出售或入库。</li>
+          <li><span class="v2-origin-chip origin-loan">借</span> 借用设备 · <span class="v2-origin-chip origin-owned">自</span> 自有设备（战败损毁） · <span class="v2-origin-chip origin-loot">拾</span> 拾获战利品 · <span class="v2-origin-chip origin-mission">任</span> 委托任务件。</li>
+          <li>船舱整理支持拖拽、点选与键盘：<kbd>↑↓←→</kbd> 移格、<kbd>Enter</kbd>/<kbd>Space</kbd> 拿放、<kbd>R</kbd> 旋转、<kbd>Delete</kbd> 舍弃、<kbd>Esc</kbd> 关闭弹层。</li>
         </ul>
-      </div>
-      <div class="help-section">
-        <h3>四、键盘与触控</h3>
-        <p>船舱整理支持拖拽、点选与键盘操作：<kbd>↑↓←→</kbd> 移格、<kbd>Enter</kbd>/<kbd>Space</kbd> 拿放、<kbd>R</kbd> 旋转、<kbd>Delete</kbd> 舍弃、<kbd>Esc</kbd> 关闭弹层。</p>
       </div>
       <div style="display:flex;justify-content:flex-end;margin-top:8px;">
         <button type="button" class="btn btn-primary" id="btn-v2-help-ok">知道了</button>
@@ -413,20 +416,20 @@ export function openV2HelpModal(host: HTMLElement): void {
 
 export function openV2SettingsModal(
   host: HTMLElement,
-  settings: GameSettings,
+  settings: V2GameSettings,
   options: {
     readonly readOnly: boolean;
     readonly hasV1Save: boolean;
-    readonly onChange: (next: GameSettings) => void;
+    readonly onChange: (next: V2GameSettings) => void;
     readonly onSwitchToV1: () => void;
     readonly onOpenMigration?: () => void;
     readonly onResetV2Save: () => void;
   }
 ): void {
-  let current: GameSettings = { ...settings };
+  let current: V2GameSettings = { ...settings };
   openTitledV2Modal(host, { title: '游戏设置', dismissible: true }, (body, modal) => {
     const renderBody = () => {
-      const eliteTacticOn = Boolean(current.eliteTacticExperiment);
+      const pureAutoOn = isPureAutoCombat(current);
       body.innerHTML = `
         <div class="settings-list">
           <div class="setting-row">
@@ -445,12 +448,14 @@ export function openV2SettingsModal(
           </div>
           <div class="setting-row">
             <div>
-              <div class="setting-label">精英战第 2 回合战术抉择（实验）</div>
-              <div class="setting-sub">开启后仅在精英战第 2 回合暂停一次，可在正常/火力过载/紧急防御间抉择</div>
+              <label for="v2-set-pure-auto" class="setting-label">纯自动战斗模式</label>
+              <div class="setting-sub">默认关闭（主动战术指令开启）；开启后跳过战中战术暂停，按配装自动交火</div>
             </div>
             <button type="button" class="btn btn-sm ${
-              eliteTacticOn ? 'btn-primary' : 'btn-secondary'
-            }" id="v2-set-elite-tactic">${eliteTacticOn ? '已开启' : '纯自动'}</button>
+              pureAutoOn ? 'btn-primary' : 'btn-secondary'
+            }" id="v2-set-pure-auto" data-testid="toggle-pure-auto" aria-label="纯自动战斗模式" aria-pressed="${pureAutoOn}">${
+        pureAutoOn ? '纯自动：已开启' : '纯自动：关闭（主动战术）'
+      }</button>
           </div>
           <div class="setting-row">
             <div>
@@ -517,7 +522,7 @@ export function openV2SettingsModal(
         </div>
       `;
 
-      const update = (patch: Partial<GameSettings>) => {
+      const update = (patch: Partial<V2GameSettings>) => {
         current = { ...current, ...patch };
         options.onChange(current);
         renderBody();
@@ -525,8 +530,8 @@ export function openV2SettingsModal(
 
       body.querySelector('#v2-set-spd-1')?.addEventListener('click', () => update({ combatSpeed: 1 }));
       body.querySelector('#v2-set-spd-2')?.addEventListener('click', () => update({ combatSpeed: 2 }));
-      body.querySelector('#v2-set-elite-tactic')?.addEventListener('click', () =>
-        update({ eliteTacticExperiment: !current.eliteTacticExperiment })
+      body.querySelector('#v2-set-pure-auto')?.addEventListener('click', () =>
+        update({ pureAutoCombat: !isPureAutoCombat(current) })
       );
       body.querySelector('#v2-set-sfx')?.addEventListener('click', () =>
         update({ sfxMuted: !current.sfxMuted })

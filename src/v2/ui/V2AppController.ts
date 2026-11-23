@@ -37,6 +37,8 @@ import {
 import {
   commitV2EliteTacticDecision,
   completeV2CombatAtCurrentNode,
+  getTacticalCommandLabel,
+  markV2CombatDecisionPaused,
   simulateV2Combat,
   startV2CombatAtCurrentNode,
 } from '../domain/combatV2';
@@ -108,9 +110,11 @@ import { computeV2PlacementTacticalDelta } from '../domain/tacticalDelta';
 import {
   V2_TAB_CHANNEL,
   V2_TAB_LOCK_KEY,
+  isPureAutoCombat,
   type SectorId,
   type V2CargoBayState,
   type V2CombatRoundLog,
+  type V2CombatUnitSnapshot,
   type V2MapNode,
   type V2PlacedItem,
   type V2ProfileState,
@@ -221,6 +225,8 @@ export class V2AppController {
   private liveCombatPlayerShield = 0;
   private liveCombatEnemiesAlive = 0;
   private liveCombatEventLine = '';
+  private liveEnemySnapshots: readonly V2CombatUnitSnapshot[] = [];
+  private livePhaseBannerText: string | null = null;
   private awaitingEliteDecision = false;
   private showCombatLogDetails = false;
 
@@ -254,6 +260,10 @@ export class V2AppController {
       },
       { lockKey: V2_TAB_LOCK_KEY, channelName: V2_TAB_CHANNEL }
     );
+  }
+
+  private getBonusBossCharges(): number {
+    return this.save.profile.relics.obsidian_crown?.restored ? 1 : 0;
   }
 
   private getCurrentRun(): V2RunState | null {
@@ -1171,28 +1181,58 @@ export class V2AppController {
 
     // 3. LIVE COMBAT HERO STAGE
     if (run.phase === 'ENCOUNTER' && run.activeCombat && currentNode?.combat) {
-      const sim = run.activeCombat.simulation;
-      const pending = run.activeCombat.pendingDecision;
+      const activeCombat = run.activeCombat;
+      const sim = activeCombat.simulation;
+      const pending = activeCombat.pendingDecision;
       const needsDecision = Boolean(pending && pending.chosen === null);
-      const resumeRound = pending && pending.chosen !== null ? 1 : 0;
-      const pbKey = `${run.runId}_${currentNode.nodeId}_${sim.resultId}_${pending?.chosen ?? 'open'}`;
+      const alreadyAtPause = Boolean(
+        needsDecision &&
+          pending &&
+          (pending.roundNumber <= 1 ||
+            sim.rounds.length === 0 ||
+            activeCombat.pausedAtDecisionId === pending.decisionId ||
+            (activeCombat.resumeFromRound ?? 0) >= pending.roundNumber - 1)
+      );
+      const resumeRound =
+        alreadyAtPause && pending
+          ? Math.max(0, pending.roundNumber - 1)
+          : activeCombat.resumeFromRound ??
+            (pending && pending.chosen !== null ? Math.max(0, pending.roundNumber - 1) : 0);
+      const committedCount = activeCombat.committedCommands?.length ?? 0;
+      const pbKey = `${run.runId}_${currentNode.nodeId}_${sim.resultId}_${
+        pending?.decisionId ?? 'none'
+      }_${pending?.chosen ?? 'open'}_${committedCount}_${run.tacticalChargesUsed}`;
 
       if (this.activeCombatPlaybackKey !== pbKey) {
         this.activeCombatPlaybackKey = pbKey;
-        this.awaitingEliteDecision = false;
-        this.liveCombatRound = resumeRound;
-        this.liveCombatEventLine =
-          pending?.chosen === 'overload'
-            ? '指令生效：火力过载 · 耗 3 盾/耐久追加 9 点无视护甲破甲直击'
-            : pending?.chosen === 'emergency_defense'
-            ? '指令生效：紧急防御 · 强化护盾并全炮停火（机库扩编与护盾反击保留）'
-            : '';
-        const prevLog = resumeRound > 0 ? sim.rounds[resumeRound - 1] : null;
-        this.liveCombatPlayerHp = prevLog ? prevLog.playerHpAfter : sim.startingPlayerHp;
-        this.liveCombatPlayerShield = prevLog ? prevLog.playerShieldAfter : sim.startingPlayerShield;
-        this.liveCombatEnemiesAlive = prevLog
-          ? prevLog.enemiesAfter.filter((e) => e.hp > 0).length
-          : sim.initialEnemies.length;
+        this.awaitingEliteDecision = alreadyAtPause;
+        this.liveCombatRound = alreadyAtPause && pending ? pending.roundNumber : resumeRound;
+        this.livePhaseBannerText = null;
+        const latestCmd =
+          activeCombat.committedCommands && activeCombat.committedCommands.length > 0
+            ? activeCombat.committedCommands[activeCombat.committedCommands.length - 1]
+            : null;
+        const activeOrderChoice = latestCmd?.choice ?? (pending?.chosen && pending.chosen !== 'normal' ? pending.chosen : null);
+        this.liveCombatEventLine = activeOrderChoice
+          ? `指令生效：${getTacticalCommandLabel(activeOrderChoice, run.shipId)}`
+          : '';
+
+        const prevLog =
+          resumeRound > 0 && sim.rounds.length > 0
+            ? sim.rounds[Math.min(resumeRound - 1, sim.rounds.length - 1)]
+            : null;
+        this.liveCombatPlayerHp = prevLog
+          ? prevLog.playerHpAfter
+          : alreadyAtPause && pending
+          ? pending.playerHpAtPause
+          : sim.startingPlayerHp;
+        this.liveCombatPlayerShield = prevLog
+          ? prevLog.playerShieldAfter
+          : alreadyAtPause && pending
+          ? pending.playerShieldAtPause
+          : sim.startingPlayerShield;
+        this.liveEnemySnapshots = prevLog ? prevLog.enemiesAfter : sim.initialEnemies;
+        this.liveCombatEnemiesAlive = this.liveEnemySnapshots.filter((e) => e.hp > 0).length;
 
         this.phaserHost.showV2Stage({
           shipId: run.shipId,
@@ -1203,26 +1243,52 @@ export class V2AppController {
           units: currentNode.combat.units,
           simulation: sim,
           settings: this.save.settings,
-          pauseAtRound: needsDecision ? pending!.roundNumber : null,
+          pauseAtRound: needsDecision && pending ? pending.roundNumber : null,
           resumeFromRound: resumeRound,
           onPauseForDecision: () => {
+            const curRun = this.getCurrentRun() ?? run;
+            const curPending = curRun.activeCombat?.pendingDecision;
             this.awaitingEliteDecision = true;
-            soundEngine.play('bossAlarm');
+            if (curPending) {
+              this.liveCombatRound = curPending.roundNumber;
+              if (this.canMutate()) {
+                const marked = markV2CombatDecisionPaused(curRun, curPending.decisionId);
+                if (marked !== curRun) {
+                  this.setCurrentRun(marked);
+                }
+              }
+            }
+            if (!alreadyAtPause) {
+              soundEngine.play('bossAlarm');
+            }
             this.renderCombatPlaybackOverlay(this.getCurrentRun() ?? run);
           },
           onRoundStep: (_idx: number, log: V2CombatRoundLog) => {
             this.liveCombatRound = log.round;
             this.liveCombatPlayerHp = log.playerHpAfter;
             this.liveCombatPlayerShield = log.playerShieldAfter;
+            this.liveEnemySnapshots = log.enemiesAfter;
             this.liveCombatEnemiesAlive = log.enemiesAfter.filter((e) => e.hp > 0).length;
+            this.livePhaseBannerText =
+              log.bossPhaseTransitions && log.bossPhaseTransitions.length > 0
+                ? log.bossPhaseTransitions.map((t) => t.label).join(' · ')
+                : null;
             const dealt = log.playerAttacks.reduce((s, a) => s + a.appliedDamage, 0);
             const tookHull = log.enemyAttacks.reduce((s, a) => s + a.hullDamage, 0);
             const parts: string[] = [`第 ${log.round} 轮`];
+            if (log.appliedTacticThisRound && log.appliedTacticThisRound !== 'normal') {
+              parts.push(`指令·${getTacticalCommandLabel(log.appliedTacticThisRound, run.shipId)}`);
+            }
             if (dealt > 0) parts.push(`我方输出 ${dealt}`);
             if (log.heavyChargingIds.length > 0) parts.push('重炮蓄能');
             if (log.shieldAbsorbedTotal > 0) parts.push(`盾吸 ${log.shieldAbsorbedTotal}`);
             if (log.counterAttack) parts.push(`反击 -${log.counterAttack.appliedDamage}`);
             if (tookHull > 0) parts.push(`舰体受创 -${tookHull}`);
+            if (log.bossPhaseTransitions && log.bossPhaseTransitions.length > 0) {
+              parts.push(log.bossPhaseTransitions[0].label);
+            } else if (log.enemySpecialNotes && log.enemySpecialNotes.length > 0) {
+              parts.push(log.enemySpecialNotes[0]);
+            }
             if (log.envModifierEvent) parts.push(log.envModifierEvent);
             this.liveCombatEventLine = parts.join(' · ');
             this.renderCombatPlaybackOverlay(this.getCurrentRun() ?? run);
@@ -1238,6 +1304,8 @@ export class V2AppController {
             if (res.ok) {
               this.activeCombatPlaybackKey = null;
               this.awaitingEliteDecision = false;
+              this.livePhaseBannerText = null;
+              this.liveEnemySnapshots = [];
               this.setCurrentRun(res.run);
               soundEngine.play(sim.outcome === 'victory' ? 'enemyDestroy' : 'hullHit');
               this.syncAll();
@@ -1245,7 +1313,7 @@ export class V2AppController {
           },
         });
       }
-      this.renderCombatPlaybackOverlay(run);
+      this.renderCombatPlaybackOverlay(this.getCurrentRun() ?? run);
       return;
     }
 
@@ -1415,6 +1483,8 @@ export class V2AppController {
         liveCombatPlayerShield: this.liveCombatPlayerShield,
         liveCombatEnemiesAlive: this.liveCombatEnemiesAlive,
         liveCombatEventLine: this.liveCombatEventLine,
+        liveEnemySnapshots: this.liveEnemySnapshots,
+        livePhaseBannerText: this.livePhaseBannerText,
         awaitingEliteDecision: this.awaitingEliteDecision,
         combatSpeed: this.save.settings.combatSpeed,
       },
@@ -1434,6 +1504,7 @@ export class V2AppController {
           this.renderCombatPlaybackOverlay(run);
         },
         onSkipPlayback: () => {
+          if (this.awaitingEliteDecision) return;
           this.phaserHost?.skipCombatPlayback();
         },
         onCommitEliteTactic: (decisionId, choice) => {
@@ -1447,8 +1518,9 @@ export class V2AppController {
           }
           this.awaitingEliteDecision = false;
           this.activeCombatPlaybackKey = null;
+          this.livePhaseBannerText = null;
           this.setCurrentRun(res.run);
-          soundEngine.play('energyLink');
+          soundEngine.play('tacticalOrder');
           this.syncAll();
         },
       }
@@ -1932,7 +2004,8 @@ export class V2AppController {
         selectedMapNodeId: this.selectedMapNodeId,
         mobileMapShowFull: this.mobileMapShowFull,
         isCompactViewport: window.innerWidth < 860,
-        eliteTacticEnabled: Boolean(this.save.settings.eliteTacticExperiment),
+        pureAutoCombat: isPureAutoCombat(this.save.settings),
+        bonusBossCharges: this.getBonusBossCharges(),
       },
       {
         onToggleMobileMap: () => {
@@ -1947,7 +2020,9 @@ export class V2AppController {
         },
         onJumpNode: (nid) => {
           if (!this.canMutate()) return;
-          const res = selectV2MapNode(run, nid);
+          const res = selectV2MapNode(run, nid, {
+            bonusBossCharges: this.getBonusBossCharges(),
+          });
           if (!res.ok) {
             this.showToast(res.error ?? '无法跃迁至该节点');
             return;
@@ -2007,6 +2082,8 @@ export class V2AppController {
         return;
       }
 
+      const pureAuto = isPureAutoCombat(this.save.settings);
+      const bonusBossCharges = this.getBonusBossCharges();
       renderCombatPreView(
         this.leftPanelEl,
         {
@@ -2014,7 +2091,8 @@ export class V2AppController {
           node,
           readOnly,
           showCombatLogDetails: this.showCombatLogDetails,
-          eliteTacticEnabled: Boolean(this.save.settings.eliteTacticExperiment),
+          pureAutoCombat: pureAuto,
+          bonusBossCharges,
         },
         {
           onSelectPolicy: (policy) => {
@@ -2029,8 +2107,11 @@ export class V2AppController {
           },
           onStartCombat: () => {
             if (!this.canMutate()) return;
+            const curPureAuto = isPureAutoCombat(this.save.settings);
             const res = startV2CombatAtCurrentNode(run, run.targetPolicy, {
-              enableEliteTactic: Boolean(this.save.settings.eliteTacticExperiment),
+              enableTacticalCommands: !curPureAuto,
+              pureAutoCombat: curPureAuto,
+              bonusBossCharges: this.getBonusBossCharges(),
             });
             if (!res.ok) {
               this.showToast(res.error ?? '无法开始战斗');
@@ -2529,6 +2610,8 @@ export class V2AppController {
         this.save = { ...this.save, settings: next };
         this.applySettingsEffects();
         this.persist();
+        // Immediately reflect Pure-Auto toggle on active Combat Pre-View or Map View
+        this.renderPanels();
       },
       onSwitchToV1: () => this.options.onSwitchToV1(),
       onOpenMigration: this.v1Inspection.hasV1Save ? () => this.openMigrationWizard() : undefined,

@@ -20,7 +20,11 @@ export type SfxKind =
   | 'creditTick'
   | 'rewardRare'
   | 'buildComplete'
-  | 'returnDock';
+  | 'returnDock'
+  | 'tacticalOrder'
+  | 'bossPhase'
+  | 'shieldOverload'
+  | 'empDisrupt';
 
 export type BgmTrack = 'base' | 'expedition' | 'boss' | 'none';
 
@@ -193,6 +197,27 @@ export class SoundEngine {
           this.tone(ctx, 'sine', 180, 120, 0.22, 0.1, now);
           this.tone(ctx, 'triangle', 523, 659, 0.16, 0.08, now + 0.14);
           this.tone(ctx, 'sine', 784, 1046, 0.24, 0.085, now + 0.26);
+          break;
+        case 'tacticalOrder':
+          // Crisp bridge command confirmation chirp
+          this.tone(ctx, 'triangle', 660, 990, 0.11, 0.09, now);
+          this.tone(ctx, 'sine', 990, 1320, 0.14, 0.075, now + 0.05);
+          break;
+        case 'bossPhase':
+          // Deep dramatic boss phase-shift horn + rising core power sweep
+          this.tone(ctx, 'sawtooth', 76, 52, 0.48, 0.14, now);
+          this.noiseBurst(ctx, 0.22, 720, 0.11, now + 0.04);
+          this.tone(ctx, 'triangle', 220, 580, 0.34, 0.095, now + 0.12);
+          break;
+        case 'shieldOverload':
+          // Shimmering crystalline hex-barrier overload pulse
+          this.tone(ctx, 'sine', 360, 720, 0.22, 0.095, now);
+          this.tone(ctx, 'triangle', 720, 1080, 0.2, 0.07, now + 0.05);
+          break;
+        case 'empDisrupt':
+          // Descending dissonant electromagnetic disruption buzz
+          this.tone(ctx, 'sawtooth', 880, 140, 0.24, 0.1, now);
+          this.noiseBurst(ctx, 0.18, 1280, 0.09, now + 0.02);
           break;
       }
     } catch {

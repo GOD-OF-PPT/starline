@@ -54,6 +54,8 @@ export interface V2TacticalDelta {
 interface ReferenceEncounter {
   readonly label: string;
   readonly units: readonly V2EnemyUnitSpec[];
+  readonly encounterKind?: string;
+  readonly bossId?: string;
 }
 
 function resolveReferenceEncounter(run: V2RunState | null): ReferenceEncounter {
@@ -66,6 +68,8 @@ function resolveReferenceEncounter(run: V2RunState | null): ReferenceEncounter {
         return {
           label: `下站·${tpl.name}`,
           units: n.combat.units,
+          encounterKind: n.combat.encounterKind,
+          bossId: n.combat.bossId ?? n.bossId,
         };
       }
     }
@@ -79,6 +83,8 @@ function resolveReferenceEncounter(run: V2RunState | null): ReferenceEncounter {
           return {
             label: `前路·${tpl.name}`,
             units: deep.combat.units,
+            encounterKind: deep.combat.encounterKind,
+            bossId: deep.combat.bossId ?? deep.bossId,
           };
         }
       }
@@ -88,12 +94,14 @@ function resolveReferenceEncounter(run: V2RunState | null): ReferenceEncounter {
     return {
       label: `第 ${nextLayer} 层标准敌舰`,
       units: buildEncounterUnits('armored', nextLayer, 'ref_delta'),
+      encounterKind: 'armored',
     };
   }
 
   return {
     label: '模拟靶舰（装甲护卫）',
     units: buildEncounterUnits('armored', 3, 'ref_prep'),
+    encounterKind: 'armored',
   };
 }
 
@@ -134,6 +142,8 @@ interface DeltaSimContext {
   readonly sectorId?: SectorId;
   readonly crewId?: V2CrewId | null;
   readonly crewMasteryTier?: number;
+  readonly encounterKind?: string;
+  readonly bossId?: string;
 }
 
 function findBestPlacementForItem(
@@ -185,6 +195,8 @@ function findBestPlacementForItem(
           sectorId: simCtx?.sectorId,
           crewId: simCtx?.crewId,
           crewMasteryTier: simCtx?.crewMasteryTier,
+          encounterKind: simCtx?.encounterKind,
+          bossId: simCtx?.bossId,
         });
         const linkBonus = st.links.length * 100;
         const winBonus = sim.outcome === 'victory' ? 10_000 : 0;
@@ -295,6 +307,8 @@ export function computeV2PlacementTacticalDelta(params: {
     sectorId: params.sectorId ?? params.run?.sectorId ?? 'near_orbit',
     crewId: params.crewId !== undefined ? params.crewId : params.run?.crewId ?? null,
     crewMasteryTier: params.crewMasteryTier ?? params.run?.crewMasteryTier ?? 0,
+    encounterKind: ref.encounterKind,
+    bossId: ref.bossId,
   };
 
   if (params.zone === 'staging') {
@@ -308,6 +322,8 @@ export function computeV2PlacementTacticalDelta(params: {
       sectorId: simCtx.sectorId,
       crewId: simCtx.crewId,
       crewMasteryTier: simCtx.crewMasteryTier,
+      encounterKind: simCtx.encounterKind,
+      bossId: simCtx.bossId,
     });
 
     let chosenSpot: { x: number; y: number; rotation: V2Rotation; bayAfter: V2CargoBayState } | null = null;
@@ -378,6 +394,8 @@ export function computeV2PlacementTacticalDelta(params: {
       sectorId: simCtx.sectorId,
       crewId: simCtx.crewId,
       crewMasteryTier: simCtx.crewMasteryTier,
+      encounterKind: simCtx.encounterKind,
+      bossId: simCtx.bossId,
     });
     const cmp = formatSimComparison(ref.label, baselineSim, afterSim, 'install');
 
@@ -407,6 +425,8 @@ export function computeV2PlacementTacticalDelta(params: {
     sectorId: simCtx.sectorId,
     crewId: simCtx.crewId,
     crewMasteryTier: simCtx.crewMasteryTier,
+    encounterKind: simCtx.encounterKind,
+    bossId: simCtx.bossId,
   });
   const simCurrent = simulateV2Combat({
     resultId: 'delta_cur',
@@ -419,6 +439,8 @@ export function computeV2PlacementTacticalDelta(params: {
     sectorId: simCtx.sectorId,
     crewId: simCtx.crewId,
     crewMasteryTier: simCtx.crewMasteryTier,
+    encounterKind: simCtx.encounterKind,
+    bossId: simCtx.bossId,
   });
 
   let synergyLine: string;

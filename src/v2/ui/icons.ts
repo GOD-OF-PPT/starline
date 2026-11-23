@@ -41,7 +41,9 @@ export type V2IconName =
   | 'gravity'
   | 'medal'
   | 'chevronDown'
-  | 'chevronUp';
+  | 'chevronUp'
+  | 'target'
+  | 'boss';
 
 const ICON_PATHS: Record<V2IconName, string> = {
   fuel: '<path d="M5 4h7a2 2 0 0 1 2 2v13H4V6a2 2 0 0 1 1-2Z"/><path d="M14 8h2l2 2v5a1.5 1.5 0 0 1-3 0v-3"/><path d="M7 10h4"/><path d="M3 19h12"/>',
@@ -80,6 +82,8 @@ const ICON_PATHS: Record<V2IconName, string> = {
   medal: '<circle cx="12" cy="10" r="5.5"/><path d="M9 14.8 7.5 21l4.5-2.2L16.5 21 15 14.8"/><path d="m12 7.2.9 1.9 2 .3-1.5 1.4.4 2-1.8-.9-1.8.9.4-2-1.5-1.4 2-.3.9-1.9Z"/>',
   chevronDown: '<path d="m6 9 6 6 6-6"/>',
   chevronUp: '<path d="m6 15 6-6 6 6"/>',
+  target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/><path d="M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22"/>',
+  boss: '<path d="m12 2.5 3.5 4.2 5.5-1.2-2.2 5.4 3.2 4.6-5.6.5L12 21.5 7.6 16l-5.6-.5 3.2-4.6L3 5.5l5.5 1.2L12 2.5Z"/><circle cx="12" cy="12" r="2.6"/>',
 };
 
 export function svgIcon(name: V2IconName, size = 15, extraClass = ''): string {

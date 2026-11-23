@@ -1,5 +1,18 @@
+import {
+  resolveV3BossDefForEncounter,
+  type V3BossDefinition,
+  type V3EnemyIntent,
+} from '../data/bosses';
 import type { V2CrewId } from '../data/crew';
-import type { V2EnemyUnitSpec } from '../data/enemies';
+import {
+  isActBossEncounterKind,
+  resolveUnitInitialShield,
+  resolveUnitIntentForRound,
+  resolveUnitIntentRole,
+  type V2EncounterKind,
+  type V2EnemyUnitRole,
+  type V2EnemyUnitSpec,
+} from '../data/enemies';
 import {
   V2_MAX_BATTLE_SHIELD,
   V2_MAX_POST_WIN_REPAIR,
@@ -7,11 +20,14 @@ import {
   type V2UnlockFamilyId,
 } from '../data/equipment';
 import { getV3SectorDef } from '../data/sectors';
+import { getShipSignatureCommand } from '../data/ships';
 import { calculateV2BuildStats, type V2BuildStats } from './buildStatsV2';
 import { generateV2CombatRewardBundle } from './encounter';
 import type {
   SectorId,
   V2ActiveCombatState,
+  V2AppliedTacticalCommand,
+  V2BossPhaseTransitionEvent,
   V2CargoBayState,
   V2CombatRoundLog,
   V2CombatSimulation,
@@ -20,8 +36,10 @@ import type {
   V2EliteTacticDecision,
   V2EliteTacticOptionPreview,
   V2EnemyAttackEvent,
+  V2MapNode,
   V2PlayerAttackEvent,
   V2RunState,
+  V2TacticalCommandId,
   V2TargetPolicy,
 } from './types';
 
@@ -29,8 +47,13 @@ export const V2_MAX_COMBAT_ROUNDS = 30;
 export const V2_ELITE_OVERLOAD_COST = 3;
 export const V2_ELITE_OVERLOAD_RAW_DMG = 9;
 export const V2_ELITE_DEFENSE_SHIELD_GAIN = 5;
+export const V2_TACTIC_EMERGENCY_SHIELD_GAIN = 6;
+export const V2_TACTIC_FOCUS_PRECISION_DMG = 4;
 /** @deprecated Alias kept for external imports; Overload now spends shield first then HP */
 export const V2_ELITE_OVERLOAD_SHIELD_COST = V2_ELITE_OVERLOAD_COST;
+
+const MAX_LIVING_ENEMIES_WITH_SUMMONS = 4;
+const MAX_CARRIER_SUMMONS_PER_UNIT = 3;
 
 interface MutableUnit {
   readonly enemyId: string;
@@ -39,9 +62,87 @@ interface MutableUnit {
   hp: number;
   readonly maxHp: number;
   readonly damagePerRound: number;
-  readonly armor: number;
+  armor: number;
   readonly pierceRatio: number;
   readonly isBoss?: boolean;
+  readonly role: V2EnemyUnitRole;
+  shield: number;
+  maxShield: number;
+  currentPhase?: number;
+  totalPhases?: number;
+  phaseStartedRound: number;
+  summonsDone: number;
+}
+
+export interface V2ScheduledTacticalCommand {
+  readonly roundNumber: number;
+  readonly choice: V2TacticalCommandId;
+}
+
+export interface V2StartCombatOptions {
+  readonly enableTacticalCommands?: boolean;
+  /** Legacy alias for enableTacticalCommands */
+  readonly enableEliteTactic?: boolean;
+  /** When true, bypasses all tactical pauses (Pure-Auto mode) */
+  readonly pureAutoCombat?: boolean;
+  /** Extra tactical command charges on Act Boss encounters (e.g. restored obsidian_crown +1) */
+  readonly bonusBossCharges?: number;
+}
+
+/**
+ * Authoritative helper identifying Act Boss / Boss encounters for charge budgets, UI badges, and settlement.
+ */
+export function isActBossOrBossNode(
+  node: Pick<V2MapNode, 'type' | 'layer' | 'bossId' | 'combat'>,
+  run?: Pick<V2RunState, 'isShowcase' | 'isTutorial'>
+): boolean {
+  if (!node.combat) return false;
+  if (node.type === 'boss') return true;
+  if (node.bossId || node.combat.bossId) return true;
+  if (isActBossEncounterKind(node.combat.encounterKind)) return true;
+  if (node.type === 'elite' && node.layer >= 6 && !run?.isShowcase && !run?.isTutorial) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Resolves the canonical Boss ID (`boss_anvil` | `boss_dreadnought` | `boss_leviathan`) for a combat node.
+ */
+export function resolveNodeBossId(
+  node: Pick<V2MapNode, 'type' | 'layer' | 'bossId' | 'combat'>,
+  run: Pick<V2RunState, 'sectorId' | 'isTutorial' | 'isShowcase'>
+): string | undefined {
+  if (!node.combat) return node.bossId;
+  if (node.combat.bossId) return node.combat.bossId;
+  if (node.bossId) return node.bossId;
+  if (isActBossEncounterKind(node.combat.encounterKind)) {
+    return node.combat.encounterKind;
+  }
+  if (
+    (node.type === 'elite' || node.type === 'boss') &&
+    node.layer >= 6 &&
+    !run.isTutorial &&
+    !run.isShowcase
+  ) {
+    return getV3SectorDef(run.sectorId).bossId;
+  }
+  return undefined;
+}
+
+/**
+ * Computes tactical command charge cap for a given combat node (1 regular/non-boss elite; 2 + bonus for Act Bosses).
+ */
+export function computeCombatTacticalChargesMax(
+  node: Pick<V2MapNode, 'type' | 'layer' | 'bossId' | 'combat'>,
+  run?: Pick<V2RunState, 'isShowcase' | 'isTutorial'>,
+  bonusBossCharges = 0
+): number {
+  const safeBonus = Math.max(0, Math.floor(bonusBossCharges));
+  if (isActBossOrBossNode(node, run)) {
+    return 2 + safeBonus;
+  }
+  return 1;
 }
 
 function selectTargetByPolicy(
@@ -61,18 +162,44 @@ function selectTargetByPolicy(
   return sorted[0];
 }
 
-function snapshotUnits(units: readonly MutableUnit[]): readonly V2CombatUnitSnapshot[] {
-  return units.map((u) => ({
-    enemyId: u.enemyId,
-    name: u.name,
-    spriteArchetype: u.spriteArchetype,
-    hp: u.hp,
-    maxHp: u.maxHp,
-    damagePerRound: u.damagePerRound,
-    armor: u.armor,
-    pierceRatio: u.pierceRatio,
-    isBoss: u.isBoss,
-  }));
+function snapshotUnits(
+  units: readonly MutableUnit[],
+  nextRound: number,
+  bossDef: V3BossDefinition | null,
+  encounterKind?: string,
+  bossId?: string
+): readonly V2CombatUnitSnapshot[] {
+  return units.map((u) => {
+    const nextIntent =
+      u.hp > 0
+        ? resolveUnitIntentForRound({
+            unit: u,
+            round: nextRound,
+            bossDef,
+            currentPhase: u.currentPhase,
+            phaseStartedRound: u.phaseStartedRound,
+            encounterKind,
+            bossId,
+          })
+        : undefined;
+    return {
+      enemyId: u.enemyId,
+      name: u.name,
+      spriteArchetype: u.spriteArchetype,
+      hp: u.hp,
+      maxHp: u.maxHp,
+      damagePerRound: u.damagePerRound,
+      armor: u.armor,
+      pierceRatio: u.pierceRatio,
+      ...(u.isBoss ? { isBoss: true } : {}),
+      ...(u.maxShield > 0 || u.shield > 0
+        ? { shield: u.shield, maxShield: Math.max(u.maxShield, u.shield) }
+        : {}),
+      ...(u.currentPhase !== undefined ? { currentPhase: u.currentPhase } : {}),
+      ...(u.totalPhases !== undefined ? { totalPhases: u.totalPhases } : {}),
+      ...(nextIntent ? { nextIntent } : {}),
+    };
+  });
 }
 
 function applyHitToUnit(
@@ -82,26 +209,155 @@ function applyHitToUnit(
   rawDamage: number,
   ignoreArmor = false
 ): V2PlayerAttackEvent {
-  // §8.2: Per-hit armor reduction: max(1, rawDamage - armor) (unless armor-piercing tactical order)
-  const appliedDamage = ignoreArmor ? Math.max(1, rawDamage) : Math.max(1, rawDamage - unit.armor);
-  const armorBlocked = Math.max(0, rawDamage - appliedDamage);
+  const safeRaw = Math.max(1, rawDamage);
   const wasAlive = unit.hp > 0;
-  unit.hp = Math.max(0, unit.hp - appliedDamage);
+
+  let shieldDamaged = 0;
+  let hpDamage = 0;
+  let armorBlocked = 0;
+
+  if (unit.shield > 0) {
+    shieldDamaged = Math.min(unit.shield, safeRaw);
+    unit.shield -= shieldDamaged;
+    const overflowRaw = safeRaw - shieldDamaged;
+    if (overflowRaw > 0) {
+      hpDamage = ignoreArmor ? overflowRaw : Math.max(1, overflowRaw - unit.armor);
+      armorBlocked = Math.max(0, overflowRaw - hpDamage);
+    }
+  } else {
+    // §8.2: Per-hit armor reduction: max(1, rawDamage - armor) (unless armor-piercing tactical order)
+    hpDamage = ignoreArmor ? safeRaw : Math.max(1, safeRaw - unit.armor);
+    armorBlocked = Math.max(0, safeRaw - hpDamage);
+  }
+
+  unit.hp = Math.max(0, unit.hp - hpDamage);
+  const appliedDamage = shieldDamaged + hpDamage;
+
   return {
     sourceKind,
     sourceInstanceId,
     targetEnemyId: unit.enemyId,
-    rawDamage,
+    rawDamage: safeRaw,
     appliedDamage,
     armorBlocked,
+    ...(shieldDamaged > 0 ? { shieldDamaged } : {}),
     targetHpAfter: unit.hp,
     targetKilled: wasAlive && unit.hp === 0,
   };
 }
 
+function processBossPhaseTransitions(params: {
+  readonly enemies: MutableUnit[];
+  readonly bossDef: V3BossDefinition | null;
+  readonly round: number;
+  readonly bossPhaseTransitions: V2BossPhaseTransitionEvent[];
+  readonly summonedEnemies: V2CombatUnitSnapshot[];
+  readonly enemySpecialNotes: string[];
+  readonly justTransitionedBossIds: Set<string>;
+  readonly encounterKind?: string;
+  readonly bossId?: string;
+}): void {
+  const {
+    enemies,
+    bossDef,
+    round,
+    bossPhaseTransitions,
+    summonedEnemies,
+    enemySpecialNotes,
+    justTransitionedBossIds,
+    encounterKind,
+    bossId,
+  } = params;
+  if (!bossDef) return;
+
+  for (const unit of enemies) {
+    if (!unit.isBoss || unit.hp <= 0 || unit.currentPhase === undefined) continue;
+    for (const phaseDef of bossDef.phases) {
+      if (phaseDef.phaseNumber <= unit.currentPhase) continue;
+      const thresholdHp = Math.floor(unit.maxHp * phaseDef.hpThresholdRatio);
+      if (unit.hp > thresholdHp) continue;
+
+      const fromPhase = unit.currentPhase;
+      unit.currentPhase = phaseDef.phaseNumber;
+      unit.phaseStartedRound = round;
+      justTransitionedBossIds.add(unit.enemyId);
+
+      bossPhaseTransitions.push({
+        enemyId: unit.enemyId,
+        fromPhase,
+        toPhase: phaseDef.phaseNumber,
+        label: phaseDef.transitionBanner,
+      });
+      enemySpecialNotes.push(phaseDef.transitionBanner);
+
+      if (phaseDef.armorOverride !== undefined) {
+        unit.armor = phaseDef.armorOverride;
+      }
+      if (phaseDef.shieldGainOnEnter && phaseDef.shieldGainOnEnter > 0) {
+        const cap = Math.max(unit.maxShield, bossDef.maxShield, phaseDef.shieldGainOnEnter);
+        unit.maxShield = cap;
+        unit.shield = Math.min(cap, unit.shield + phaseDef.shieldGainOnEnter);
+      }
+      if (phaseDef.summonSpec && phaseDef.summonOnEnterCount && phaseDef.summonOnEnterCount > 0) {
+        let livingCount = enemies.filter((e) => e.hp > 0).length;
+        for (let sIdx = 0; sIdx < phaseDef.summonOnEnterCount; sIdx++) {
+          if (livingCount >= MAX_LIVING_ENEMIES_WITH_SUMMONS) break;
+          const summonId = `${unit.enemyId}_p${phaseDef.phaseNumber}_s${sIdx + 1}`;
+          if (enemies.some((e) => e.enemyId === summonId)) continue;
+          const spec = phaseDef.summonSpec;
+          const summoned: MutableUnit = {
+            enemyId: summonId,
+            name: phaseDef.summonOnEnterCount > 1 ? `${spec.name} ${String.fromCharCode(65 + sIdx)}` : spec.name,
+            spriteArchetype: spec.spriteArchetype,
+            hp: spec.maxHp,
+            maxHp: spec.maxHp,
+            damagePerRound: spec.damagePerRound,
+            armor: spec.armor,
+            pierceRatio: spec.pierceRatio,
+            role: 'swarm_drone',
+            shield: 0,
+            maxShield: 0,
+            phaseStartedRound: round + 1,
+            summonsDone: 0,
+          };
+          enemies.push(summoned);
+          livingCount += 1;
+          const snap = snapshotUnits([summoned], round + 1, bossDef, encounterKind, bossId)[0];
+          if (snap) summonedEnemies.push(snap);
+        }
+      }
+    }
+  }
+}
+
+export function getTacticalCommandLabel(choice: V2TacticalCommandId, shipId?: string): string {
+  switch (choice) {
+    case 'normal':
+      return '正常执行';
+    case 'overload':
+      return '火力过载';
+    case 'emergency_shield':
+      return '紧急护盾';
+    case 'emergency_defense':
+      return '紧急防御';
+    case 'focus_calibrate':
+      return '聚焦校准';
+    case 'signature_cannon_skiff':
+      return '双联超频';
+    case 'signature_shield_cruiser':
+      return '相位反震';
+    case 'signature_heavy_freighter':
+      return '舱壁抢修';
+    case 'signature_stargate_cruiser':
+      return '星门共振';
+    default:
+      return shipId ? getShipSignatureCommand(shipId).label : '战术指令';
+  }
+}
+
 /**
- * Single authoritative deterministic combat engine used identically by BOTH preview and live battle (§8.2 & AC07-AC10).
- * Optionally applies a Round-2 Elite tactical choice (`normal` | `overload` | `emergency_defense`).
+ * Single authoritative deterministic combat engine used identically by pre-combat preview,
+ * tactical delta, tactical option previews, live Phaser playback, and settlement.
  */
 export function simulateV2Combat(params: {
   readonly resultId: string;
@@ -111,10 +367,15 @@ export function simulateV2Combat(params: {
   readonly units: readonly V2EnemyUnitSpec[];
   readonly targetPolicy: V2TargetPolicy;
   readonly precomputedStats?: V2BuildStats;
+  /** Legacy Round-2 single tactic hook */
   readonly round2Tactic?: V2EliteTacticChoice;
+  /** V3 multi-charge scheduled tactical commands (cumulative, ordered by roundNumber) */
+  readonly tacticalCommands?: readonly V2ScheduledTacticalCommand[];
   readonly sectorId?: SectorId;
   readonly crewId?: V2CrewId | null;
   readonly crewMasteryTier?: number;
+  readonly encounterKind?: V2EncounterKind | string;
+  readonly bossId?: string;
 }): V2CombatSimulation {
   const stats = params.precomputedStats ?? calculateV2BuildStats(params.bay);
   const sectorId: SectorId = params.sectorId ?? 'near_orbit';
@@ -122,19 +383,48 @@ export function simulateV2Combat(params: {
   const envModifierId = sector.envModifier.id;
   const masteryTier = Math.max(0, Math.min(2, Math.floor(params.crewMasteryTier ?? 0)));
 
-  const enemies: MutableUnit[] = params.units.map((u) => ({
-    enemyId: u.enemyId,
-    name: u.name,
-    spriteArchetype: u.spriteArchetype,
-    hp: u.maxHp,
-    maxHp: u.maxHp,
-    damagePerRound: u.damagePerRound,
-    armor: u.armor,
-    pierceRatio: u.pierceRatio,
-    isBoss: u.isBoss,
-  }));
+  const bossDef = resolveV3BossDefForEncounter({
+    encounterKind: params.encounterKind,
+    bossId: params.bossId,
+    units: params.units,
+  });
+  const resolvedBossId = params.bossId ?? bossDef?.bossId;
 
-  const initialEnemies = snapshotUnits(enemies);
+  const commandByRound = new Map<number, V2TacticalCommandId>();
+  if (params.tacticalCommands && params.tacticalCommands.length > 0) {
+    for (const cmd of params.tacticalCommands) {
+      if (Number.isInteger(cmd.roundNumber) && cmd.roundNumber >= 1) {
+        commandByRound.set(cmd.roundNumber, cmd.choice);
+      }
+    }
+  } else if (params.round2Tactic) {
+    commandByRound.set(2, params.round2Tactic);
+  }
+
+  const enemies: MutableUnit[] = params.units.map((u) => {
+    const role = resolveUnitIntentRole(u, params.encounterKind, resolvedBossId);
+    const shieldInit = resolveUnitInitialShield(u, params.encounterKind, resolvedBossId);
+    const isMultiPhaseBoss = Boolean(u.isBoss && bossDef);
+    return {
+      enemyId: u.enemyId,
+      name: u.name,
+      spriteArchetype: u.spriteArchetype,
+      hp: u.maxHp,
+      maxHp: u.maxHp,
+      damagePerRound: u.damagePerRound,
+      armor: u.armor,
+      pierceRatio: u.pierceRatio,
+      isBoss: u.isBoss,
+      role,
+      shield: shieldInit.shield,
+      maxShield: shieldInit.maxShield,
+      ...(isMultiPhaseBoss ? { currentPhase: 1, totalPhases: bossDef!.phases.length } : {}),
+      phaseStartedRound: 1,
+      summonsDone: 0,
+    };
+  });
+
+  const initialEnemies = snapshotUnits(enemies, 1, bossDef, params.encounterKind, resolvedBossId);
   let playerHp = Math.max(0, params.startingHp);
 
   // Opening shield: base build shield + Engineer Mastery T2 (+2, capped at 20), then Sector 2 cryo_ion (-2, min 0)
@@ -148,7 +438,8 @@ export function simulateV2Combat(params: {
 
   let outcome: 'victory' | 'defeat' = 'defeat';
   let stalemate = false;
-  let appliedTactic: V2EliteTacticChoice | undefined = undefined;
+  let appliedTactic: V2TacticalCommandId | undefined = undefined;
+  const appliedCommandsList: { readonly roundNumber: number; readonly choice: V2TacticalCommandId }[] = [];
   let heavyStallApplied = false;
 
   for (let round = 1; round <= V2_MAX_COMBAT_ROUNDS; round++) {
@@ -159,30 +450,90 @@ export function simulateV2Combat(params: {
       break;
     }
 
-    // Phase-D optional Round-2 Elite tactical order (applied cleanly at Round 2 boundary before shots)
+    const roundCmd = commandByRound.get(round);
     let suppressDirectWeaponsThisRound = false;
-    let triggerOverloadBonusHit = false;
-    if (round === 2 && params.round2Tactic) {
-      appliedTactic = params.round2Tactic;
+    let ignoreArmorDirectThisRound = false;
+    let directWeaponDmgBonus = 0;
+    let pierceMitigationFactor = 1;
+    let empImmuneThisRound = false;
+    let counterBonusThisRound = 0;
+    const tacticStrikes: {
+      readonly sourceInstanceId: string;
+      readonly rawDamage: number;
+      readonly ignoreArmor: boolean;
+      readonly aoe?: boolean;
+    }[] = [];
+
+    if (roundCmd) {
+      appliedTactic = roundCmd;
+      appliedCommandsList.push({ roundNumber: round, choice: roundCmd });
       if (
-        params.round2Tactic === 'overload' &&
+        roundCmd === 'overload' &&
         playerHp + playerShield > V2_ELITE_OVERLOAD_COST
       ) {
         const shieldPaid = Math.min(playerShield, V2_ELITE_OVERLOAD_COST);
         playerShield -= shieldPaid;
         const hpPaid = V2_ELITE_OVERLOAD_COST - shieldPaid;
         playerHp = Math.max(1, playerHp - hpPaid);
-        triggerOverloadBonusHit = true;
-      } else if (params.round2Tactic === 'emergency_defense') {
+        tacticStrikes.push({
+          sourceInstanceId: 'tactic_overload',
+          rawDamage: V2_ELITE_OVERLOAD_RAW_DMG,
+          ignoreArmor: true,
+        });
+      } else if (roundCmd === 'emergency_shield') {
+        const shieldGain =
+          V2_TACTIC_EMERGENCY_SHIELD_GAIN + (stats.bestActiveCounter ? 2 : 0);
+        playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + shieldGain);
+        pierceMitigationFactor = 0.5;
+        if (stats.bestActiveCounter) {
+          counterBonusThisRound = 2;
+        }
+      } else if (roundCmd === 'emergency_defense') {
         const shieldGain =
           V2_ELITE_DEFENSE_SHIELD_GAIN + (stats.bestActiveCounter ? 2 : 0);
         playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + shieldGain);
         suppressDirectWeaponsThisRound = true;
         heavyStallApplied = true;
+        counterBonusThisRound = 2;
+      } else if (roundCmd === 'focus_calibrate') {
+        ignoreArmorDirectThisRound = true;
+        directWeaponDmgBonus = 1;
+        tacticStrikes.push({
+          sourceInstanceId: 'tactic_focus_calibrate',
+          rawDamage: V2_TACTIC_FOCUS_PRECISION_DMG,
+          ignoreArmor: true,
+        });
+      } else if (roundCmd === 'signature_cannon_skiff') {
+        directWeaponDmgBonus = 1;
+        tacticStrikes.push(
+          { sourceInstanceId: 'tactic_sig_cannon_skiff_1', rawDamage: 4, ignoreArmor: true },
+          { sourceInstanceId: 'tactic_sig_cannon_skiff_2', rawDamage: 4, ignoreArmor: true }
+        );
+      } else if (roundCmd === 'signature_shield_cruiser') {
+        playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + 5);
+        const shockwaveDmg = Math.max(4, Math.floor(playerShield * 0.5));
+        tacticStrikes.push({
+          sourceInstanceId: 'tactic_sig_shield_cruiser',
+          rawDamage: shockwaveDmg,
+          ignoreArmor: true,
+          aoe: true,
+        });
+      } else if (roundCmd === 'signature_heavy_freighter') {
+        playerHp = Math.min(params.maxHp, playerHp + 5);
+        playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + 4);
+        empImmuneThisRound = true;
+      } else if (roundCmd === 'signature_stargate_cruiser') {
+        playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + 4);
+        tacticStrikes.push({
+          sourceInstanceId: 'tactic_sig_stargate_cruiser',
+          rawDamage: 7,
+          ignoreArmor: true,
+          aoe: true,
+        });
       }
     }
 
-    // Power diversion during Emergency Defense stalls heavy railgun charge by 1 cycle, while hangar bays continue launching/ramping
+    // Power diversion during legacy Emergency Defense stalls heavy railgun charge by 1 cycle
     const effectiveHeavyRound = heavyStallApplied && round >= 2 ? round - 1 : round;
 
     const droneCountsByHangar: Record<string, number> = {};
@@ -213,30 +564,37 @@ export function simulateV2Combat(params: {
       return bonus;
     };
 
-    // 2a. Core attack (paused during full-shield emergency_defense power diversion)
+    // 2a. Core attack
     if (stats.coreAttack > 0 && !suppressDirectWeaponsThisRound) {
       playerAttacks.push(
         applyHitToUnit(
           primaryTarget,
           'core',
           'ship_core',
-          stats.coreAttack + consumeFirstHitBonus()
+          stats.coreAttack + directWeaponDmgBonus + consumeFirstHitBonus(),
+          ignoreArmorDirectThisRound
         )
       );
     }
 
-    // Optional Round-2 Overload armor-piercing strike (ignores enemy armor; switches to living target if primary fell to core!)
-    if (triggerOverloadBonusHit) {
-      const overloadTarget = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
-      playerAttacks.push(
-        applyHitToUnit(
-          overloadTarget,
-          'core',
-          'tactic_overload',
-          V2_ELITE_OVERLOAD_RAW_DMG,
-          true
-        )
-      );
+    // 2a-bis. Tactical command / hull signature strikes
+    for (const strike of tacticStrikes) {
+      if (strike.aoe) {
+        const livingSorted = enemies
+          .filter((u) => u.hp > 0)
+          .sort((a, b) => a.enemyId.localeCompare(b.enemyId));
+        const targets = livingSorted.length > 0 ? livingSorted : [primaryTarget];
+        for (const t of targets) {
+          playerAttacks.push(
+            applyHitToUnit(t, 'core', strike.sourceInstanceId, strike.rawDamage, strike.ignoreArmor)
+          );
+        }
+      } else {
+        const target = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
+        playerAttacks.push(
+          applyHitToUnit(target, 'core', strike.sourceInstanceId, strike.rawDamage, strike.ignoreArmor)
+        );
+      }
     }
 
     if (!suppressDirectWeaponsThisRound) {
@@ -247,7 +605,8 @@ export function simulateV2Combat(params: {
             primaryTarget,
             'laser',
             l.instanceId,
-            l.totalDamage + consumeFirstHitBonus()
+            l.totalDamage + directWeaponDmgBonus + consumeFirstHitBonus(),
+            ignoreArmorDirectThisRound
           )
         );
       }
@@ -264,13 +623,14 @@ export function simulateV2Combat(params: {
               primaryTarget,
               'heavy',
               h.instanceId,
-              h.baseDamage + bonus + consumeFirstHitBonus()
+              h.baseDamage + bonus + directWeaponDmgBonus + consumeFirstHitBonus(),
+              ignoreArmorDirectThisRound
             )
           );
         }
       }
 
-      // 2d. Hangar drones: each active drone acquires a living enemy independently (auto-switches on kill; per-drone armor still applies! AC08)
+      // 2d. Hangar drones: each active drone acquires a living enemy independently
       for (const hg of stats.hangars) {
         const drones = droneCountsByHangar[hg.instanceId] ?? 0;
         for (let d = 0; d < drones; d++) {
@@ -280,7 +640,8 @@ export function simulateV2Combat(params: {
               droneTarget,
               'hangar',
               `${hg.instanceId}_d${d + 1}`,
-              hg.damagePerDrone + consumeFirstHitBonus()
+              hg.damagePerDrone + consumeFirstHitBonus(),
+              ignoreArmorDirectThisRound
             )
           );
         }
@@ -297,47 +658,153 @@ export function simulateV2Combat(params: {
               target,
               'flak',
               fl.instanceId,
-              fl.damagePerEnemy + consumeFirstHitBonus()
+              fl.damagePerEnemy + consumeFirstHitBonus(),
+              ignoreArmorDirectThisRound
             )
           );
         }
       }
     }
 
-    // Step 4: Simultaneous enemy attacks from startLiving (even if killed in step 3!)
+    // Step 3b: Multi-Phase Act Boss threshold transitions (evaluated after player attack phase)
+    const bossPhaseTransitions: V2BossPhaseTransitionEvent[] = [];
+    const summonedEnemies: V2CombatUnitSnapshot[] = [];
+    const enemySpecialNotes: string[] = [];
+    const justTransitionedBossIds = new Set<string>();
+
+    processBossPhaseTransitions({
+      enemies,
+      bossDef,
+      round,
+      bossPhaseTransitions,
+      summonedEnemies,
+      enemySpecialNotes,
+      justTransitionedBossIds,
+      encounterKind: params.encounterKind,
+      bossId: resolvedBossId,
+    });
+
+    // Step 4: Simultaneous enemy actions from startLiving using telegraphed round intents
     const startLivingSorted = [...startLiving].sort((a, b) => a.enemyId.localeCompare(b.enemyId));
     const enemyAttacks: V2EnemyAttackEvent[] = [];
+    const enemyIntentsThisRound: { readonly enemyId: string; readonly intent: V3EnemyIntent }[] = [];
     let shieldAbsorbedTotal = 0;
     const gravityEnemyDmgBonus = isGravitySurgeRound ? 1 : 0;
 
     for (const enemy of startLivingSorted) {
-      const rawDamage = enemy.damagePerRound + gravityEnemyDmgBonus;
-      const pierceDamage =
-        enemy.pierceRatio > 0 ? Math.floor(rawDamage * enemy.pierceRatio) : 0;
-      const normalDamage = rawDamage - pierceDamage;
-      const shieldAbsorbed = Math.min(playerShield, normalDamage);
-      playerShield -= shieldAbsorbed;
-      shieldAbsorbedTotal += shieldAbsorbed;
-      const hullDamage = pierceDamage + (normalDamage - shieldAbsorbed);
-      playerHp = Math.max(0, playerHp - hullDamage);
-
-      enemyAttacks.push({
-        enemyId: enemy.enemyId,
-        rawDamage,
-        pierceDamage,
-        shieldAbsorbed,
-        hullDamage,
+      const intent = resolveUnitIntentForRound({
+        unit: enemy,
+        round,
+        bossDef,
+        currentPhase: enemy.currentPhase,
+        phaseStartedRound: enemy.phaseStartedRound,
+        isTransitionRound: justTransitionedBossIds.has(enemy.enemyId),
+        encounterKind: params.encounterKind,
+        bossId: resolvedBossId,
       });
+      enemyIntentsThisRound.push({ enemyId: enemy.enemyId, intent });
+
+      let rawDamage = 0;
+      let pierceDamage = 0;
+      let shieldAbsorbed = 0;
+      let hullDamage = 0;
+      let empShieldDrained = 0;
+
+      // Gravity tide (+1) applies ONLY when the enemy actually fires an attack (intent.damage > 0)
+      if (intent.damage > 0) {
+        rawDamage = intent.damage + gravityEnemyDmgBonus;
+        const effectivePierceRatio =
+          Math.max(0, Math.min(1, intent.pierceRatio ?? enemy.pierceRatio)) * pierceMitigationFactor;
+        pierceDamage = effectivePierceRatio > 0 ? Math.floor(rawDamage * effectivePierceRatio) : 0;
+        const normalDamage = rawDamage - pierceDamage;
+        shieldAbsorbed = Math.min(playerShield, normalDamage);
+        playerShield -= shieldAbsorbed;
+        shieldAbsorbedTotal += shieldAbsorbed;
+        hullDamage = pierceDamage + (normalDamage - shieldAbsorbed);
+        playerHp = Math.max(0, playerHp - hullDamage);
+      }
+
+      // EMP Shield Disruptor effect (runs after damage or independently on EMP rounds)
+      if (intent.empShieldDrain && intent.empShieldDrain > 0) {
+        if (empImmuneThisRound) {
+          enemySpecialNotes.push('舱壁防护：已抵御 EMP 护盾干扰');
+        } else if (playerShield > 0) {
+          empShieldDrained = Math.min(playerShield, intent.empShieldDrain);
+          playerShield -= empShieldDrained;
+          enemySpecialNotes.push(`${enemy.name} EMP 脉冲：我方护盾 -${empShieldDrained}`);
+        }
+      }
+
+      if (rawDamage > 0 || empShieldDrained > 0) {
+        enemyAttacks.push({
+          enemyId: enemy.enemyId,
+          rawDamage,
+          pierceDamage,
+          shieldAbsorbed,
+          hullDamage,
+          intentKind: intent.kind,
+          ...(empShieldDrained > 0 ? { empShieldDrained } : {}),
+        });
+      }
+
+      // Self-buffs & summons only execute if the unit survived player fire
+      if (enemy.hp > 0 && intent.shieldGain && intent.shieldGain > 0) {
+        const cap = Math.max(enemy.maxShield, intent.shieldGain, 6);
+        enemy.maxShield = cap;
+        const before = enemy.shield;
+        enemy.shield = Math.min(cap, enemy.shield + intent.shieldGain);
+        const gained = enemy.shield - before;
+        if (gained > 0) {
+          enemySpecialNotes.push(`${enemy.name} 护盾充能 +${gained}`);
+        }
+      }
+
+      if (
+        enemy.hp > 0 &&
+        intent.summonCount &&
+        intent.summonCount > 0 &&
+        enemy.summonsDone < MAX_CARRIER_SUMMONS_PER_UNIT
+      ) {
+        let livingCount = enemies.filter((e) => e.hp > 0).length;
+        for (let k = 0; k < intent.summonCount; k++) {
+          if (
+            livingCount >= MAX_LIVING_ENEMIES_WITH_SUMMONS ||
+            enemy.summonsDone >= MAX_CARRIER_SUMMONS_PER_UNIT
+          ) {
+            break;
+          }
+          enemy.summonsDone += 1;
+          const summonId = `${enemy.enemyId}_sum_r${round}_${enemy.summonsDone}`;
+          const drone: MutableUnit = {
+            enemyId: summonId,
+            name: `母舰无人机 #${enemy.summonsDone}`,
+            spriteArchetype: 'scout',
+            hp: 5,
+            maxHp: 5,
+            damagePerRound: 1,
+            armor: 0,
+            pierceRatio: 0,
+            role: 'swarm_drone',
+            shield: 0,
+            maxShield: 0,
+            phaseStartedRound: round + 1,
+            summonsDone: 0,
+          };
+          enemies.push(drone);
+          livingCount += 1;
+          const snap = snapshotUnits([drone], round + 1, bossDef, params.encounterKind, resolvedBossId)[0];
+          if (snap) summonedEnemies.push(snap);
+          enemySpecialNotes.push(`${enemy.name} 放出护航无人机`);
+        }
+      }
     }
 
-    // Step 5: Counter phase (ship-wide ONCE per round, based ONLY on actual shield absorbed; supercharged +2 during emergency_defense!)
+    // Step 5: Counter phase (ship-wide ONCE per round, based ONLY on actual shield absorbed)
     let counterAttack: V2PlayerAttackEvent | null = null;
     if (stats.bestActiveCounter && shieldAbsorbedTotal > 0) {
-      const defenseCounterBonus =
-        round === 2 && params.round2Tactic === 'emergency_defense' ? 2 : 0;
       const rawCounter = Math.min(
-        stats.bestActiveCounter.maxDamage + defenseCounterBonus,
-        Math.floor(shieldAbsorbedTotal * stats.bestActiveCounter.ratio) + defenseCounterBonus
+        stats.bestActiveCounter.maxDamage + counterBonusThisRound,
+        Math.floor(shieldAbsorbedTotal * stats.bestActiveCounter.ratio) + counterBonusThisRound
       );
       if (rawCounter > 0) {
         const postMainLiving = enemies.filter((u) => u.hp > 0);
@@ -349,6 +816,18 @@ export function simulateV2Combat(params: {
             stats.bestActiveCounter.instanceId,
             rawCounter
           );
+          // Counter damage can also push a living Boss across a phase threshold cleanly
+          processBossPhaseTransitions({
+            enemies,
+            bossDef,
+            round,
+            bossPhaseTransitions,
+            summonedEnemies,
+            enemySpecialNotes,
+            justTransitionedBossIds,
+            encounterKind: params.encounterKind,
+            bossId: resolvedBossId,
+          });
         }
       }
     }
@@ -381,8 +860,13 @@ export function simulateV2Combat(params: {
       shieldAbsorbedTotal,
       playerHpAfter: playerHp,
       playerShieldAfter: playerShield,
-      enemiesAfter: snapshotUnits(enemies),
+      enemiesAfter: snapshotUnits(enemies, round + 1, bossDef, params.encounterKind, resolvedBossId),
       ...(envModifierEvent ? { envModifierEvent } : {}),
+      ...(roundCmd ? { appliedTacticThisRound: roundCmd } : {}),
+      ...(enemyIntentsThisRound.length > 0 ? { enemyIntentsThisRound } : {}),
+      ...(bossPhaseTransitions.length > 0 ? { bossPhaseTransitions } : {}),
+      ...(summonedEnemies.length > 0 ? { summonedEnemies } : {}),
+      ...(enemySpecialNotes.length > 0 ? { enemySpecialNotes } : {}),
     });
 
     // Step 6: Win/loss check — player HP <= 0 ALWAYS loses first (including mutual destruction via counter! AC09)
@@ -412,7 +896,7 @@ export function simulateV2Combat(params: {
     outcome === 'victory'
       ? Math.min(totalEffectiveRepair, Math.max(0, params.maxHp - playerHp))
       : 0;
-  const finalPlayerHpAfterRepair = Math.min(params.maxHp, playerHp + repairApplied);
+  const finalPlayerHpAfterRepair = outcome === 'victory' ? Math.min(params.maxHp, playerHp + repairApplied) : 0;
 
   return {
     resultId: params.resultId,
@@ -428,8 +912,10 @@ export function simulateV2Combat(params: {
     initialEnemies,
     rounds,
     appliedTactic,
+    ...(appliedCommandsList.length > 0 ? { appliedCommands: appliedCommandsList } : {}),
     sectorId,
     envModifierId,
+    ...(resolvedBossId ? { bossId: resolvedBossId } : {}),
   };
 }
 
@@ -453,24 +939,57 @@ export function previewV2CombatNode(
     sectorId: run.sectorId,
     crewId: run.crewId,
     crewMasteryTier: run.crewMasteryTier ?? 0,
+    encounterKind: node.combat.encounterKind,
+    bossId: resolveNodeBossId(node, run),
   });
 }
 
-function buildEliteRound2Decision(params: {
+function buildTacticalDecisionAtRound(params: {
   readonly run: V2RunState;
-  readonly nodeId: string;
+  readonly node: V2MapNode;
   readonly targetPolicy: V2TargetPolicy;
-  readonly units: readonly V2EnemyUnitSpec[];
+  readonly startingHp: number;
   readonly baselineSim: V2CombatSimulation;
+  readonly pauseRound: number;
+  readonly priorCommands: readonly V2AppliedTacticalCommand[];
+  readonly chargeIndex: number;
+  readonly chargesMax: number;
 }): V2EliteTacticDecision | null {
-  if (params.baselineSim.rounds.length < 2) return null;
-  const r1 = params.baselineSim.rounds[0];
-  if (!r1 || r1.playerHpAfter <= 0) return null;
-  const aliveEnemies = r1.enemiesAfter.filter((e) => e.hp > 0);
+  const { run, node, targetPolicy, startingHp, baselineSim, pauseRound, priorCommands, chargeIndex, chargesMax } =
+    params;
+  if (!node.combat || pauseRound < 2) return null;
+  if (baselineSim.rounds.length < pauseRound) return null;
+  const prevRoundLog = baselineSim.rounds[pauseRound - 2];
+  if (!prevRoundLog || prevRoundLog.playerHpAfter <= 0) return null;
+  const aliveEnemies = prevRoundLog.enemiesAfter.filter((e) => e.hp > 0);
   if (aliveEnemies.length === 0) return null;
 
-  const canOverload = r1.playerHpAfter + r1.playerShieldAfter > V2_ELITE_OVERLOAD_COST;
-  const overloadShieldCost = Math.min(r1.playerShieldAfter, V2_ELITE_OVERLOAD_COST);
+  const bossId = resolveNodeBossId(node, run);
+  const priorScheduled: readonly V2ScheduledTacticalCommand[] = priorCommands.map((c) => ({
+    roundNumber: c.roundNumber,
+    choice: c.choice,
+  }));
+
+  const runPreviewWithChoice = (choice: V2TacticalCommandId): V2CombatSimulation =>
+    simulateV2Combat({
+      resultId: `prev_${choice}_${run.runId}_${node.nodeId}_r${pauseRound}`,
+      bay: run.bay,
+      startingHp,
+      maxHp: run.maxHp,
+      units: node.combat!.units,
+      targetPolicy,
+      tacticalCommands: [...priorScheduled, { roundNumber: pauseRound, choice }],
+      sectorId: run.sectorId,
+      crewId: run.crewId,
+      crewMasteryTier: run.crewMasteryTier ?? 0,
+      encounterKind: node.combat!.encounterKind,
+      bossId,
+    });
+
+  const hpAtPause = prevRoundLog.playerHpAfter;
+  const shieldAtPause = prevRoundLog.playerShieldAfter;
+  const canOverload = hpAtPause + shieldAtPause > V2_ELITE_OVERLOAD_COST;
+  const overloadShieldCost = Math.min(shieldAtPause, V2_ELITE_OVERLOAD_COST);
   const overloadHpCost = V2_ELITE_OVERLOAD_COST - overloadShieldCost;
   const overloadCostLabel =
     overloadHpCost === 0
@@ -479,88 +998,123 @@ function buildEliteRound2Decision(params: {
       ? `消耗 ${overloadHpCost} 耐久`
       : `消耗 ${overloadShieldCost} 盾 + ${overloadHpCost} 耐久`;
 
-  const simOverload = canOverload
-    ? simulateV2Combat({
-        resultId: `prev_ov_${params.run.runId}_${params.nodeId}`,
-        bay: params.run.bay,
-        startingHp: params.run.hp,
-        maxHp: params.run.maxHp,
-        units: params.units,
-        targetPolicy: params.targetPolicy,
-        round2Tactic: 'overload',
-        sectorId: params.run.sectorId,
-        crewId: params.run.crewId,
-        crewMasteryTier: params.run.crewMasteryTier ?? 0,
-      })
-    : params.baselineSim;
+  const simOverload = canOverload ? runPreviewWithChoice('overload') : baselineSim;
+  const simShield = runPreviewWithChoice('emergency_shield');
+  const simFocus = runPreviewWithChoice('focus_calibrate');
 
-  const simDefense = simulateV2Combat({
-    resultId: `prev_def_${params.run.runId}_${params.nodeId}`,
-    bay: params.run.bay,
-    startingHp: params.run.hp,
-    maxHp: params.run.maxHp,
-    units: params.units,
-    targetPolicy: params.targetPolicy,
-    round2Tactic: 'emergency_defense',
-    sectorId: params.run.sectorId,
-    crewId: params.run.crewId,
-    crewMasteryTier: params.run.crewMasteryTier ?? 0,
-  });
+  const sigDef = getShipSignatureCommand(run.shipId);
+  const simSignature = runPreviewWithChoice(sigDef.choice);
 
-  const hasCounter = calculateV2BuildStats(params.run.bay).bestActiveCounter !== null;
-  const defenseShieldGain = V2_ELITE_DEFENSE_SHIELD_GAIN + (hasCounter ? 2 : 0);
+  const hasCounter = calculateV2BuildStats(run.bay).bestActiveCounter !== null;
+  const shieldGain = V2_TACTIC_EMERGENCY_SHIELD_GAIN + (hasCounter ? 2 : 0);
 
+  // Ordered strictly: 1. overload, 2. emergency_shield, 3. focus_calibrate, 4. Hull Signature (LAST!)
   const options: V2EliteTacticOptionPreview[] = [
-    {
-      choice: 'normal',
-      label: '正常执行',
-      summary: '按原配装节拍自动交火，无额外损耗且保持重炮蓄能/机库扩编进度',
-      enabled: true,
-      predictedOutcome: params.baselineSim.outcome,
-      predictedFinalHp: params.baselineSim.finalPlayerHpAfterRepair,
-      predictedRounds: params.baselineSim.roundsCount,
-    },
     {
       choice: 'overload',
       label: '火力过载',
-      summary: `${overloadCostLabel}，本轮追加 1 次 ${V2_ELITE_OVERLOAD_RAW_DMG} 点无视护甲破甲直击`,
+      summary: `${overloadCostLabel}，追加 1 次 ${V2_ELITE_OVERLOAD_RAW_DMG} 点无视护甲破甲直击`,
       enabled: canOverload,
       disabledReason: canOverload
         ? undefined
-        : `剩余护盾与耐久总和 ${r1.playerHpAfter + r1.playerShieldAfter} ≤ ${V2_ELITE_OVERLOAD_COST}，无法承受过载反冲`,
+        : `剩余护盾与耐久总和 ${hpAtPause + shieldAtPause} ≤ ${V2_ELITE_OVERLOAD_COST}，无法承受过载反冲`,
       predictedOutcome: simOverload.outcome,
-      predictedFinalHp: simOverload.finalPlayerHpAfterRepair,
+      predictedFinalHp: simOverload.outcome === 'victory' ? simOverload.finalPlayerHpAfterRepair : 0,
       predictedRounds: simOverload.roundsCount,
     },
     {
-      choice: 'emergency_defense',
-      label: '紧急防御',
-      summary: `立刻 +${defenseShieldGain} 护盾（上限 ${V2_MAX_BATTLE_SHIELD}${
-        hasCounter ? '，含反击器协同 +2' : ''
-      }），全炮停火且重炮蓄能延后 1 轮（机库照常扩编${hasCounter ? '，反击当轮 +2 伤' : ''}）`,
+      choice: 'emergency_shield',
+      label: '紧急护盾',
+      summary: `立刻 +${shieldGain} 护盾（上限 ${V2_MAX_BATTLE_SHIELD}${
+        hasCounter ? '，反击协同 +2 盾/+2 伤' : ''
+      }），且本轮敌方穿盾比例减半`,
       enabled: true,
-      predictedOutcome: simDefense.outcome,
-      predictedFinalHp: simDefense.finalPlayerHpAfterRepair,
-      predictedRounds: simDefense.roundsCount,
+      predictedOutcome: simShield.outcome,
+      predictedFinalHp: simShield.outcome === 'victory' ? simShield.finalPlayerHpAfterRepair : 0,
+      predictedRounds: simShield.roundsCount,
+    },
+    {
+      choice: 'focus_calibrate',
+      label: '聚焦校准',
+      summary: `本轮我方直击武器全部无视敌方护甲且伤害 +1，并追加 ${V2_TACTIC_FOCUS_PRECISION_DMG} 点破甲精准齐射`,
+      enabled: true,
+      predictedOutcome: simFocus.outcome,
+      predictedFinalHp: simFocus.outcome === 'victory' ? simFocus.finalPlayerHpAfterRepair : 0,
+      predictedRounds: simFocus.roundsCount,
+    },
+    {
+      choice: sigDef.choice,
+      label: sigDef.label,
+      summary: sigDef.summary,
+      enabled: true,
+      isSignature: true,
+      predictedOutcome: simSignature.outcome,
+      predictedFinalHp: simSignature.outcome === 'victory' ? simSignature.finalPlayerHpAfterRepair : 0,
+      predictedRounds: simSignature.roundsCount,
     },
   ];
 
-  const isGravitySurgeR2 = getV3SectorDef(params.run.sectorId).envModifier.id === 'gravity_tide';
-  const enemyThreatDamage = aliveEnemies.reduce(
-    (sum, e) => sum + e.damagePerRound + (isGravitySurgeR2 ? 1 : 0),
-    0
-  );
+  // Authoritative incoming threat damage at pauseRound (matches actual simulated round salvo!)
+  const pauseRoundLog = baselineSim.rounds[pauseRound - 1];
+  const isGravitySurge =
+    getV3SectorDef(run.sectorId).envModifier.id === 'gravity_tide' && pauseRound % 2 === 0;
+  const enemyThreatDamage = pauseRoundLog
+    ? pauseRoundLog.enemyAttacks.reduce((sum, a) => sum + a.rawDamage, 0)
+    : aliveEnemies.reduce((sum, e) => {
+        const dmg = e.nextIntent ? e.nextIntent.damage : e.damagePerRound;
+        return sum + (dmg > 0 ? dmg + (isGravitySurge ? 1 : 0) : 0);
+      }, 0);
+
+  const bossSnap = aliveEnemies.find((e) => e.isBoss);
+  const chargesRemaining = Math.max(1, chargesMax - (chargeIndex - 1));
 
   return {
-    decisionId: `tactic_${params.run.runId}_${params.nodeId}_r2`,
-    roundNumber: 2,
-    playerHpAtPause: r1.playerHpAfter,
-    playerShieldAtPause: r1.playerShieldAfter,
+    decisionId: `tactic_${run.runId}_${node.nodeId}_r${pauseRound}_c${chargeIndex}`,
+    roundNumber: pauseRound,
+    playerHpAtPause: hpAtPause,
+    playerShieldAtPause: shieldAtPause,
     enemyThreatDamage,
     enemiesAlive: aliveEnemies.length,
     options,
     chosen: null,
+    chargeIndex,
+    chargesRemaining,
+    chargesMax,
+    ...(bossSnap?.currentPhase !== undefined ? { bossPhaseAtPause: bossSnap.currentPhase } : {}),
   };
+}
+
+function findNextPauseRoundAfterCommit(
+  sim: V2CombatSimulation,
+  committedRound: number
+): number | null {
+  const isRoundPausable = (r: number): boolean => {
+    if (r <= committedRound || sim.rounds.length < r) return false;
+    const prev = sim.rounds[r - 2];
+    if (!prev || prev.playerHpAfter <= 0) return false;
+    return prev.enemiesAfter.some((e) => e.hp > 0);
+  };
+
+  // 1. Prefer the first round immediately following a Boss phase transition at >= committedRound
+  for (let idx = Math.max(0, committedRound - 1); idx < sim.rounds.length; idx++) {
+    const rLog = sim.rounds[idx];
+    if (rLog.bossPhaseTransitions && rLog.bossPhaseTransitions.length > 0) {
+      const candidate = rLog.round + 1;
+      if (isRoundPausable(candidate)) return candidate;
+    }
+  }
+
+  // 2. Fallback to committedRound + 2 (pacing rhythm)
+  if (isRoundPausable(committedRound + 2)) {
+    return committedRound + 2;
+  }
+
+  // 3. Fallback to committedRound + 1 if battle would otherwise finish before R+2 (guarantees 2nd charge window)
+  if (isRoundPausable(committedRound + 1)) {
+    return committedRound + 1;
+  }
+
+  return null;
 }
 
 /**
@@ -577,13 +1131,15 @@ export function getEffectiveV2CombatBounty(
 }
 
 /**
- * Starts combat at the current combat/elite node, locking the exact simulation snapshot into activeCombat.
- * When `enableEliteTactic` is enabled on an Elite node reaching Round 2, attaches an atomic Round-2 decision snapshot.
+ * Starts combat at the current combat/elite/boss node, locking the exact simulation snapshot into activeCombat.
+ * - Computes dynamic `tacticalChargesMax` (1 regular/non-boss elite; 2 + bonusBossCharges for Act Bosses) and resets `tacticalChargesUsed = 0`.
+ * - Enables mid-combat active tactical pause when requested (always ON in V2AppController unless `pureAutoCombat === true`).
+ * - Idempotent on refresh when `run.activeCombat.nodeId === node.nodeId`.
  */
 export function startV2CombatAtCurrentNode(
   run: V2RunState,
   policyOverride?: V2TargetPolicy,
-  options?: { readonly enableEliteTactic?: boolean }
+  options?: V2StartCombatOptions
 ): { readonly ok: boolean; readonly run: V2RunState; readonly error?: string } {
   if (run.phase !== 'ENCOUNTER' || !run.currentNodeId) {
     return { ok: false, run, error: '当前不在战斗节点内' };
@@ -600,6 +1156,10 @@ export function startV2CombatAtCurrentNode(
   }
 
   const targetPolicy = policyOverride ?? run.targetPolicy;
+  const bossId = resolveNodeBossId(node, run);
+  const tacticalChargesMax = computeCombatTacticalChargesMax(node, run, options?.bonusBossCharges ?? 0);
+  const tacticalChargesUsed = 0;
+
   const simulation = simulateV2Combat({
     resultId: `cmb_${run.runId}_${node.nodeId}`,
     bay: run.bay,
@@ -610,16 +1170,28 @@ export function startV2CombatAtCurrentNode(
     sectorId: run.sectorId,
     crewId: run.crewId,
     crewMasteryTier: run.crewMasteryTier ?? 0,
+    encounterKind: node.combat.encounterKind,
+    bossId,
   });
 
+  const tacticalEnabled =
+    options?.pureAutoCombat !== true &&
+    (options?.enableTacticalCommands === true ||
+      options?.enableEliteTactic === true ||
+      options?.pureAutoCombat === false);
+
   const pendingDecision =
-    options?.enableEliteTactic && (node.type === 'elite' || node.type === 'boss')
-      ? buildEliteRound2Decision({
+    tacticalEnabled && tacticalChargesMax > 0
+      ? buildTacticalDecisionAtRound({
           run,
-          nodeId: node.nodeId,
+          node,
           targetPolicy,
-          units: node.combat.units,
+          startingHp: run.hp,
           baselineSim: simulation,
+          pauseRound: 2,
+          priorCommands: [],
+          chargeIndex: 1,
+          chargesMax: tacticalChargesMax,
         })
       : null;
 
@@ -629,6 +1201,9 @@ export function startV2CombatAtCurrentNode(
     targetPolicy,
     simulation,
     pendingDecision,
+    committedCommands: [],
+    resumeFromRound: 0,
+    pausedAtDecisionId: null,
   };
 
   return {
@@ -636,14 +1211,46 @@ export function startV2CombatAtCurrentNode(
     run: {
       ...run,
       targetPolicy,
+      tacticalChargesMax,
+      tacticalChargesUsed,
       activeCombat,
     },
   };
 }
 
 /**
- * Commits the player's Round-2 Elite tactical decision atomically and idempotently.
- * Recomputes the authoritative battle outcome with the chosen Round-2 order; refresh can never duplicate or undo it.
+ * Pure helper marking that live playback has reached the active tactical pause boundary
+ * so browser reload restores the pause immediately without replaying earlier rounds.
+ */
+export function markV2CombatDecisionPaused(
+  run: V2RunState,
+  decisionId: string
+): V2RunState {
+  if (!run.activeCombat || !run.activeCombat.pendingDecision) return run;
+  const pending = run.activeCombat.pendingDecision;
+  if (pending.decisionId !== decisionId || pending.chosen !== null) return run;
+  const pauseResumeIdx = Math.max(0, pending.roundNumber - 1);
+  if (
+    run.activeCombat.pausedAtDecisionId === decisionId &&
+    run.activeCombat.resumeFromRound === pauseResumeIdx
+  ) {
+    return run;
+  }
+  return {
+    ...run,
+    activeCombat: {
+      ...run.activeCombat,
+      resumeFromRound: pauseResumeIdx,
+      pausedAtDecisionId: decisionId,
+    },
+  };
+}
+
+/**
+ * Commits the player's active tactical command atomically and idempotently.
+ * - Accumulates multi-charge commands across Boss phases while maintaining 100% deterministic preview parity.
+ * - Increments `tacticalChargesUsed` cleanly without ever exceeding `tacticalChargesMax`.
+ * - Chains Pause #2 / #3 automatically when charges remain and battle continues.
  */
 export function commitV2EliteTacticDecision(
   run: V2RunState,
@@ -668,33 +1275,86 @@ export function commitV2EliteTacticDecision(
 
   const node = run.graph.nodes[run.currentNodeId];
   if (!node || !node.combat) {
-    return { ok: false, run, error: '当前精英节点数据异常' };
+    return { ok: false, run, error: '当前战斗节点数据异常' };
   }
 
+  const consumesCharge = choice !== 'normal';
+  if (consumesCharge && run.tacticalChargesUsed >= run.tacticalChargesMax) {
+    return { ok: false, run, error: '本场战斗战术指令充能已耗尽' };
+  }
+
+  const prevCommitted = run.activeCombat.committedCommands ?? [];
+  const nextCommitted: readonly V2AppliedTacticalCommand[] = consumesCharge
+    ? [
+        ...prevCommitted,
+        { decisionId, roundNumber: pending.roundNumber, choice },
+      ]
+    : [...prevCommitted];
+  const nextChargesUsed = consumesCharge
+    ? Math.min(run.tacticalChargesMax, run.tacticalChargesUsed + 1)
+    : run.tacticalChargesUsed;
+
+  const bossId = resolveNodeBossId(node, run);
+  const scheduledCommands: readonly V2ScheduledTacticalCommand[] = nextCommitted.map((c) => ({
+    roundNumber: c.roundNumber,
+    choice: c.choice,
+  }));
+
   const nextSimulation = simulateV2Combat({
-    resultId: `cmb_${run.runId}_${node.nodeId}_${choice}`,
+    resultId: `cmb_${run.runId}_${node.nodeId}_r${pending.roundNumber}_${choice}_c${nextChargesUsed}`,
     bay: run.bay,
     startingHp: run.activeCombat.startingHp,
     maxHp: run.maxHp,
     units: node.combat.units,
     targetPolicy: run.activeCombat.targetPolicy,
-    round2Tactic: choice,
+    tacticalCommands:
+      scheduledCommands.length > 0
+        ? scheduledCommands
+        : [{ roundNumber: pending.roundNumber, choice }],
     sectorId: run.sectorId,
     crewId: run.crewId,
     crewMasteryTier: run.crewMasteryTier ?? 0,
+    encounterKind: node.combat.encounterKind,
+    bossId,
   });
+
+  // Check if another charge remains and combat continues to a later pause round (e.g. Boss Phase 2 / 3)
+  let nextPendingDecision: V2EliteTacticDecision = {
+    ...pending,
+    chosen: choice,
+  };
+  if (nextChargesUsed < run.tacticalChargesMax) {
+    const nextPauseRound = findNextPauseRoundAfterCommit(nextSimulation, pending.roundNumber);
+    if (nextPauseRound !== null) {
+      const chained = buildTacticalDecisionAtRound({
+        run,
+        node,
+        targetPolicy: run.activeCombat.targetPolicy,
+        startingHp: run.activeCombat.startingHp,
+        baselineSim: nextSimulation,
+        pauseRound: nextPauseRound,
+        priorCommands: nextCommitted,
+        chargeIndex: nextChargesUsed + 1,
+        chargesMax: run.tacticalChargesMax,
+      });
+      if (chained) {
+        nextPendingDecision = chained;
+      }
+    }
+  }
 
   return {
     ok: true,
     run: {
       ...run,
+      tacticalChargesUsed: nextChargesUsed,
       activeCombat: {
         ...run.activeCombat,
         simulation: nextSimulation,
-        pendingDecision: {
-          ...pending,
-          chosen: choice,
-        },
+        pendingDecision: nextPendingDecision,
+        committedCommands: nextCommitted,
+        resumeFromRound: Math.max(0, pending.roundNumber - 1),
+        pausedAtDecisionId: null,
       },
       claimedEventIds: [...run.claimedEventIds, claimKey],
     },
@@ -703,9 +1363,10 @@ export function commitV2EliteTacticDecision(
 
 /**
  * Commits the deterministic combat result once playback finishes or is skipped.
- * - Strictly refuses completion while an Elite Round-2 tactical decision remains unresolved!
- * - Victory: applies post-repair HP, pays fixed bounty into run.wallet, generates deterministic 3-choice reward bundle
- * - Defeat: sets HP = 0 and enters SETTLEMENT (defeat)
+ * - Strictly refuses completion while any tactical decision remains unresolved!
+ * - Preserves `tacticalChargesUsed` so post-combat telemetry/save records charges spent.
+ * - Victory: applies post-repair HP, pays fixed bounty into run.wallet, records defeated boss & enemy kinds, generates deterministic 3-choice reward bundle.
+ * - Defeat: sets HP = 0 and enters SETTLEMENT (defeat).
  */
 export function completeV2CombatAtCurrentNode(
   run: V2RunState,
@@ -716,7 +1377,7 @@ export function completeV2CombatAtCurrentNode(
     return { ok: false, run, error: '没有进行中的战斗可结算' };
   }
   if (run.activeCombat.pendingDecision && run.activeCombat.pendingDecision.chosen === null) {
-    return { ok: false, run, error: '请先完成第 2 回合精英战战术抉择' };
+    return { ok: false, run, error: '请先完成当前回合的战术指令抉择' };
   }
   const node = run.graph.nodes[run.currentNodeId];
   if (!node || !node.combat) {
@@ -761,16 +1422,7 @@ export function completeV2CombatAtCurrentNode(
       : [...effectiveRecent];
 
   const effectiveBounty = getEffectiveV2CombatBounty(run, node.combat.bounty);
-
-  const bossIdOnNode =
-    node.combat.bossId ??
-    node.bossId ??
-    ((node.type === 'elite' || node.type === 'boss') &&
-    node.layer >= 6 &&
-    !run.isTutorial &&
-    !run.isShowcase
-      ? getV3SectorDef(run.sectorId).bossId
-      : undefined);
+  const bossIdOnNode = resolveNodeBossId(node, run);
 
   const prevBosses = run.defeatedBossIdsThisRun ?? [];
   const nextBosses =

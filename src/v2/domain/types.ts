@@ -1,6 +1,7 @@
 import type { RngCursor } from '../../domain/rng';
 import type { GameSettings, RelicProgress } from '../../domain/progression';
 import type { SectorBgIndex } from '../../data/nodes';
+import type { V3EnemyIntent, V3EnemyIntentKind } from '../data/bosses';
 import type { V2ContractTier, V2ContractType } from '../data/contracts';
 import type { V2CrewId } from '../data/crew';
 import type { V2EncounterKind, V2EnemyUnitSpec } from '../data/enemies';
@@ -13,7 +14,19 @@ import type {
 import type { V2FacilityId } from '../data/facilities';
 import type { SectorEnvModifierId } from '../data/sectors';
 import type { V2Rotation } from '../data/shapes';
-import type { V2ShipId } from '../data/ships';
+import type { V2ShipId, V2ShipSignatureCommandId } from '../data/ships';
+
+/** V2/V3 settings extending shared GameSettings without touching legacy V1 progression.ts */
+export interface V2GameSettings extends GameSettings {
+  /** false / undefined => Default-ON Active Tactical Commands; true => Pure-Auto combat */
+  readonly pureAutoCombat?: boolean;
+}
+
+export function isPureAutoCombat(
+  settings?: { readonly pureAutoCombat?: boolean } | null
+): boolean {
+  return Boolean(settings?.pureAutoCombat);
+}
 
 export const V2_SCHEMA_VERSION = 3;
 export const V2_RULES_VERSION = '3.0.0';
@@ -200,6 +213,7 @@ export interface V2PlayerAttackEvent {
   readonly rawDamage: number;
   readonly appliedDamage: number;
   readonly armorBlocked: number;
+  readonly shieldDamaged?: number;
   readonly targetHpAfter: number;
   readonly targetKilled: boolean;
 }
@@ -210,6 +224,8 @@ export interface V2EnemyAttackEvent {
   readonly pierceDamage: number;
   readonly shieldAbsorbed: number;
   readonly hullDamage: number;
+  readonly intentKind?: V3EnemyIntentKind;
+  readonly empShieldDrained?: number;
 }
 
 export interface V2CombatUnitSnapshot {
@@ -222,6 +238,18 @@ export interface V2CombatUnitSnapshot {
   readonly armor: number;
   readonly pierceRatio: number;
   readonly isBoss?: boolean;
+  readonly shield?: number;
+  readonly maxShield?: number;
+  readonly currentPhase?: number;
+  readonly totalPhases?: number;
+  readonly nextIntent?: V3EnemyIntent;
+}
+
+export interface V2BossPhaseTransitionEvent {
+  readonly enemyId: string;
+  readonly fromPhase: number;
+  readonly toPhase: number;
+  readonly label: string;
 }
 
 export interface V2CombatRoundLog {
@@ -236,16 +264,39 @@ export interface V2CombatRoundLog {
   readonly playerShieldAfter: number;
   readonly enemiesAfter: readonly V2CombatUnitSnapshot[];
   readonly envModifierEvent?: string;
+  readonly appliedTacticThisRound?: V2TacticalCommandId;
+  readonly enemyIntentsThisRound?: readonly {
+    readonly enemyId: string;
+    readonly intent: V3EnemyIntent;
+  }[];
+  readonly bossPhaseTransitions?: readonly V2BossPhaseTransitionEvent[];
+  readonly summonedEnemies?: readonly V2CombatUnitSnapshot[];
+  readonly enemySpecialNotes?: readonly string[];
 }
 
-export type V2EliteTacticChoice = 'normal' | 'overload' | 'emergency_defense';
+export type V2TacticalCommandId =
+  | 'normal'
+  | 'overload'
+  | 'emergency_shield'
+  | 'emergency_defense'
+  | 'focus_calibrate'
+  | V2ShipSignatureCommandId;
+
+export type V2EliteTacticChoice = V2TacticalCommandId;
+
+export interface V2AppliedTacticalCommand {
+  readonly decisionId: string;
+  readonly roundNumber: number;
+  readonly choice: V2TacticalCommandId;
+}
 
 export interface V2EliteTacticOptionPreview {
-  readonly choice: V2EliteTacticChoice;
+  readonly choice: V2TacticalCommandId;
   readonly label: string;
   readonly summary: string;
   readonly enabled: boolean;
   readonly disabledReason?: string;
+  readonly isSignature?: boolean;
   readonly predictedOutcome: 'victory' | 'defeat';
   readonly predictedFinalHp: number;
   readonly predictedRounds: number;
@@ -259,7 +310,11 @@ export interface V2EliteTacticDecision {
   readonly enemyThreatDamage: number;
   readonly enemiesAlive: number;
   readonly options: readonly V2EliteTacticOptionPreview[];
-  readonly chosen: V2EliteTacticChoice | null;
+  readonly chosen: V2TacticalCommandId | null;
+  readonly chargeIndex?: number;
+  readonly chargesRemaining?: number;
+  readonly chargesMax?: number;
+  readonly bossPhaseAtPause?: number;
 }
 
 export interface V2CombatSimulation {
@@ -275,9 +330,14 @@ export interface V2CombatSimulation {
   readonly finalPlayerHpAfterRepair: number;
   readonly initialEnemies: readonly V2CombatUnitSnapshot[];
   readonly rounds: readonly V2CombatRoundLog[];
-  readonly appliedTactic?: V2EliteTacticChoice;
+  readonly appliedTactic?: V2TacticalCommandId;
+  readonly appliedCommands?: readonly {
+    readonly roundNumber: number;
+    readonly choice: V2TacticalCommandId;
+  }[];
   readonly sectorId?: SectorId;
   readonly envModifierId?: SectorEnvModifierId;
+  readonly bossId?: string;
 }
 
 export interface V2CombatRewardBundle {
@@ -301,8 +361,14 @@ export interface V2ActiveCombatState {
   readonly startingHp: number;
   readonly targetPolicy: V2TargetPolicy;
   readonly simulation: V2CombatSimulation;
-  /** Optional Phase-D Round-2 Elite tactical decision (paused before Round 2) */
+  /** Active tactical command decision (paused before pendingDecision.roundNumber) */
   readonly pendingDecision?: V2EliteTacticDecision | null;
+  /** Ordered list of tactical commands already committed during this battle */
+  readonly committedCommands?: readonly V2AppliedTacticalCommand[];
+  /** 0-indexed round index where live playback resumes cleanly without replaying earlier rounds */
+  readonly resumeFromRound?: number;
+  /** Persisted decisionId once live playback has reached the pause boundary (reload-safe instant restore) */
+  readonly pausedAtDecisionId?: string | null;
 }
 
 export interface V2EngineerSwapOffer {
@@ -489,7 +555,7 @@ export interface V2SaveData {
   readonly savedAt: string;
   readonly profile: V2ProfileState;
   readonly activeRun: V2RunState | null;
-  readonly settings: GameSettings;
+  readonly settings: V2GameSettings;
 }
 
 export type V2SettlementDisposition = 'sell' | 'store' | 'keep_relic' | 'deliver' | 'return_loan';
