@@ -1,13 +1,17 @@
 import type { RelicProgress } from '../../domain/progression';
+import { V2_CREW, type V2CrewId } from '../data/crew';
 import {
   V2_CONTRACT_FAMILY_UNLOCK_ORDER,
   V2_WAREHOUSE_CAPACITY,
   type V2EquipmentKind,
 } from '../data/equipment';
 import { V2_TUTORIAL_SUCCESS_BONUS } from '../data/facilities';
+import { advanceCampaignAfterRun } from './campaign';
 import { isContractReadyForDelivery } from './contracts';
 import { createV2EquipmentInstance, getAnyV2ItemDef } from './itemCatalog';
 import type {
+  CampaignActId,
+  SectorId,
   V2ItemInstance,
   V2ProfileState,
   V2RunState,
@@ -32,6 +36,8 @@ export interface V2SettlementSummary {
   readonly contractRewardCredits: number;
   readonly tutorialBonusCredits: number;
   readonly soldItemsCredits: number;
+  /** Optional Salvager Mastery T1+ cargo appraisal bonus credits (0 at Tier 0) */
+  readonly crewMasteryBonusCredits?: number;
   /** Defeat 40% recoverable total before 0.4 floor */
   readonly defeatRecoverableBase: number;
   /** Exact final delta added to profile.credits (single source of truth for HUD & receipt, AC13!) */
@@ -49,7 +55,8 @@ export interface V2SettlementSummary {
 export function getDefaultDispositionForItem(
   item: V2ItemInstance,
   reason: 'safe_return' | 'defeat',
-  contractCompleted: boolean
+  contractCompleted: boolean,
+  profile?: V2ProfileState
 ): V2SettlementDisposition {
   if (reason === 'defeat') {
     if (item.origin === 'loan') return 'return_loan';
@@ -59,6 +66,15 @@ export function getDefaultDispositionForItem(
   if (item.origin === 'loan') return 'return_loan';
   if (item.origin === 'mission') return contractCompleted ? 'deliver' : 'return_loan';
   if (item.origin === 'owned') return 'store'; // Owned equipment defaults back to warehouse (§10.3)
+  if (item.category === 'cargo' && profile?.buildings.display) {
+    const def = getAnyV2ItemDef(item.definitionId);
+    if (def?.isCollectible && def.relicId) {
+      const relicProgress = profile.relics[def.relicId];
+      if (!relicProgress?.restored && (relicProgress?.storedCount ?? 0) === 0) {
+        return 'keep_relic';
+      }
+    }
+  }
   return 'sell'; // Loot cargo & loot equipment default to sell
 }
 
@@ -161,6 +177,7 @@ export function calculateV2Settlement(
 
   // Safe Return (§10.3)
   let soldItemsCredits = 0;
+  let soldLootCargoCredits = 0;
   const storedToWarehouseItems: V2ItemInstance[] = [];
   const keptRelicsById: Record<string, number> = {};
 
@@ -171,12 +188,15 @@ export function calculateV2Settlement(
     const selected =
       requested && allowed.includes(requested)
         ? requested
-        : getDefaultDispositionForItem(item, 'safe_return', contractCompleted);
+        : getDefaultDispositionForItem(item, 'safe_return', contractCompleted, profile);
 
     let creditsPayout = 0;
     if (selected === 'sell') {
       creditsPayout = item.fixedValue;
       soldItemsCredits += creditsPayout;
+      if (item.category === 'cargo' && item.origin === 'loot') {
+        soldLootCargoCredits += creditsPayout;
+      }
     } else if (selected === 'store') {
       storedToWarehouseItems.push({ ...item, origin: 'owned', location: 'warehouse' });
     } else if (selected === 'keep_relic' && def?.relicId) {
@@ -193,6 +213,14 @@ export function calculateV2Settlement(
     };
   });
 
+  // Salvager Mastery Tier >= 1 grants +15% appraisal bonus on sold loot cargo (0 at Tier 0)
+  const effectiveMasteryTier =
+    run.crewMasteryTier ?? (run.crewId ? profile.crewMastery[run.crewId] ?? 0 : 0);
+  const crewMasteryBonusCredits =
+    run.crewId === 'salvager' && effectiveMasteryTier >= 1 && soldLootCargoCredits > 0
+      ? Math.round(soldLootCargoCredits * 0.15)
+      : 0;
+
   // Tutorial success grants fixed +40 once (§12); regular contracts grant template reward once (§4.1)
   const contractRewardCredits =
     contractCompleted && !run.isTutorial ? run.contract.rewardCredits : 0;
@@ -202,7 +230,11 @@ export function calculateV2Settlement(
       : 0;
 
   const finalCreditsEarned =
-    run.wallet + soldItemsCredits + contractRewardCredits + tutorialBonusCredits;
+    run.wallet +
+    soldItemsCredits +
+    crewMasteryBonusCredits +
+    contractRewardCredits +
+    tutorialBonusCredits;
 
   const warehouseProjectedCount =
     profile.equipmentWarehouse.length + storedToWarehouseItems.length;
@@ -215,6 +247,7 @@ export function calculateV2Settlement(
     contractRewardCredits,
     tutorialBonusCredits,
     soldItemsCredits,
+    crewMasteryBonusCredits,
     defeatRecoverableBase: 0,
     finalCreditsEarned,
     lines,
@@ -234,6 +267,15 @@ export interface V2ApplySettlementResult {
   readonly summary: V2SettlementSummary;
   readonly unlockedFamilyName?: string;
   readonly unlockedCrewName?: string;
+  readonly actTransition?: { readonly from: CampaignActId; readonly to: CampaignActId } | null;
+  readonly newlyUnlockedSectors?: readonly SectorId[];
+  readonly newlyCompletedMilestones?: readonly string[];
+  readonly crewMasteryUpgraded?: {
+    readonly crewId: V2CrewId;
+    readonly fromTier: number;
+    readonly toTier: number;
+  } | null;
+  readonly newlyDefeatedBossIds?: readonly string[];
   readonly error?: string;
 }
 
@@ -286,10 +328,12 @@ export function applyV2Settlement(
     if (layer > maxLayerThisRun) maxLayerThisRun = layer;
   }
 
-  // Buildings auto-unlocked on tutorial completion regardless of delivery success (§12)
+  // Buildings auto-unlocked on tutorial safe return regardless of delivery success (§12),
+  // but NOT on tutorial defeat (which keeps campaign in prologue).
+  const tutorialSucceeded = run.isTutorial && summary.reason === 'safe_return';
   const nextBuildings = { ...profile.buildings };
   const nextFacilityTiers: Record<string, number> = { ...profile.facilityTiers };
-  if (run.isTutorial) {
+  if (tutorialSucceeded) {
     nextBuildings.workbench = true;
     nextBuildings.contract_hub = true;
     nextFacilityTiers.workbench = Math.max(1, nextFacilityTiers.workbench ?? 0);
@@ -316,10 +360,10 @@ export function applyV2Settlement(
     // Crew unlocks on first transport / survey contract (§6.2)
     if (cType === 'transport' && !nextCrew.includes('salvager')) {
       nextCrew.push('salvager');
-      unlockedCrewName = '打捞师';
+      unlockedCrewName = `${V2_CREW.salvager.name}（打捞师）`;
     } else if (cType === 'survey' && !nextCrew.includes('navigator')) {
       nextCrew.push('navigator');
-      unlockedCrewName = '领航员';
+      unlockedCrewName = `${V2_CREW.navigator.name}（领航员）`;
     }
 
     // First-time completion of each distinct standard contract type unlocks next ordered family (§10.4)
@@ -374,7 +418,7 @@ export function applyV2Settlement(
     totalSalvagePartsEarned: profile.career.totalSalvagePartsEarned + salvageEarned,
   };
 
-  const nextProfile: V2ProfileState = {
+  const baseNextProfile: V2ProfileState = {
     ...profile,
     credits: profile.credits + summary.finalCreditsEarned,
     salvageParts: profile.salvageParts + salvageEarned,
@@ -395,7 +439,7 @@ export function applyV2Settlement(
     completedContractIds: nextCompletedIds,
     deepestLayerReached: Math.max(profile.deepestLayerReached, maxLayerThisRun),
     totalRuns: profile.totalRuns + 1,
-    tutorialCompleted: profile.tutorialCompleted || run.isTutorial,
+    tutorialCompleted: profile.tutorialCompleted || tutorialSucceeded,
     tutorialBonusClaimed:
       profile.tutorialBonusClaimed || summary.tutorialBonusCredits > 0,
     settledRunIds: [...profile.settledRunIds, run.runId],
@@ -403,11 +447,18 @@ export function applyV2Settlement(
     career: nextCareer,
   };
 
+  const campaignAdvance = advanceCampaignAfterRun(baseNextProfile, run, summary);
+
   return {
     ok: true,
-    profile: nextProfile,
+    profile: campaignAdvance.profile,
     summary,
     unlockedFamilyName,
     unlockedCrewName,
+    actTransition: campaignAdvance.actTransition,
+    newlyUnlockedSectors: campaignAdvance.newlyUnlockedSectors,
+    newlyCompletedMilestones: campaignAdvance.newlyCompletedMilestones,
+    crewMasteryUpgraded: campaignAdvance.crewMasteryUpgraded,
+    newlyDefeatedBossIds: campaignAdvance.newlyDefeatedBossIds,
   };
 }

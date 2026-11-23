@@ -1,5 +1,6 @@
 import { V2_CONTRACT_TEMPLATES } from '../../data/contracts';
 import { V2_WAREHOUSE_CAPACITY } from '../../data/equipment';
+import type { ActiveCampaignObjective } from '../../domain/campaign';
 import { getV2RelicSummary } from '../../domain/progressionV2';
 import type { V2ProfileState } from '../../domain/types';
 import { svgIcon } from '../icons';
@@ -11,6 +12,8 @@ export interface BaseViewProps {
   readonly nextGoal: NextBaseGoal;
   readonly recommendedContractId: string;
   readonly activeDockingNotice: V2ReturnDockingNotice | null;
+  readonly campaignBannerCollapsed: boolean;
+  readonly campaignObjective: ActiveCampaignObjective;
 }
 
 export interface BaseViewActions {
@@ -19,6 +22,8 @@ export interface BaseViewActions {
   readonly onStartTutorial: () => void;
   readonly onLaunchRecommended: (contractTemplateId: string) => void;
   readonly onOpenContracts: () => void;
+  readonly onToggleCampaignBanner: () => void;
+  readonly onOpenCampaign: () => void;
   readonly onOpenGoal: (kind: NextBaseGoal['actionKind']) => void;
   readonly onOpenWarehouse: () => void;
   readonly onOpenFacilities: () => void;
@@ -31,7 +36,15 @@ export function renderBaseHeroView(
   props: BaseViewProps,
   actions: BaseViewActions
 ): void {
-  const { profile: p, readOnly, nextGoal, recommendedContractId, activeDockingNotice } = props;
+  const {
+    profile: p,
+    readOnly,
+    nextGoal,
+    recommendedContractId,
+    activeDockingNotice,
+    campaignBannerCollapsed: collapsed,
+    campaignObjective: camp,
+  } = props;
   const relicSum = getV2RelicSummary(p);
   const recTpl = V2_CONTRACT_TEMPLATES[recommendedContractId] ?? V2_CONTRACT_TEMPLATES.transport_std;
 
@@ -97,9 +110,34 @@ export function renderBaseHeroView(
       </div>
     `;
 
+  const campaignBannerHtml = `
+    <div class="v3-campaign-banner ${collapsed ? 'is-collapsed' : ''}" data-testid="campaign-banner">
+      <div class="v3-cb-header">
+        <button type="button" class="v3-cb-toggle" id="v3-cb-toggle" data-testid="btn-toggle-campaign-banner" aria-expanded="${!collapsed}">
+          <span class="v3-cb-eyebrow">${svgIcon('campaign', 13)} 星门重启计划 · ${camp.actLabel}</span>
+          <span class="v3-cb-chevron">${svgIcon(collapsed ? 'chevronUp' : 'chevronDown', 13)}</span>
+        </button>
+        <button type="button" class="btn btn-sm btn-secondary v3-cb-open-btn" id="v3-btn-open-campaign" data-testid="btn-open-campaign">
+          主线档案${camp.unreadCommsCount > 0 ? `<span class="v3-unread-dot" aria-label="未读通讯">${camp.unreadCommsCount}</span>` : ''}
+        </button>
+      </div>
+      ${
+        !collapsed
+          ? `<div class="v3-cb-body">
+              <div class="v3-cb-obj">
+                <strong>${camp.headline}</strong>
+                <small>${camp.detail}</small>
+              </div>
+              <div class="v3-cb-progress-track" aria-label="主线推进进度"><span style="width:${camp.progressPct}%"></span></div>
+            </div>`
+          : ''
+      }
+    </div>
+  `;
+
   const utilityDockHtml = `
     <div class="v2-base-utility-col">
-      <!-- M2 (F05) slot: [data-testid="campaign-banner"] & [data-testid="btn-open-campaign"] -->
+      ${campaignBannerHtml}
       <button type="button" class="v2-next-goal-pill ${nextGoal.ready ? 'is-ready' : ''}" id="v2-base-next-goal">
         <span class="v2-goal-k">${nextGoal.ready ? '下一步就绪' : '下一个基地目标'}</span>
         <strong>${nextGoal.title}</strong>
@@ -153,6 +191,12 @@ export function renderBaseHeroView(
   overlayEl
     .querySelector('#v2-base-all-contracts')
     ?.addEventListener('click', actions.onOpenContracts);
+  overlayEl
+    .querySelector('#v3-cb-toggle')
+    ?.addEventListener('click', actions.onToggleCampaignBanner);
+  overlayEl
+    .querySelector('#v3-btn-open-campaign')
+    ?.addEventListener('click', actions.onOpenCampaign);
   overlayEl
     .querySelector('#v2-base-next-goal')
     ?.addEventListener('click', () => actions.onOpenGoal(nextGoal.actionKind));

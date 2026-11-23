@@ -13,11 +13,12 @@ import type { GameSettings } from '../../domain/progression';
 import type { V2EnemyUnitSpec } from '../data/enemies';
 import type { V2ShipId } from '../data/ships';
 import type { V2ShipVisualSpec } from '../domain/shipVisualSpec';
-import type { V2CombatRoundLog, V2CombatSimulation } from '../domain/types';
+import type { SectorId, V2CombatRoundLog, V2CombatSimulation } from '../domain/types';
 
 export interface V2StagePlayback {
   readonly shipId: V2ShipId;
   readonly shipVisualSpec?: V2ShipVisualSpec | null;
+  readonly sectorId?: SectorId;
   readonly sectorIndex: SectorBgIndex;
   readonly eventBackdrop: 'wreck' | 'merchant' | 'anomaly' | 'distress' | null;
   readonly units: readonly V2EnemyUnitSpec[];
@@ -591,6 +592,15 @@ export class V2CombatScene extends Phaser.Scene {
     } else if (this.textures.exists(bgKey)) {
       this.bgImage.setTexture(bgKey);
     }
+    if (pb.eventBackdrop) {
+      this.bgImage.clearTint();
+    } else if (pb.sectorId === 'frozen_graveyard') {
+      this.bgImage.setTint(0xd8f3ff);
+    } else if (pb.sectorId === 'stargate_abyss') {
+      this.bgImage.setTint(0xddd0ff);
+    } else {
+      this.bgImage.clearTint();
+    }
 
     // Player ship sprite (hide on wreck backdrop so the 3 interactive hull compartments stay unobstructed!)
     const showPlayerShip = pb.eventBackdrop !== 'wreck';
@@ -1144,9 +1154,18 @@ export class V2CombatScene extends Phaser.Scene {
     // Starfield
     this.bgGraphics.clear();
     if (!lowQuality && pb?.eventBackdrop !== 'wreck') {
-      for (const st of this.stars) {
+      for (let idx = 0; idx < this.stars.length; idx++) {
+        const st = this.stars[idx];
         const sx = (((st.nx - (reduced ? 0 : this.elapsed * st.speed)) % 1) + 1) % 1;
-        this.bgGraphics.fillStyle(0xe9edf2, st.a);
+        const starColor =
+          pb?.sectorId === 'frozen_graveyard'
+            ? 0x9be8ff
+            : pb?.sectorId === 'stargate_abyss'
+            ? idx % 3 === 0
+              ? 0xf6b852
+              : 0xc9b3ff
+            : 0xe9edf2;
+        this.bgGraphics.fillStyle(starColor, st.a);
         this.bgGraphics.fillCircle(sx * this.viewW, st.ny * this.viewH, st.r);
       }
     }

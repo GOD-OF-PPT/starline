@@ -1,8 +1,8 @@
 import { getTitleKeyArtUrl } from '../../../assets/itemArt';
+import { CAMPAIGN_CHAPTERS } from '../../data/campaign';
 import { getV2RelicSummary } from '../../domain/progressionV2';
 import type { V2ProfileState } from '../../domain/types';
 import { svgIcon } from '../icons';
-import { CAMPAIGN_ACT_LABELS } from './screenTypes';
 
 export interface TitleViewProps {
   readonly profile: V2ProfileState;
@@ -25,7 +25,9 @@ export function renderTitleView(
   const relicSum = getV2RelicSummary(p);
   const hasProgress =
     p.totalRuns > 0 || p.tutorialCompleted || p.credits > 0 || Boolean(p.migrationRecord);
-  const actLabel = CAMPAIGN_ACT_LABELS[p.campaign?.currentAct ?? 'prologue'];
+  const actLabel =
+    CAMPAIGN_CHAPTERS[p.campaign?.currentAct ?? 'prologue']?.title ??
+    CAMPAIGN_CHAPTERS.prologue.title;
   const ctaText = hasProgress ? '继续远航' : '开启新征程';
 
   hostEl.innerHTML = `

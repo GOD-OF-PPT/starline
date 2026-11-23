@@ -7,8 +7,10 @@ import {
   type V2ArchetypeId,
   type V2EquipmentKind,
 } from '../data/equipment';
+import { V3_SECTORS, getV3SectorDef } from '../data/sectors';
 import type { V2Rotation } from '../data/shapes';
 import { V2_SHIPS, type V2ShipId } from '../data/ships';
+import { shouldTriggerRelicPitySignal } from './campaign';
 import { createV2ContractInstance } from './contracts';
 import {
   createEmptyV2Bay,
@@ -112,9 +114,16 @@ export function validateV2PrepareLoadout(
   shipId: V2ShipId,
   crewId: V2CrewId | null,
   slots: readonly V2PrepareSlotEntry[],
-  trialBuildId: V2TrialBuildId | null = null
+  trialBuildId: V2TrialBuildId | null = null,
+  sectorId: SectorId = 'near_orbit'
 ): V2PrepareValidation {
   const errors: string[] = [];
+  if (!Object.prototype.hasOwnProperty.call(V3_SECTORS, sectorId)) {
+    errors.push(`未知目标星区「${String(sectorId)}」`);
+  } else if (!profile.campaign.unlockedSectors.includes(sectorId)) {
+    const sector = getV3SectorDef(sectorId);
+    errors.push(`目标星区「${sector.name}」尚未解锁（${sector.unlockRequirementText}）`);
+  }
   if (!profile.unlockedShips.includes(shipId)) {
     errors.push(`舰船 ${V2_SHIPS[shipId]?.name ?? shipId} 尚未解锁`);
   }
@@ -244,12 +253,14 @@ export function launchV2Expedition(params: {
   readonly errors: readonly string[];
 } {
   const trialBuildId = params.trialBuildId ?? null;
+  const sectorId: SectorId = params.sectorId ?? 'near_orbit';
   const check = validateV2PrepareLoadout(
     params.profile,
     params.shipId,
     params.crewId,
     params.slots,
-    trialBuildId
+    trialBuildId,
+    sectorId
   );
   if (!check.valid) {
     return { ok: false, profile: params.profile, run: null, errors: check.errors };
@@ -260,6 +271,7 @@ export function launchV2Expedition(params: {
   const seed = (params.seed ?? createRandomSeed()) >>> 0;
   const runId = `v2run_${seed.toString(36)}_${params.profile.totalRuns + 1}`;
   const streams = createV2RngStreams(seed);
+  const pity = shouldTriggerRelicPitySignal(params.profile, sectorId);
 
   const generated = generateV2StarGraph({
     runId,
@@ -269,6 +281,10 @@ export function launchV2Expedition(params: {
     streams,
     allowImproved: params.allowImproved ?? true,
     maxLayers: params.maxLayers ?? 6,
+    sectorId,
+    endlessThreat: params.endlessThreat ?? 0,
+    isFinalCampaignRun: Boolean(params.isFinalCampaignRun),
+    guaranteedRelicDefId: pity.triggered ? pity.relicDefId : null,
   });
 
   const contract = createV2ContractInstance(tpl.templateId, generated.markedNodeIds, runId);
@@ -312,6 +328,12 @@ export function launchV2Expedition(params: {
   }
 
   const ship = V2_SHIPS[params.shipId];
+  const crewMasteryTier = params.crewId
+    ? Math.max(0, Math.min(2, Math.floor(params.profile.crewMastery[params.crewId] ?? 0)))
+    : 0;
+  const navigatorFuelBonus = params.crewId === 'navigator' && crewMasteryTier >= 1 ? 1 : 0;
+  const startingFuel = Math.min(V2_MAX_FUEL, V2_STARTING_FUEL + navigatorFuelBonus);
+
   const run: V2RunState = {
     runId,
     schemaVersion: V2_SCHEMA_VERSION,
@@ -325,7 +347,7 @@ export function launchV2Expedition(params: {
     shipId: params.shipId,
     crewId: params.crewId,
     primaryArchetype: params.primaryArchetype,
-    fuel: V2_STARTING_FUEL,
+    fuel: startingFuel,
     maxFuel: V2_MAX_FUEL,
     hp: ship.maxHp,
     maxHp: ship.maxHp,
@@ -349,15 +371,18 @@ export function launchV2Expedition(params: {
     activeEngineerOffer: null,
     navigatorFreeJumpUsed: false,
     settlementReason: null,
-    sectorId: params.sectorId ?? 'near_orbit',
+    sectorId,
     endlessThreat: params.endlessThreat ?? 0,
     endlessMutatorIds: params.endlessMutatorIds ? [...params.endlessMutatorIds] : [],
     recentEquipmentKinds: [],
-    usedEventIds: [],
+    usedEventIds: [...generated.usedEventIds],
     tacticalChargesMax: 1,
     tacticalChargesUsed: 0,
     salvagePartsEarned: 0,
     isFinalCampaignRun: Boolean(params.isFinalCampaignRun),
+    crewMasteryTier,
+    defeatedBossIdsThisRun: [],
+    defeatedEnemyKindsThisRun: [],
   };
 
   const nextProfile: V2ProfileState = {

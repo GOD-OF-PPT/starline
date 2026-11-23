@@ -1,4 +1,9 @@
-import { buildEncounterUnits, V2_ENCOUNTER_TEMPLATES, type V2EnemyUnitSpec } from '../data/enemies';
+import type { V2CrewId } from '../data/crew';
+import {
+  buildEncounterUnits,
+  getV2EncounterTemplate,
+  type V2EnemyUnitSpec,
+} from '../data/enemies';
 import { V2_EQUIPMENT_DEFS, type V2EquipmentKind } from '../data/equipment';
 import { getV2OccupiedCells, V2_SHAPES, type V2Rotation } from '../data/shapes';
 import { V2_SHIPS } from '../data/ships';
@@ -12,6 +17,7 @@ import {
 } from './inventoryV2';
 import { getAnyV2ItemDef } from './itemCatalog';
 import type {
+  SectorId,
   V2CargoBayState,
   V2ItemInstance,
   V2PlacedItem,
@@ -56,7 +62,7 @@ function resolveReferenceEncounter(run: V2RunState | null): ReferenceEncounter {
     for (const nid of reachable) {
       const n = run.graph.nodes[nid];
       if (n?.combat) {
-        const tpl = V2_ENCOUNTER_TEMPLATES[n.combat.encounterKind];
+        const tpl = getV2EncounterTemplate(n.combat.encounterKind);
         return {
           label: `下站·${tpl.name}`,
           units: n.combat.units,
@@ -69,7 +75,7 @@ function resolveReferenceEncounter(run: V2RunState | null): ReferenceEncounter {
       for (const nextId of n?.nextNodeIds ?? []) {
         const deep = run.graph.nodes[nextId];
         if (deep?.combat) {
-          const tpl = V2_ENCOUNTER_TEMPLATES[deep.combat.encounterKind];
+          const tpl = getV2EncounterTemplate(deep.combat.encounterKind);
           return {
             label: `前路·${tpl.name}`,
             units: deep.combat.units,
@@ -124,13 +130,20 @@ function countFreeCells(bay: V2CargoBayState): { readonly free: number; readonly
   return { free: Math.max(0, ship.validCellCount - occupied), total: ship.validCellCount };
 }
 
+interface DeltaSimContext {
+  readonly sectorId?: SectorId;
+  readonly crewId?: V2CrewId | null;
+  readonly crewMasteryTier?: number;
+}
+
 function findBestPlacementForItem(
   bay: V2CargoBayState,
   item: V2ItemInstance,
   startingHp: number,
   maxHp: number,
   policy: V2TargetPolicy,
-  refUnits: readonly V2EnemyUnitSpec[]
+  refUnits: readonly V2EnemyUnitSpec[],
+  simCtx?: DeltaSimContext
 ): { readonly x: number; readonly y: number; readonly rotation: V2Rotation; readonly bayAfter: V2CargoBayState } | null {
   const ship = V2_SHIPS[bay.shipId];
   const def = getAnyV2ItemDef(item.definitionId);
@@ -169,6 +182,9 @@ function findBestPlacementForItem(
           units: refUnits,
           targetPolicy: policy,
           precomputedStats: st,
+          sectorId: simCtx?.sectorId,
+          crewId: simCtx?.crewId,
+          crewMasteryTier: simCtx?.crewMasteryTier,
         });
         const linkBonus = st.links.length * 100;
         const winBonus = sim.outcome === 'victory' ? 10_000 : 0;
@@ -235,6 +251,9 @@ export function computeV2PlacementTacticalDelta(params: {
   readonly item: V2ItemInstance;
   readonly zone: 'grid' | 'staging';
   readonly candidateSpot?: { readonly x: number; readonly y: number; readonly rotation: V2Rotation };
+  readonly sectorId?: SectorId;
+  readonly crewId?: V2CrewId | null;
+  readonly crewMasteryTier?: number;
 }): V2TacticalDelta {
   const def = getAnyV2ItemDef(params.item.definitionId);
   const cellCount = def ? V2_SHAPES[def.shapeId].cells.length : 1;
@@ -272,6 +291,11 @@ export function computeV2PlacementTacticalDelta(params: {
   const eqDef = V2_EQUIPMENT_DEFS[params.item.definitionId]!;
   const ref = resolveReferenceEncounter(params.run);
   const partnerKinds = getSynergyPartnerKinds(eqDef.kind);
+  const simCtx: DeltaSimContext = {
+    sectorId: params.sectorId ?? params.run?.sectorId ?? 'near_orbit',
+    crewId: params.crewId !== undefined ? params.crewId : params.run?.crewId ?? null,
+    crewMasteryTier: params.crewMasteryTier ?? params.run?.crewMasteryTier ?? 0,
+  };
 
   if (params.zone === 'staging') {
     const baselineSim = simulateV2Combat({
@@ -281,6 +305,9 @@ export function computeV2PlacementTacticalDelta(params: {
       maxHp: params.maxHp,
       units: ref.units,
       targetPolicy: params.targetPolicy,
+      sectorId: simCtx.sectorId,
+      crewId: simCtx.crewId,
+      crewMasteryTier: simCtx.crewMasteryTier,
     });
 
     let chosenSpot: { x: number; y: number; rotation: V2Rotation; bayAfter: V2CargoBayState } | null = null;
@@ -312,7 +339,8 @@ export function computeV2PlacementTacticalDelta(params: {
         params.startingHp,
         params.maxHp,
         params.targetPolicy,
-        ref.units
+        ref.units,
+        simCtx
       );
     }
 
@@ -347,6 +375,9 @@ export function computeV2PlacementTacticalDelta(params: {
       units: ref.units,
       targetPolicy: params.targetPolicy,
       precomputedStats: afterStats,
+      sectorId: simCtx.sectorId,
+      crewId: simCtx.crewId,
+      crewMasteryTier: simCtx.crewMasteryTier,
     });
     const cmp = formatSimComparison(ref.label, baselineSim, afterSim, 'install');
 
@@ -373,6 +404,9 @@ export function computeV2PlacementTacticalDelta(params: {
     maxHp: params.maxHp,
     units: ref.units,
     targetPolicy: params.targetPolicy,
+    sectorId: simCtx.sectorId,
+    crewId: simCtx.crewId,
+    crewMasteryTier: simCtx.crewMasteryTier,
   });
   const simCurrent = simulateV2Combat({
     resultId: 'delta_cur',
@@ -382,6 +416,9 @@ export function computeV2PlacementTacticalDelta(params: {
     units: ref.units,
     targetPolicy: params.targetPolicy,
     precomputedStats: currentStats,
+    sectorId: simCtx.sectorId,
+    crewId: simCtx.crewId,
+    crewMasteryTier: simCtx.crewMasteryTier,
   });
 
   let synergyLine: string;
@@ -412,7 +449,8 @@ export function computeV2PlacementTacticalDelta(params: {
         params.startingHp,
         params.maxHp,
         params.targetPolicy,
-        ref.units
+        ref.units,
+        simCtx
       );
       const movedPlaced: V2PlacedItem | null = bestMove
         ? { item: params.item, x: bestMove.x, y: bestMove.y, rotation: bestMove.rotation }

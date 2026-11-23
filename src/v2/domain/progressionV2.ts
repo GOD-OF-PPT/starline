@@ -11,6 +11,7 @@ import {
   V2_RELIC_ORDER,
   type V2FacilityId,
 } from '../data/facilities';
+import { syncCampaignProgress } from './campaign';
 import { createV2EquipmentInstance } from './itemCatalog';
 import type { V2ProfileState } from './types';
 
@@ -79,18 +80,20 @@ export function purchaseV2Facility(
     nextFacilityTiers.drydock = Math.max(2, nextFacilityTiers.drydock ?? 0);
   }
 
+  const updated: V2ProfileState = {
+    ...profile,
+    credits: profile.credits - def.cost,
+    buildings: {
+      ...profile.buildings,
+      [facilityId]: true,
+    },
+    facilityTiers: nextFacilityTiers,
+    unlockedShips: nextShips,
+  };
+
   return {
     ok: true,
-    profile: {
-      ...profile,
-      credits: profile.credits - def.cost,
-      buildings: {
-        ...profile.buildings,
-        [facilityId]: true,
-      },
-      facilityTiers: nextFacilityTiers,
-      unlockedShips: nextShips,
-    },
+    profile: syncCampaignProgress(updated).profile,
   };
 }
 
@@ -295,19 +298,20 @@ export function restoreV2Relic(
   if (!check.canRestore) return { ok: false, profile, error: check.reason };
   const def = V2_RELICS[relicId];
   const st = profile.relics[relicId];
-  return {
-    ok: true,
-    profile: {
-      ...profile,
-      credits: profile.credits - def.restoreCost,
-      relics: {
-        ...profile.relics,
-        [relicId]: {
-          storedCount: Math.max(0, st.storedCount - 1),
-          restored: true,
-        },
+  const updated: V2ProfileState = {
+    ...profile,
+    credits: profile.credits - def.restoreCost,
+    relics: {
+      ...profile.relics,
+      [relicId]: {
+        storedCount: Math.max(0, st.storedCount - 1),
+        restored: true,
       },
     },
+  };
+  return {
+    ok: true,
+    profile: syncCampaignProgress(updated).profile,
   };
 }
 

@@ -1,7 +1,9 @@
 import { V2_ARCHETYPE_LABELS } from '../../data/equipment';
-import { previewV2CombatNode } from '../../domain/combatV2';
+import { getV3SectorDef } from '../../data/sectors';
+import { getEffectiveV2CombatBounty, previewV2CombatNode } from '../../domain/combatV2';
 import { computeV2JumpFuelCost, isContractReadyForDelivery } from '../../domain/contracts';
 import { getReachableNextNodeIds } from '../../domain/encounter';
+import { getAnyV2ItemDef } from '../../domain/itemCatalog';
 import type { V2MapNode, V2RunState } from '../../domain/types';
 import { svgIcon } from '../icons';
 import { NODE_TYPE_META } from './screenTypes';
@@ -112,11 +114,14 @@ export function renderMapView(
       isCur ? 'current' : ''
     } ${isNext ? 'reachable' : ''} ${isSelected ? 'selected' : ''}" data-select-node="${
       n.nodeId
-    }" data-testid="map-node-${n.nodeId}" ${!isNext ? 'disabled' : ''} title="第${n.layer}层 ${meta.label}">
+    }" data-reachable="${isNext ? 'true' : 'false'}" data-testid="map-node-${n.nodeId}" ${
+      !isNext ? 'disabled' : ''
+    } title="第${n.layer}层 ${meta.label}">
       <span class="v2-dag-icon">${svgIcon(meta.icon, compact ? 15 : 16)}</span>
       <span class="v2-dag-name">${meta.label}</span>
       ${n.contractMarker ? `<span class="v2-dag-star" aria-label="委托目标">${svgIcon('star', 11)}</span>` : ''}
       ${n.hasSupportGuarantee ? `<span class="v2-dag-sup">配</span>` : ''}
+      ${n.hasRelicSignal ? `<span class="v3-dag-relic" title="保底遗物信号">遗</span>` : ''}
     </button>`;
   };
 
@@ -185,10 +190,11 @@ export function renderMapView(
             })`
         )
         .join(' + ');
+      const effectiveBounty = getEffectiveV2CombatBounty(run, n.combat.bounty);
       const brief =
         pv?.outcome === 'victory'
-          ? `${elitePrefix}预计胜 · 余 ${pv.finalPlayerHpAfterRepair}HP (${pv.roundsCount}轮) · +${n.combat.bounty}¤`
-          : `${elitePrefix}高危战败风险 (${pv?.roundsCount ?? '?'}轮) · +${n.combat.bounty}¤`;
+          ? `${elitePrefix}预计胜 · 余 ${pv.finalPlayerHpAfterRepair}HP (${pv.roundsCount}轮) · +${effectiveBounty}¤`
+          : `${elitePrefix}高危战败风险 (${pv?.roundsCount ?? '?'}轮) · +${effectiveBounty}¤`;
       return {
         brief,
         cls: pv?.outcome === 'victory' ? 'ok' : 'risk',
@@ -199,7 +205,7 @@ export function renderMapView(
       return {
         brief: '三热点打捞：设备 / 补油修船 / 货物',
         cls: '',
-        detail: run.crewId === 'salvager' ? '拆解专家已透视全明细' : '切开任意 1 处舱室',
+        detail: run.crewId === 'salvager' ? '苏岚已透视全明细' : '切开任意 1 处舱室',
       };
     }
     if (n.type === 'merchant') {
@@ -245,6 +251,7 @@ export function renderMapView(
                   </div>
                   <div class="v2-mc-tags">
                     ${rn.contractMarker ? `<span class="v2-badge-contract">${svgIcon('star', 10)} 委托目标</span>` : ''}
+                    ${rn.hasRelicSignal ? `<span class="v3-badge-relic">${svgIcon('museum', 10)} 保底遗物信号</span>` : ''}
                     ${
                       rn.hasSupportGuarantee
                         ? `<span class="v2-badge-support">${V2_ARCHETYPE_LABELS[run.primaryArchetype].supportName}保底</span>`
@@ -279,12 +286,41 @@ export function renderMapView(
     !run.isTutorial &&
     !isContractReadyForDelivery(run, 'safe_return');
 
+  const sector = getV3SectorDef(run.sectorId);
+  const envIcon =
+    sector.envModifier.id === 'cryo_ion'
+      ? 'cryo'
+      : sector.envModifier.id === 'gravity_tide'
+      ? 'gravity'
+      : 'radar';
+  const relicSignalNodes = Object.values(run.graph.nodes).filter((n) => Boolean(n.hasRelicSignal));
+  const relicSignalBannerHtml =
+    relicSignalNodes.length > 0
+      ? (() => {
+          const target = relicSignalNodes[0];
+          const relicName = target.relicSignalDefId
+            ? getAnyV2ItemDef(target.relicSignalDefId)?.name ?? '古代遗物'
+            : '古代遗物';
+          return `<div class="v3-relic-pity-banner" data-testid="relic-pity-banner">
+            ${svgIcon('museum', 14)}
+            <span>保底遗物信号已锁定：第 ${target.layer} 层 ${target.lane === 0 ? 'A线' : 'B线'} 探测到「${relicName}」高能信号</span>
+          </div>`;
+        })()
+      : '';
+
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root" data-testid="map-screen">
       <div class="panel-header">
         <h2>${svgIcon('radar', 16)} 星际航路 · ${run.contract.name}</h2>
         <span class="panel-sub">航行钱包 <strong class="num">${run.wallet}¤</strong></span>
       </div>
+
+      <div class="v3-run-sector-strip env-${sector.envModifier.id}" data-testid="sector-modifier-badge">
+        <span class="v3-sector-mod-badge">${svgIcon(envIcon, 13)} ${sector.name} · ${sector.envModifier.name}</span>
+        <span class="v3-sector-mod-desc">${sector.envModifier.combatRuleSummary}</span>
+      </div>
+
+      ${relicSignalBannerHtml}
 
       ${
         isCompactViewport && focusLayers.length > 0

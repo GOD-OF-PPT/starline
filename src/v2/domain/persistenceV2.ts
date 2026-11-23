@@ -120,6 +120,7 @@ const VALID_ENDINGS: ReadonlySet<EndingId> = new Set([
 const VALID_NODE_TYPES: ReadonlySet<V2NodeType> = new Set([
   'combat',
   'elite',
+  'boss',
   'wreck',
   'merchant',
   'anomaly',
@@ -776,6 +777,18 @@ function validateV2RunCore(
     ) {
       return { ok: false, error: `activeRun.graph.nodes.${nodeKey}.nextNodeIds 损坏` };
     }
+    if (n.bossId !== undefined && typeof n.bossId !== 'string') {
+      return { ok: false, error: `activeRun.graph.nodes.${nodeKey}.bossId 非法` };
+    }
+    if (n.hasRelicSignal !== undefined && typeof n.hasRelicSignal !== 'boolean') {
+      return { ok: false, error: `activeRun.graph.nodes.${nodeKey}.hasRelicSignal 非法` };
+    }
+    if (n.relicSignalDefId !== undefined && typeof n.relicSignalDefId !== 'string') {
+      return { ok: false, error: `activeRun.graph.nodes.${nodeKey}.relicSignalDefId 非法` };
+    }
+    if (n.eventId !== undefined && typeof n.eventId !== 'string') {
+      return { ok: false, error: `activeRun.graph.nodes.${nodeKey}.eventId 非法` };
+    }
   }
   if (run.currentNodeId !== null && typeof run.currentNodeId !== 'string') {
     return { ok: false, error: 'activeRun.currentNodeId 类型非法' };
@@ -995,6 +1008,24 @@ function validateV2RunCore(
       (!isFiniteInt(run.endlessThreat) || run.endlessThreat < 0 || run.endlessThreat > 10)
     ) {
       return { ok: false, error: 'activeRun.endlessThreat 越界或非法' };
+    }
+    if (
+      run.crewMasteryTier !== undefined &&
+      (!isFiniteInt(run.crewMasteryTier) || run.crewMasteryTier < 0 || run.crewMasteryTier > 2)
+    ) {
+      return { ok: false, error: 'activeRun.crewMasteryTier 越界或非法' };
+    }
+    if (
+      run.defeatedBossIdsThisRun !== undefined &&
+      !isDenseArrayOf(run.defeatedBossIdsThisRun, isString)
+    ) {
+      return { ok: false, error: 'activeRun.defeatedBossIdsThisRun 非法' };
+    }
+    if (
+      run.defeatedEnemyKindsThisRun !== undefined &&
+      !isDenseArrayOf(run.defeatedEnemyKindsThisRun, isString)
+    ) {
+      return { ok: false, error: 'activeRun.defeatedEnemyKindsThisRun 非法' };
     }
   }
 
@@ -1828,15 +1859,24 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
         : undefined;
     const needsEndlessPatch =
       rawRun.endlessThreat !== undefined && nextEndlessThreat !== rawRun.endlessThreat;
+    const nextCrewMasteryTier =
+      rawRun.crewMasteryTier !== undefined
+        ? typeof rawRun.crewMasteryTier === 'number' && Number.isFinite(rawRun.crewMasteryTier)
+          ? Math.max(0, Math.min(2, Math.floor(rawRun.crewMasteryTier)))
+          : 0
+        : undefined;
+    const needsCrewMasteryPatch =
+      rawRun.crewMasteryTier !== undefined && nextCrewMasteryTier !== rawRun.crewMasteryTier;
     const safeChargesMax = sanitizeNonNegInt(rawRun.tacticalChargesMax);
     const safeChargesUsed = Math.min(safeChargesMax, sanitizeNonNegInt(rawRun.tacticalChargesUsed));
     const needsChargesPatch =
       rawRun.tacticalChargesMax !== safeChargesMax || rawRun.tacticalChargesUsed !== safeChargesUsed;
 
-    if (needsEndlessPatch || needsChargesPatch) {
+    if (needsEndlessPatch || needsCrewMasteryPatch || needsChargesPatch) {
       activeRun = {
         ...rawRun,
         ...(rawRun.endlessThreat !== undefined ? { endlessThreat: nextEndlessThreat } : {}),
+        ...(rawRun.crewMasteryTier !== undefined ? { crewMasteryTier: nextCrewMasteryTier } : {}),
         tacticalChargesMax: safeChargesMax,
         tacticalChargesUsed: safeChargesUsed,
       };

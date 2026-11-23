@@ -1,3 +1,4 @@
+import { getV3SectorDef } from '../../data/sectors';
 import { areAllEventOptionsUnaffordable } from '../../domain/encounter';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
 import type { V2MapNode, V2RunState } from '../../domain/types';
@@ -79,12 +80,18 @@ export function renderEventView(
     `;
   }
 
+  const sector = getV3SectorDef(run.sectorId);
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root" data-testid="event-screen">
       <div class="panel-header">
         <h2>${svgIcon(NODE_TYPE_META[node.type].icon, 16)} 第 ${node.layer} 层 · ${NODE_TYPE_META[node.type].label}</h2>
-        <span class="panel-sub">星区事件</span>
+        <span class="panel-sub">${sector.name} · 星区事件</span>
       </div>
+      ${
+        node.hasRelicSignal
+          ? `<div class="v3-relic-pity-banner">${svgIcon('museum', 13)} 保底遗物信号源：回收货物即可获得本星区古代遗物！</div>`
+          : ''
+      }
       ${eventBodyHtml}
       ${
         unaffordable

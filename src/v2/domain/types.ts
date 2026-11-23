@@ -11,6 +11,7 @@ import type {
   V2UnlockFamilyId,
 } from '../data/equipment';
 import type { V2FacilityId } from '../data/facilities';
+import type { SectorEnvModifierId } from '../data/sectors';
 import type { V2Rotation } from '../data/shapes';
 import type { V2ShipId } from '../data/ships';
 
@@ -77,7 +78,14 @@ export type V2NamedStreamKey = 'map' | 'enemies' | 'shop' | 'events' | 'rewards'
 
 export type V2RngStreams = Record<V2NamedStreamKey, RngCursor>;
 
-export type V2NodeType = 'combat' | 'elite' | 'wreck' | 'merchant' | 'anomaly' | 'distress';
+export type V2NodeType =
+  | 'combat'
+  | 'elite'
+  | 'boss'
+  | 'wreck'
+  | 'merchant'
+  | 'anomaly'
+  | 'distress';
 
 export interface V2ShopEquipmentOffer {
   readonly offerId: string;
@@ -132,6 +140,7 @@ export interface V2CombatPayload {
   readonly bounty: number;
   readonly improvedProb: number;
   readonly guaranteedSupportKind?: V2EquipmentKind;
+  readonly bossId?: string;
 }
 
 export interface V2MapNode {
@@ -143,6 +152,10 @@ export interface V2MapNode {
   readonly nextNodeIds: readonly string[];
   readonly contractMarker: boolean;
   readonly hasSupportGuarantee?: boolean;
+  readonly bossId?: string;
+  readonly hasRelicSignal?: boolean;
+  readonly relicSignalDefId?: string;
+  readonly eventId?: string;
   readonly combat?: V2CombatPayload;
   readonly wreck?: V2WreckPayload;
   readonly merchant?: V2MerchantPayload;
@@ -222,6 +235,7 @@ export interface V2CombatRoundLog {
   readonly playerHpAfter: number;
   readonly playerShieldAfter: number;
   readonly enemiesAfter: readonly V2CombatUnitSnapshot[];
+  readonly envModifierEvent?: string;
 }
 
 export type V2EliteTacticChoice = 'normal' | 'overload' | 'emergency_defense';
@@ -262,6 +276,8 @@ export interface V2CombatSimulation {
   readonly initialEnemies: readonly V2CombatUnitSnapshot[];
   readonly rounds: readonly V2CombatRoundLog[];
   readonly appliedTactic?: V2EliteTacticChoice;
+  readonly sectorId?: SectorId;
+  readonly envModifierId?: SectorEnvModifierId;
 }
 
 export interface V2CombatRewardBundle {
@@ -395,6 +411,12 @@ export interface V2RunState {
   readonly tacticalChargesUsed: number;
   readonly salvagePartsEarned: number;
   readonly isFinalCampaignRun?: boolean;
+  /** Snapshotted crew mastery tier (0..2) at expedition launch for 100% reload-safe preview/combat parity */
+  readonly crewMasteryTier?: number;
+  /** Boss IDs defeated during this expedition (committed to profile.campaign.defeatedBossIds on settlement) */
+  readonly defeatedBossIdsThisRun?: readonly string[];
+  /** Encounter kinds defeated during this expedition (committed to profile.defeatedEnemyKinds on settlement) */
+  readonly defeatedEnemyKindsThisRun?: readonly string[];
 }
 
 export interface V2PresetSlot {

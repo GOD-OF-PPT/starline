@@ -1,6 +1,8 @@
 import {
+  V2_CARGO_DEFS,
   V2_EXTENDED_RELIC_CARGO_KINDS,
   V2_REGULAR_CARGO_KINDS,
+  computeV2CargoPrice,
 } from '../data/cargo';
 import {
   getMerchantBuybackPrice,
@@ -9,6 +11,7 @@ import {
   type V2Quality,
   type V2UnlockFamilyId,
 } from '../data/equipment';
+import { getV3SectorDef } from '../data/sectors';
 import { computeV2JumpFuelCost } from './contracts';
 import { addV2ItemToStaging, removeV2ItemById } from './inventoryV2';
 import { createV2CargoInstance, createV2EquipmentInstance } from './itemCatalog';
@@ -59,10 +62,11 @@ export function maybeCreateEngineerSwapOffer(
   const pool = getUnlockedEquipmentKinds(unlockedFamilies).filter((k) => k !== acquiredKind);
   if (pool.length === 0) return run;
 
+  const candidateCount = (run.crewMasteryTier ?? 0) >= 1 ? 4 : 3;
   const draw = withV2Stream(run.rngStreams, 'rewards', (rng) => {
     const remaining = [...pool];
     const picked: V2EquipmentKind[] = [];
-    while (picked.length < 3 && remaining.length > 0) {
+    while (picked.length < candidateCount && remaining.length > 0) {
       const idx = rng.nextInt(remaining.length);
       picked.push(remaining.splice(idx, 1)[0]);
     }
@@ -89,7 +93,7 @@ export function applyV2EngineerSwap(
 ): V2ActionOutcome {
   const offer = run.activeEngineerOffer;
   if (!offer || offer.used) {
-    return { ok: false, run, error: '当前没有可用的工程师改装机会' };
+    return { ok: false, run, error: '当前没有可用的林工现场改装机会' };
   }
   if (!offer.candidates.includes(chosenKind)) {
     return { ok: false, run, error: '所选设备不在本次候选列表中' };
@@ -103,10 +107,16 @@ export function applyV2EngineerSwap(
     return { ok: false, run, error: '原设备已被舍弃或不可改装' };
   }
 
+  // Engineer Mastery T2 preserves 'improved' quality on swap; T0/T1 swap to common (§6.2)
+  const swappedQuality: V2Quality =
+    run.crewId === 'engineer' && (run.crewMasteryTier ?? 0) >= 2 && orig.quality === 'improved'
+      ? 'improved'
+      : 'common';
+
   const swapped = createV2EquipmentInstance({
     instanceId: `${orig.instanceId}_eng`,
     kind: chosenKind,
-    quality: 'common', // §6.2: swaps to same-tier common equipment
+    quality: swappedQuality,
     origin: 'loot',
     acquiredDepth: orig.acquiredDepth,
     location: 'staging',
@@ -247,13 +257,23 @@ export function resolveV2WreckChoice(
       nextBay = addV2ItemToStaging(nextBay, cg, 0);
     }
   } else if (room === 'reactor_fuel') {
-    const fuelGain = Math.min(node.wreck.reactorFuelGain ?? 2, run.maxFuel - run.fuel);
+    const salvagerFuelBonus =
+      run.crewId === 'salvager' && (run.crewMasteryTier ?? 0) >= 2 ? 1 : 0;
+    const fuelGain = Math.min(
+      (node.wreck.reactorFuelGain ?? 2) + salvagerFuelBonus,
+      run.maxFuel - run.fuel
+    );
     if (fuelGain <= 0) {
       return { ok: false, run, error: '燃料已满，可改选应急维修或其他舱室' };
     }
     nextFuel = run.fuel + fuelGain;
   } else {
-    const repairGain = Math.min(node.wreck.reactorRepairGain ?? 8, run.maxHp - run.hp);
+    const salvagerRepairBonus =
+      run.crewId === 'salvager' && (run.crewMasteryTier ?? 0) >= 2 ? 2 : 0;
+    const repairGain = Math.min(
+      (node.wreck.reactorRepairGain ?? 8) + salvagerRepairBonus,
+      run.maxHp - run.hp
+    );
     if (repairGain <= 0) {
       return { ok: false, run, error: '船体耐久已满，可改选抽取燃料或其他舱室' };
     }
@@ -453,7 +473,7 @@ export function abandonV2EventAndReturn(run: V2RunState): V2ActionOutcome {
     return { ok: false, run, error: '当前不在可放弃的事件中' };
   }
   const node = run.graph.nodes[run.currentNodeId];
-  if (!node || node.type === 'combat' || node.type === 'elite') {
+  if (!node || node.type === 'combat' || node.type === 'elite' || node.type === 'boss') {
     return { ok: false, run, error: '战斗节点不可按非战斗事件放弃' };
   }
   const updatedNode: V2MapNode = { ...node, abandoned: true, resolved: false };
@@ -708,19 +728,41 @@ export function generateV2CombatRewardBundle(
       location: 'staging',
     });
 
-    const isElite = node.type === 'elite';
+    const sector = getV3SectorDef(run.sectorId);
+    const isElite = node.type === 'elite' || node.type === 'boss';
     let cargoDefId: string;
-    if (node.layer >= 4 && rng.nextFloat() < (isElite ? 0.25 : 0.12)) {
-      cargoDefId = `cargo.${rng.pick(V2_EXTENDED_RELIC_CARGO_KINDS)}`;
+    if (
+      node.hasRelicSignal &&
+      node.relicSignalDefId &&
+      Object.prototype.hasOwnProperty.call(V2_CARGO_DEFS, node.relicSignalDefId)
+    ) {
+      cargoDefId = node.relicSignalDefId;
+    } else if (
+      node.layer >= 4 &&
+      rng.nextFloat() < (isElite ? Math.max(0.25, sector.relicDropChanceDeep + 0.13) : sector.relicDropChanceDeep)
+    ) {
+      if (sector.signatureRelicIds.length > 0 && rng.nextFloat() < 0.7) {
+        const sigDefId = `cargo.${rng.pick(sector.signatureRelicIds)}`;
+        cargoDefId = Object.prototype.hasOwnProperty.call(V2_CARGO_DEFS, sigDefId)
+          ? sigDefId
+          : `cargo.${rng.pick(V2_EXTENDED_RELIC_CARGO_KINDS)}`;
+      } else {
+        cargoDefId = `cargo.${rng.pick(V2_EXTENDED_RELIC_CARGO_KINDS)}`;
+      }
     } else {
       cargoDefId = `cargo.${rng.pick(V2_REGULAR_CARGO_KINDS)}`;
     }
+    const scaledCargoVal =
+      sector.cargoPriceMult === 1
+        ? undefined
+        : Math.max(1, Math.round(computeV2CargoPrice(cargoDefId, node.layer) * sector.cargoPriceMult));
     const cargoOption = createV2CargoInstance({
       instanceId: `${run.runId}_rew_cg_${node.nodeId}`,
       defId: cargoDefId,
       origin: 'loot',
       acquiredDepth: node.layer,
       location: 'staging',
+      fixedValueOverride: scaledCargoVal,
     });
 
     const bundle: V2CombatRewardBundle = {

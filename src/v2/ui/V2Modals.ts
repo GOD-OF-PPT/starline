@@ -46,14 +46,22 @@ import { svgIcon } from './icons';
 
 let v2ModalSeq = 1;
 
-function openTitledV2Modal(
+export function openTitledV2Modal(
   host: HTMLElement,
-  opts: { readonly title: string; readonly dismissible?: boolean; readonly onClose?: () => void },
+  opts: {
+    readonly title: string;
+    readonly dismissible?: boolean;
+    readonly cardClass?: string;
+    readonly onClose?: () => void;
+  },
   buildBody: (body: HTMLElement, modal: ManagedModalHandle) => void
 ): ManagedModalHandle {
   const titleId = `v2-modal-title-${v2ModalSeq++}`;
   const dismissible = opts.dismissible ?? true;
   const modal = openManagedModal(host, { titleId, dismissible, onClose: opts.onClose });
+  if (opts.cardClass) {
+    modal.card.classList.add(opts.cardClass);
+  }
 
   const header = document.createElement('div');
   header.className = 'modal-header';

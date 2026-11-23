@@ -1,8 +1,16 @@
+import type { V2CrewId } from '../data/crew';
 import type { V2EnemyUnitSpec } from '../data/enemies';
-import { V2_MAX_BATTLE_SHIELD, type V2EquipmentKind, type V2UnlockFamilyId } from '../data/equipment';
+import {
+  V2_MAX_BATTLE_SHIELD,
+  V2_MAX_POST_WIN_REPAIR,
+  type V2EquipmentKind,
+  type V2UnlockFamilyId,
+} from '../data/equipment';
+import { getV3SectorDef } from '../data/sectors';
 import { calculateV2BuildStats, type V2BuildStats } from './buildStatsV2';
 import { generateV2CombatRewardBundle } from './encounter';
 import type {
+  SectorId,
   V2ActiveCombatState,
   V2CargoBayState,
   V2CombatRoundLog,
@@ -104,8 +112,16 @@ export function simulateV2Combat(params: {
   readonly targetPolicy: V2TargetPolicy;
   readonly precomputedStats?: V2BuildStats;
   readonly round2Tactic?: V2EliteTacticChoice;
+  readonly sectorId?: SectorId;
+  readonly crewId?: V2CrewId | null;
+  readonly crewMasteryTier?: number;
 }): V2CombatSimulation {
   const stats = params.precomputedStats ?? calculateV2BuildStats(params.bay);
+  const sectorId: SectorId = params.sectorId ?? 'near_orbit';
+  const sector = getV3SectorDef(sectorId);
+  const envModifierId = sector.envModifier.id;
+  const masteryTier = Math.max(0, Math.min(2, Math.floor(params.crewMasteryTier ?? 0)));
+
   const enemies: MutableUnit[] = params.units.map((u) => ({
     enemyId: u.enemyId,
     name: u.name,
@@ -120,7 +136,13 @@ export function simulateV2Combat(params: {
 
   const initialEnemies = snapshotUnits(enemies);
   let playerHp = Math.max(0, params.startingHp);
-  let playerShield = stats.effectiveShield;
+
+  // Opening shield: base build shield + Engineer Mastery T2 (+2, capped at 20), then Sector 2 cryo_ion (-2, min 0)
+  const engineerOpeningShieldBonus = params.crewId === 'engineer' && masteryTier >= 2 ? 2 : 0;
+  const preEnvShield = Math.min(V2_MAX_BATTLE_SHIELD, stats.effectiveShield + engineerOpeningShieldBonus);
+  let playerShield =
+    envModifierId === 'cryo_ion' ? Math.max(0, preEnvShield - 2) : preEnvShield;
+  const cryoOpeningSuppressed = envModifierId === 'cryo_ion' && preEnvShield > playerShield;
   const startingPlayerShield = playerShield;
   const rounds: V2CombatRoundLog[] = [];
 
@@ -179,9 +201,28 @@ export function simulateV2Combat(params: {
     const primaryTarget = selectTargetByPolicy(startLiving, params.targetPolicy)!;
     const playerAttacks: V2PlayerAttackEvent[] = [];
 
+    // Deterministic first-direct-attack bonuses (Navigator Mastery T2 on R1; Sector 3 gravity_tide on even rounds)
+    const isGravitySurgeRound = envModifierId === 'gravity_tide' && round % 2 === 0;
+    let pendingFirstHitBonus =
+      (round === 1 && params.crewId === 'navigator' && masteryTier >= 2 ? 2 : 0) +
+      (isGravitySurgeRound ? 2 : 0);
+    const consumeFirstHitBonus = (): number => {
+      if (pendingFirstHitBonus <= 0) return 0;
+      const bonus = pendingFirstHitBonus;
+      pendingFirstHitBonus = 0;
+      return bonus;
+    };
+
     // 2a. Core attack (paused during full-shield emergency_defense power diversion)
     if (stats.coreAttack > 0 && !suppressDirectWeaponsThisRound) {
-      playerAttacks.push(applyHitToUnit(primaryTarget, 'core', 'ship_core', stats.coreAttack));
+      playerAttacks.push(
+        applyHitToUnit(
+          primaryTarget,
+          'core',
+          'ship_core',
+          stats.coreAttack + consumeFirstHitBonus()
+        )
+      );
     }
 
     // Optional Round-2 Overload armor-piercing strike (ignores enemy armor; switches to living target if primary fell to core!)
@@ -201,7 +242,14 @@ export function simulateV2Combat(params: {
     if (!suppressDirectWeaponsThisRound) {
       // 2b. Lasers (sorted by instanceId)
       for (const l of stats.lasers) {
-        playerAttacks.push(applyHitToUnit(primaryTarget, 'laser', l.instanceId, l.totalDamage));
+        playerAttacks.push(
+          applyHitToUnit(
+            primaryTarget,
+            'laser',
+            l.instanceId,
+            l.totalDamage + consumeFirstHitBonus()
+          )
+        );
       }
 
       // 2c. Heavy cannons firing this round (sorted by instanceId)
@@ -211,7 +259,14 @@ export function simulateV2Combat(params: {
           : effectiveHeavyRound % 2 === 0;
         if (fires) {
           const bonus = round === 1 ? h.firstShotBonus : 0;
-          playerAttacks.push(applyHitToUnit(primaryTarget, 'heavy', h.instanceId, h.baseDamage + bonus));
+          playerAttacks.push(
+            applyHitToUnit(
+              primaryTarget,
+              'heavy',
+              h.instanceId,
+              h.baseDamage + bonus + consumeFirstHitBonus()
+            )
+          );
         }
       }
 
@@ -221,7 +276,12 @@ export function simulateV2Combat(params: {
         for (let d = 0; d < drones; d++) {
           const droneTarget = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
           playerAttacks.push(
-            applyHitToUnit(droneTarget, 'hangar', `${hg.instanceId}_d${d + 1}`, hg.damagePerDrone)
+            applyHitToUnit(
+              droneTarget,
+              'hangar',
+              `${hg.instanceId}_d${d + 1}`,
+              hg.damagePerDrone + consumeFirstHitBonus()
+            )
           );
         }
       }
@@ -232,7 +292,14 @@ export function simulateV2Combat(params: {
       );
       for (const fl of stats.flaks) {
         for (const target of startLivingSortedForFlak) {
-          playerAttacks.push(applyHitToUnit(target, 'flak', fl.instanceId, fl.damagePerEnemy));
+          playerAttacks.push(
+            applyHitToUnit(
+              target,
+              'flak',
+              fl.instanceId,
+              fl.damagePerEnemy + consumeFirstHitBonus()
+            )
+          );
         }
       }
     }
@@ -241,9 +308,10 @@ export function simulateV2Combat(params: {
     const startLivingSorted = [...startLiving].sort((a, b) => a.enemyId.localeCompare(b.enemyId));
     const enemyAttacks: V2EnemyAttackEvent[] = [];
     let shieldAbsorbedTotal = 0;
+    const gravityEnemyDmgBonus = isGravitySurgeRound ? 1 : 0;
 
     for (const enemy of startLivingSorted) {
-      const rawDamage = enemy.damagePerRound;
+      const rawDamage = enemy.damagePerRound + gravityEnemyDmgBonus;
       const pierceDamage =
         enemy.pierceRatio > 0 ? Math.floor(rawDamage * enemy.pierceRatio) : 0;
       const normalDamage = rawDamage - pierceDamage;
@@ -285,6 +353,24 @@ export function simulateV2Combat(params: {
       }
     }
 
+    // Step 5b: End-of-round deterministic sector environmental effect
+    let envModifierEvent: string | undefined;
+    if (envModifierId === 'cryo_ion') {
+      if (round % 2 === 0) {
+        if (playerShield > 0) {
+          const drained = Math.min(playerShield, 2);
+          playerShield -= drained;
+          envModifierEvent = `低温电离脉冲：余盾衰减 -${drained}`;
+        } else {
+          envModifierEvent = '低温电离脉冲：无余盾，船体未受损';
+        }
+      } else if (round === 1 && cryoOpeningSuppressed) {
+        envModifierEvent = `低温电离场：开战护盾压制 -${preEnvShield - startingPlayerShield}`;
+      }
+    } else if (isGravitySurgeRound) {
+      envModifierEvent = '引力潮汐高潮：我方首击 +2 / 敌舰齐射各 +1';
+    }
+
     rounds.push({
       round,
       droneCountsByHangar,
@@ -296,6 +382,7 @@ export function simulateV2Combat(params: {
       playerHpAfter: playerHp,
       playerShieldAfter: playerShield,
       enemiesAfter: snapshotUnits(enemies),
+      ...(envModifierEvent ? { envModifierEvent } : {}),
     });
 
     // Step 6: Win/loss check — player HP <= 0 ALWAYS loses first (including mutual destruction via counter! AC09)
@@ -315,9 +402,16 @@ export function simulateV2Combat(params: {
     }
   }
 
-  // Step 7: Post-victory repair only on victory
+  // Step 7: Post-victory repair only on victory (Engineer Mastery T1 adds +1 post-win repair, still capped at V2_MAX_POST_WIN_REPAIR = 4)
+  const engineerRepairBonus = params.crewId === 'engineer' && masteryTier >= 1 ? 1 : 0;
+  const totalEffectiveRepair = Math.min(
+    V2_MAX_POST_WIN_REPAIR,
+    stats.effectiveRepair + engineerRepairBonus
+  );
   const repairApplied =
-    outcome === 'victory' ? Math.min(stats.effectiveRepair, Math.max(0, params.maxHp - playerHp)) : 0;
+    outcome === 'victory'
+      ? Math.min(totalEffectiveRepair, Math.max(0, params.maxHp - playerHp))
+      : 0;
   const finalPlayerHpAfterRepair = Math.min(params.maxHp, playerHp + repairApplied);
 
   return {
@@ -334,6 +428,8 @@ export function simulateV2Combat(params: {
     initialEnemies,
     rounds,
     appliedTactic,
+    sectorId,
+    envModifierId,
   };
 }
 
@@ -354,6 +450,9 @@ export function previewV2CombatNode(
     maxHp: run.maxHp,
     units: node.combat.units,
     targetPolicy: policyOverride ?? run.targetPolicy,
+    sectorId: run.sectorId,
+    crewId: run.crewId,
+    crewMasteryTier: run.crewMasteryTier ?? 0,
   });
 }
 
@@ -389,6 +488,9 @@ function buildEliteRound2Decision(params: {
         units: params.units,
         targetPolicy: params.targetPolicy,
         round2Tactic: 'overload',
+        sectorId: params.run.sectorId,
+        crewId: params.run.crewId,
+        crewMasteryTier: params.run.crewMasteryTier ?? 0,
       })
     : params.baselineSim;
 
@@ -400,6 +502,9 @@ function buildEliteRound2Decision(params: {
     units: params.units,
     targetPolicy: params.targetPolicy,
     round2Tactic: 'emergency_defense',
+    sectorId: params.run.sectorId,
+    crewId: params.run.crewId,
+    crewMasteryTier: params.run.crewMasteryTier ?? 0,
   });
 
   const hasCounter = calculateV2BuildStats(params.run.bay).bestActiveCounter !== null;
@@ -440,16 +545,35 @@ function buildEliteRound2Decision(params: {
     },
   ];
 
+  const isGravitySurgeR2 = getV3SectorDef(params.run.sectorId).envModifier.id === 'gravity_tide';
+  const enemyThreatDamage = aliveEnemies.reduce(
+    (sum, e) => sum + e.damagePerRound + (isGravitySurgeR2 ? 1 : 0),
+    0
+  );
+
   return {
     decisionId: `tactic_${params.run.runId}_${params.nodeId}_r2`,
     roundNumber: 2,
     playerHpAtPause: r1.playerHpAfter,
     playerShieldAtPause: r1.playerShieldAfter,
-    enemyThreatDamage: aliveEnemies.reduce((sum, e) => sum + e.damagePerRound, 0),
+    enemyThreatDamage,
     enemiesAlive: aliveEnemies.length,
     options,
     chosen: null,
   };
+}
+
+/**
+ * Single authoritative combat victory bounty calculator (applies Salvager Mastery T2 +20% ceil bonus)
+ * shared by Map forecast, Combat Pre-View, and completeV2CombatAtCurrentNode payout.
+ */
+export function getEffectiveV2CombatBounty(
+  run: Pick<V2RunState, 'crewId' | 'crewMasteryTier'>,
+  baseBounty: number
+): number {
+  return run.crewId === 'salvager' && (run.crewMasteryTier ?? 0) >= 2
+    ? Math.ceil(baseBounty * 1.2)
+    : baseBounty;
 }
 
 /**
@@ -483,10 +607,13 @@ export function startV2CombatAtCurrentNode(
     maxHp: run.maxHp,
     units: node.combat.units,
     targetPolicy,
+    sectorId: run.sectorId,
+    crewId: run.crewId,
+    crewMasteryTier: run.crewMasteryTier ?? 0,
   });
 
   const pendingDecision =
-    options?.enableEliteTactic && node.type === 'elite'
+    options?.enableEliteTactic && (node.type === 'elite' || node.type === 'boss')
       ? buildEliteRound2Decision({
           run,
           nodeId: node.nodeId,
@@ -552,6 +679,9 @@ export function commitV2EliteTacticDecision(
     units: node.combat.units,
     targetPolicy: run.activeCombat.targetPolicy,
     round2Tactic: choice,
+    sectorId: run.sectorId,
+    crewId: run.crewId,
+    crewMasteryTier: run.crewMasteryTier ?? 0,
   });
 
   return {
@@ -630,18 +760,42 @@ export function completeV2CombatAtCurrentNode(
       ? [...effectiveRecent, offeredKind].slice(-4)
       : [...effectiveRecent];
 
+  const effectiveBounty = getEffectiveV2CombatBounty(run, node.combat.bounty);
+
+  const bossIdOnNode =
+    node.combat.bossId ??
+    node.bossId ??
+    ((node.type === 'elite' || node.type === 'boss') &&
+    node.layer >= 6 &&
+    !run.isTutorial &&
+    !run.isShowcase
+      ? getV3SectorDef(run.sectorId).bossId
+      : undefined);
+
+  const prevBosses = run.defeatedBossIdsThisRun ?? [];
+  const nextBosses =
+    bossIdOnNode && !prevBosses.includes(bossIdOnNode)
+      ? [...prevBosses, bossIdOnNode]
+      : [...prevBosses];
+
+  const prevKinds = run.defeatedEnemyKindsThisRun ?? [];
+  const kindAdditions = [node.combat.encounterKind, ...(bossIdOnNode ? [bossIdOnNode] : [])];
+  const nextDefeatedKinds = Array.from(new Set([...prevKinds, ...kindAdditions]));
+
   return {
     ok: true,
     run: {
       ...run,
       hp: sim.finalPlayerHpAfterRepair,
-      wallet: run.wallet + node.combat.bounty,
+      wallet: run.wallet + effectiveBounty,
       rngStreams: nextStreams,
       activeCombat: null,
       pendingReward: bundle,
       phase: 'REWARD',
       claimedEventIds: [...run.claimedEventIds, claimKey],
       recentEquipmentKinds: nextRecentKinds,
+      defeatedBossIdsThisRun: nextBosses,
+      defeatedEnemyKindsThisRun: nextDefeatedKinds,
     },
   };
 }

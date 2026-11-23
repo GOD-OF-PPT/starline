@@ -4,6 +4,8 @@ import type { BaseProgression } from '../../domain/progression';
 import { MultiTabGuard } from '../../domain/tabLock';
 import { PhaserHost } from '../../scenes/PhaserHost';
 import { hasOpenModal, registerModalBackgroundRoot } from '../../ui/Modals';
+import { CAMPAIGN_CHAPTERS, type CampaignCommTrigger } from '../data/campaign';
+import { V2_CREW, type V2CrewId } from '../data/crew';
 import {
   V2_EQUIPMENT_DEFS,
   V2_RESEARCH_COST_CREDITS,
@@ -17,6 +19,7 @@ import {
   V2_RELIC_ORDER,
   type V2FacilityId,
 } from '../data/facilities';
+import { getV3SectorDef } from '../data/sectors';
 import { V2_SHIPS, type V2ShipId } from '../data/ships';
 import { createV2ShowcaseRun } from '../data/showcaseRun';
 import {
@@ -25,6 +28,12 @@ import {
   getTrialDemoUnits,
 } from '../data/trialBuilds';
 import { V2_TUTORIAL_HINTS, createV2TutorialRun } from '../data/tutorialV2';
+import {
+  getActiveCampaignObjective,
+  getTriggeredCommForContext,
+  markCampaignCommRead,
+  markCampaignCommsRead,
+} from '../domain/campaign';
 import {
   commitV2EliteTacticDecision,
   completeV2CombatAtCurrentNode,
@@ -99,6 +108,7 @@ import { computeV2PlacementTacticalDelta } from '../domain/tacticalDelta';
 import {
   V2_TAB_CHANNEL,
   V2_TAB_LOCK_KEY,
+  type SectorId,
   type V2CargoBayState,
   type V2CombatRoundLog,
   type V2MapNode,
@@ -111,12 +121,13 @@ import {
   type V2WreckChoice,
 } from '../domain/types';
 import { CargoGridV2Component } from './CargoGridV2';
-import { svgIcon } from './icons';
+import { crewPortraitSvg, svgIcon } from './icons';
 import {
   buildV2InspectSnapshot,
   type StarlineInspectSnapshot,
   type StarlineScreenId,
 } from './inspectSnapshot';
+import { openV3CampaignModal, type CampaignModalTab } from './modals/CampaignModal';
 import { renderArrangeView } from './screens/ArrangeView';
 import { renderBaseHeroView } from './screens/BaseView';
 import { renderCombatLiveOverlay, renderCombatPreView } from './screens/CombatView';
@@ -187,6 +198,14 @@ export class V2AppController {
   private settlementDispositions: Record<string, V2SettlementDisposition> = {};
   private sceneCollapseOverride: boolean | null = null;
   private activeDockingNotice: V2ReturnDockingNotice | null = null;
+  private campaignBannerCollapsed = false;
+  private preferredSectorId: SectorId | null = null;
+  private activeCommBanner: {
+    readonly id: string;
+    readonly speakerId: V2CrewId;
+    readonly title: string;
+    readonly text: string;
+  } | null = null;
 
   // Interactive focus states for unified Map & 3-hotspot Wreck
   private selectedMapNodeId: string | null = null;
@@ -727,6 +746,7 @@ export class V2AppController {
     this.writeTitleSession(true);
     this.prepareDraft = null;
     this.activeDockingNotice = null;
+    this.activeCommBanner = null;
     this.settlementDispositions = {};
     this.selectedMapNodeId = null;
     this.selectedWreckHotspot = 'armory';
@@ -897,6 +917,23 @@ export class V2AppController {
       `);
     }
 
+    if (this.activeCommBanner) {
+      const c = this.activeCommBanner;
+      items.push(`
+        <div class="v3-comm-banner" data-testid="crew-comm-banner" role="status">
+          ${crewPortraitSvg(c.speakerId, 30)}
+          <div class="v3-comm-banner-body">
+            <div class="v3-comm-banner-head">${svgIcon('comms', 12)} ${c.title}</div>
+            <div class="v3-comm-banner-text">「${c.text}」</div>
+          </div>
+          <div class="v3-comm-banner-actions">
+            <button type="button" class="btn btn-sm btn-secondary" id="v3-comm-open-archive">查看档案</button>
+            <button type="button" class="btn btn-sm btn-ghost" id="v3-comm-dismiss" aria-label="关闭通讯">✕</button>
+          </div>
+        </div>
+      `);
+    }
+
     if (this.failedAssetKeys.length > 0) {
       items.push(`
         <div class="system-banner banner-warn">
@@ -918,6 +955,32 @@ export class V2AppController {
     }
 
     this.bannersEl.innerHTML = items.join('');
+
+    this.bannersEl.querySelector('#v3-comm-open-archive')?.addEventListener('click', () => {
+      const comm = this.activeCommBanner;
+      this.activeCommBanner = null;
+      if (comm && !this.isReadOnlyTab) {
+        this.save = { ...this.save, profile: markCampaignCommRead(this.save.profile, comm.id) };
+        this.persist();
+      }
+      this.renderBanners();
+      soundEngine.play('click');
+      this.openCampaignModal('comms');
+    });
+
+    this.bannersEl.querySelector('#v3-comm-dismiss')?.addEventListener('click', () => {
+      const comm = this.activeCommBanner;
+      this.activeCommBanner = null;
+      if (comm && !this.isReadOnlyTab) {
+        this.save = { ...this.save, profile: markCampaignCommRead(this.save.profile, comm.id) };
+        this.persist();
+      }
+      soundEngine.play('click');
+      this.renderBanners();
+      if (!this.getCurrentRun() && !this.prepareDraft) {
+        this.renderBaseHeroOverlay();
+      }
+    });
 
     this.bannersEl.querySelector('#v2-btn-retry-assets')?.addEventListener('click', () => {
       this.failedAssetKeys = [];
@@ -942,6 +1005,17 @@ export class V2AppController {
     this.bannersEl.querySelector('#v2-banner-migrate')?.addEventListener('click', () => {
       this.openMigrationWizard();
     });
+  }
+
+  private triggerCrewComm(trigger: CampaignCommTrigger): void {
+    const comm = getTriggeredCommForContext(this.save.profile, trigger);
+    if (!comm) return;
+    this.activeCommBanner = {
+      id: comm.id,
+      speakerId: comm.speakerId,
+      title: comm.title,
+      text: comm.text,
+    };
   }
 
   // --- Phaser Stage Bridge ---
@@ -1064,10 +1138,12 @@ export class V2AppController {
       }
 
       draft.demoPlaybackKey = null;
+      const prepSector = getV3SectorDef(draft.sectorId);
       this.phaserHost.showV2Stage({
         shipId: draft.shipId,
         shipVisualSpec: visualSpec,
-        sectorIndex: 1,
+        sectorId: draft.sectorId,
+        sectorIndex: prepSector.primaryBgIndex,
         eventBackdrop: null,
         units: [],
         simulation: null,
@@ -1080,7 +1156,7 @@ export class V2AppController {
           : `<span class="v2-mount-pill muted">仅舰载核心小炮</span>`;
 
       this.sceneOverlayEl.innerHTML = `
-        <div class="scene-stage-tag">${svgIcon('rocket', 13)} ${ship.name} · 外部挂点实时联动</div>
+        <div class="scene-stage-tag">${svgIcon('rocket', 13)} ${ship.name} · ${prepSector.name} · 外部挂点实时联动</div>
         <div class="v2-mount-strip">${mountChips}</div>
       `;
       return;
@@ -1089,7 +1165,8 @@ export class V2AppController {
     if (!run) return;
 
     const currentNode = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
-    const sectorIndex = currentNode?.sectorBg ?? 1;
+    const activeSector = getV3SectorDef(run.sectorId);
+    const sectorIndex = currentNode?.sectorBg ?? activeSector.primaryBgIndex;
     const visualSpec = deriveV2ShipVisualSpec(run.bay);
 
     // 3. LIVE COMBAT HERO STAGE
@@ -1120,6 +1197,7 @@ export class V2AppController {
         this.phaserHost.showV2Stage({
           shipId: run.shipId,
           shipVisualSpec: visualSpec,
+          sectorId: run.sectorId,
           sectorIndex,
           eventBackdrop: null,
           units: currentNode.combat.units,
@@ -1145,6 +1223,7 @@ export class V2AppController {
             if (log.shieldAbsorbedTotal > 0) parts.push(`盾吸 ${log.shieldAbsorbedTotal}`);
             if (log.counterAttack) parts.push(`反击 -${log.counterAttack.appliedDamage}`);
             if (tookHull > 0) parts.push(`舰体受创 -${tookHull}`);
+            if (log.envModifierEvent) parts.push(log.envModifierEvent);
             this.liveCombatEventLine = parts.join(' · ');
             this.renderCombatPlaybackOverlay(this.getCurrentRun() ?? run);
           },
@@ -1176,6 +1255,7 @@ export class V2AppController {
       this.phaserHost.showV2Stage({
         shipId: run.shipId,
         shipVisualSpec: visualSpec,
+        sectorId: run.sectorId,
         sectorIndex,
         eventBackdrop: 'wreck',
         units: [],
@@ -1202,6 +1282,7 @@ export class V2AppController {
     this.phaserHost.showV2Stage({
       shipId: run.shipId,
       shipVisualSpec: visualSpec,
+      sectorId: run.sectorId,
       sectorIndex,
       eventBackdrop: eventBg,
       units: previewUnits,
@@ -1211,7 +1292,7 @@ export class V2AppController {
 
     const stageLabel =
       run.phase === 'MAP'
-        ? `${svgIcon('radar', 13)} 航路第 ${currentNode ? currentNode.layer : 0}/${run.graph.maxLayers} 层`
+        ? `${svgIcon('radar', 13)} ${activeSector.name} · 航路第 ${currentNode ? currentNode.layer : 0}/${run.graph.maxLayers} 层`
         : run.phase === 'SHOP'
         ? `${svgIcon('merchant', 13)} 流动商人 · 航行钱包 ${run.wallet}¤`
         : run.phase === 'REWARD'
@@ -1221,7 +1302,7 @@ export class V2AppController {
         : run.phase === 'SETTLEMENT'
         ? `${svgIcon('beacon', 13)} ${run.settlementReason === 'defeat' ? '紧急拖回结算' : '安全靠泊清点'}`
         : currentNode
-        ? `${svgIcon(NODE_TYPE_META[currentNode.type].icon, 13)} 第 ${currentNode.layer} 层 · ${
+        ? `${svgIcon(NODE_TYPE_META[currentNode.type].icon, 13)} ${activeSector.name} · 第 ${currentNode.layer} 层 ${
             NODE_TYPE_META[currentNode.type].label
           }`
         : '深空巡航中';
@@ -1251,6 +1332,8 @@ export class V2AppController {
         nextGoal: this.computeNextBaseGoal(p),
         recommendedContractId: this.pickRecommendedContractId(p),
         activeDockingNotice: this.activeDockingNotice,
+        campaignBannerCollapsed: this.campaignBannerCollapsed,
+        campaignObjective: getActiveCampaignObjective(p),
       },
       {
         onSkipDocking: () => {
@@ -1276,6 +1359,15 @@ export class V2AppController {
             },
             onStartTutorial: () => this.startTutorialRun(),
           });
+        },
+        onToggleCampaignBanner: () => {
+          this.campaignBannerCollapsed = !this.campaignBannerCollapsed;
+          soundEngine.play('click');
+          this.renderBaseHeroOverlay();
+        },
+        onOpenCampaign: () => {
+          soundEngine.play('click');
+          this.openCampaignModal('roadmap');
         },
         onOpenGoal: (kind) => {
           soundEngine.play('click');
@@ -1422,8 +1514,19 @@ export class V2AppController {
     }
   }
 
-  private openPrepareForContract(contractTemplateId: string): void {
+  private openPrepareForContract(
+    contractTemplateId: string,
+    preferredSectorOverride?: SectorId
+  ): void {
     const p = this.save.profile;
+    const unlockedSectors =
+      p.campaign.unlockedSectors.length > 0 ? p.campaign.unlockedSectors : (['near_orbit'] as const);
+    const chosenSector: SectorId =
+      preferredSectorOverride && unlockedSectors.includes(preferredSectorOverride)
+        ? preferredSectorOverride
+        : this.preferredSectorId && unlockedSectors.includes(this.preferredSectorId)
+        ? this.preferredSectorId
+        : unlockedSectors[0] ?? 'near_orbit';
     const shipId = p.unlockedShips.includes(p.selectedShipId) ? p.selectedShipId : 'cannon_skiff';
     const crewId =
       p.selectedCrewId && p.unlockedCrew.includes(p.selectedCrewId)
@@ -1432,7 +1535,7 @@ export class V2AppController {
     const slots = [...buildFreeFallbackPrepareSlots(shipId, p.blueprints)];
     this.prepareDraft = {
       contractTemplateId,
-      sectorId: p.campaign.unlockedSectors[0] ?? 'near_orbit',
+      sectorId: chosenSector,
       shipId,
       crewId,
       primaryArchetype: p.selectedArchetype,
@@ -1515,9 +1618,20 @@ export class V2AppController {
       profile: nextProfile,
       activeRun: res.run,
     };
+    this.preferredSectorId = res.run.sectorId;
     this.prepareDraft = null;
     this.settlementDispositions = {};
     this.selectedMapNodeId = null;
+
+    const hasRelicSignal = Object.values(res.run.graph.nodes).some((n) => Boolean(n.hasRelicSignal));
+    if (hasRelicSignal) {
+      this.triggerCrewComm('pity_signal_detected');
+    } else if (res.run.sectorId === 'frozen_graveyard') {
+      this.triggerCrewComm('act2_start');
+    } else if (res.run.sectorId === 'stargate_abyss') {
+      this.triggerCrewComm('act3_start');
+    }
+
     this.persist();
     soundEngine.play('warpJump');
     this.syncAll();
@@ -1533,7 +1647,8 @@ export class V2AppController {
       draft.shipId,
       draft.crewId,
       draft.slots,
-      draft.trialBuildId
+      draft.trialBuildId,
+      draft.sectorId
     );
     const previewBay = this.buildPreparePreviewBay(draft);
 
@@ -1549,6 +1664,7 @@ export class V2AppController {
         onSelectSector: (sectorId) => {
           if (!p.campaign.unlockedSectors.includes(sectorId)) return;
           draft.sectorId = sectorId;
+          this.preferredSectorId = sectorId;
           soundEngine.play('click');
           this.syncAll();
         },
@@ -1586,6 +1702,7 @@ export class V2AppController {
           this.syncAll();
         },
         onSelectCrew: (crewId) => {
+          if (!p.unlockedCrew.includes(crewId)) return;
           draft.crewId = crewId;
           soundEngine.play('click');
           this.syncAll();
@@ -1754,6 +1871,7 @@ export class V2AppController {
     );
 
     const shipMaxHp = V2_SHIPS[draft.shipId].maxHp;
+    const draftMasteryTier = draft.crewId ? p.crewMastery[draft.crewId] ?? 0 : 0;
     this.mountV2CargoBay(previewBay, !readOnly, {
       title: `整备船舱 · ${V2_SHIPS[draft.shipId].name}`,
       prepareMode: true,
@@ -1766,6 +1884,9 @@ export class V2AppController {
           targetPolicy: 'weakest',
           item,
           zone,
+          sectorId: draft.sectorId,
+          crewId: draft.crewId,
+          crewMasteryTier: draftMasteryTier,
         }),
       onChange: (nextBay) => {
         draft.playingDemo = false;
@@ -1833,6 +1954,11 @@ export class V2AppController {
           }
           this.selectedMapNodeId = null;
           this.selectedWreckHotspot = 'armory';
+          const enteredNode = res.run.graph.nodes[nid];
+          const bossId = enteredNode?.combat?.bossId ?? enteredNode?.bossId;
+          if (bossId === 'boss_anvil') this.triggerCrewComm('act1_boss_intro');
+          else if (bossId === 'boss_dreadnought') this.triggerCrewComm('act2_boss_intro');
+          else if (bossId === 'boss_leviathan') this.triggerCrewComm('act3_boss_intro');
           this.setCurrentRun(res.run);
           soundEngine.play('warpJump');
           this.syncAll();
@@ -1983,9 +2109,11 @@ export class V2AppController {
     if (!this.canMutate()) return;
     const res = applyV2EngineerSwap(run, kind);
     if (!res.ok) return this.showToast(res.error ?? '改装失败');
+    const swappedItem = res.run.bay.staging.find((s) => s.item.instanceId.endsWith('_eng'))?.item;
+    const qualityTag = swappedItem?.quality === 'improved' ? '（优良）' : '';
     this.setCurrentRun(res.run);
     soundEngine.play('place');
-    this.showToast(`工程师已改装为「${getV2EquipmentDefByKind(kind, 'common').name}」。`);
+    this.showToast(`林工已改装为「${getV2EquipmentDefByKind(kind, 'common').name}${qualityTag}」。`);
     this.syncAll();
   }
 
@@ -2220,9 +2348,33 @@ export class V2AppController {
           soundEngine.play(result.summary.contractCompleted ? 'contractDeliver' : 'returnDock');
 
           const unlockedParts = [
+            result.actTransition
+              ? `主线推进：${CAMPAIGN_CHAPTERS[result.actTransition.to].title}`
+              : null,
+            result.newlyUnlockedSectors && result.newlyUnlockedSectors.length > 0
+              ? `解锁星区：${result.newlyUnlockedSectors.map((sid) => getV3SectorDef(sid).name).join('、')}`
+              : null,
+            result.crewMasteryUpgraded
+              ? `${V2_CREW[result.crewMasteryUpgraded.crewId].name}专精升至 Lv.${result.crewMasteryUpgraded.toTier}`
+              : null,
             result.unlockedFamilyName ? `解锁体系：${result.unlockedFamilyName}` : null,
             result.unlockedCrewName ? `新船员加入：${result.unlockedCrewName}` : null,
           ].filter(Boolean);
+
+          // Trigger non-blocking crew comm banner on major campaign/crew/relic beats (never auto-opens modal!)
+          if (result.newlyDefeatedBossIds?.includes('boss_anvil')) {
+            this.triggerCrewComm('act1_boss_clear');
+          } else if (result.newlyDefeatedBossIds?.includes('boss_dreadnought')) {
+            this.triggerCrewComm('act2_boss_clear');
+          } else if (result.actTransition?.to === 'act1') {
+            this.triggerCrewComm('act1_start');
+          } else if (result.unlockedCrewName?.includes('苏岚')) {
+            this.triggerCrewComm('crew_salvager_join');
+          } else if (result.unlockedCrewName?.includes('陆衡')) {
+            this.triggerCrewComm('crew_navigator_join');
+          } else if (Object.keys(result.summary.keptRelicsById).length > 0) {
+            this.triggerCrewComm('relic_recovered');
+          }
 
           const reduced = this.save.settings.reducedMotion;
           const notice: V2ReturnDockingNotice = {
@@ -2309,6 +2461,41 @@ export class V2AppController {
 
   // --- Modal Launchers ---
 
+  private openCampaignModal(initialTab: CampaignModalTab = 'roadmap'): void {
+    const applyReadCommIds = (commIds: readonly string[]) => {
+      if (this.isReadOnlyTab || !this.tabGuard.canWrite() || commIds.length === 0) return;
+      const nextProfile = markCampaignCommsRead(this.save.profile, commIds);
+      let bannerCleared = false;
+      if (this.activeCommBanner && commIds.includes(this.activeCommBanner.id)) {
+        this.activeCommBanner = null;
+        bannerCleared = true;
+      }
+      if (nextProfile !== this.save.profile) {
+        this.save = { ...this.save, profile: nextProfile };
+        this.persist();
+        if (!this.getCurrentRun() && !this.prepareDraft) {
+          this.renderBaseHeroOverlay();
+        }
+      }
+      if (bannerCleared) {
+        this.renderBanners();
+      }
+    };
+
+    openV3CampaignModal(this.modalHostEl, () => this.save.profile, {
+      readOnly: this.isReadOnlyTab,
+      initialTab,
+      onMarkCommRead: (commId: string) => applyReadCommIds([commId]),
+      onMarkCommsRead: (commIds: readonly string[]) => applyReadCommIds(commIds),
+      onSelectSectorFromCampaign: (sectorId: SectorId) => {
+        if (!this.canMutate()) return;
+        if (!this.save.profile.campaign.unlockedSectors.includes(sectorId)) return;
+        this.preferredSectorId = sectorId;
+        this.openPrepareForContract(this.pickRecommendedContractId(this.save.profile), sectorId);
+      },
+    });
+  }
+
   private openFacilitiesModal(): void {
     openV2FacilitiesDrawerModal(this.modalHostEl, () => this.save.profile, {
       readOnly: this.isReadOnlyTab,
@@ -2352,6 +2539,8 @@ export class V2AppController {
         this.showcaseRun = null;
         this.prepareDraft = null;
         this.activeDockingNotice = null;
+        this.activeCommBanner = null;
+        this.preferredSectorId = null;
         this.persist();
         soundEngine.play('click');
         this.showToast('远航进度已重置（经典版旧档不受影响）。');

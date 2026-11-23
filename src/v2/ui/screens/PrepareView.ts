@@ -1,6 +1,6 @@
 import { getItemImageUrl, getPlayerShipImageUrl } from '../../../assets/itemArt';
 import { V2_CONTRACT_TEMPLATES } from '../../data/contracts';
-import { V2_CREW, V2_CREW_ORDER, type V2CrewId } from '../../data/crew';
+import { V2_CREW, V2_CREW_ORDER, getV2CrewMasteryTierDef, type V2CrewId } from '../../data/crew';
 import {
   V2_ARCHETYPE_LABELS,
   V2_EQUIPMENT_DEFS,
@@ -8,13 +8,15 @@ import {
   getV2EquipmentDefByKind,
   type V2ArchetypeId,
 } from '../../data/equipment';
+import { V3_SECTORS, V3_SECTOR_ORDER, getV3SectorDef } from '../../data/sectors';
 import { V2_SHAPES } from '../../data/shapes';
 import { V2_SHIPS, V2_SHIP_ORDER, type V2ShipId } from '../../data/ships';
 import { V2_TRIAL_BUILD_ORDER, V2_TRIAL_BUILDS } from '../../data/trialBuilds';
+import { shouldTriggerRelicPitySignal } from '../../domain/campaign';
 import { V2_MAX_SAVED_PRESETS, type V2PrepareValidation } from '../../domain/loadout';
 import type { SectorId, V2ProfileState, V2TrialBuildId } from '../../domain/types';
-import { svgIcon } from '../icons';
-import { ARCHETYPE_ORDER, SECTOR_DISPLAY_NAMES, type V2PrepareDraft } from './screenTypes';
+import { crewPortraitSvg, svgIcon } from '../icons';
+import { ARCHETYPE_ORDER, type V2PrepareDraft } from './screenTypes';
 
 export interface PrepareViewProps {
   readonly profile: V2ProfileState;
@@ -51,8 +53,17 @@ export function renderPrepareView(
   const contractTpl =
     V2_CONTRACT_TEMPLATES[draft.contractTemplateId] ?? V2_CONTRACT_TEMPLATES.free_salvage;
   const usedOwnedIds = new Set(check.ownedInstancesUsed);
-  const unlockedSectors =
-    p.campaign.unlockedSectors.length > 0 ? p.campaign.unlockedSectors : (['near_orbit'] as const);
+  const unlockedSet = new Set<SectorId>(
+    p.campaign.unlockedSectors.length > 0 ? p.campaign.unlockedSectors : ['near_orbit']
+  );
+  const activeSector = getV3SectorDef(draft.sectorId);
+  const activePity = shouldTriggerRelicPitySignal(p, activeSector.id);
+  const envIcon =
+    activeSector.envModifier.id === 'cryo_ion'
+      ? 'cryo'
+      : activeSector.envModifier.id === 'gravity_tide'
+      ? 'gravity'
+      : 'radar';
 
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root v3-sticky-panel-root" data-testid="prepare-screen">
@@ -63,20 +74,54 @@ export function renderPrepareView(
 
       <div class="v3-panel-scroll-body">
         <div class="v2-prep-group">
-          <div class="v2-prep-label">目标星区</div>
+          <div class="v2-prep-label">目标星区（共 3 星区 · 击败首领逐幕解锁）</div>
           <div class="v2-sector-row" data-testid="sector-selector">
-            ${unlockedSectors
-              .map((sid) => {
-                const info = SECTOR_DISPLAY_NAMES[sid];
-                const active = draft.sectorId === sid;
-                return `<button type="button" class="v2-sector-chip ${active ? 'active' : ''}" data-prep-sector="${sid}" ${
-                  readOnly ? 'disabled' : ''
-                }>
-                  <strong>${svgIcon('radar', 13)} ${info.name}</strong>
-                  <small>${info.brief}</small>
-                </button>`;
-              })
-              .join('')}
+            ${V3_SECTOR_ORDER.map((sid) => {
+              const sec = V3_SECTORS[sid];
+              const unlocked = unlockedSet.has(sid);
+              const active = draft.sectorId === sid;
+              const toneCls =
+                sid === 'frozen_graveyard'
+                  ? 'sector-frozen'
+                  : sid === 'stargate_abyss'
+                  ? 'sector-abyss'
+                  : 'sector-near';
+              const secIco =
+                sec.envModifier.id === 'cryo_ion'
+                  ? 'cryo'
+                  : sec.envModifier.id === 'gravity_tide'
+                  ? 'gravity'
+                  : 'radar';
+              return `<button type="button" class="v2-sector-chip ${toneCls} ${active ? 'active' : ''} ${
+                unlocked ? '' : 'is-locked'
+              }" data-prep-sector="${sid}" data-sector-id="${sid}" data-testid="sector-option-${sid}" data-locked="${
+                unlocked ? 'false' : 'true'
+              }" ${!unlocked || readOnly ? 'disabled' : ''}>
+                <strong>${svgIcon(unlocked ? secIco : 'lock', 13)} ${sec.name}</strong>
+                <small>${
+                  unlocked
+                    ? sec.envModifier.shortBadge
+                    : `未解锁 · ${sec.unlockRequirementText}`
+                }</small>
+              </button>`;
+            }).join('')}
+          </div>
+          <div class="v3-sector-env-card env-${activeSector.envModifier.id}" data-testid="sector-env-card">
+            <div class="v3-sec-env-head">
+              <strong>${svgIcon(envIcon, 14)} ${activeSector.name} · ${activeSector.envModifier.name}</strong>
+              <span class="v3-sec-env-tag">首领：${activeSector.bossName}</span>
+            </div>
+            <div class="v3-sec-env-rule">${activeSector.envModifier.description}</div>
+            <div class="v3-sec-env-foot">
+              <span>赏金倍率 ${Math.round(activeSector.bountyMult * 100)}% · 货物估价 ${Math.round(
+    activeSector.cargoPriceMult * 100
+  )}%</span>
+              <span class="${activePity.triggered ? 'v3-pity-ready-pill' : ''}">${
+    activePity.triggered
+      ? '本趟已触发保底遗物信号！'
+      : `遗物信号保底 ${activePity.counter}/${activePity.threshold}`
+  }</span>
+            </div>
           </div>
         </div>
 
@@ -107,7 +152,7 @@ export function renderPrepareView(
         </div>
 
         <div class="v2-prep-group">
-          <div class="v2-prep-label">舰船与船员</div>
+          <div class="v2-prep-label">舰船与具名船员</div>
           <div class="v2-ship-cards" data-testid="ship-selector">
             ${V2_SHIP_ORDER.map((sid) => {
               const s = V2_SHIPS[sid];
@@ -131,11 +176,29 @@ export function renderPrepareView(
               const c = V2_CREW[cid];
               const unlocked = p.unlockedCrew.includes(cid);
               const active = draft.crewId === cid;
-              return `<button type="button" class="v2-crew-pill ${active ? 'active' : ''}" data-prep-crew="${cid}" ${
-                !unlocked ? 'disabled' : ''
-              }>
-                <strong>${c.name}</strong>
-                <small>${unlocked ? c.abilitySummary : c.unlockHint}</small>
+              const tier = Math.max(0, Math.min(2, Math.floor(p.crewMastery[cid] ?? 0)));
+              const tierDef = getV2CrewMasteryTierDef(cid, tier);
+              const stars = `${'★'.repeat(tier)}${'☆'.repeat(2 - tier)}`;
+              return `<button type="button" class="v2-crew-pill ${active ? 'active' : ''} ${
+                unlocked ? '' : 'is-locked'
+              }" data-prep-crew="${cid}" data-crew-id="${cid}" data-testid="crew-option-${cid}" data-locked="${
+                unlocked ? 'false' : 'true'
+              }" ${!unlocked || readOnly ? 'disabled' : ''}>
+                <div class="v3-crew-pill-inner">
+                  ${crewPortraitSvg(cid, 32)}
+                  <div class="v3-crew-pill-text">
+                    <div class="v3-crew-pill-head">
+                      <strong>${c.name} · ${c.roleTitle}</strong>
+                      <span class="v3-mastery-badge">专精 Lv.${tier} ${stars}</span>
+                    </div>
+                    <small>${unlocked ? `${c.abilityTitle}：${c.abilitySummary}` : c.unlockHint}</small>
+                    ${
+                      unlocked && tier > 0
+                        ? `<span class="v3-crew-perk-line">${tierDef.title}：${tierDef.perkSummary}</span>`
+                        : ''
+                    }
+                  </div>
+                </div>
               </button>`;
             }).join('')}
           </div>
@@ -280,6 +343,7 @@ export function renderPrepareView(
 
   leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-prep-sector]').forEach((btn) => {
     btn.addEventListener('click', () => {
+      if (btn.disabled) return;
       actions.onSelectSector(btn.dataset.prepSector as SectorId);
     });
   });
@@ -300,6 +364,7 @@ export function renderPrepareView(
 
   leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-prep-crew]').forEach((btn) => {
     btn.addEventListener('click', () => {
+      if (btn.disabled) return;
       actions.onSelectCrew(btn.dataset.prepCrew as V2CrewId);
     });
   });

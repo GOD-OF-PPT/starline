@@ -1,3 +1,4 @@
+import { getV3SectorDef } from '../../data/sectors';
 import { V2_SHAPES } from '../../data/shapes';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
 import type { V2MapNode, V2RunState, V2WreckChoice } from '../../domain/types';
@@ -27,12 +28,20 @@ export function renderWreckHotspotOverlay(
   if (!w) return;
 
   const peek = run.crewId === 'salvager';
+  const salvagerT2 = peek && (run.crewMasteryTier ?? 0) >= 2;
+  const sector = getV3SectorDef(run.sectorId);
   const armDef = getAnyV2ItemDef(w.armoryItem.definitionId);
   const cargoSummary = w.cargoItems
-    .map((c) => `${getAnyV2ItemDef(c.definitionId)?.name ?? c.definitionId}(${c.fixedValue}¤)`)
+    .map((c) => {
+      const def = getAnyV2ItemDef(c.definitionId);
+      const shapeLbl = def ? V2_SHAPES[def.shapeId].label : '';
+      return `${def?.name ?? c.definitionId}(${shapeLbl ? `${shapeLbl} · ` : ''}${c.fixedValue}¤)`;
+    })
     .join(' + ');
-  const fuelGain = Math.min(w.reactorFuelGain ?? 2, run.maxFuel - run.fuel);
-  const repairGain = Math.min(w.reactorRepairGain ?? 8, run.maxHp - run.hp);
+  const baseReactorFuel = (w.reactorFuelGain ?? 2) + (salvagerT2 ? 1 : 0);
+  const baseReactorRepair = (w.reactorRepairGain ?? 8) + (salvagerT2 ? 2 : 0);
+  const fuelGain = Math.min(baseReactorFuel, run.maxFuel - run.fuel);
+  const repairGain = Math.min(baseReactorRepair, run.maxHp - run.hp);
 
   let detailHtml = '';
   if (sel === 'armory') {
@@ -41,7 +50,7 @@ export function renderWreckHotspotOverlay(
         <strong>军械舱（1 件设备）</strong>
         <span>${
           peek && armDef
-            ? `拆解专家透视：${armDef.name}（${w.armoryItem.quality === 'improved' ? '优良' : '普通'} · ${V2_SHAPES[armDef.shapeId].label} · 回收 ${w.armoryItem.fixedValue}¤）`
+            ? `打捞师·苏岚透视：${armDef.name}（${w.armoryItem.quality === 'improved' ? '优良' : '普通'} · ${V2_SHAPES[armDef.shapeId].label} · 回收 ${w.armoryItem.fixedValue}¤）`
             : `预计占格 ${w.armorySizeRange} · ${w.armoryValueRange}`
         }</span>
       </div>
@@ -52,8 +61,8 @@ export function renderWreckHotspotOverlay(
   } else if (sel === 'reactor') {
     detailHtml = `
       <div class="v2-wh-confirm-text">
-        <strong>反应舱（深潜续航补给）</strong>
-        <span>不占船舱格位：可抽取剩余燃料 +${w.reactorFuelGain ?? 2} 或应急抢修 +${w.reactorRepairGain ?? 8} 耐久</span>
+        <strong>反应舱（深潜续航补给${salvagerT2 ? ' · 苏岚专精加成' : ''}）</strong>
+        <span>不占船舱格位：可抽取剩余燃料 +${baseReactorFuel} 或应急抢修 +${baseReactorRepair} 耐久</span>
       </div>
       <div class="v2-wh-reactor-btns">
         <button type="button" class="btn btn-primary" data-cut-wreck="reactor_fuel" data-testid="wreck-cut-reactor_fuel" ${
@@ -69,7 +78,7 @@ export function renderWreckHotspotOverlay(
       <div class="v2-wh-confirm-text">
         <strong>货舱（${w.cargoItems.length} 件货物）</strong>
         <span>${
-          peek ? `拆解专家透视：${cargoSummary}` : `预计占格 ${w.cargoSizeRange} · ${w.cargoValueRange}`
+          peek ? `打捞师·苏岚透视：${cargoSummary}` : `预计占格 ${w.cargoSizeRange} · ${w.cargoValueRange}`
         }</span>
       </div>
       <button type="button" class="btn btn-primary" data-cut-wreck="cargo" data-testid="wreck-cut-cargo" ${
@@ -80,7 +89,7 @@ export function renderWreckHotspotOverlay(
 
   overlayEl.innerHTML = `
     <div class="v3-overlay-screen" data-testid="wreck-screen">
-      <div class="scene-stage-tag">${svgIcon('wreck', 13)} 第 ${node.layer} 层 · 漂流残骸（选择 1 处舱室切开）</div>
+      <div class="scene-stage-tag">${svgIcon('wreck', 13)} ${sector.name} · 第 ${node.layer} 层 漂流残骸（选择 1 处舱室切开）</div>
       <!-- M4 (F11) slot: [data-testid="wreck-stability"] & [data-testid="btn-wreck-extract"] -->
 
       <button type="button" class="v2-wreck-hotspot ${sel === 'armory' ? 'active' : ''}"

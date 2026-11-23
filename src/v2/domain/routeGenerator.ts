@@ -1,5 +1,4 @@
 import type { SeededRng } from '../../domain/rng';
-import type { SectorBgIndex } from '../../data/nodes';
 import {
   V2_CARGO_DEFS,
   V2_EXTENDED_RELIC_CARGO_KINDS,
@@ -8,10 +7,8 @@ import {
 } from '../data/cargo';
 import { V2_CONTRACT_TEMPLATES, type V2ContractTemplate } from '../data/contracts';
 import {
-  buildEncounterUnits,
-  getEncounterBounty,
+  buildSectorEnemyEncounter,
   getEncounterImprovedProb,
-  type V2EncounterKind,
 } from '../data/enemies';
 import {
   V2_ARCHETYPE_SUPPORT_PART,
@@ -22,11 +19,14 @@ import {
   type V2Quality,
   type V2UnlockFamilyId,
 } from '../data/equipment';
+import { drawSectorEventPayload } from '../data/events';
+import { getV3SectorDef } from '../data/sectors';
 import { V2_SHAPES } from '../data/shapes';
 import { createV2CargoInstance, createV2EquipmentInstance } from './itemCatalog';
 import { withV2Stream } from './rngStreams';
 import {
   V2_STARTING_FUEL,
+  type SectorId,
   type V2AnomalyPayload,
   type V2CombatPayload,
   type V2ContractInstance,
@@ -41,15 +41,6 @@ import {
   type V2WreckPayload,
 } from './types';
 
-const LAYER_SECTOR_BGS: readonly SectorBgIndex[] = [1, 2, 4, 5, 3, 6];
-
-const REGULAR_ENCOUNTER_KINDS: readonly V2EncounterKind[] = [
-  'patrol',
-  'swarm',
-  'armored',
-  'piercer',
-];
-
 export interface GenerateV2GraphParams {
   readonly runId: string;
   readonly contractTemplateId: string;
@@ -58,23 +49,43 @@ export interface GenerateV2GraphParams {
   readonly streams: V2RngStreams;
   readonly allowImproved: boolean;
   readonly maxLayers?: number;
+  readonly sectorId?: SectorId;
+  readonly endlessThreat?: number;
+  readonly isFinalCampaignRun?: boolean;
+  readonly guaranteedRelicDefId?: string | null;
 }
 
 export interface GenerateV2GraphResult {
   readonly graph: V2StarGraph;
   readonly markedNodeIds: readonly string[];
   readonly nextStreams: V2RngStreams;
+  readonly usedEventIds: readonly string[];
+  readonly relicSignalNodeId: string | null;
 }
 
 function makeNodeId(layer: number, lane: 0 | 1): string {
   return `L${layer}${lane === 0 ? 'A' : 'B'}`;
 }
 
-function pickCargoDefId(rng: SeededRng, layer: number, isEliteOrDeepBonus = false): string {
-  // Preserve v3.0 extended relics in deep layers (4..6) at modest probability (ADR-02)
+function pickCargoDefId(
+  rng: SeededRng,
+  layer: number,
+  sectorId: SectorId,
+  isEliteOrDeepBonus = false
+): string {
+  const sector = getV3SectorDef(sectorId);
+  // Preserve v3.0 extended relics in deep layers (4..6), weighted toward sector signature relics
   if (layer >= 4) {
-    const extProb = isEliteOrDeepBonus ? 0.22 : 0.12;
+    const extProb = isEliteOrDeepBonus
+      ? Math.min(0.4, sector.relicDropChanceDeep + 0.1)
+      : sector.relicDropChanceDeep;
     if (rng.nextFloat() < extProb) {
+      if (sector.signatureRelicIds.length > 0 && rng.nextFloat() < 0.7) {
+        const sigDefId = `cargo.${rng.pick(sector.signatureRelicIds)}`;
+        if (Object.prototype.hasOwnProperty.call(V2_CARGO_DEFS, sigDefId)) {
+          return sigDefId;
+        }
+      }
       const kind = rng.pick(V2_EXTENDED_RELIC_CARGO_KINDS);
       return `cargo.${kind}`;
     }
@@ -87,10 +98,16 @@ function rollQuality(
   rng: SeededRng,
   layer: number,
   isElite: boolean,
-  allowImproved: boolean
+  allowImproved: boolean,
+  sectorId: SectorId
 ): V2Quality {
   if (!allowImproved) return 'common';
-  const prob = getEncounterImprovedProb(isElite ? 'elite' : 'patrol', layer, allowImproved);
+  const sector = getV3SectorDef(sectorId);
+  const baseProb = getEncounterImprovedProb(isElite ? 'elite' : 'patrol', layer, allowImproved);
+  const prob =
+    sectorId === 'near_orbit'
+      ? baseProb
+      : Math.min(0.75, baseProb + sector.improvedProbBonus);
   return rng.nextFloat() < prob ? 'improved' : 'common';
 }
 
@@ -125,6 +142,15 @@ function valueRangeLabel(items: readonly V2ItemInstance[]): string {
  */
 export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2GraphResult {
   const maxLayers = params.maxLayers ?? 6;
+  const sectorId: SectorId = params.sectorId ?? 'near_orbit';
+  const sector = getV3SectorDef(sectorId);
+  const endlessThreat = params.endlessThreat ?? 0;
+  const isFinalCampaignRun = Boolean(params.isFinalCampaignRun);
+  const guaranteedRelicDefId =
+    params.guaranteedRelicDefId &&
+    Object.prototype.hasOwnProperty.call(V2_CARGO_DEFS, params.guaranteedRelicDefId)
+      ? params.guaranteedRelicDefId
+      : null;
   const tpl: V2ContractTemplate =
     V2_CONTRACT_TEMPLATES[params.contractTemplateId] ?? V2_CONTRACT_TEMPLATES.free_salvage;
   const unlockedKinds = getUnlockedEquipmentKinds(params.unlockedFamilies);
@@ -284,52 +310,92 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
   Object.assign(edges, edgeDraw.value);
   streams = edgeDraw.nextStreams;
 
+  // 3b. Deterministically pick 1 reachable non-merchant node for guaranteed pity relic signal if triggered
+  let relicSignalNodeId: string | null = null;
+  if (guaranteedRelicDefId) {
+    const preferredLayers = maxLayers >= 5 ? [3, 4, 5] : Array.from({ length: maxLayers }, (_, i) => i + 1);
+    const nonMerchantNonCombat = (nid: string) => {
+      const t = nodeTypes[nid];
+      return t === 'wreck' || t === 'anomaly' || t === 'distress';
+    };
+    const backboneCandidates = preferredLayers
+      .map((l) => guaranteedPathNodeIds[l - 1])
+      .filter((nid): nid is string => Boolean(nid) && nonMerchantNonCombat(nid));
+
+    if (backboneCandidates.length > 0) {
+      relicSignalNodeId = backboneCandidates[backboneCandidates.length - 1];
+    } else {
+      const midNonCombat: string[] = [];
+      const midCombat: string[] = [];
+      for (const l of preferredLayers) {
+        for (const lane of [0, 1] as const) {
+          const nid = makeNodeId(l, lane);
+          const t = nodeTypes[nid];
+          if (nonMerchantNonCombat(nid)) midNonCombat.push(nid);
+          else if (t === 'combat' || t === 'elite') midCombat.push(nid);
+        }
+      }
+      relicSignalNodeId = midNonCombat[0] ?? midCombat[0] ?? guaranteedPathNodeIds[Math.min(maxLayers - 1, 2)] ?? null;
+    }
+  }
+
   // 4. Populate each node's concrete deterministic payload using its dedicated named PRNG stream!
   const nodes: Record<string, V2MapNode> = {};
+  const usedEventIds: string[] = [];
   let itemSeq = 1;
   const nextUid = (prefix: string) => `${params.runId}_${prefix}_${itemSeq++}`;
 
   for (let layer = 1; layer <= maxLayers; layer++) {
-    const sectorBg = LAYER_SECTOR_BGS[Math.min(LAYER_SECTOR_BGS.length - 1, layer - 1)];
+    const bgIdx = Math.min(sector.layerBgIndices.length - 1, layer - 1);
+    const sectorBg = sector.layerBgIndices[bgIdx];
     for (const lane of [0, 1] as const) {
       const nodeId = makeNodeId(layer, lane);
       const type = nodeTypes[nodeId];
       const isSupportNode = nodeId === supportNodeId;
       const isMarker = contractMarkers.has(nodeId);
+      const isRelicSignalNode = relicSignalNodeId === nodeId && guaranteedRelicDefId !== null;
 
       let combat: V2CombatPayload | undefined;
       let wreck: V2WreckPayload | undefined;
       let merchant: V2MerchantPayload | undefined;
       let anomaly: V2AnomalyPayload | undefined;
       let distress: V2DistressPayload | undefined;
+      let bossId: string | undefined;
+      let eventId: string | undefined;
 
-      if (type === 'combat' || type === 'elite') {
+      if (type === 'combat' || type === 'elite' || type === 'boss') {
         const res = withV2Stream(streams, 'enemies', (rng) => {
-          const encounterKind: V2EncounterKind =
-            type === 'elite'
-              ? 'elite'
-              : layer === 1
-              ? 'patrol'
-              : rng.pick(REGULAR_ENCOUNTER_KINDS);
-          const useLeviathan = type === 'elite' && rng.nextInt(2) === 1;
-          const units = buildEncounterUnits(encounterKind, layer, nodeId, useLeviathan);
+          const enc = buildSectorEnemyEncounter(
+            sectorId,
+            layer,
+            type === 'elite' || type === 'boss' ? 'elite' : 'regular',
+            rng,
+            endlessThreat,
+            {
+              nodeId,
+              allowImproved: params.allowImproved,
+              isFinalCampaignRun,
+            }
+          );
           const payload: V2CombatPayload = {
-            encounterKind,
-            units,
-            bounty: getEncounterBounty(encounterKind, layer),
-            improvedProb: getEncounterImprovedProb(encounterKind, layer, params.allowImproved),
+            encounterKind: enc.encounterKind,
+            units: enc.units,
+            bounty: enc.bounty,
+            improvedProb: enc.improvedProb,
             guaranteedSupportKind: isSupportNode ? supportKind : undefined,
+            bossId: enc.bossId,
           };
-          return payload;
+          return { payload, bossId: enc.bossId };
         });
-        combat = res.value;
+        combat = res.value.payload;
+        bossId = res.value.bossId;
         streams = res.nextStreams;
       } else if (type === 'wreck') {
         const res = withV2Stream(streams, 'events', (rng) => {
           const eqKind: V2EquipmentKind = isSupportNode
             ? supportKind
             : rng.pick(unlockedKinds);
-          const eqQuality = rollQuality(rng, layer, false, params.allowImproved);
+          const eqQuality = rollQuality(rng, layer, false, params.allowImproved, sectorId);
           const armoryItem = createV2EquipmentInstance({
             instanceId: nextUid('wrk_eq'),
             kind: eqKind,
@@ -338,14 +404,25 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
             acquiredDepth: layer,
             location: 'staging',
           });
-          const cargoDef1 = pickCargoDefId(rng, layer, false);
-          const cargoDef2 = pickCargoDefId(rng, layer, false);
+          const cargoDef1 = isRelicSignalNode
+            ? guaranteedRelicDefId!
+            : pickCargoDefId(rng, layer, sectorId, false);
+          const cargoDef2 = pickCargoDefId(rng, layer, sectorId, false);
+          const c1Val =
+            sector.cargoPriceMult === 1
+              ? undefined
+              : Math.max(1, Math.round(computeV2CargoPrice(cargoDef1, layer) * sector.cargoPriceMult));
+          const c2Val =
+            sector.cargoPriceMult === 1
+              ? undefined
+              : Math.max(1, Math.round(computeV2CargoPrice(cargoDef2, layer) * sector.cargoPriceMult));
           const c1 = createV2CargoInstance({
             instanceId: nextUid('wrk_cg'),
             defId: cargoDef1,
             origin: 'loot',
             acquiredDepth: layer,
             location: 'staging',
+            fixedValueOverride: c1Val,
           });
           const c2 = createV2CargoInstance({
             instanceId: nextUid('wrk_cg'),
@@ -353,6 +430,7 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
             origin: 'loot',
             acquiredDepth: layer,
             location: 'staging',
+            fixedValueOverride: c2Val,
           });
           const eqDef = getV2EquipmentDefByKind(eqKind, eqQuality);
           const eqCells = V2_SHAPES[eqDef.shapeId].cells.length;
@@ -379,8 +457,10 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
           const otherPool = unlockedKinds.filter((k) => k !== offerKind1);
           const offerKind2: V2EquipmentKind =
             otherPool.length > 0 ? rng.pick(otherPool) : offerKind1;
-          const q1 = isSupportNode ? 'common' : rollQuality(rng, layer, false, params.allowImproved);
-          const q2 = rollQuality(rng, layer, false, params.allowImproved);
+          const q1 = isSupportNode
+            ? 'common'
+            : rollQuality(rng, layer, false, params.allowImproved, sectorId);
+          const q2 = rollQuality(rng, layer, false, params.allowImproved, sectorId);
 
           const makeOffer = (idx: number, kind: V2EquipmentKind, quality: V2Quality): V2ShopEquipmentOffer => {
             const def = getV2EquipmentDefByKind(kind, quality);
@@ -413,62 +493,21 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
         });
         merchant = res.value;
         streams = res.nextStreams;
-      } else if (type === 'anomaly') {
-        const res = withV2Stream(streams, 'events', (rng) => {
-          const defId = pickCargoDefId(rng, layer, layer >= 4);
-          const def = V2_CARGO_DEFS[defId];
-          const safeCargoItem = createV2CargoInstance({
-            instanceId: nextUid('anom_safe'),
-            defId,
-            origin: 'loot',
-            acquiredDepth: layer,
-            location: 'staging',
-          });
-          const breach1 = createV2CargoInstance({
-            instanceId: nextUid('anom_b1'),
-            defId,
-            origin: 'loot',
-            acquiredDepth: layer,
-            location: 'staging',
-          });
-          const breach2 = createV2CargoInstance({
-            instanceId: nextUid('anom_b2'),
-            defId,
-            origin: 'loot',
-            acquiredDepth: layer,
-            location: 'staging',
-          });
-          const payload: V2AnomalyPayload = {
-            cargoCategoryLabel: `${def.name}（${V2_SHAPES[def.shapeId].label} · 单件 ${computeV2CargoPrice(defId, layer)}¤）`,
-            safeFuelCost: 1,
-            safeCargoItem,
-            breachHpCost: 4,
-            breachCargoItems: [breach1, breach2],
-            chosenOption: null,
-          };
-          return payload;
-        });
-        anomaly = res.value;
-        streams = res.nextStreams;
-      } else if (type === 'distress') {
-        const res = withV2Stream(streams, 'events', (rng) => {
-          const defId = pickCargoDefId(rng, layer, false);
-          const haulCargoItem = createV2CargoInstance({
-            instanceId: nextUid('dist_cg'),
-            defId,
-            origin: 'loot',
-            acquiredDepth: layer,
-            location: 'staging',
-          });
-          const payload: V2DistressPayload = {
-            rescueFuelCost: 1,
-            repairAmount: 10,
-            haulCargoItem,
-            chosenOption: null,
-          };
-          return payload;
-        });
-        distress = res.value;
+      } else if (type === 'anomaly' || type === 'distress') {
+        const res = withV2Stream(streams, 'events', (rng) =>
+          drawSectorEventPayload(sectorId, type, usedEventIds, rng, {
+            layer,
+            nextUid,
+            guaranteedRelicDefId: isRelicSignalNode ? guaranteedRelicDefId : null,
+            cargoPriceMult: sector.cargoPriceMult,
+          })
+        );
+        eventId = res.value.eventId;
+        if (!usedEventIds.includes(eventId)) {
+          usedEventIds.push(eventId);
+        }
+        anomaly = res.value.anomaly;
+        distress = res.value.distress;
         streams = res.nextStreams;
       }
 
@@ -481,6 +520,11 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
         nextNodeIds: edges[nodeId] ?? [],
         contractMarker: isMarker,
         hasSupportGuarantee: isSupportNode,
+        ...(bossId ? { bossId } : {}),
+        ...(isRelicSignalNode
+          ? { hasRelicSignal: true, relicSignalDefId: guaranteedRelicDefId! }
+          : {}),
+        ...(eventId ? { eventId } : {}),
         combat,
         wreck,
         merchant,
@@ -502,6 +546,8 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
     graph,
     markedNodeIds: Array.from(contractMarkers).sort(),
     nextStreams: streams,
+    usedEventIds,
+    relicSignalNodeId,
   };
 }
 

@@ -1,4 +1,6 @@
-import { previewV2CombatNode } from '../../domain/combatV2';
+import { getV2EncounterTemplate } from '../../data/enemies';
+import { getV3SectorDef } from '../../data/sectors';
+import { getEffectiveV2CombatBounty, previewV2CombatNode } from '../../domain/combatV2';
 import type {
   V2EliteTacticChoice,
   V2MapNode,
@@ -31,13 +33,29 @@ export function renderCombatPreView(
   if (!node.combat) return;
 
   const pv = previewV2CombatNode(run, node.nodeId, run.targetPolicy);
-  const isEliteWithTactic = node.type === 'elite' && eliteTacticEnabled;
+  const isEliteWithTactic = (node.type === 'elite' || node.type === 'boss') && eliteTacticEnabled;
+  const sector = getV3SectorDef(run.sectorId);
+  const envIcon =
+    sector.envModifier.id === 'cryo_ion'
+      ? 'cryo'
+      : sector.envModifier.id === 'gravity_tide'
+      ? 'gravity'
+      : 'radar';
+  const encounterTpl = getV2EncounterTemplate(node.combat.encounterKind);
+  const headerLabel = node.combat.bossId || node.bossId ? encounterTpl.name : NODE_TYPE_META[node.type].label;
+
+  const effectiveBounty = getEffectiveV2CombatBounty(run, node.combat.bounty);
 
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root" data-testid="combat-screen">
       <div class="panel-header">
-        <h2>${svgIcon(NODE_TYPE_META[node.type].icon, 16)} 第 ${node.layer} 层 · ${NODE_TYPE_META[node.type].label}</h2>
-        <span class="panel-sub">击破赏金 <strong class="num">+${node.combat.bounty}¤</strong></span>
+        <h2>${svgIcon(NODE_TYPE_META[node.type].icon, 16)} 第 ${node.layer} 层 · ${headerLabel}</h2>
+        <span class="panel-sub">击破赏金 <strong class="num">+${effectiveBounty}¤</strong></span>
+      </div>
+
+      <div class="v3-combat-env-banner env-${sector.envModifier.id}" data-testid="combat-sector-modifier">
+        <span class="v3-sector-mod-badge">${svgIcon(envIcon, 13)} ${sector.name} · ${sector.envModifier.name}</span>
+        <span class="v3-sector-mod-desc">${sector.envModifier.combatRuleSummary}</span>
       </div>
 
       <div class="v2-enemy-roster">
@@ -67,7 +85,7 @@ export function renderCombatPreView(
 
       ${
         pv
-          ? `<div class="v2-combat-preview-card ${pv.outcome === 'victory' ? 'ok' : 'danger'}">
+          ? `<div class="v2-combat-preview-card ${pv.outcome === 'victory' ? 'ok' : 'danger'}" data-preview-final-hp="${pv.finalPlayerHpAfterRepair}">
               <div class="v2-cp-head">
                 <strong>${isEliteWithTactic ? '按正常执行推演：' : '战果预估：'}${
               pv.outcome === 'victory' ? '预计获胜' : '有战败风险'
@@ -93,7 +111,9 @@ export function renderCombatPreView(
                             r.playerAttacks.reduce((s, a) => s + a.appliedDamage, 0)
                           }伤${r.counterAttack ? `+反击${r.counterAttack.appliedDamage}` : ''} · 敌方 ${
                             r.enemyAttacks.reduce((s, a) => s + a.hullDamage, 0)
-                          }直伤(盾吸${r.shieldAbsorbedTotal}) → ${r.playerHpAfter}HP</div>`
+                          }直伤(盾吸${r.shieldAbsorbedTotal}) → ${r.playerHpAfter}HP${
+                            r.envModifierEvent ? ` · [${r.envModifierEvent}]` : ''
+                          }</div>`
                         )
                         .join('')}
                     </div>`
@@ -191,6 +211,15 @@ export function renderCombatLiveOverlay(
     `
     : '';
 
+  const sector = getV3SectorDef(run.sectorId);
+  const envPillHtml =
+    sector.envModifier.id !== 'none'
+      ? `<span class="combat-pill v3-env-pill env-${sector.envModifier.id}" data-testid="combat-sector-modifier">${svgIcon(
+          sector.envModifier.id === 'cryo_ion' ? 'cryo' : 'gravity',
+          12
+        )} ${sector.name} · ${sector.envModifier.name}</span>`
+      : '';
+
   overlayEl.innerHTML = `
     <div class="v3-overlay-screen" data-testid="combat-screen">
       <div class="combat-hud-bar v2-combat-hero-hud">
@@ -203,6 +232,7 @@ export function renderCombatLiveOverlay(
           </span>
           <span class="combat-pill">${svgIcon('shield', 13)} <strong class="num">${liveCombatPlayerShield}</strong></span>
           <span class="combat-pill">${svgIcon('combat', 13)} 敌 <strong class="num">${liveCombatEnemiesAlive}</strong></span>
+          ${envPillHtml}
         </div>
         <div class="v2-combat-ctrl-group">
           <button type="button" class="btn btn-sm btn-ghost" id="v2-combat-peek-bay">${svgIcon('grid', 13)} 查看船舱</button>

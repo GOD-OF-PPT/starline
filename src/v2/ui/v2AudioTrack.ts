@@ -15,7 +15,11 @@ export function resolveV2BgmTrack(params: {
   if (run.phase === 'ENCOUNTER' && run.currentNodeId) {
     const node = run.graph.nodes[run.currentNodeId];
     const isBossOrElite = Boolean(
-      node && (node.type === 'elite' || node.combat?.units.some((u) => u.isBoss))
+      node &&
+        (node.type === 'elite' ||
+          node.type === 'boss' ||
+          Boolean(node.bossId) ||
+          node.combat?.units.some((u) => u.isBoss))
     );
     if (isBossOrElite) return 'boss';
   }

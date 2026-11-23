@@ -1,4 +1,5 @@
 import { V2_EQUIPMENT_DEFS, V2_WAREHOUSE_CAPACITY } from '../../data/equipment';
+import { previewSettlementCampaignOutcomes } from '../../domain/campaign';
 import type { V2SettlementSummary } from '../../domain/settlementV2';
 import type {
   V2PlacedItem,
@@ -121,6 +122,11 @@ export function renderSettlementView(
               ? `
                 <div class="v2-mig-row"><span>出售物品收益</span><strong class="num">+${summary.soldItemsCredits}¤</strong></div>
                 ${
+                  (summary.crewMasteryBonusCredits ?? 0) > 0
+                    ? `<div class="v2-mig-row"><span>苏岚专精估价加成 (+15%)</span><strong class="num">+${summary.crewMasteryBonusCredits}¤</strong></div>`
+                    : ''
+                }
+                ${
                   summary.contractRewardCredits > 0
                     ? `<div class="v2-mig-row"><span>委托悬赏奖金</span><strong class="num">+${summary.contractRewardCredits}¤</strong></div>`
                     : ''
@@ -145,10 +151,30 @@ export function renderSettlementView(
 
         ${
           !run.isShowcase
-            ? `<div class="v2-settle-goal-hint ${nextGoal.ready ? 'is-ready' : ''}">
-                <span>下一基地目标：<strong>${nextGoal.title}</strong></span>
-                <small>${nextGoal.detail}</small>
-              </div>`
+            ? (() => {
+                const campPreview = previewSettlementCampaignOutcomes(p, run, summary);
+                const campCard =
+                  campPreview.headlines.length > 0 || campPreview.pityLine
+                    ? `<div class="v3-settle-campaign-card">
+                        <div class="v3-sc-title">${svgIcon('campaign', 13)} 战役与专精推进预览</div>
+                        ${campPreview.headlines
+                          .map((h) => `<div class="v3-sc-line">${h}</div>`)
+                          .join('')}
+                        ${
+                          campPreview.pityLine
+                            ? `<div class="v3-sc-pity">${campPreview.pityLine}</div>`
+                            : ''
+                        }
+                      </div>`
+                    : '';
+                return `
+                  <div class="v2-settle-goal-hint ${nextGoal.ready ? 'is-ready' : ''}">
+                    <span>下一基地目标：<strong>${nextGoal.title}</strong></span>
+                    <small>${nextGoal.detail}</small>
+                  </div>
+                  ${campCard}
+                `;
+              })()
             : ''
         }
 
