@@ -1,7 +1,8 @@
 import type { V2EquipmentKind } from '../../data/equipment';
+import { getV3GadgetDef } from '../../data/gadgets';
 import { V2_SHIPS } from '../../data/ships';
 import { canPerformSurveyAtCurrentNode, isContractReadyForDelivery } from '../../domain/contracts';
-import { isAtTerminalLayer } from '../../domain/encounter';
+import { canUseV3GadgetInRun, isAtTerminalLayer } from '../../domain/encounter';
 import { deriveV2ShipVisualSpec } from '../../domain/shipVisualSpec';
 import type { V2RunState } from '../../domain/types';
 import { svgIcon } from '../icons';
@@ -17,6 +18,7 @@ export interface ArrangeViewActions {
   readonly onToggleShipPreview: () => void;
   readonly onEngineerSwap: (kind: V2EquipmentKind) => void;
   readonly onSurveyScan: () => void;
+  readonly onUseGadget?: (instanceId: string) => void;
   readonly onAbortContract: () => void;
   readonly onLeaveArrange: (terminal: boolean) => void;
 }
@@ -46,6 +48,30 @@ export function renderArrangeView(
   const visualSpec = deriveV2ShipVisualSpec(run.bay);
   const engineerBannerHtml = renderEngineerSwapBannerHtml(run, readOnly);
 
+  const arrangeGadgets = run.bay.placed
+    .map((p) => ({ item: p.item, def: getV3GadgetDef(p.item.definitionId) }))
+    .filter(
+      (entry): entry is { item: typeof entry.item; def: NonNullable<typeof entry.def> } =>
+        Boolean(entry.def && entry.def.usableIn === 'map_arrange')
+    );
+
+  const arrangeGadgetBarHtml =
+    arrangeGadgets.length > 0 && actions.onUseGadget
+      ? `<div class="v3-gadget-bar" data-testid="arrange-gadget-bar">
+          <span class="v3-gadget-bar-label">${svgIcon('bolt', 12)} 战术消耗装置</span>
+          <div class="v3-gadget-bar-btns">
+            ${arrangeGadgets
+              .map(({ item, def }) => {
+                const chk = canUseV3GadgetInRun(run, item.instanceId);
+                return `<button type="button" class="btn btn-sm btn-secondary v3-gadget-use-btn" data-use-gadget="${item.instanceId}" data-gadget-kind="${def.kind}" data-gadget-id="${def.kind}" data-testid="btn-use-gadget-${def.kind}" title="${chk.reason ?? def.summary}" ${
+                  readOnly || !chk.usable ? 'disabled' : ''
+                }>使用 ${def.buttonLabel}</button>`;
+              })
+              .join('')}
+          </div>
+        </div>`
+      : '';
+
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root" data-testid="arrange-screen">
       <div class="panel-header">
@@ -73,6 +99,7 @@ export function renderArrangeView(
       </div>
 
       ${engineerBannerHtml}
+      ${arrangeGadgetBarHtml}
 
       ${
         surveyCheck.canSurvey
@@ -124,6 +151,12 @@ export function renderArrangeView(
   leftPanelEl
     .querySelector('#v2-arrange-abort')
     ?.addEventListener('click', actions.onAbortContract);
+
+  leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-use-gadget]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      actions.onUseGadget?.(btn.dataset.useGadget!);
+    });
+  });
 
   leftPanelEl
     .querySelector('#v2-btn-leave-arrange')

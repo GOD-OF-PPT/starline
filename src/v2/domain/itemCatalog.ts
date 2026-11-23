@@ -6,6 +6,11 @@ import {
   type V2EquipmentKind,
   type V2Quality,
 } from '../data/equipment';
+import {
+  V3_GADGET_DEFS,
+  type V3GadgetDef,
+  type V3GadgetKind,
+} from '../data/gadgets';
 import type { V2ShapeId } from '../data/shapes';
 import type {
   V2ItemInstance,
@@ -17,7 +22,7 @@ import type {
 
 export interface V2UnifiedItemDef {
   readonly defId: string;
-  readonly category: 'equipment' | 'cargo' | 'mission';
+  readonly category: 'equipment' | 'cargo' | 'mission' | 'gadget';
   readonly name: string;
   readonly shortName: string;
   readonly shapeId: V2ShapeId;
@@ -27,6 +32,7 @@ export interface V2UnifiedItemDef {
   readonly relicId?: string;
   readonly equipmentDef?: V2EquipmentDef;
   readonly cargoDef?: V2CargoDef;
+  readonly gadgetDef?: V3GadgetDef;
 }
 
 function hasOwn(obj: object, key: string): boolean {
@@ -62,6 +68,20 @@ export function getAnyV2ItemDef(defId: string): V2UnifiedItemDef | undefined {
       isCollectible: cg.isCollectible,
       relicId: cg.relicId,
       cargoDef: cg,
+    };
+  }
+  if (hasOwn(V3_GADGET_DEFS, defId)) {
+    const gd = V3_GADGET_DEFS[defId];
+    return {
+      defId: gd.defId,
+      category: 'gadget',
+      name: gd.name,
+      shortName: gd.shortName,
+      shapeId: gd.shapeId,
+      quality: 'common',
+      summary: gd.summary,
+      isCollectible: false,
+      gadgetDef: gd,
     };
   }
   return undefined;
@@ -121,6 +141,30 @@ export function createV2CargoInstance(params: {
     acquiredDepth: params.acquiredDepth,
     fixedValue,
     missionBinding: params.missionBinding,
+    location: params.location,
+  };
+}
+
+export function createV3GadgetInstance(params: {
+  readonly instanceId: string;
+  readonly kind: V3GadgetKind;
+  readonly origin: 'owned' | 'loot';
+  readonly acquiredDepth: number;
+  readonly location: V2ItemLocation;
+}): V2ItemInstance {
+  const key = `gadget.${params.kind}`;
+  if (!hasOwn(V3_GADGET_DEFS, key)) {
+    throw new Error(`Unknown V3 gadget defId: ${key}`);
+  }
+  const def = V3_GADGET_DEFS[key];
+  return {
+    instanceId: params.instanceId,
+    definitionId: def.defId,
+    category: 'gadget',
+    quality: 'common',
+    origin: params.origin,
+    acquiredDepth: params.acquiredDepth,
+    fixedValue: def.fixedValue,
     location: params.location,
   };
 }

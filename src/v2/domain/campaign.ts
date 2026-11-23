@@ -128,13 +128,17 @@ export function shouldTriggerRelicPitySignal(
 ): RelicPitySignalStatus {
   const raw = profile.campaign.relicPityCounters[sectorId] ?? 0;
   const counter = Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0;
+  const threshold =
+    (profile.facilityTiers?.display ?? 0) >= 3
+      ? Math.max(2, RELIC_PITY_THRESHOLD - 1)
+      : RELIC_PITY_THRESHOLD;
   const relicDefId = getNextUncollectedSectorRelicDefId(profile, sectorId);
-  const triggered = counter >= RELIC_PITY_THRESHOLD && relicDefId !== null;
+  const triggered = counter >= threshold && relicDefId !== null;
   return {
     triggered,
     relicDefId: triggered ? relicDefId : null,
     counter,
-    threshold: RELIC_PITY_THRESHOLD,
+    threshold,
   };
 }
 

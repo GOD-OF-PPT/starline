@@ -3,19 +3,23 @@ import { openManagedModal, type ManagedModalHandle } from '../../ui/Modals';
 import { V2_CARGO_DEFS } from '../data/cargo';
 import { V2_EQUIPMENT_DEFS } from '../data/equipment';
 import {
-  V2_FACILITIES,
-  V2_FACILITY_ORDER,
   V2_RELICS,
   V2_RELIC_ORDER,
-  type V2FacilityId,
+  V3_RELIC_PASSIVES,
+  V3_STATION_FACILITIES,
+  V3_STATION_FACILITY_ORDER,
+  type V3StationFacilityId,
 } from '../data/facilities';
+import { V3_GADGET_DEFS } from '../data/gadgets';
 import { V2_SHAPES } from '../data/shapes';
+import { V2_SHIP_ORDER } from '../data/ships';
 import { V2_TRIAL_BUILD_ORDER, V2_TRIAL_BUILDS } from '../data/trialBuilds';
 import { getAnyV2ItemDef } from '../domain/itemCatalog';
 import type { V1MigrationInspection } from '../domain/migration';
 import {
-  canBuildV2Facility,
   canRestoreV2Relic,
+  canUpgradeV3Facility,
+  getEffectiveWarehouseCapacity,
   getV2RelicSummary,
 } from '../domain/progressionV2';
 import {
@@ -95,69 +99,113 @@ export function openV2FacilitiesDrawerModal(
   getProfile: () => V2ProfileState,
   options: {
     readonly readOnly: boolean;
-    readonly onBuild: (fid: V2FacilityId) => { readonly ok: boolean; readonly error?: string };
+    readonly onUpgrade: (
+      fid: V3StationFacilityId
+    ) => { readonly ok: boolean; readonly error?: string; readonly newTier?: number };
   }
 ): void {
   let feedback: { readonly text: string; readonly isError: boolean } | null = null;
-  openTitledV2Modal(host, { title: '空间站扩建与船坞设施', dismissible: true }, (body) => {
-    const renderBody = () => {
-      const p = getProfile();
-      body.innerHTML = `
-        <div class="v2-wh-summary">
-          <span>当前信用点：<strong class="num">${p.credits}¤</strong></span>
-          <span>已解锁舰船：<strong class="num">${p.unlockedShips.length}/3</strong></span>
-          <span>船员名册：<strong class="num">${p.unlockedCrew.length}/3</strong></span>
-        </div>
-        ${
-          feedback
-            ? `<div class="system-banner ${
-                feedback.isError ? 'banner-danger' : 'banner-warn'
-              }" style="margin:8px 0;">${feedback.text}</div>`
-            : ''
-        }
-        <div class="v2-facility-list">
-          ${V2_FACILITY_ORDER.map((fid) => {
-            const def = V2_FACILITIES[fid];
-            const built = p.buildings[fid];
-            const check = canBuildV2Facility(p, fid);
-            return `<div class="v2-facility-card ${built ? 'built' : ''}">
-              <div class="v2-fac-main">
-                <div class="v2-fac-title">
-                  <strong>${def.name}</strong>
-                  <span class="v2-fac-badge ${built ? 'done' : ''}">${
-              built ? '已启用' : def.cost === 0 ? '教学免费' : `${def.cost}¤`
-            }</span>
-                </div>
-                <div class="v2-fac-desc">${def.effectSummary}</div>
-                ${!built && check.reason ? `<div class="v2-fac-req">${check.reason}</div>` : ''}
-              </div>
-              <div class="v2-fac-act">
-                ${
-                  built
-                    ? `<span class="v2-built-ok">运行中</span>`
-                    : `<button type="button" class="btn btn-sm btn-primary" data-modal-build="${fid}" ${
-                        options.readOnly || !check.canBuild ? 'disabled' : ''
-                      }>${def.cost === 0 ? '首航解锁' : `建造 ${def.cost}¤`}</button>`
-                }
-              </div>
-            </div>`;
-          }).join('')}
-        </div>
-      `;
+  openTitledV2Modal(
+    host,
+    { title: '空间站设施扩建（T1–T3 阶升级）', cardClass: 'v3-facilities-modal', dismissible: true },
+    (body) => {
+      const renderBody = () => {
+        const p = getProfile();
+        const warehouseCap = getEffectiveWarehouseCapacity(p);
+        body.innerHTML = `
+          <div class="v2-wh-summary">
+            <span>信用点：<strong class="num">${p.credits}¤</strong></span>
+            <span class="v3-parts-pill">${svgIcon('parts', 13)} 精密零件：<strong class="num">${p.salvageParts}</strong></span>
+            <span>舰船：<strong class="num">${p.unlockedShips.length}/${V2_SHIP_ORDER.length}</strong></span>
+            <span>设备库上限：<strong class="num">${warehouseCap}</strong></span>
+          </div>
+          ${
+            feedback
+              ? `<div class="system-banner ${
+                  feedback.isError ? 'banner-danger' : 'banner-warn'
+                }" style="margin:8px 0;">${feedback.text}</div>`
+              : ''
+          }
+          <div class="v2-facility-list v3-facility-list">
+            ${V3_STATION_FACILITY_ORDER.map((fid) => {
+              const def = V3_STATION_FACILITIES[fid];
+              const check = canUpgradeV3Facility(p, fid);
+              const curTier = check.currentTier;
+              const isMax = curTier >= 3;
+              const nextSpec = check.nextSpec;
+              const costParts: string[] = [];
+              if (nextSpec) {
+                if (nextSpec.creditCost > 0) costParts.push(`${nextSpec.creditCost}¤`);
+                if (nextSpec.partsCost > 0) costParts.push(`${nextSpec.partsCost} 精密零件`);
+              }
+              const costText = costParts.length > 0 ? costParts.join(' + ') : '首航免费';
+              const btnLabel = !nextSpec
+                ? '已满级 T3'
+                : nextSpec.creditCost === 0 && nextSpec.partsCost === 0
+                ? '首航解锁'
+                : nextSpec.tier === 1
+                ? `建造 T1（${costText}）`
+                : `升级 T${nextSpec.tier}（${costText}）`;
+              const activeDesc =
+                curTier > 0
+                  ? `当前 T${curTier}：${def.tiers[curTier - 1].effectSummary}`
+                  : `未建 · T1 效果：${def.tiers[0].effectSummary}`;
+              const nextDesc =
+                nextSpec && curTier > 0
+                  ? `<div class="v3-fac-next-desc">下一阶 T${nextSpec.tier}：${nextSpec.effectSummary}</div>`
+                  : '';
 
-      body.querySelectorAll<HTMLButtonElement>('[data-modal-build]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const fid = btn.dataset.modalBuild as V2FacilityId;
-          const res = options.onBuild(fid);
-          feedback = res.ok
-            ? { text: `「${V2_FACILITIES[fid].name}」已建成启用！`, isError: false }
-            : { text: res.error ?? '无法建造', isError: true };
-          renderBody();
+              return `<div class="v2-facility-card v3-facility-card ${curTier > 0 ? 'built' : ''} ${
+                isMax ? 'is-max-tier' : ''
+              }" data-facility-id="${fid}" data-facility-tier="${curTier}">
+                <div class="v2-fac-main">
+                  <div class="v2-fac-title">
+                    <strong>${def.name}</strong>
+                    <span class="v2-fac-badge ${curTier > 0 ? 'done' : ''}">${
+                isMax ? '已满级 T3' : curTier > 0 ? `T${curTier}/T3` : '未建'
+              }</span>
+                    <span class="v3-fac-tier-pips" aria-hidden="true">
+                      <i class="${curTier >= 1 ? 'on' : ''}">T1</i>
+                      <i class="${curTier >= 2 ? 'on' : ''}">T2</i>
+                      <i class="${curTier >= 3 ? 'on' : ''}">T3</i>
+                    </span>
+                  </div>
+                  <div class="v2-fac-desc">${activeDesc}</div>
+                  ${nextDesc}
+                  ${!isMax && check.reason ? `<div class="v2-fac-req">${check.reason}</div>` : ''}
+                </div>
+                <div class="v2-fac-act">
+                  ${
+                    isMax
+                      ? `<span class="v2-built-ok">满级运行中</span>`
+                      : `<button type="button" class="btn btn-sm btn-primary" data-modal-build="${fid}" data-testid="btn-build-${fid}" ${
+                          options.readOnly || !check.canUpgrade ? 'disabled' : ''
+                        }>${btnLabel}</button>`
+                  }
+                </div>
+              </div>`;
+            }).join('')}
+          </div>
+        `;
+
+        body.querySelectorAll<HTMLButtonElement>('[data-modal-build]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fid = btn.dataset.modalBuild as V3StationFacilityId;
+            const res = options.onUpgrade(fid);
+            const name = V3_STATION_FACILITIES[fid]?.name ?? fid;
+            feedback = res.ok
+              ? {
+                  text: `「${name}」已升至 T${res.newTier ?? 1} 阶并立即生效！`,
+                  isError: false,
+                }
+              : { text: res.error ?? '无法扩建或升级', isError: true };
+            renderBody();
+          });
         });
-      });
-    };
-    renderBody();
-  });
+      };
+      renderBody();
+    }
+  );
 }
 
 export function openV2ShowcasePickerModal(
@@ -300,11 +348,11 @@ export function openV2HelpModal(host: HTMLElement): void {
         </ul>
       </div>
       <div class="help-section">
-        <h3>三、三种主要打法与邻接联动</h3>
+        <h3>三、船体供能格、新模块、消耗装置与藏品被动</h3>
         <ul>
-          <li><strong>重炮破甲</strong>：单发高伤击穿重甲；贴邻<strong>蓄能器</strong>抢占第 1、3、5 轮先手开火。</li>
-          <li><strong>无人机编队</strong>：机库每轮自动扩编可数无人机群；贴邻<strong>编队中继</strong>将上限升至 4 架。</li>
-          <li><strong>护盾反击</strong>：厚盾吸收敌弹后，贴邻<strong>反击器</strong>按实吸护盾比例劈出反击电弧（穿盾伤害不计入吸收）。</li>
+          <li><strong>船体供能格（⚡）</strong>：4 艘舰船均配有高亮供能格，装备覆盖供能格即可获得超导增幅（激光+1伤、重炮+3伤、护盾+2盾、导弹舱+1发、排热阀+1回盾等）。</li>
+          <li><strong>跨体系模块与 1×1 消耗装置</strong>：含冷却排热阀、货舱谐振仪、EMP 干扰器、超频核心、磁力拆解爪、齐射导弹舱，以及 4 种一次性消耗装置（应急维修包 / 过载电池 / 跃迁燃料罐 / 切割稳定器）。</li>
+          <li><strong>空间站 T1–T3 扩建与遗物被动</strong>：6 大部门可升至 T3，船坞 T3 解锁旗舰「星门巡洋舰」；4 件遗物在藏品馆<strong>修复陈列后</strong>立即激活全局被动（星盘+1油全图透视、冻珀+4HP、量子核+1预算、黑曜冠徽首领+1指令）。</li>
         </ul>
       </div>
       <div class="help-section">
@@ -491,7 +539,8 @@ export function openV2WarehouseModal(
 export function openV2CodexModal(host: HTMLElement, profile: V2ProfileState): void {
   const eqList = Object.values(V2_EQUIPMENT_DEFS);
   const cargoList = Object.values(V2_CARGO_DEFS);
-  const allDefs = [...eqList, ...cargoList];
+  const gadgetList = Object.values(V3_GADGET_DEFS);
+  const allDefs = [...eqList, ...gadgetList, ...cargoList];
   const discovered = new Set(profile.discoveredItems);
   const seen = new Set([...profile.seenItems, ...profile.discoveredItems]);
 
@@ -503,7 +552,7 @@ export function openV2CodexModal(host: HTMLElement, profile: V2ProfileState): vo
   openTitledV2Modal(
     host,
     {
-      title: `装备与货物图鉴 (${discoveredCount}/${allDefs.length} · ${pct}%)`,
+      title: `装备、装置与货物图鉴 (${discoveredCount}/${allDefs.length} · ${pct}%)`,
       dismissible: true,
     },
     (body) => {
@@ -524,12 +573,15 @@ export function openV2CodexModal(host: HTMLElement, profile: V2ProfileState): vo
                 ? 'seen'
                 : 'locked';
               const isEq = d.defId.startsWith('equipment.');
+              const isGadget = d.defId.startsWith('gadget.');
               const isMission = d.defId.startsWith('mission.');
               const cargoDef = V2_CARGO_DEFS[d.defId];
               const categoryLabel = isEq
                 ? d.defId.endsWith('.improved')
                   ? '优良设备'
                   : '普通设备'
+                : isGadget
+                ? '战术消耗装置'
                 : isMission
                 ? '任务物资'
                 : cargoDef?.isCollectible
@@ -539,6 +591,8 @@ export function openV2CodexModal(host: HTMLElement, profile: V2ProfileState): vo
                 state === 'locked'
                   ? isEq
                     ? '未发现模块'
+                    : isGadget
+                    ? '未发现装置'
                     : isMission
                     ? '未知任务物资'
                     : '未知货物'
@@ -590,7 +644,7 @@ export function openV2RelicGalleryModal(
   }
 ): void {
   let msg: string | null = null;
-  openTitledV2Modal(host, { title: '星际藏品展馆 (4 件稀世遗物)', dismissible: true }, (body) => {
+  openTitledV2Modal(host, { title: '星际藏品展馆 (4 件稀世遗物 · 修复激活全局被动)', dismissible: true }, (body) => {
     const renderBody = () => {
       const profile = getProfile();
       const sum = getV2RelicSummary(profile);
@@ -604,23 +658,31 @@ export function openV2RelicGalleryModal(
         <div class="relic-gallery-grid">
           ${V2_RELIC_ORDER.map((rid) => {
             const def = V2_RELICS[rid];
+            const passive = V3_RELIC_PASSIVES[rid];
             const st = profile.relics[rid] ?? { storedCount: 0, restored: false };
             const check = canRestoreV2Relic(profile, rid);
             const itemDefId = `cargo.${rid}`;
-            return `<div class="relic-card ${st.restored ? 'restored' : ''}">
+            return `<div class="relic-card ${st.restored ? 'restored' : ''}" data-relic-id="${rid}">
               <img class="relic-thumb" src="${getItemImageUrl(itemDefId)}" alt="${def.name}" />
               <div class="relic-info">
                 <div class="relic-title">${def.name} ${
-              st.restored ? '<span class="v2-bp-badge unlocked">展台陈列中</span>' : ''
+              st.restored
+                ? '<span class="v2-bp-badge unlocked">展台陈列 · 被动激活</span>'
+                : '<span class="v2-bp-badge locked">修复后激活被动</span>'
             }</div>
                 <div class="relic-lore">${def.lore}</div>
+                ${
+                  passive
+                    ? `<div class="v3-relic-passive-line ${st.restored ? 'active' : ''}">${svgIcon('bolt', 12)} ${passive.effectText}</div>`
+                    : ''
+                }
                 <div class="relic-status">库藏实物：${st.storedCount} · 修复费用：${def.restoreCost}¤</div>
               </div>
               <div>
                 ${
                   st.restored
                     ? `<span style="color:var(--accent-energy);font-size:12px;font-weight:700;">已修复</span>`
-                    : `<button type="button" class="btn btn-sm btn-primary" data-restore-relic="${rid}" ${
+                    : `<button type="button" class="btn btn-sm btn-primary" data-restore-relic="${rid}" data-testid="btn-restore-relic-${rid}" ${
                         options.readOnly || !check.canRestore ? 'disabled' : ''
                       }>${check.canRestore ? `修复 (${def.restoreCost}¤)` : check.reason ?? '暂不可修'}</button>`
                 }
@@ -633,7 +695,7 @@ export function openV2RelicGalleryModal(
       body.querySelectorAll<HTMLButtonElement>('[data-restore-relic]').forEach((btn) => {
         btn.addEventListener('click', () => {
           const res = options.onRestore(btn.dataset.restoreRelic!);
-          msg = res.ok ? '藏品修复成功！已陈列至拆解站主展台。' : res.error ?? '修复失败';
+          msg = res.ok ? '藏品修复成功！已陈列至拆解站主展台并激活常驻被动。' : res.error ?? '修复失败';
           renderBody();
         });
       });

@@ -9,6 +9,8 @@ import {
   type V2ArchetypeId,
 } from '../../data/equipment';
 import { V3_FACTIONS } from '../../data/factions';
+import { V3_RELIC_PASSIVES } from '../../data/facilities';
+import { getV3GadgetDef } from '../../data/gadgets';
 import { V3_SECTORS, V3_SECTOR_ORDER, getV3SectorDef } from '../../data/sectors';
 import { V2_SHAPES } from '../../data/shapes';
 import { V2_SHIPS, V2_SHIP_ORDER, type V2ShipId } from '../../data/ships';
@@ -16,7 +18,8 @@ import { V2_TRIAL_BUILD_ORDER, V2_TRIAL_BUILDS } from '../../data/trialBuilds';
 import { shouldTriggerRelicPitySignal } from '../../domain/campaign';
 import { previewContractBonusHint } from '../../domain/contracts';
 import { getEffectiveShipLoadoutBudget, getEffectiveShipMaxHp } from '../../domain/dismantle';
-import { V2_MAX_SAVED_PRESETS, type V2PrepareValidation } from '../../domain/loadout';
+import type { V2PrepareValidation } from '../../domain/loadout';
+import { getActiveRelicPassives, getEffectiveMaxPresets } from '../../domain/progressionV2';
 import type { SectorId, V2ProfileState, V2TrialBuildId } from '../../domain/types';
 import { crewPortraitSvg, svgIcon } from '../icons';
 import { ARCHETYPE_ORDER, type V2PrepareDraft } from './screenTypes';
@@ -70,6 +73,8 @@ export function renderPrepareView(
 
   const contractFaction = contractTpl.factionId ? V3_FACTIONS[contractTpl.factionId] : null;
   const bonusHint = previewContractBonusHint(contractTpl);
+  const relicPassives = getActiveRelicPassives(p);
+  const maxPresets = getEffectiveMaxPresets(p);
 
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root v3-sticky-panel-root" data-testid="prepare-screen">
@@ -152,10 +157,10 @@ export function renderPrepareView(
 
         <div class="v2-prep-group v2-trial-section">
           <div class="v2-prep-label-row">
-            <span class="v2-prep-label">${svgIcon('bolt', 13)} 零门槛试航方案（一键试玩三大流派 + 实战微演示）</span>
+            <span class="v2-prep-label">${svgIcon('bolt', 13)} 全息战术模板（整套模拟体验 + 实战微演示）</span>
             ${
               draft.trialBuildId
-                ? `<button type="button" class="btn btn-sm btn-ghost" id="v2-trial-exit">切回自由配装</button>`
+                ? `<button type="button" class="btn btn-sm btn-ghost" id="v2-trial-exit" data-testid="btn-exit-template">切回自由配装</button>`
                 : ''
             }
           </div>
@@ -164,7 +169,7 @@ export function renderPrepareView(
               const spec = V2_TRIAL_BUILDS[tid];
               const active = draft.trialBuildId === tid;
               const ico = tid === 'trial_heavy' ? 'cannon' : tid === 'trial_hangar' ? 'drone' : 'counter';
-              return `<button type="button" class="v2-trial-mini-card ${active ? 'active' : ''}" data-pick-trial="${tid}" ${
+              return `<button type="button" class="v2-trial-mini-card ${active ? 'active' : ''}" data-pick-trial="${tid}" data-testid="btn-trial-template-${tid}" ${
                 readOnly ? 'disabled' : ''
               }>
                 <div class="v2-tm-head">${svgIcon(ico, 15)} <strong>${spec.shortName}</strong></div>
@@ -173,11 +178,27 @@ export function renderPrepareView(
               </button>`;
             }).join('')}
           </div>
-          <div class="v2-trial-bp-note">试航方案为普通品质整套借用（返航归还，不可混搭外部件）；已研究永久蓝图可自由混搭、在研究台制造自有普通件（出航预算 -1）并保存预设；优良件仅限远航打捞或商人获取。</div>
+          <div class="v2-trial-bp-note">全息战术模板为普通品质整套借用（返航归还，不可混搭外部件）；已研究永久蓝图可自由混搭、在工坊制造自有设备（出航预算 -1）并保存预设。</div>
         </div>
 
         <div class="v2-prep-group">
-          <div class="v2-prep-label">舰船与具名船员</div>
+          <div class="v2-prep-label-row">
+            <span class="v2-prep-label">舰船与具名船员（共 ${V2_SHIP_ORDER.length} 舰 · 含船体供能格）</span>
+          </div>
+          ${
+            relicPassives.activeRelicIds.length > 0
+              ? `<div class="v3-relic-passive-strip" style="margin-bottom:6px;" data-testid="prepare-relic-passives">
+                  ${relicPassives.activeRelicIds
+                    .map(
+                      (rid) =>
+                        `<span class="v3-relic-passive-pill">${svgIcon('museum', 11)} ${
+                          V3_RELIC_PASSIVES[rid]?.shortBadge ?? rid
+                        }</span>`
+                    )
+                    .join('')}
+                </div>`
+              : ''
+          }
           <div class="v2-ship-cards" data-testid="ship-selector">
             ${V2_SHIP_ORDER.map((sid) => {
               const s = V2_SHIPS[sid];
@@ -185,13 +206,13 @@ export function renderPrepareView(
               const active = draft.shipId === sid;
               const effHp = getEffectiveShipMaxHp(p, sid);
               const effBudget = getEffectiveShipLoadoutBudget(p, sid);
-              return `<button type="button" class="v2-choice-pill ${active ? 'active' : ''}" data-prep-ship="${sid}" ${
+              return `<button type="button" class="v2-choice-pill ${active ? 'active' : ''}" data-prep-ship="${sid}" data-testid="ship-option-${sid}" ${
                 !unlocked ? 'disabled' : ''
               }>
                 <img class="v2-ship-mini" src="${getPlayerShipImageUrl(sid)}" alt="${s.name}" />
                 <span class="v2-choice-main">
                   <strong>${s.name}</strong>
-                  <small>${s.cols}×${s.rows} (${s.validCellCount}格) · HP ${effHp} · 预算 ${effBudget}${
+                  <small>${s.cols}×${s.rows} (${s.validCellCount}格·⚡${s.powerCells.length}) · HP ${effHp} · 预算 ${effBudget}${
                 s.bonusShield > 0 ? ` · +${s.bonusShield}盾` : ''
               }${!unlocked ? ' · 未解锁' : ''}</small>
                 </span>
@@ -279,27 +300,36 @@ export function renderPrepareView(
               .join('')}
           </div>
 
-          <div class="v2-pool-subtitle">仓库自有设备（${p.equipmentWarehouse.length} 件 · 普通自有预算 -1 · 战败损失实物）</div>
+          <div class="v2-pool-subtitle">仓库自有设备与装置（${p.equipmentWarehouse.length} 件 · 普通自有预算 -1 · 战败损失实物）</div>
           <div class="v2-pool-chips">
             ${
               p.equipmentWarehouse.length === 0
-                ? `<span class="v2-empty-inline">设备库暂无自有设备（可返航入库或研究台制造）</span>`
+                ? `<span class="v2-empty-inline">设备库暂无自有设备（可返航入库或工坊制造）</span>`
                 : p.equipmentWarehouse
                     .map((w) => {
-                      const def = V2_EQUIPMENT_DEFS[w.definitionId];
-                      if (!def) return '';
+                      const eqDef = V2_EQUIPMENT_DEFS[w.definitionId];
+                      const gdDef = eqDef ? undefined : getV3GadgetDef(w.definitionId);
+                      if (!eqDef && !gdDef) return '';
                       const alreadyUsed = usedOwnedIds.has(w.instanceId);
-                      const effBudget = getEffectiveV2EquipmentBudgetCost(def, 'owned');
+                      const effBudget = eqDef
+                        ? getEffectiveV2EquipmentBudgetCost(eqDef, 'owned')
+                        : gdDef!.budgetCost;
                       const overBudget = check.totalBudget + effBudget > check.maxBudget;
-                      const discountSuffix = effBudget < def.budgetCost ? '(-1)' : '';
-                      return `<button type="button" class="v2-pool-btn origin-owned" data-add-owned="${
+                      const discountSuffix = eqDef && effBudget < eqDef.budgetCost ? '(-1)' : '';
+                      const name = eqDef?.name ?? gdDef!.name;
+                      const tagText = gdDef ? '耗' : w.quality === 'improved' ? '良' : '普';
+                      const availClass = alreadyUsed ? '' : ' warehouse-item';
+                      const availAttrs = alreadyUsed
+                        ? ''
+                        : ` data-testid="warehouse-item-${w.instanceId}" data-origin="owned"`;
+                      return `<button type="button" class="v2-pool-btn origin-owned${availClass}" data-add-owned="${
                         w.instanceId
-                      }" ${draft.trialBuildId || alreadyUsed || overBudget || readOnly ? 'disabled' : ''}>
+                      }"${availAttrs} ${draft.trialBuildId || alreadyUsed || overBudget || readOnly ? 'disabled' : ''}>
                         <span class="v2-origin-badge origin-owned">自</span>
-                        <img src="${getItemImageUrl(w.definitionId)}" alt="${def.name}" />
-                        <span>${def.name} <em class="v2-q-tag">${
-                        w.quality === 'improved' ? '良' : '普'
-                      }</em><small>${alreadyUsed ? '已装载' : `预算${effBudget}${discountSuffix}`}</small></span>
+                        <img src="${getItemImageUrl(w.definitionId)}" alt="${name}" />
+                        <span>${name} <em class="v2-q-tag">${tagText}</em><small>${
+                        alreadyUsed ? '已装载' : `预算${effBudget}${discountSuffix}`
+                      }</small></span>
                       </button>`;
                     })
                     .join('')
@@ -309,12 +339,12 @@ export function renderPrepareView(
 
         <div class="v2-prep-group v2-preset-box">
           <div class="v2-prep-label-row">
-            <span class="v2-prep-label">配装预设 (${p.loadoutPresets.length}/${V2_MAX_SAVED_PRESETS})</span>
+            <span class="v2-prep-label">配装预设 (${p.loadoutPresets.length}/${maxPresets})</span>
             <div style="display:flex;gap:6px;align-items:center;">
               <input type="text" id="v2-preset-name" class="v2-preset-input" maxlength="16" placeholder="预设名称" value="${
                 V2_SHIPS[draft.shipId].name.slice(0, 4)
               }-${V2_ARCHETYPE_LABELS[draft.primaryArchetype].name.slice(0, 2)}" />
-              <button type="button" class="btn btn-sm btn-secondary" id="v2-preset-save" ${
+              <button type="button" class="btn btn-sm btn-secondary" id="v2-preset-save" data-testid="btn-save-preset" ${
                 readOnly || draft.trialBuildId !== null || draft.slots.length === 0 ? 'disabled' : ''
               }>保存预设</button>
             </div>

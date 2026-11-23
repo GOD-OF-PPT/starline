@@ -1,6 +1,8 @@
+import { getV3GadgetDef } from '../../data/gadgets';
 import { getV3SectorDef } from '../../data/sectors';
 import { V2_SHAPES } from '../../data/shapes';
 import { buildActiveWreckStateForNode, evaluateWreckHotspotCut } from '../../domain/dismantle';
+import { canUseV3GadgetInRun } from '../../domain/encounter';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
 import type {
   V2ItemInstance,
@@ -129,6 +131,7 @@ export interface WreckLeftPanelProps {
 export interface WreckLeftPanelActions {
   readonly onSelectHotspot: (spot: WreckHotspotId) => void;
   readonly onCutSpot: (spotId: V2WreckSpotId) => void;
+  readonly onUseGadget?: (instanceId: string) => void;
   readonly onExtract: () => void;
   readonly onAbandon: () => void;
 }
@@ -197,12 +200,13 @@ export function renderWreckLeftPanel(
         bonusPills.push(`+${spot.rewardCredits}¤`);
       }
 
-      // Build risk pills
       let riskHtml = '';
       if (spot.cut) {
         riskHtml = `<span class="v3-risk-pill risk-done">${svgIcon('check', 12)} 舱室已切开</span>`;
       } else if (evalRes.isFirstSafeCut) {
         riskHtml = `<span class="v3-risk-pill risk-safe">${svgIcon('check', 12)} 首刀无伤（0 耐久 / 0 燃料消耗）</span>`;
+      } else if (wreck.stabilizerActive) {
+        riskHtml = `<span class="v3-risk-pill risk-safe">${svgIcon('check', 12)} 稳定器护航：下刀免伤防伏击（0 耐久 / 0 燃料）</span>`;
       } else {
         const pills: string[] = [];
         if (evalRes.isLethal) {
@@ -280,6 +284,33 @@ export function renderWreckLeftPanel(
     })
     .join('');
 
+  const stabilizerGadgets = run.bay.placed
+    .map((p) => ({ item: p.item, def: getV3GadgetDef(p.item.definitionId) }))
+    .filter(
+      (entry): entry is { item: typeof entry.item; def: NonNullable<typeof entry.def> } =>
+        Boolean(entry.def && entry.def.usableIn === 'wreck')
+    );
+
+  const stabilizerBarHtml = wreck.stabilizerActive
+    ? `<div class="v3-stabilizer-banner" data-testid="wreck-stabilizer-active">
+        ${svgIcon('shield', 14)} <strong>切割稳定器已启用</strong>：下一次风险切割免疫船体损伤、燃料消耗与伏击警报！
+      </div>`
+    : stabilizerGadgets.length > 0 && actions.onUseGadget
+    ? `<div class="v3-gadget-bar" data-testid="wreck-gadget-bar">
+        <span class="v3-gadget-bar-label">${svgIcon('shield', 12)} 拆解消耗装置</span>
+        <div class="v3-gadget-bar-btns">
+          ${stabilizerGadgets
+            .map(({ item, def }) => {
+              const chk = canUseV3GadgetInRun(run, item.instanceId);
+              return `<button type="button" class="btn btn-sm btn-primary v3-gadget-use-btn" data-use-gadget="${item.instanceId}" data-gadget-kind="${def.kind}" data-gadget-id="${def.kind}" data-testid="btn-use-gadget-${def.kind}" ${
+                readOnly || !chk.usable ? 'disabled' : ''
+              }>使用${def.buttonLabel}（${def.shortEffectLabel}）</button>`;
+            })
+            .join('')}
+        </div>
+      </div>`
+    : '';
+
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root v3-sticky-panel-root" data-testid="wreck-screen">
       <div class="panel-header">
@@ -306,6 +337,8 @@ export function renderWreckLeftPanel(
             <span>本趟精密零件 <strong class="num">+${run.salvagePartsEarned}</strong></span>
           </div>
         </div>
+
+        ${stabilizerBarHtml}
 
         ${
           peek
@@ -353,6 +386,12 @@ export function renderWreckLeftPanel(
   leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-cut-spot]').forEach((btn) => {
     btn.addEventListener('click', () => {
       actions.onCutSpot(btn.dataset.cutSpot as V2WreckSpotId);
+    });
+  });
+
+  leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-use-gadget]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      actions.onUseGadget?.(btn.dataset.useGadget!);
     });
   });
 

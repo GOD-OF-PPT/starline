@@ -20,9 +20,14 @@ import {
   type V2UnlockFamilyId,
 } from '../data/equipment';
 import { drawSectorEventPayload } from '../data/events';
+import { V3_GADGET_ORDER, getV3GadgetDefByKind } from '../data/gadgets';
 import { getV3SectorDef } from '../data/sectors';
 import { V2_SHAPES } from '../data/shapes';
-import { createV2CargoInstance, createV2EquipmentInstance } from './itemCatalog';
+import {
+  createV2CargoInstance,
+  createV2EquipmentInstance,
+  createV3GadgetInstance,
+} from './itemCatalog';
 import { withV2Stream } from './rngStreams';
 import {
   V2_STARTING_FUEL,
@@ -54,6 +59,8 @@ export interface GenerateV2GraphParams {
   readonly endlessThreat?: number;
   readonly isFinalCampaignRun?: boolean;
   readonly guaranteedRelicDefId?: string | null;
+  readonly researchLabTier?: number;
+  readonly displayTier?: number;
 }
 
 export interface GenerateV2GraphResult {
@@ -72,14 +79,16 @@ function pickCargoDefId(
   rng: SeededRng,
   layer: number,
   sectorId: SectorId,
-  isEliteOrDeepBonus = false
+  isEliteOrDeepBonus = false,
+  displayTier = 0
 ): string {
   const sector = getV3SectorDef(sectorId);
+  const displayRelicBonus = displayTier >= 2 ? 0.06 : 0;
   // Preserve v3.0 extended relics in deep layers (4..6), weighted toward sector signature relics
   if (layer >= 4) {
     const extProb = isEliteOrDeepBonus
-      ? Math.min(0.4, sector.relicDropChanceDeep + 0.1)
-      : sector.relicDropChanceDeep;
+      ? Math.min(0.45, sector.relicDropChanceDeep + 0.1 + displayRelicBonus)
+      : Math.min(0.4, sector.relicDropChanceDeep + displayRelicBonus);
     if (rng.nextFloat() < extProb) {
       if (sector.signatureRelicIds.length > 0 && rng.nextFloat() < 0.7) {
         const sigDefId = `cargo.${rng.pick(sector.signatureRelicIds)}`;
@@ -100,15 +109,17 @@ function rollQuality(
   layer: number,
   isElite: boolean,
   allowImproved: boolean,
-  sectorId: SectorId
+  sectorId: SectorId,
+  researchLabTier = 0
 ): V2Quality {
   if (!allowImproved) return 'common';
   const sector = getV3SectorDef(sectorId);
   const baseProb = getEncounterImprovedProb(isElite ? 'elite' : 'patrol', layer, allowImproved);
+  const labBonus = researchLabTier >= 3 ? 0.08 : 0;
   const prob =
-    sectorId === 'near_orbit'
+    sectorId === 'near_orbit' && labBonus === 0
       ? baseProb
-      : Math.min(0.75, baseProb + sector.improvedProbBonus);
+      : Math.min(0.78, baseProb + (sectorId === 'near_orbit' ? 0 : sector.improvedProbBonus) + labBonus);
   return rng.nextFloat() < prob ? 'improved' : 'common';
 }
 
@@ -147,6 +158,8 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
   const sector = getV3SectorDef(sectorId);
   const endlessThreat = params.endlessThreat ?? 0;
   const isFinalCampaignRun = Boolean(params.isFinalCampaignRun);
+  const researchLabTier = params.researchLabTier ?? 0;
+  const displayTier = params.displayTier ?? 0;
   const guaranteedRelicDefId =
     params.guaranteedRelicDefId &&
     Object.prototype.hasOwnProperty.call(V2_CARGO_DEFS, params.guaranteedRelicDefId)
@@ -392,7 +405,10 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
             encounterKind: enc.encounterKind,
             units: enc.units,
             bounty: enc.bounty,
-            improvedProb: enc.improvedProb,
+            improvedProb:
+              researchLabTier >= 3 && params.allowImproved
+                ? Math.min(0.78, enc.improvedProb + 0.08)
+                : enc.improvedProb,
             guaranteedSupportKind: isSupportNode ? supportKind : undefined,
             bossId: enc.bossId,
           };
@@ -406,7 +422,14 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
           const eqKind: V2EquipmentKind = isSupportNode
             ? supportKind
             : rng.pick(unlockedKinds);
-          const eqQuality = rollQuality(rng, layer, false, params.allowImproved, sectorId);
+          const eqQuality = rollQuality(
+            rng,
+            layer,
+            false,
+            params.allowImproved,
+            sectorId,
+            researchLabTier
+          );
           const armoryItem = createV2EquipmentInstance({
             instanceId: nextUid('wrk_eq'),
             kind: eqKind,
@@ -417,8 +440,8 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
           });
           const cargoDef1 = isRelicSignalNode
             ? guaranteedRelicDefId!
-            : pickCargoDefId(rng, layer, sectorId, false);
-          const cargoDef2 = pickCargoDefId(rng, layer, sectorId, false);
+            : pickCargoDefId(rng, layer, sectorId, false, displayTier);
+          const cargoDef2 = pickCargoDefId(rng, layer, sectorId, false, displayTier);
           const c1Val =
             sector.cargoPriceMult === 1
               ? undefined
@@ -470,8 +493,8 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
             otherPool.length > 0 ? rng.pick(otherPool) : offerKind1;
           const q1 = isSupportNode
             ? 'common'
-            : rollQuality(rng, layer, false, params.allowImproved, sectorId);
-          const q2 = rollQuality(rng, layer, false, params.allowImproved, sectorId);
+            : rollQuality(rng, layer, false, params.allowImproved, sectorId, researchLabTier);
+          const q2 = rollQuality(rng, layer, false, params.allowImproved, sectorId, researchLabTier);
 
           const makeOffer = (idx: number, kind: V2EquipmentKind, quality: V2Quality): V2ShopEquipmentOffer => {
             const def = getV2EquipmentDefByKind(kind, quality);
@@ -491,8 +514,23 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
             };
           };
 
+          const gadgetKind = rng.pick(V3_GADGET_ORDER);
+          const gadgetDef = getV3GadgetDefByKind(gadgetKind);
+          const gadgetOffer: V2ShopEquipmentOffer = {
+            offerId: `${nodeId}_offer_gadget`,
+            item: createV3GadgetInstance({
+              instanceId: nextUid('shop_gadget'),
+              kind: gadgetKind,
+              origin: 'loot',
+              acquiredDepth: layer,
+              location: 'staging',
+            }),
+            buyPrice: gadgetDef.shopBuyPrice,
+            sold: false,
+          };
+
           const payload: V2MerchantPayload = {
-            offers: [makeOffer(1, offerKind1, q1), makeOffer(2, offerKind2, q2)],
+            offers: [makeOffer(1, offerKind1, q1), makeOffer(2, offerKind2, q2), gadgetOffer],
             fuelPrice: 12,
             fuelAmount: 2,
             fuelBought: false,

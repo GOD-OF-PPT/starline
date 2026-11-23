@@ -53,7 +53,7 @@ export type V2ItemLocation = 'bay' | 'staging' | 'warehouse' | 'gift_queue';
 export interface V2ItemInstance {
   readonly instanceId: string;
   readonly definitionId: string;
-  readonly category: 'equipment' | 'cargo' | 'mission';
+  readonly category: 'equipment' | 'cargo' | 'mission' | 'gadget';
   readonly quality: V2Quality;
   readonly origin: V2ItemOrigin;
   readonly acquiredDepth: number;
@@ -140,6 +140,7 @@ export interface V2WreckState {
   readonly lastCutSummary?: string;
   readonly ambushTriggered?: boolean;
   readonly stashedItems?: readonly V2ItemInstance[];
+  readonly stabilizerActive?: boolean;
 }
 
 export interface V2EventOptionState {
@@ -272,7 +273,16 @@ export interface V2ContractInstance {
 
 export type V2TargetPolicy = 'weakest' | 'highest_threat';
 
-export type V2AttackSourceKind = 'core' | 'laser' | 'heavy' | 'hangar' | 'flak' | 'counter';
+export type V2AttackSourceKind =
+  | 'core'
+  | 'laser'
+  | 'heavy'
+  | 'hangar'
+  | 'flak'
+  | 'counter'
+  | 'salvo'
+  | 'emp'
+  | 'grapple';
 
 export interface V2PlayerAttackEvent {
   readonly sourceKind: V2AttackSourceKind;
@@ -406,6 +416,8 @@ export interface V2CombatSimulation {
   readonly sectorId?: SectorId;
   readonly envModifierId?: SectorEnvModifierId;
   readonly bossId?: string;
+  readonly overchargeApplied?: boolean;
+  readonly stargateRelayTier?: number;
 }
 
 export interface V2CombatRewardBundle {
@@ -561,6 +573,8 @@ export interface V2RunState {
   readonly wrecksDissectedThisRun?: number;
   /** Faction reputation gained from narrative events during this run */
   readonly factionRepEarnedThisRun?: Partial<Record<FactionId, number>>;
+  /** Armed by consumable gadget.overcharge_cell pre-combat; cleared upon combat completion or leaving node */
+  readonly overchargeCellActive?: boolean;
 }
 
 export interface V2PresetSlot {

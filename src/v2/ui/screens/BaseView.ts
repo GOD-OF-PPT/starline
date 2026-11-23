@@ -1,7 +1,13 @@
 import { V2_CONTRACT_TEMPLATES } from '../../data/contracts';
-import { V2_WAREHOUSE_CAPACITY } from '../../data/equipment';
+import { V2_ALL_EQUIPMENT_KINDS } from '../../data/equipment';
+import { V3_RELIC_PASSIVES } from '../../data/facilities';
+import { V2_SHIP_ORDER } from '../../data/ships';
 import type { ActiveCampaignObjective } from '../../domain/campaign';
-import { getV2RelicSummary } from '../../domain/progressionV2';
+import {
+  getActiveRelicPassives,
+  getEffectiveWarehouseCapacity,
+  getV2RelicSummary,
+} from '../../domain/progressionV2';
 import type { V2ProfileState } from '../../domain/types';
 import { svgIcon } from '../icons';
 import type { NextBaseGoal, V2ReturnDockingNotice } from './screenTypes';
@@ -140,9 +146,26 @@ export function renderBaseHeroView(
     </div>
   `;
 
+  const warehouseCap = getEffectiveWarehouseCapacity(p);
+  const relicPassives = getActiveRelicPassives(p);
+  const activeRelicStripHtml =
+    relicPassives.activeRelicIds.length > 0
+      ? `<div class="v3-relic-passive-strip" data-testid="active-relic-passives">
+          ${relicPassives.activeRelicIds
+            .map(
+              (rid) =>
+                `<span class="v3-relic-passive-pill">${svgIcon('museum', 11)} ${
+                  V3_RELIC_PASSIVES[rid]?.shortBadge ?? rid
+                }</span>`
+            )
+            .join('')}
+        </div>`
+      : '';
+
   const utilityDockHtml = `
     <div class="v2-base-utility-col">
       ${campaignBannerHtml}
+      ${activeRelicStripHtml}
       <button type="button" class="v2-next-goal-pill ${nextGoal.ready ? 'is-ready' : ''}" id="v2-base-next-goal">
         <span class="v2-goal-k">${nextGoal.ready ? '下一步就绪' : '下一个基地目标'}</span>
         <strong>${nextGoal.title}</strong>
@@ -152,14 +175,14 @@ export function renderBaseHeroView(
         <button type="button" class="v2-dock-btn" id="v2-dock-wh" data-testid="btn-open-warehouse">
           ${svgIcon('warehouse', 17)}
           <span>设备工坊</span>
-          <small class="num">${p.equipmentWarehouse.length}/${V2_WAREHOUSE_CAPACITY} · ${p.salvageParts}零件${
+          <small class="num">${p.equipmentWarehouse.length}/${warehouseCap} · ${p.salvageParts}零件${
     p.pendingGiftQueue.length > 0 ? ` +${p.pendingGiftQueue.length}` : ''
   }</small>
         </button>
         <button type="button" class="v2-dock-btn" id="v2-dock-fac" data-testid="btn-open-facilities">
           ${svgIcon('wrench', 17)}
           <span>设施扩建</span>
-          <small class="num">${p.unlockedShips.length}/3 舰</small>
+          <small class="num">${p.unlockedShips.length}/${V2_SHIP_ORDER.length} 舰</small>
         </button>
         <button type="button" class="v2-dock-btn" id="v2-dock-relics" data-testid="btn-open-relics">
           ${svgIcon('museum', 17)}
@@ -169,7 +192,7 @@ export function renderBaseHeroView(
         <button type="button" class="v2-dock-btn" id="v2-dock-codex" data-testid="btn-open-codex">
           ${svgIcon('book', 17)}
           <span>图鉴</span>
-          <small class="num">${p.blueprints.length}/10 蓝图</small>
+          <small class="num">${p.blueprints.length}/${V2_ALL_EQUIPMENT_KINDS.length} 蓝图</small>
         </button>
         <!-- M6 (F18) slot: [data-testid="btn-open-career"] -->
       </div>

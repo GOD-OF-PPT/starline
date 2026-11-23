@@ -1,6 +1,7 @@
 import { resolveV3BossDefForEncounter } from '../../data/bosses';
 import { getV2EncounterTemplate } from '../../data/enemies';
 import { V2_ARCHETYPE_LABELS } from '../../data/equipment';
+import { getV3GadgetDef } from '../../data/gadgets';
 import { getV3SectorDef } from '../../data/sectors';
 import {
   computeCombatTacticalChargesMax,
@@ -13,7 +14,7 @@ import {
   evaluateRunBonusObjective,
   isContractReadyForDelivery,
 } from '../../domain/contracts';
-import { getReachableNextNodeIds } from '../../domain/encounter';
+import { canUseV3GadgetInRun, getReachableNextNodeIds } from '../../domain/encounter';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
 import type { V2MapNode, V2RunState } from '../../domain/types';
 import { svgIcon } from '../icons';
@@ -27,12 +28,15 @@ export interface MapViewProps {
   readonly isCompactViewport: boolean;
   readonly pureAutoCombat: boolean;
   readonly bonusBossCharges?: number;
+  readonly fullMapReveal?: boolean;
+  readonly stargateRelayTier?: number;
 }
 
 export interface MapViewActions {
   readonly onToggleMobileMap: () => void;
   readonly onSelectNode: (nodeId: string) => void;
   readonly onJumpNode: (nodeId: string) => void;
+  readonly onUseGadget?: (instanceId: string) => void;
   readonly onSafeReturn: () => void;
   readonly onAbortContract: () => void;
 }
@@ -50,6 +54,8 @@ export function renderMapView(
     isCompactViewport,
     pureAutoCombat,
     bonusBossCharges = 0,
+    fullMapReveal = false,
+    stargateRelayTier = 0,
   } = props;
 
   const reachableIds = getReachableNextNodeIds(run);
@@ -123,13 +129,20 @@ export function renderMapView(
     const isCur = run.currentNodeId === n.nodeId;
     const isNext = reachableIds.includes(n.nodeId);
     const isSelected = effectiveSelectedId === n.nodeId;
+    const intelTitle = fullMapReveal
+      ? n.combat
+        ? `第${n.layer}层 ${meta.label} · ${getV2EncounterTemplate(n.combat.encounterKind).name}`
+        : n.eventState
+        ? `第${n.layer}层 ${meta.label} · ${n.eventState.title}`
+        : `第${n.layer}层 ${meta.label}`
+      : `第${n.layer}层 ${meta.label}`;
     return `<button type="button" class="v2-dag-node ${meta.cls} ${visited ? 'visited' : ''} ${
       isCur ? 'current' : ''
     } ${isNext ? 'reachable' : ''} ${isSelected ? 'selected' : ''}" data-select-node="${
       n.nodeId
     }" data-reachable="${isNext ? 'true' : 'false'}" data-testid="map-node-${n.nodeId}" ${
       !isNext ? 'disabled' : ''
-    } title="第${n.layer}层 ${meta.label}">
+    } title="${intelTitle}">
       <span class="v2-dag-icon">${svgIcon(meta.icon, compact ? 15 : 16)}</span>
       <span class="v2-dag-name">${meta.label}</span>
       ${n.contractMarker ? `<span class="v2-dag-star" aria-label="委托目标">${svgIcon('star', 11)}</span>` : ''}
@@ -194,7 +207,7 @@ export function renderMapView(
     n: V2MapNode
   ): { brief: string; cls: string; detail: string; traitBadge?: string } => {
     if (n.combat) {
-      const pv = previewV2CombatNode(run, n.nodeId, run.targetPolicy);
+      const pv = previewV2CombatNode(run, n.nodeId, run.targetPolicy, { stargateRelayTier });
       const chargesMax = computeCombatTacticalChargesMax(n, run, bonusBossCharges);
       const tacticPrefix = !pureAutoCombat ? `基础推演(含${chargesMax}指令)：` : '';
       const bossId = resolveNodeBossId(n, run);
@@ -351,6 +364,36 @@ export function renderMapView(
         })()
       : '';
 
+  const mapGadgets = run.bay.placed
+    .map((p) => ({ item: p.item, def: getV3GadgetDef(p.item.definitionId) }))
+    .filter(
+      (entry): entry is { item: typeof entry.item; def: NonNullable<typeof entry.def> } =>
+        Boolean(entry.def && entry.def.usableIn === 'map_arrange')
+    );
+
+  const mapGadgetBarHtml =
+    mapGadgets.length > 0 && actions.onUseGadget
+      ? `<div class="v3-gadget-bar" data-testid="map-gadget-bar">
+          <span class="v3-gadget-bar-label">${svgIcon('bolt', 12)} 战术消耗装置</span>
+          <div class="v3-gadget-bar-btns">
+            ${mapGadgets
+              .map(({ item, def }) => {
+                const chk = canUseV3GadgetInRun(run, item.instanceId);
+                return `<button type="button" class="btn btn-sm btn-secondary v3-gadget-use-btn" data-use-gadget="${item.instanceId}" data-gadget-kind="${def.kind}" data-gadget-id="${def.kind}" data-testid="btn-use-gadget-${def.kind}" title="${chk.reason ?? def.summary}" ${
+                  readOnly || !chk.usable ? 'disabled' : ''
+                }>使用 ${def.buttonLabel}</button>`;
+              })
+              .join('')}
+          </div>
+        </div>`
+      : '';
+
+  const navigatorRevealHtml = fullMapReveal
+    ? `<div class="v3-relic-passive-banner" data-testid="relic-passive-navigator">
+        ${svgIcon('museum', 13)} <strong>古代星盘常驻被动已生效</strong>：全图 ${run.graph.maxLayers} 层航路情报透视 · 出航燃料 +1
+      </div>`
+    : '';
+
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root" data-testid="map-screen">
       <div class="panel-header">
@@ -363,9 +406,13 @@ export function renderMapView(
         <span class="v3-sector-mod-desc">${sector.envModifier.combatRuleSummary}</span>
       </div>
 
+      ${navigatorRevealHtml}
+
       ${bonusTrackerHtml}
 
       ${relicSignalBannerHtml}
+
+      ${mapGadgetBarHtml}
 
       ${
         isCompactViewport && focusLayers.length > 0
@@ -412,6 +459,12 @@ export function renderMapView(
   leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-jump-node]').forEach((btn) => {
     btn.addEventListener('click', () => {
       actions.onJumpNode(btn.dataset.jumpNode!);
+    });
+  });
+
+  leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-use-gadget]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      actions.onUseGadget?.(btn.dataset.useGadget!);
     });
   });
 

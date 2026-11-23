@@ -12,7 +12,9 @@ import {
   type V2Quality,
   type V2UnlockFamilyId,
 } from '../data/equipment';
+import { getV3GadgetDef } from '../data/gadgets';
 import { getV3SectorDef } from '../data/sectors';
+import { calculateV2BuildStats } from './buildStatsV2';
 import {
   canPerformSurveyAtCurrentNode,
   computeV2JumpFuelCost,
@@ -167,7 +169,13 @@ export function selectV2MapNode(
   }
 
   const nextPhase = node.type === 'merchant' ? 'SHOP' : 'ENCOUNTER';
-  const bonusBoss = Math.max(0, Math.floor(options?.bonusBossCharges ?? 0));
+  const bonusBoss = Math.max(
+    0,
+    Math.floor(
+      options?.bonusBossCharges ??
+        (options?.profile?.relics?.obsidian_crown?.restored ? 1 : 0)
+    )
+  );
   const isBossNode = Boolean(
     node.combat &&
       (node.type === 'boss' ||
@@ -201,12 +209,161 @@ export function selectV2MapNode(
       visitedNodeIds: [...run.visitedNodeIds, targetNodeId],
       phase: nextPhase,
       activeCombat: null,
+      overchargeCellActive: false,
       pendingReward: null,
       activeEngineerOffer: null,
       activeWreck,
       activeEvent,
       tacticalChargesMax: nextChargesMax,
       tacticalChargesUsed: nextChargesUsed,
+    },
+  };
+}
+
+export interface V3GadgetUseCheck {
+  readonly usable: boolean;
+  readonly reason?: string;
+}
+
+export interface V3GadgetUseOutcome extends V2ActionOutcome {
+  readonly message?: string;
+  readonly gadgetKind?: string;
+}
+
+/**
+ * Pure usability guard for consumable 1x1 tactical gadgets placed in the cargo bay.
+ */
+export function canUseV3GadgetInRun(
+  run: V2RunState,
+  instanceId: string
+): V3GadgetUseCheck {
+  const placed = run.bay.placed.find((p) => p.item.instanceId === instanceId);
+  if (!placed) {
+    return { usable: false, reason: '船舱中未找到该装置（请先安装进货舱）' };
+  }
+  const def = getV3GadgetDef(placed.item.definitionId);
+  if (!def) {
+    return { usable: false, reason: '该物品不是可消耗战术装置' };
+  }
+
+  if (def.kind === 'repair_kit') {
+    if (run.phase !== 'MAP' && run.phase !== 'ARRANGE') {
+      return { usable: false, reason: '仅可在星图或船舱整理阶段使用' };
+    }
+    if (run.hp >= run.maxHp) {
+      return { usable: false, reason: '船体耐久已满，无需使用' };
+    }
+    return { usable: true };
+  }
+
+  if (def.kind === 'jump_canister') {
+    if (run.phase !== 'MAP' && run.phase !== 'ARRANGE') {
+      return { usable: false, reason: '仅可在星图或船舱整理阶段使用' };
+    }
+    if (run.fuel >= run.maxFuel) {
+      return { usable: false, reason: '跃迁燃料已满，无需使用' };
+    }
+    return { usable: true };
+  }
+
+  if (def.kind === 'overcharge_cell') {
+    const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : undefined;
+    if (run.phase !== 'ENCOUNTER' || !node?.combat) {
+      return { usable: false, reason: '仅可在战斗节点开战前激活' };
+    }
+    if (run.activeCombat) {
+      return { usable: false, reason: '战斗已经打响，无法再装填过载电池' };
+    }
+    if (run.overchargeCellActive) {
+      return { usable: false, reason: '本场战斗过载电池已充能就绪' };
+    }
+    return { usable: true };
+  }
+
+  // cut_stabilizer
+  const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : undefined;
+  if (run.phase !== 'ENCOUNTER' || !node || node.type !== 'wreck' || node.combat || run.activeCombat) {
+    return { usable: false, reason: '仅可在残骸拆解阶段使用' };
+  }
+  const wreck = run.activeWreck && run.activeWreck.nodeId === node.nodeId ? run.activeWreck : null;
+  if (wreck?.extracted) {
+    return { usable: false, reason: '残骸已撤离' };
+  }
+  if (wreck?.ambushTriggered) {
+    return { usable: false, reason: '伏击警报已触发，请先应战' };
+  }
+  if (wreck?.stabilizerActive) {
+    return { usable: false, reason: '切割稳定器保护已生效，下一次风险切割免伤' };
+  }
+  return { usable: true };
+}
+
+/**
+ * Pure, atomic consumable gadget activation: removes the exact instance from `bay.placed` and applies its effect.
+ */
+export function useV3GadgetInRun(
+  run: V2RunState,
+  instanceId: string,
+  profile?: V2ProfileState
+): V3GadgetUseOutcome {
+  const check = canUseV3GadgetInRun(run, instanceId);
+  if (!check.usable) {
+    return { ok: false, run, error: check.reason ?? '当前无法使用该装置' };
+  }
+  const placed = run.bay.placed.find((p) => p.item.instanceId === instanceId)!;
+  const def = getV3GadgetDef(placed.item.definitionId)!;
+  const nextBay = removeV2ItemById(run.bay, instanceId);
+
+  if (def.kind === 'repair_kit') {
+    const nextHp = Math.min(run.maxHp, run.hp + 10);
+    const gained = nextHp - run.hp;
+    return {
+      ok: true,
+      gadgetKind: def.kind,
+      message: `使用应急维修包：船体耐久 +${gained} HP（${nextHp}/${run.maxHp}）`,
+      run: { ...run, hp: nextHp, bay: nextBay },
+    };
+  }
+
+  if (def.kind === 'jump_canister') {
+    const nextFuel = Math.min(run.maxFuel, run.fuel + 2);
+    const gained = nextFuel - run.fuel;
+    return {
+      ok: true,
+      gadgetKind: def.kind,
+      message: `使用跃迁燃料罐：燃料 +${gained}（${nextFuel}/${run.maxFuel}）`,
+      run: { ...run, fuel: nextFuel, bay: nextBay },
+    };
+  }
+
+  if (def.kind === 'overcharge_cell') {
+    return {
+      ok: true,
+      gadgetKind: def.kind,
+      message: '过载电池已充能：本战首轮追加 +6 无视护甲爆发与 +4 护盾（已同步至战果预估）',
+      run: { ...run, bay: nextBay, overchargeCellActive: true },
+    };
+  }
+
+  // cut_stabilizer
+  const node = run.graph.nodes[run.currentNodeId!]!;
+  const built = buildActiveWreckStateForNode(run, node, profile);
+  const nextStability = Math.min(built.wreck.maxStability, built.wreck.stability + 35);
+  const nextWreck: V2WreckState = {
+    ...built.wreck,
+    stability: nextStability,
+    stabilizerActive: true,
+    lastCutSummary: `切割稳定器已启用：结构稳定度恢复至 ${nextStability}/${built.wreck.maxStability}，下一次风险切割免疫船体损伤、燃料消耗与伏击！`,
+  };
+  return {
+    ok: true,
+    gadgetKind: def.kind,
+    message: `使用切割稳定器：稳定度恢复至 ${nextStability}，下次风险切割免伤防伏击`,
+    run: {
+      ...run,
+      rngStreams: built.nextStreams,
+      bay: nextBay,
+      activeWreck: nextWreck,
     },
   };
 }
@@ -250,10 +407,12 @@ export function cutV2WreckHotspot(
   }
 
   const spot = wreck.hotspots.find((h) => h.spotId === spotId)!;
+  const grappleBonusParts = calculateV2BuildStats(run.bay).bonusSalvagePartsPerCut;
+  const totalSpotParts = Math.max(0, spot.rewardParts ?? 0) + grappleBonusParts;
   let nextHp = Math.max(1, run.hp - evalRes.effectiveHullDamage);
   let nextFuel = Math.max(0, run.fuel - evalRes.effectiveFuelCost);
   let nextWallet = run.wallet + Math.max(0, spot.rewardCredits ?? 0);
-  let nextParts = (run.salvagePartsEarned ?? 0) + Math.max(0, spot.rewardParts ?? 0);
+  let nextParts = (run.salvagePartsEarned ?? 0) + totalSpotParts;
   let nextBay = run.bay;
   const acquiredEquips: V2ItemInstance[] = [];
   const nextRecentKinds = [...(run.recentEquipmentKinds ?? [])];
@@ -284,8 +443,12 @@ export function cutV2WreckHotspot(
   if (itemsToStage.length > 0) {
     summaryParts.push(`回收 ${itemsToStage.length} 件物资入暂存区`);
   }
-  if ((spot.rewardParts ?? 0) > 0) {
-    summaryParts.push(`+${spot.rewardParts} 精密零件`);
+  if (totalSpotParts > 0) {
+    summaryParts.push(
+      grappleBonusParts > 0
+        ? `+${totalSpotParts} 精密零件（含拆解爪 +${grappleBonusParts}）`
+        : `+${totalSpotParts} 精密零件`
+    );
   }
   if ((spot.rewardCredits ?? 0) > 0) {
     summaryParts.push(`+${spot.rewardCredits}¤`);
@@ -325,6 +488,11 @@ export function cutV2WreckHotspot(
     summaryParts.push(`切割耗油 -${evalRes.effectiveFuelCost}`);
   }
 
+  const stabilizerConsumed = !evalRes.isFirstSafeCut && Boolean(wreck.stabilizerActive);
+  if (stabilizerConsumed) {
+    summaryParts.push('切割稳定器护航生效（免伤防伏击）');
+  }
+
   const nextHotspots = wreck.hotspots.map((h) =>
     h.spotId === spotId ? { ...h, cut: true } : h
   );
@@ -339,6 +507,7 @@ export function cutV2WreckHotspot(
     stability: nextStability,
     cutsMade: nextCutsMade,
     hotspots: nextHotspots,
+    stabilizerActive: stabilizerConsumed ? false : wreck.stabilizerActive,
     lastCutSummary: summaryText,
   };
   let nextChargesMax = run.tacticalChargesMax;

@@ -3,6 +3,7 @@ import './v2/ui/styles/v3-layout.css';
 import './v2/ui/styles/v3-campaign.css';
 import './v2/ui/styles/v3-combat.css';
 import './v2/ui/styles/v3-dismantle.css';
+import './v2/ui/styles/v3-buildcraft.css';
 import { soundEngine } from './audio/soundEngine';
 import { AppController } from './ui/AppController';
 import { hasOpenModal } from './ui/Modals';

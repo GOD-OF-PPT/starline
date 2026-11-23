@@ -7,6 +7,7 @@ import {
   type V2ArchetypeId,
   type V2EquipmentKind,
 } from '../data/equipment';
+import { getV3GadgetDef } from '../data/gadgets';
 import { V3_SECTORS, getV3SectorDef } from '../data/sectors';
 import type { V2Rotation } from '../data/shapes';
 import { V2_SHIPS, type V2ShipId } from '../data/ships';
@@ -18,7 +19,13 @@ import {
   findFirstLegalV2Placement,
   validateV2Placement,
 } from './inventoryV2';
-import { createV2EquipmentInstance } from './itemCatalog';
+import { createV2EquipmentInstance, createV3GadgetInstance } from './itemCatalog';
+import {
+  getActiveRelicPassives,
+  getEffectiveMaxPresets,
+  getFacilityTier,
+  getStargateRelayStartingWallet,
+} from './progressionV2';
 import { createV2RngStreams } from './rngStreams';
 import { generateV2StarGraph } from './routeGenerator';
 import { buildTrialPrepareSlots, isKindAuthorizedByTrialBuild } from '../data/trialBuilds';
@@ -140,11 +147,59 @@ export function validateV2PrepareLoadout(
 
   for (let i = 0; i < slots.length; i++) {
     const slot = slots[i];
-    const def = V2_EQUIPMENT_DEFS[slot.definitionId];
-    if (!def) {
+    const eqDef = V2_EQUIPMENT_DEFS[slot.definitionId];
+    const gdDef = eqDef ? undefined : getV3GadgetDef(slot.definitionId);
+    if (!eqDef && !gdDef) {
       errors.push(`槽位 ${i + 1} 设备定义无效`);
       continue;
     }
+
+    if (gdDef) {
+      totalBudget += gdDef.budgetCost;
+      if (slot.origin === 'loan') {
+        errors.push(`战术消耗装置「${gdDef.name}」仅限自带库存，不可免费借用`);
+      } else {
+        if (trialBuildId !== null) {
+          errors.push(`全息战术模板不可与自有装置「${gdDef.name}」混搭`);
+        }
+        if (!slot.warehouseInstanceId) {
+          errors.push(`自有槽位 ${gdDef.name} 缺少真实库存实例 ID`);
+        } else {
+          const real = profile.equipmentWarehouse.find(
+            (w) => w.instanceId === slot.warehouseInstanceId
+          );
+          if (!real) {
+            errors.push(`库存中缺少自有装置「${gdDef.name}」`);
+          } else if (real.definitionId !== slot.definitionId) {
+            errors.push(`库存实例与槽位定义不匹配`);
+          } else if (ownedUsedSet.has(real.instanceId)) {
+            errors.push(`同一库存实例不可重复装配`);
+          } else {
+            ownedUsedSet.add(real.instanceId);
+          }
+        }
+      }
+
+      const chk = validateV2Placement(tempBay, slot.definitionId, slot.x, slot.y, slot.rotation);
+      if (!chk.valid) {
+        errors.push(`「${gdDef.name}」放置非法（${chk.reason}）`);
+      } else {
+        const dummy = createV3GadgetInstance({
+          instanceId: `chk_${i}`,
+          kind: gdDef.kind,
+          origin: 'owned',
+          acquiredDepth: 0,
+          location: 'bay',
+        });
+        tempBay = {
+          ...tempBay,
+          placed: [...tempBay.placed, { item: dummy, x: slot.x, y: slot.y, rotation: slot.rotation }],
+        };
+      }
+      continue;
+    }
+
+    const def = eqDef!;
     totalBudget += getEffectiveV2EquipmentBudgetCost(def, slot.origin);
 
     if (slot.origin === 'loan') {
@@ -153,14 +208,14 @@ export function validateV2PrepareLoadout(
       }
       if (trialBuildId !== null) {
         if (!isKindAuthorizedByTrialBuild(trialBuildId, def.kind)) {
-          errors.push(`试航方案为整套借用，不可混入方案外设备「${def.name}」`);
+          errors.push(`全息战术模板为整套借用，不可混入方案外设备「${def.name}」`);
         }
       } else if (!profile.blueprints.includes(def.kind)) {
         errors.push(`尚未解锁「${def.name}」普通蓝图，不可免费借用`);
       }
     } else {
       if (trialBuildId !== null) {
-        errors.push(`试航方案为整套借用，不可与自有设备「${def.name}」混搭`);
+        errors.push(`全息战术模板为整套借用，不可与自有设备「${def.name}」混搭`);
       }
       if (!slot.warehouseInstanceId) {
         errors.push(`自有槽位 ${def.name} 缺少真实库存实例 ID`);
@@ -286,6 +341,8 @@ export function launchV2Expedition(params: {
     endlessThreat: params.endlessThreat ?? 0,
     isFinalCampaignRun: Boolean(params.isFinalCampaignRun),
     guaranteedRelicDefId: pity.triggered ? pity.relicDefId : null,
+    researchLabTier: getFacilityTier(params.profile, 'research_lab'),
+    displayTier: getFacilityTier(params.profile, 'display'),
   });
 
   const bonusObjective = generateContractBonusObjective(tpl, seed);
@@ -305,7 +362,6 @@ export function launchV2Expedition(params: {
   const placed: V2PlacedItem[] = [];
   let loanSeq = 1;
   for (const slot of params.slots) {
-    const def = V2_EQUIPMENT_DEFS[slot.definitionId]!;
     if (slot.origin === 'owned' && slot.warehouseInstanceId) {
       const real = params.profile.equipmentWarehouse.find(
         (w) => w.instanceId === slot.warehouseInstanceId
@@ -317,6 +373,7 @@ export function launchV2Expedition(params: {
         rotation: slot.rotation,
       });
     } else {
+      const def = V2_EQUIPMENT_DEFS[slot.definitionId]!;
       const loanItem = createV2EquipmentInstance({
         instanceId: `${runId}_loan_${loanSeq++}`,
         kind: def.kind,
@@ -334,12 +391,17 @@ export function launchV2Expedition(params: {
     }
   }
 
+  const relicPassives = getActiveRelicPassives(params.profile);
   const effectiveMaxHp = getEffectiveShipMaxHp(params.profile, params.shipId);
   const crewMasteryTier = params.crewId
     ? Math.max(0, Math.min(2, Math.floor(params.profile.crewMastery[params.crewId] ?? 0)))
     : 0;
   const navigatorFuelBonus = params.crewId === 'navigator' && crewMasteryTier >= 1 ? 1 : 0;
-  const startingFuel = Math.min(V2_MAX_FUEL, V2_STARTING_FUEL + navigatorFuelBonus);
+  const startingFuel = Math.min(
+    V2_MAX_FUEL,
+    V2_STARTING_FUEL + navigatorFuelBonus + relicPassives.startingFuelBonus
+  );
+  const startingWallet = getStargateRelayStartingWallet(params.profile);
 
   const run: V2RunState = {
     runId,
@@ -358,7 +420,7 @@ export function launchV2Expedition(params: {
     maxFuel: V2_MAX_FUEL,
     hp: effectiveMaxHp,
     maxHp: effectiveMaxHp,
-    wallet: 0,
+    wallet: startingWallet,
     graph: generated.graph,
     visitedNodeIds: [],
     currentNodeId: null,
@@ -396,6 +458,7 @@ export function launchV2Expedition(params: {
     discardedCountThisRun: 0,
     wrecksDissectedThisRun: 0,
     factionRepEarnedThisRun: {},
+    overchargeCellActive: false,
   };
 
   const nextProfile: V2ProfileState = {
@@ -422,14 +485,15 @@ export function saveV2LoadoutPreset(
     readonly slots: readonly V2PrepareSlotEntry[];
   }
 ): { readonly ok: boolean; readonly profile: V2ProfileState; readonly error?: string } {
+  const maxPresets = getEffectiveMaxPresets(profile);
   const existingIdx = input.presetId
     ? profile.loadoutPresets.findIndex((p) => p.presetId === input.presetId)
     : -1;
-  if (existingIdx < 0 && profile.loadoutPresets.length >= V2_MAX_SAVED_PRESETS) {
+  if (existingIdx < 0 && profile.loadoutPresets.length >= maxPresets) {
     return {
       ok: false,
       profile,
-      error: `最多保存 ${V2_MAX_SAVED_PRESETS} 套配装预设，请先覆盖或删除旧预设`,
+      error: `最多保存 ${maxPresets} 套配装预设，请先覆盖或删除旧预设`,
     };
   }
 
@@ -493,8 +557,9 @@ export function resolveV2PresetAgainstWarehouse(
 ): readonly V2ResolvedPresetSlot[] {
   const claimedOwnedIds = new Set<string>();
   return preset.slots.map((ps, idx) => {
-    const def = V2_EQUIPMENT_DEFS[ps.definitionId];
-    if (!def) {
+    const eqDef = V2_EQUIPMENT_DEFS[ps.definitionId];
+    const gdDef = eqDef ? undefined : getV3GadgetDef(ps.definitionId);
+    if (!eqDef && !gdDef) {
       return {
         presetSlot: ps,
         resolved: null,
@@ -503,7 +568,7 @@ export function resolveV2PresetAgainstWarehouse(
       };
     }
 
-    if (ps.preferOrigin === 'owned') {
+    if (ps.preferOrigin === 'owned' || gdDef) {
       const match = profile.equipmentWarehouse.find(
         (w) => w.definitionId === ps.definitionId && !claimedOwnedIds.has(w.instanceId)
       );
@@ -529,12 +594,12 @@ export function resolveV2PresetAgainstWarehouse(
         presetSlot: ps,
         resolved: null,
         missingOwned: true,
-        canSubstituteCommonLoan: profile.blueprints.includes(def.kind),
+        canSubstituteCommonLoan: Boolean(eqDef && profile.blueprints.includes(eqDef.kind)),
       };
     }
 
     // Loan slot
-    if (profile.blueprints.includes(def.kind) && def.quality === 'common') {
+    if (eqDef && profile.blueprints.includes(eqDef.kind) && eqDef.quality === 'common') {
       return {
         presetSlot: ps,
         resolved: {

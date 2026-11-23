@@ -87,6 +87,8 @@ export interface V2StartCombatOptions {
   readonly pureAutoCombat?: boolean;
   /** Extra tactical command charges on Act Boss encounters (e.g. restored obsidian_crown +1) */
   readonly bonusBossCharges?: number;
+  /** Optional Stargate Relay tier (T2+ grants R1 core bonus damage) */
+  readonly stargateRelayTier?: number;
 }
 
 /**
@@ -376,12 +378,15 @@ export function simulateV2Combat(params: {
   readonly crewMasteryTier?: number;
   readonly encounterKind?: V2EncounterKind | string;
   readonly bossId?: string;
+  readonly overchargeCellActive?: boolean;
+  readonly stargateRelayTier?: number;
 }): V2CombatSimulation {
   const stats = params.precomputedStats ?? calculateV2BuildStats(params.bay);
   const sectorId: SectorId = params.sectorId ?? 'near_orbit';
   const sector = getV3SectorDef(sectorId);
   const envModifierId = sector.envModifier.id;
   const masteryTier = Math.max(0, Math.min(2, Math.floor(params.crewMasteryTier ?? 0)));
+  const relayTier = Math.max(0, Math.floor(params.stargateRelayTier ?? 0));
 
   const bossDef = resolveV3BossDefForEncounter({
     encounterKind: params.encounterKind,
@@ -427,11 +432,16 @@ export function simulateV2Combat(params: {
   const initialEnemies = snapshotUnits(enemies, 1, bossDef, params.encounterKind, resolvedBossId);
   let playerHp = Math.max(0, params.startingHp);
 
-  // Opening shield: base build shield + Engineer Mastery T2 (+2, capped at 20), then Sector 2 cryo_ion (-2, min 0)
+  // Opening shield: base build shield + Engineer Mastery T2 (+2) + Overcharge Cell (+4), capped at 20, then Sector 2 cryo_ion (-2, min 0)
   const engineerOpeningShieldBonus = params.crewId === 'engineer' && masteryTier >= 2 ? 2 : 0;
-  const preEnvShield = Math.min(V2_MAX_BATTLE_SHIELD, stats.effectiveShield + engineerOpeningShieldBonus);
+  const overchargeShieldBonus = params.overchargeCellActive ? 4 : 0;
+  const preEnvShield = Math.min(
+    V2_MAX_BATTLE_SHIELD,
+    stats.effectiveShield + engineerOpeningShieldBonus + overchargeShieldBonus
+  );
+  const cryoOpenDrain = Math.max(0, 2 - stats.cryoDrainReduction);
   let playerShield =
-    envModifierId === 'cryo_ion' ? Math.max(0, preEnvShield - 2) : preEnvShield;
+    envModifierId === 'cryo_ion' ? Math.max(0, preEnvShield - cryoOpenDrain) : preEnvShield;
   const cryoOpeningSuppressed = envModifierId === 'cryo_ion' && preEnvShield > playerShield;
   const startingPlayerShield = playerShield;
   const rounds: V2CombatRoundLog[] = [];
@@ -552,10 +562,21 @@ export function simulateV2Combat(params: {
     const primaryTarget = selectTargetByPolicy(startLiving, params.targetPolicy)!;
     const playerAttacks: V2PlayerAttackEvent[] = [];
 
-    // Deterministic first-direct-attack bonuses (Navigator Mastery T2 on R1; Sector 3 gravity_tide on even rounds)
+    // Overcharge Cell consumable gadget: Round 1 +6 armor-piercing burst!
+    if (round === 1 && params.overchargeCellActive) {
+      tacticStrikes.push({
+        sourceInstanceId: 'gadget_overcharge_cell',
+        rawDamage: 6,
+        ignoreArmor: true,
+      });
+    }
+
+    // Deterministic first-direct-attack bonuses (Navigator Mastery T2 on R1; Stargate Relay T2+ on R1; Sector 3 gravity_tide on even rounds)
     const isGravitySurgeRound = envModifierId === 'gravity_tide' && round % 2 === 0;
+    const relayR1Bonus = round === 1 ? (relayTier >= 3 ? 2 : relayTier >= 2 ? 1 : 0) : 0;
     let pendingFirstHitBonus =
       (round === 1 && params.crewId === 'navigator' && masteryTier >= 2 ? 2 : 0) +
+      relayR1Bonus +
       (isGravitySurgeRound ? 2 : 0);
     const consumeFirstHitBonus = (): number => {
       if (pendingFirstHitBonus <= 0) return 0;
@@ -647,6 +668,62 @@ export function simulateV2Combat(params: {
         }
       }
 
+      // 2d-bis. Salvo Pods: multi-missile volley with independent retargeting on kill
+      for (const sv of stats.salvos) {
+        for (let m = 0; m < sv.missiles; m++) {
+          const salvoTarget = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
+          const coolantExtra = m === 0 ? sv.coolantBonus : 0;
+          playerAttacks.push(
+            applyHitToUnit(
+              salvoTarget,
+              'salvo',
+              `${sv.instanceId}_m${m + 1}`,
+              sv.damagePerMissile + coolantExtra + directWeaponDmgBonus + consumeFirstHitBonus(),
+              ignoreArmorDirectThisRound
+            )
+          );
+        }
+      }
+
+      // 2d-ter. EMP Jammers: strip enemy shield before dealing direct EMP pulse damage
+      for (const ej of stats.empJammers) {
+        const empTarget = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
+        const preShred = Math.min(empTarget.shield, ej.shieldShred);
+        if (preShred > 0) {
+          empTarget.shield -= preShred;
+        }
+        const hit = applyHitToUnit(
+          empTarget,
+          'emp',
+          ej.instanceId,
+          ej.damage + directWeaponDmgBonus + consumeFirstHitBonus(),
+          ignoreArmorDirectThisRound
+        );
+        playerAttacks.push(
+          preShred > 0
+            ? {
+                ...hit,
+                appliedDamage: hit.appliedDamage + preShred,
+                shieldDamaged: (hit.shieldDamaged ?? 0) + preShred,
+              }
+            : hit
+        );
+      }
+
+      // 2d-quater. Salvage Grapples: magnetic clamp strike
+      for (const gr of stats.salvageGrapples) {
+        const grappleTarget = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
+        playerAttacks.push(
+          applyHitToUnit(
+            grappleTarget,
+            'grapple',
+            gr.instanceId,
+            gr.damage + directWeaponDmgBonus + consumeFirstHitBonus(),
+            ignoreArmorDirectThisRound
+          )
+        );
+      }
+
       // 2e. Flak arrays: hit EVERY enemy alive at start of round (sorted by enemyId)
       const startLivingSortedForFlak = [...startLiving].sort((a, b) =>
         a.enemyId.localeCompare(b.enemyId)
@@ -690,6 +767,9 @@ export function simulateV2Combat(params: {
     const enemyIntentsThisRound: { readonly enemyId: string; readonly intent: V3EnemyIntent }[] = [];
     let shieldAbsorbedTotal = 0;
     const gravityEnemyDmgBonus = isGravitySurgeRound ? 1 : 0;
+    let empWeakenApplied = false;
+    const empWeakenActiveThisRound =
+      stats.enemyWeakenAmount > 0 && (stats.enemyWeakenEveryRound || round % 2 === 1);
 
     for (const enemy of startLivingSorted) {
       const intent = resolveUnitIntentForRound({
@@ -713,6 +793,10 @@ export function simulateV2Combat(params: {
       // Gravity tide (+1) applies ONLY when the enemy actually fires an attack (intent.damage > 0)
       if (intent.damage > 0) {
         rawDamage = intent.damage + gravityEnemyDmgBonus;
+        if (empWeakenActiveThisRound && !empWeakenApplied) {
+          rawDamage = Math.max(1, rawDamage - stats.enemyWeakenAmount);
+          empWeakenApplied = true;
+        }
         const effectivePierceRatio =
           Math.max(0, Math.min(1, intent.pierceRatio ?? enemy.pierceRatio)) * pierceMitigationFactor;
         pierceDamage = effectivePierceRatio > 0 ? Math.floor(rawDamage * effectivePierceRatio) : 0;
@@ -724,12 +808,15 @@ export function simulateV2Combat(params: {
         playerHp = Math.max(0, playerHp - hullDamage);
       }
 
-      // EMP Shield Disruptor effect (runs after damage or independently on EMP rounds)
+      // EMP Shield Disruptor effect (dampened by emp_jammer empDrainReduction)
       if (intent.empShieldDrain && intent.empShieldDrain > 0) {
+        const netEmpDrain = Math.max(0, intent.empShieldDrain - stats.empDrainReduction);
         if (empImmuneThisRound) {
           enemySpecialNotes.push('舱壁防护：已抵御 EMP 护盾干扰');
+        } else if (netEmpDrain <= 0) {
+          enemySpecialNotes.push('EMP 干扰器：已完全抵消敌方护盾干扰');
         } else if (playerShield > 0) {
-          empShieldDrained = Math.min(playerShield, intent.empShieldDrain);
+          empShieldDrained = Math.min(playerShield, netEmpDrain);
           playerShield -= empShieldDrained;
           enemySpecialNotes.push(`${enemy.name} EMP 脉冲：我方护盾 -${empShieldDrained}`);
         }
@@ -832,12 +919,15 @@ export function simulateV2Combat(params: {
       }
     }
 
-    // Step 5b: End-of-round deterministic sector environmental effect
+    // Step 5b: End-of-round deterministic sector environmental effect + Coolant Vent shield regen
     let envModifierEvent: string | undefined;
     if (envModifierId === 'cryo_ion') {
       if (round % 2 === 0) {
-        if (playerShield > 0) {
-          const drained = Math.min(playerShield, 2);
+        const netCryoDrain = Math.max(0, 2 - stats.cryoDrainReduction);
+        if (netCryoDrain === 0) {
+          envModifierEvent = '低温电离脉冲：冷却排热阀抵消余盾衰减';
+        } else if (playerShield > 0) {
+          const drained = Math.min(playerShield, netCryoDrain);
           playerShield -= drained;
           envModifierEvent = `低温电离脉冲：余盾衰减 -${drained}`;
         } else {
@@ -848,6 +938,10 @@ export function simulateV2Combat(params: {
       }
     } else if (isGravitySurgeRound) {
       envModifierEvent = '引力潮汐高潮：我方首击 +2 / 敌舰齐射各 +1';
+    }
+
+    if (playerHp > 0 && enemies.some((u) => u.hp > 0) && stats.endOfRoundShieldRegen > 0) {
+      playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + stats.endOfRoundShieldRegen);
     }
 
     rounds.push({
@@ -916,6 +1010,8 @@ export function simulateV2Combat(params: {
     sectorId,
     envModifierId,
     ...(resolvedBossId ? { bossId: resolvedBossId } : {}),
+    ...(params.overchargeCellActive ? { overchargeApplied: true } : {}),
+    ...(relayTier > 0 ? { stargateRelayTier: relayTier } : {}),
   };
 }
 
@@ -925,10 +1021,12 @@ export function simulateV2Combat(params: {
 export function previewV2CombatNode(
   run: V2RunState,
   nodeId: string,
-  policyOverride?: V2TargetPolicy
+  policyOverride?: V2TargetPolicy,
+  options?: { readonly stargateRelayTier?: number }
 ): V2CombatSimulation | null {
   const node = run.graph.nodes[nodeId];
   if (!node || !node.combat) return null;
+  const isCurrentNode = run.currentNodeId === nodeId;
   return simulateV2Combat({
     resultId: `preview_${run.runId}_${nodeId}`,
     bay: run.bay,
@@ -941,6 +1039,8 @@ export function previewV2CombatNode(
     crewMasteryTier: run.crewMasteryTier ?? 0,
     encounterKind: node.combat.encounterKind,
     bossId: resolveNodeBossId(node, run),
+    overchargeCellActive: isCurrentNode ? Boolean(run.overchargeCellActive) : false,
+    stargateRelayTier: options?.stargateRelayTier ?? 0,
   });
 }
 
@@ -954,9 +1054,20 @@ function buildTacticalDecisionAtRound(params: {
   readonly priorCommands: readonly V2AppliedTacticalCommand[];
   readonly chargeIndex: number;
   readonly chargesMax: number;
+  readonly stargateRelayTier?: number;
 }): V2EliteTacticDecision | null {
-  const { run, node, targetPolicy, startingHp, baselineSim, pauseRound, priorCommands, chargeIndex, chargesMax } =
-    params;
+  const {
+    run,
+    node,
+    targetPolicy,
+    startingHp,
+    baselineSim,
+    pauseRound,
+    priorCommands,
+    chargeIndex,
+    chargesMax,
+    stargateRelayTier,
+  } = params;
   if (!node.combat || pauseRound < 2) return null;
   if (baselineSim.rounds.length < pauseRound) return null;
   const prevRoundLog = baselineSim.rounds[pauseRound - 2];
@@ -984,6 +1095,8 @@ function buildTacticalDecisionAtRound(params: {
       crewMasteryTier: run.crewMasteryTier ?? 0,
       encounterKind: node.combat!.encounterKind,
       bossId,
+      overchargeCellActive: Boolean(run.overchargeCellActive || baselineSim.overchargeApplied),
+      stargateRelayTier: stargateRelayTier ?? baselineSim.stargateRelayTier ?? 0,
     });
 
   const hpAtPause = prevRoundLog.playerHpAfter;
@@ -1172,6 +1285,8 @@ export function startV2CombatAtCurrentNode(
     crewMasteryTier: run.crewMasteryTier ?? 0,
     encounterKind: node.combat.encounterKind,
     bossId,
+    overchargeCellActive: Boolean(run.overchargeCellActive),
+    stargateRelayTier: options?.stargateRelayTier ?? 0,
   });
 
   const tacticalEnabled =
@@ -1192,6 +1307,7 @@ export function startV2CombatAtCurrentNode(
           priorCommands: [],
           chargeIndex: 1,
           chargesMax: tacticalChargesMax,
+          stargateRelayTier: options?.stargateRelayTier ?? 0,
         })
       : null;
 
@@ -1255,7 +1371,8 @@ export function markV2CombatDecisionPaused(
 export function commitV2EliteTacticDecision(
   run: V2RunState,
   decisionId: string,
-  choice: V2EliteTacticChoice
+  choice: V2EliteTacticChoice,
+  options?: { readonly stargateRelayTier?: number }
 ): { readonly ok: boolean; readonly run: V2RunState; readonly error?: string } {
   if (run.phase !== 'ENCOUNTER' || !run.activeCombat || !run.currentNodeId) {
     return { ok: false, run, error: '当前没有等待战术抉择的战斗' };
@@ -1295,6 +1412,7 @@ export function commitV2EliteTacticDecision(
     : run.tacticalChargesUsed;
 
   const bossId = resolveNodeBossId(node, run);
+  const relayTier = options?.stargateRelayTier ?? run.activeCombat.simulation.stargateRelayTier ?? 0;
   const scheduledCommands: readonly V2ScheduledTacticalCommand[] = nextCommitted.map((c) => ({
     roundNumber: c.roundNumber,
     choice: c.choice,
@@ -1316,6 +1434,10 @@ export function commitV2EliteTacticDecision(
     crewMasteryTier: run.crewMasteryTier ?? 0,
     encounterKind: node.combat.encounterKind,
     bossId,
+    overchargeCellActive: Boolean(
+      run.overchargeCellActive || run.activeCombat.simulation.overchargeApplied
+    ),
+    stargateRelayTier: relayTier,
   });
 
   // Check if another charge remains and combat continues to a later pause round (e.g. Boss Phase 2 / 3)
@@ -1336,6 +1458,7 @@ export function commitV2EliteTacticDecision(
         priorCommands: nextCommitted,
         chargeIndex: nextChargesUsed + 1,
         chargesMax: run.tacticalChargesMax,
+        stargateRelayTier: relayTier,
       });
       if (chained) {
         nextPendingDecision = chained;
@@ -1396,6 +1519,7 @@ export function completeV2CombatAtCurrentNode(
         ...run,
         hp: 0,
         activeCombat: null,
+        overchargeCellActive: false,
         phase: 'SETTLEMENT',
         settlementReason: 'defeat',
         claimedEventIds: [...run.claimedEventIds, claimKey],
@@ -1422,6 +1546,7 @@ export function completeV2CombatAtCurrentNode(
       : [...effectiveRecent];
 
   const effectiveBounty = getEffectiveV2CombatBounty(run, node.combat.bounty);
+  const grappleWinParts = calculateV2BuildStats(run.bay).bonusSalvagePartsPerWin;
   const bossIdOnNode = resolveNodeBossId(node, run);
 
   const prevBosses = run.defeatedBossIdsThisRun ?? [];
@@ -1440,8 +1565,10 @@ export function completeV2CombatAtCurrentNode(
       ...run,
       hp: sim.finalPlayerHpAfterRepair,
       wallet: run.wallet + effectiveBounty,
+      salvagePartsEarned: (run.salvagePartsEarned ?? 0) + grappleWinParts,
       rngStreams: nextStreams,
       activeCombat: null,
+      overchargeCellActive: false,
       pendingReward: bundle,
       phase: 'REWARD',
       claimedEventIds: [...run.claimedEventIds, claimKey],

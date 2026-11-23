@@ -4,6 +4,7 @@ import {
   getV2EncounterTemplate,
   resolveUnitInitialShield,
 } from '../../data/enemies';
+import { getV3GadgetDef } from '../../data/gadgets';
 import { getV3SectorDef } from '../../data/sectors';
 import { getShipSignatureCommand } from '../../data/ships';
 import {
@@ -12,6 +13,7 @@ import {
   previewV2CombatNode,
   resolveNodeBossId,
 } from '../../domain/combatV2';
+import { canUseV3GadgetInRun } from '../../domain/encounter';
 import type {
   V2CombatUnitSnapshot,
   V2EliteTacticChoice,
@@ -29,11 +31,13 @@ export interface CombatPreViewProps {
   readonly showCombatLogDetails: boolean;
   readonly pureAutoCombat: boolean;
   readonly bonusBossCharges?: number;
+  readonly stargateRelayTier?: number;
 }
 
 export interface CombatPreViewActions {
   readonly onSelectPolicy: (policy: V2TargetPolicy) => void;
   readonly onToggleLog: () => void;
+  readonly onUseGadget?: (instanceId: string) => void;
   readonly onStartCombat: () => void;
 }
 
@@ -90,10 +94,18 @@ export function renderCombatPreView(
   props: CombatPreViewProps,
   actions: CombatPreViewActions
 ): void {
-  const { run, node, readOnly, showCombatLogDetails, pureAutoCombat, bonusBossCharges = 0 } = props;
+  const {
+    run,
+    node,
+    readOnly,
+    showCombatLogDetails,
+    pureAutoCombat,
+    bonusBossCharges = 0,
+    stargateRelayTier = 0,
+  } = props;
   if (!node.combat) return;
 
-  const pv = previewV2CombatNode(run, node.nodeId, run.targetPolicy);
+  const pv = previewV2CombatNode(run, node.nodeId, run.targetPolicy, { stargateRelayTier });
   const sector = getV3SectorDef(run.sectorId);
   const envIcon =
     sector.envModifier.id === 'cryo_ion'
@@ -176,6 +188,33 @@ export function renderCombatPreView(
     })
     .join('');
 
+  const overchargeGadgets = run.bay.placed
+    .map((p) => ({ item: p.item, def: getV3GadgetDef(p.item.definitionId) }))
+    .filter(
+      (entry): entry is { item: typeof entry.item; def: NonNullable<typeof entry.def> } =>
+        Boolean(entry.def && entry.def.usableIn === 'combat_pre')
+    );
+
+  const overchargeBannerHtml = run.overchargeCellActive
+    ? `<div class="v3-overcharge-banner" data-testid="overcharge-active-banner">
+        ${svgIcon('bolt', 14)} <strong>过载电池已充能</strong>：首轮追加 +6 无视护甲能量爆发与 +4 护盾（已同步至下方预估）
+      </div>`
+    : overchargeGadgets.length > 0 && actions.onUseGadget
+    ? `<div class="v3-gadget-bar" data-testid="combat-gadget-bar">
+        <span class="v3-gadget-bar-label">${svgIcon('bolt', 12)} 战前消耗装置</span>
+        <div class="v3-gadget-bar-btns">
+          ${overchargeGadgets
+            .map(({ item, def }) => {
+              const chk = canUseV3GadgetInRun(run, item.instanceId);
+              return `<button type="button" class="btn btn-sm btn-primary v3-gadget-use-btn" data-use-gadget="${item.instanceId}" data-gadget-kind="${def.kind}" data-gadget-id="${def.kind}" data-testid="use-gadget-${def.kind}" ${
+                readOnly || !chk.usable ? 'disabled' : ''
+              }>⚡ 使用${def.buttonLabel}（${def.shortEffectLabel}）</button>`;
+            })
+            .join('')}
+        </div>
+      </div>`
+    : '';
+
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root v3-sticky-panel-root" data-testid="combat-screen">
       <div class="v3-panel-scroll-body">
@@ -190,6 +229,7 @@ export function renderCombatPreView(
         </div>
 
         ${tacticalSummaryHtml}
+        ${overchargeBannerHtml}
         ${bossOverviewHtml}
 
         <div class="v2-enemy-roster v3-enemy-roster">
@@ -272,6 +312,12 @@ export function renderCombatPreView(
   leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-policy]').forEach((btn) => {
     btn.addEventListener('click', () => {
       actions.onSelectPolicy(btn.dataset.policy as V2TargetPolicy);
+    });
+  });
+
+  leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-use-gadget]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      actions.onUseGadget?.(btn.dataset.useGadget!);
     });
   });
 

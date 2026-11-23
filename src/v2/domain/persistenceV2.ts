@@ -237,7 +237,7 @@ function isValidPresetSlot(raw: unknown): raw is V2PresetSlot {
   if (!isPlainObject(raw)) return false;
   if (typeof raw.definitionId !== 'string') return false;
   const def = getAnyV2ItemDef(raw.definitionId);
-  if (!def || def.category !== 'equipment') return false;
+  if (!def || (def.category !== 'equipment' && def.category !== 'gadget')) return false;
   if (raw.quality !== def.quality) return false;
   if (raw.preferOrigin !== 'owned' && raw.preferOrigin !== 'loan') return false;
   if (!isFiniteInt(raw.x) || !isFiniteInt(raw.y)) return false;
@@ -678,6 +678,9 @@ function validateV2WreckState(
     if (spot.reactorRepairGain !== undefined && !isNonNegInt(spot.reactorRepairGain)) {
       return { ok: false, error: `${label}.hotspots[${i}].reactorRepairGain 非法` };
     }
+  }
+  if (w.stabilizerActive !== undefined && typeof w.stabilizerActive !== 'boolean') {
+    return { ok: false, error: `${label}.stabilizerActive 非法` };
   }
   if (w.stashedItems !== undefined) {
     if (!Array.isArray(w.stashedItems)) {
@@ -1204,6 +1207,9 @@ function validateV2RunCore(
     ) {
       return { ok: false, error: 'activeRun.activeCombat.simulation.appliedCommands 非法' };
     }
+    if (sim.stargateRelayTier !== undefined && !isNonNegInt(sim.stargateRelayTier)) {
+      return { ok: false, error: 'activeRun.activeCombat.simulation.stargateRelayTier 非法' };
+    }
     if (ac.pendingDecision !== undefined && ac.pendingDecision !== null) {
       const pd = ac.pendingDecision;
       if (
@@ -1352,6 +1358,9 @@ function validateV2RunCore(
     if (run.wrecksDissectedThisRun !== undefined && !isNonNegInt(run.wrecksDissectedThisRun)) {
       return { ok: false, error: 'activeRun.wrecksDissectedThisRun 非法' };
     }
+    if (run.overchargeCellActive !== undefined && typeof run.overchargeCellActive !== 'boolean') {
+      return { ok: false, error: 'activeRun.overchargeCellActive 非法' };
+    }
     if (run.factionRepEarnedThisRun !== undefined) {
       if (!isPlainObject(run.factionRepEarnedThisRun)) {
         return { ok: false, error: 'activeRun.factionRepEarnedThisRun 非法' };
@@ -1434,7 +1443,14 @@ function validateSaveDataCore(
     }
     bpSet.add(bp);
   }
-  if (!Array.isArray(p.equipmentWarehouse) || p.equipmentWarehouse.length > V2_WAREHOUSE_CAPACITY) {
+  const rawLabTier =
+    isPlainObject(p.facilityTiers) &&
+    typeof p.facilityTiers.research_lab === 'number' &&
+    Number.isFinite(p.facilityTiers.research_lab)
+      ? Math.floor(p.facilityTiers.research_lab)
+      : 0;
+  const maxWarehouseCap = rawLabTier >= 3 ? 20 : rawLabTier >= 2 ? 16 : V2_WAREHOUSE_CAPACITY;
+  if (!Array.isArray(p.equipmentWarehouse) || p.equipmentWarehouse.length > maxWarehouseCap) {
     return { ok: false, error: 'profile.equipmentWarehouse 非法或超容量' };
   }
   const warehouseAndGiftIds = new Set<string>();
@@ -1446,8 +1462,8 @@ function validateSaveDataCore(
     const chk = validateV2Item(it, `equipmentWarehouse[${i}]`);
     if (!chk.ok) return chk;
     const def = getAnyV2ItemDef(it.definitionId);
-    if (!def || def.category !== 'equipment') {
-      return { ok: false, error: `equipmentWarehouse[${i}] 仅允许存放装备` };
+    if (!def || (def.category !== 'equipment' && def.category !== 'gadget')) {
+      return { ok: false, error: `equipmentWarehouse[${i}] 仅允许存放装备或战术装置` };
     }
     if (it.origin === 'loan' || it.origin === 'mission') {
       return { ok: false, error: '借用或任务物不允许进入设备库' };
@@ -1961,6 +1977,11 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
   ) {
     facilityTiers.stargate_relay = 0;
   }
+  if (buildings.drydock_tier2 || (facilityTiers.drydock_tier2 ?? 0) >= 1) {
+    facilityTiers.drydock = Math.max(2, facilityTiers.drydock ?? 0);
+  } else if (buildings.drydock) {
+    facilityTiers.drydock = Math.max(1, facilityTiers.drydock ?? 0);
+  }
 
   const factionRep: Record<FactionId, number> = { ...createInitialV3FactionRep() };
   if (isPlainObject(rawProfile.factionRep)) {
@@ -2084,9 +2105,12 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
     for (let i = 0; i < rawProfile.equipmentWarehouse.length; i += 1) {
       if (!hasOwn(rawProfile.equipmentWarehouse, i)) continue;
       const it = rawProfile.equipmentWarehouse[i];
+      const itDef = validateV2Item(it, 'equipmentWarehouse').ok
+        ? getAnyV2ItemDef(it.definitionId)
+        : undefined;
       if (
-        validateV2Item(it, 'equipmentWarehouse').ok &&
-        getAnyV2ItemDef(it.definitionId)?.category === 'equipment' &&
+        itDef &&
+        (itDef.category === 'equipment' || itDef.category === 'gadget') &&
         it.origin !== 'loan' &&
         it.origin !== 'mission' &&
         !seenWarehouseAndGiftIds.has(it.instanceId)

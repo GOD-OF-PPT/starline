@@ -1,17 +1,22 @@
 import {
   V2_EQUIPMENT_DEFS,
-  V2_WAREHOUSE_CAPACITY,
   getV2EquipmentDefByKind,
   type V2EquipmentDef,
   type V2EquipmentKind,
 } from '../data/equipment';
 import { V2_SHIPS, type V2ShipId } from '../data/ships';
+import { calculateV2BuildStats } from './buildStatsV2';
 import {
   getDismantlePartsMultiplier,
   getEffectiveWorkshopCost,
   getWreckFactionStabilityBonus,
 } from './factions';
 import { createV2EquipmentInstance, getAnyV2ItemDef } from './itemCatalog';
+import {
+  getActiveRelicPassives,
+  getEffectiveWarehouseCapacity,
+  getFacilityTier,
+} from './progressionV2';
 import { withV2Stream } from './rngStreams';
 import type {
   V2ItemInstance,
@@ -90,26 +95,29 @@ export function getShipHullTuning(
 }
 
 export function getEffectiveShipMaxHp(
-  profile: Pick<V2ProfileState, 'hullTuning'> | undefined,
+  profile: (Pick<V2ProfileState, 'hullTuning'> & Partial<Pick<V2ProfileState, 'relics'>>) | undefined,
   shipId: V2ShipId
 ): number {
   const base = V2_SHIPS[shipId].maxHp;
   const tuning = getShipHullTuning(profile, shipId);
-  return base + tuning.hpLevel * 2;
+  const relicBonus = getActiveRelicPassives(profile).maxHpBonus;
+  return base + tuning.hpLevel * 2 + relicBonus;
 }
 
 export function getEffectiveShipLoadoutBudget(
-  profile: Pick<V2ProfileState, 'hullTuning'> | undefined,
+  profile: (Pick<V2ProfileState, 'hullTuning'> & Partial<Pick<V2ProfileState, 'relics'>>) | undefined,
   shipId: V2ShipId
 ): number {
   const base = V2_SHIPS[shipId].loadoutBudget;
   const tuning = getShipHullTuning(profile, shipId);
-  return base + tuning.budgetLevel;
+  const relicBonus = getActiveRelicPassives(profile).loadoutBudgetBonus;
+  return base + tuning.budgetLevel + relicBonus;
 }
 
 export function getDismantleSalvagePartsYield(
   item: V2ItemInstance,
-  profile?: Pick<V2ProfileState, 'factionRep' | 'hullTuning' | 'selectedShipId'>,
+  profile?: Pick<V2ProfileState, 'factionRep' | 'hullTuning' | 'selectedShipId'> &
+    Partial<Pick<V2ProfileState, 'buildings' | 'facilityTiers'>>,
   shipId?: V2ShipId
 ): number {
   if (!canDismantleV2Item(item).ok) return 0;
@@ -120,12 +128,22 @@ export function getDismantleSalvagePartsYield(
       item.quality === 'improved'
         ? Math.max(10, Math.round(item.fixedValue * 0.9))
         : Math.max(6, Math.round(item.fixedValue * 0.8));
+  } else if (item.category === 'gadget') {
+    baseParts = Math.max(4, Math.round(item.fixedValue * 0.55));
   } else {
     baseParts = Math.max(3, Math.round(item.fixedValue * 0.45));
   }
 
   const salvagersRep = profile?.factionRep?.free_salvagers ?? 0;
-  const mult = getDismantlePartsMultiplier(salvagersRep);
+  const wbTier =
+    profile?.facilityTiers || profile?.buildings
+      ? getFacilityTier(
+          profile as Pick<V2ProfileState, 'buildings' | 'facilityTiers'>,
+          'workbench'
+        )
+      : 0;
+  const wbMult = wbTier >= 2 ? 1.1 : 1;
+  const mult = getDismantlePartsMultiplier(salvagersRep) * wbMult;
   const effectiveShip = shipId ?? profile?.selectedShipId ?? 'cannon_skiff';
   const salvageTuning = getShipHullTuning(profile, effectiveShip).salvageLevel;
   return Math.max(1, Math.ceil(baseParts * mult) + salvageTuning);
@@ -165,9 +183,15 @@ export function dismantleV2WarehouseItem(
 
 export function getUpgradeToImprovedCost(
   def: V2EquipmentDef,
-  profile: Pick<V2ProfileState, 'factionRep'>
+  profile: Pick<V2ProfileState, 'factionRep'> &
+    Partial<Pick<V2ProfileState, 'buildings' | 'facilityTiers'>>
 ): { readonly parts: number; readonly credits: number } {
-  const baseParts = Math.max(20, Math.round(def.recycleValue * 2));
+  const wbTier =
+    profile.facilityTiers || profile.buildings
+      ? getFacilityTier(profile as Pick<V2ProfileState, 'buildings' | 'facilityTiers'>, 'workbench')
+      : 0;
+  const rawParts = Math.max(20, Math.round(def.recycleValue * 2));
+  const baseParts = wbTier >= 3 ? Math.max(12, Math.round(rawParts * 0.9)) : rawParts;
   const parts = getEffectiveWorkshopCost(baseParts, profile.factionRep.deep_institute);
   return { parts, credits: 0 };
 }
@@ -260,10 +284,16 @@ export function upgradeV2EquipmentToImproved(
 
 export function getPartsCraftCost(
   kind: V2EquipmentKind,
-  profile: Pick<V2ProfileState, 'factionRep'>
+  profile: Pick<V2ProfileState, 'factionRep'> &
+    Partial<Pick<V2ProfileState, 'buildings' | 'facilityTiers'>>
 ): { readonly parts: number; readonly credits: number } {
   const def = getV2EquipmentDefByKind(kind, 'common');
-  const baseParts = Math.max(18, Math.round(def.recycleValue * 1.8));
+  const wbTier =
+    profile.facilityTiers || profile.buildings
+      ? getFacilityTier(profile as Pick<V2ProfileState, 'buildings' | 'facilityTiers'>, 'workbench')
+      : 0;
+  const rawParts = Math.max(18, Math.round(def.recycleValue * 1.8));
+  const baseParts = wbTier >= 3 ? Math.max(12, Math.round(rawParts * 0.9)) : rawParts;
   const parts = getEffectiveWorkshopCost(baseParts, profile.factionRep.deep_institute);
   return { parts, credits: 0 };
 }
@@ -280,11 +310,12 @@ export function canCraftV2EquipmentWithParts(
   if (!profile.blueprints.includes(kind)) {
     return { canCraft: false, cost, reason: '尚未解锁该设备的普通蓝图' };
   }
-  if (profile.equipmentWarehouse.length >= V2_WAREHOUSE_CAPACITY) {
+  const capacity = getEffectiveWarehouseCapacity(profile);
+  if (profile.equipmentWarehouse.length >= capacity) {
     return {
       canCraft: false,
       cost,
-      reason: `设备库已满（${V2_WAREHOUSE_CAPACITY}/${V2_WAREHOUSE_CAPACITY}），请先腾出空位`,
+      reason: `设备库已满（${capacity}/${capacity}），请先腾出空位`,
     };
   }
   if (profile.salvageParts < cost.parts) {
@@ -337,7 +368,8 @@ export function craftV2EquipmentWithParts(
 export function getHullTuningCost(
   track: V3HullTuningTrack,
   nextLevel: number,
-  profile: Pick<V2ProfileState, 'factionRep'>
+  profile: Pick<V2ProfileState, 'factionRep'> &
+    Partial<Pick<V2ProfileState, 'buildings' | 'facilityTiers'>>
 ): { readonly parts: number; readonly credits: number } {
   const baseTable: Record<V3HullTuningTrack, readonly number[]> = {
     hp: [25, 45, 65],
@@ -346,7 +378,12 @@ export function getHullTuningCost(
   };
   const arr = baseTable[track];
   const idx = Math.max(0, Math.min(arr.length - 1, nextLevel - 1));
-  const parts = getEffectiveWorkshopCost(arr[idx], profile.factionRep.deep_institute);
+  const dockTier =
+    profile.facilityTiers || profile.buildings
+      ? getFacilityTier(profile as Pick<V2ProfileState, 'buildings' | 'facilityTiers'>, 'drydock')
+      : 0;
+  const rawCost = dockTier >= 3 ? Math.max(15, Math.round(arr[idx] * 0.9)) : arr[idx];
+  const parts = getEffectiveWorkshopCost(rawCost, profile.factionRep.deep_institute);
   return { parts, credits: 0 };
 }
 
@@ -434,7 +471,8 @@ export interface V3WreckCutEvaluation {
 export function buildActiveWreckStateForNode(
   run: V2RunState,
   node: V2MapNode,
-  profile?: Pick<V2ProfileState, 'factionRep' | 'hullTuning'>
+  profile?: Pick<V2ProfileState, 'factionRep' | 'hullTuning'> &
+    Partial<Pick<V2ProfileState, 'buildings' | 'facilityTiers'>>
 ): { readonly wreck: V2WreckState; readonly nextStreams: V2RngStreams } {
   if (run.activeWreck && run.activeWreck.nodeId === node.nodeId) {
     return { wreck: run.activeWreck, nextStreams: run.rngStreams };
@@ -443,7 +481,16 @@ export function buildActiveWreckStateForNode(
   const w = node.wreck;
   const salvageLevel = getShipHullTuning(profile, run.shipId).salvageLevel;
   const factionBonus = getWreckFactionStabilityBonus(profile?.factionRep?.free_salvagers ?? 0);
-  const maxStability = 100 + salvageLevel * 15 + factionBonus;
+  const grappleBonus = calculateV2BuildStats(run.bay).wreckStabilityBonus;
+  const wbTier =
+    profile?.facilityTiers || profile?.buildings
+      ? getFacilityTier(
+          profile as Pick<V2ProfileState, 'buildings' | 'facilityTiers'>,
+          'workbench'
+        )
+      : 0;
+  const workbenchBonus = wbTier >= 3 ? 10 : 0;
+  const maxStability = 100 + salvageLevel * 15 + factionBonus + grappleBonus + workbenchBonus;
 
   const draw = withV2Stream(run.rngStreams, 'events', (rng) => {
     const armoryAmbush = node.layer >= 3 && rng.nextFloat() < 0.32;
@@ -499,7 +546,7 @@ export function buildActiveWreckStateForNode(
 }
 
 export function evaluateWreckHotspotCut(
-  run: Pick<V2RunState, 'hp' | 'fuel'>,
+  run: Pick<V2RunState, 'hp' | 'fuel'> & Partial<Pick<V2RunState, 'bay'>>,
   wreck: V2WreckState,
   spotId: V2WreckSpotId
 ): V3WreckCutEvaluation {
@@ -572,10 +619,16 @@ export function evaluateWreckHotspotCut(
     };
   }
 
-  // Cut #1 is ALWAYS SAFE (0 hull loss, 0 fuel cost, 0 ambush risk!)
-  const effectiveHullDamage = isFirstSafeCut ? 0 : Math.max(0, spot.riskHullDamage);
-  const effectiveFuelCost = isFirstSafeCut ? 0 : Math.max(0, spot.riskFuelCost);
-  const effectiveAmbushRisk = isFirstSafeCut ? false : Boolean(spot.riskAmbush);
+  // Cut #1 is ALWAYS SAFE; Cut Stabilizer protects the next risky cut (0 hull / 0 fuel / 0 ambush)
+  const stabilizerProtects = !isFirstSafeCut && Boolean(wreck.stabilizerActive);
+  const grappleReduction = run.bay ? calculateV2BuildStats(run.bay).wreckHullDamageReduction : 0;
+  const effectiveHullDamage =
+    isFirstSafeCut || stabilizerProtects
+      ? 0
+      : Math.max(0, spot.riskHullDamage - grappleReduction);
+  const effectiveFuelCost = isFirstSafeCut || stabilizerProtects ? 0 : Math.max(0, spot.riskFuelCost);
+  const effectiveAmbushRisk =
+    isFirstSafeCut || stabilizerProtects ? false : Boolean(spot.riskAmbush);
 
   // Strict lethal-cut guard: never allow a cut that drops HP <= 0!
   if (effectiveHullDamage > 0 && run.hp <= effectiveHullDamage) {

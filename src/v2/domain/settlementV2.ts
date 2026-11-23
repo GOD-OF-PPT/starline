@@ -3,7 +3,6 @@ import { V2_CONTRACT_TEMPLATES } from '../data/contracts';
 import { V2_CREW, type V2CrewId } from '../data/crew';
 import {
   V2_CONTRACT_FAMILY_UNLOCK_ORDER,
-  V2_WAREHOUSE_CAPACITY,
   type V2EquipmentKind,
 } from '../data/equipment';
 import { V2_TUTORIAL_SUCCESS_BONUS } from '../data/facilities';
@@ -17,6 +16,7 @@ import {
 } from './factions';
 import { createV2EquipmentInstance, getAnyV2ItemDef } from './itemCatalog';
 import { V3_MAX_RUN_HISTORY } from './persistenceV2';
+import { getEffectiveWarehouseCapacity, getFacilityTier } from './progressionV2';
 import type {
   CampaignActId,
   FactionId,
@@ -119,7 +119,7 @@ export function getAllowedDispositionsForItem(
   const def = getAnyV2ItemDef(item.definitionId);
   const canDismantle = canDismantleV2Item(item).ok;
 
-  if (item.category === 'equipment') {
+  if (item.category === 'equipment' || item.category === 'gadget') {
     if (item.origin === 'owned') {
       return canDismantle ? ['store', 'sell', 'dismantle'] : ['store', 'sell'];
     }
@@ -262,26 +262,36 @@ export function calculateV2Settlement(
     };
   });
 
-  // Salvager Mastery Tier >= 1 grants +15% appraisal bonus on sold loot cargo (0 at Tier 0)
+  // Salvager Mastery Tier >= 1 (+15%) & Display T2/T3 (+8%/+15%) appraisal bonus on sold loot cargo (0 at T0/T1)
   const effectiveMasteryTier =
     run.crewMasteryTier ?? (run.crewId ? profile.crewMastery[run.crewId] ?? 0 : 0);
+  const displayTier = getFacilityTier(profile, 'display');
+  const displayCargoPct = displayTier >= 3 ? 0.15 : displayTier >= 2 ? 0.08 : 0;
   const crewMasteryBonusCredits =
-    run.crewId === 'salvager' && effectiveMasteryTier >= 1 && soldLootCargoCredits > 0
+    (run.crewId === 'salvager' && effectiveMasteryTier >= 1 && soldLootCargoCredits > 0
       ? Math.round(soldLootCargoCredits * 0.15)
-      : 0;
+      : 0) +
+    (displayCargoPct > 0 && soldLootCargoCredits > 0
+      ? Math.round(soldLootCargoCredits * displayCargoPct)
+      : 0);
 
-  // Tutorial success grants fixed +40 once (§12); regular contracts grant template reward once (§4.1)
+  // Tutorial success grants fixed +40 once (§12); regular contracts grant template reward once (+contract_hub T2/T3 bonus)
+  const hubTier = getFacilityTier(profile, 'contract_hub');
+  const hubContractMult = hubTier >= 3 ? 1.2 : hubTier >= 2 ? 1.1 : 1;
   const contractRewardCredits =
-    contractCompleted && !run.isTutorial ? run.contract.rewardCredits : 0;
+    contractCompleted && !run.isTutorial
+      ? Math.round(run.contract.rewardCredits * hubContractMult)
+      : 0;
   const tutorialBonusCredits =
     run.isTutorial && contractCompleted && !profile.tutorialBonusClaimed
       ? V2_TUTORIAL_SUCCESS_BONUS
       : 0;
 
   // Optional Bonus Objective (F13): trust frozen `activeBonus.completed` — NEVER clobber pre-seeded false!
+  const hubBonusMult = hubTier >= 3 ? 1.1 : 1;
   const bonusObjectiveCredits =
     contractCompleted && !run.isTutorial && activeBonus?.completed === true
-      ? activeBonus.rewardCredits
+      ? Math.round(activeBonus.rewardCredits * hubBonusMult)
       : 0;
 
   // Faction Perks (F13): Starport Guild Lv3 +10% guild contract bonus; Deep Institute Lv3 +6 survey parts
@@ -304,7 +314,8 @@ export function calculateV2Settlement(
     Math.max(0, Math.floor(run.salvagePartsEarned ?? 0)) + surveyBonusParts;
   const totalSalvagePartsEarned = runSalvagePartsEarned + dismantledPartsEarned;
 
-  // Faction reputation gains (event rep + completed formal contract rep)
+  // Faction reputation gains (event rep + completed formal contract rep; contract_hub T3 +15%)
+  const hubRepMult = hubTier >= 3 ? 1.15 : 1;
   const factionRepGains: Partial<Record<FactionId, number>> = {};
   if (!run.isShowcase) {
     if (run.factionRepEarnedThisRun) {
@@ -317,9 +328,10 @@ export function calculateV2Settlement(
     if (contractCompleted && !run.isTutorial && effectiveFactionId) {
       const baseRep = run.contract.factionRepReward ?? tplFallback?.factionRepReward ?? 35;
       const bonusRep = activeBonus?.completed === true ? 10 : 0;
-      if (baseRep + bonusRep > 0) {
+      const totalRep = Math.round((baseRep + bonusRep) * hubRepMult);
+      if (totalRep > 0) {
         factionRepGains[effectiveFactionId] =
-          (factionRepGains[effectiveFactionId] ?? 0) + baseRep + bonusRep;
+          (factionRepGains[effectiveFactionId] ?? 0) + totalRep;
       }
     }
   }
@@ -333,9 +345,10 @@ export function calculateV2Settlement(
     factionContractBonusCredits +
     tutorialBonusCredits;
 
+  const warehouseCapacity = getEffectiveWarehouseCapacity(profile);
   const warehouseProjectedCount =
     profile.equipmentWarehouse.length + storedToWarehouseItems.length;
-  const warehouseOverflow = warehouseProjectedCount > V2_WAREHOUSE_CAPACITY;
+  const warehouseOverflow = warehouseProjectedCount > warehouseCapacity;
 
   return {
     reason: 'safe_return',
@@ -402,11 +415,12 @@ export function applyV2Settlement(
   }
 
   if (summary.warehouseOverflow) {
+    const cap = getEffectiveWarehouseCapacity(profile);
     return {
       ok: false,
       profile,
       summary,
-      error: `设备库容量不足（预计 ${summary.warehouseProjectedCount}/${V2_WAREHOUSE_CAPACITY}），请将部分设备改为出售或拆解后再确认结算`,
+      error: `设备库容量不足（预计 ${summary.warehouseProjectedCount}/${cap}），请将部分设备改为出售或拆解后再确认结算`,
     };
   }
 

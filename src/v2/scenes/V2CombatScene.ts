@@ -230,6 +230,7 @@ export class V2CombatScene extends Phaser.Scene {
       ['v2.ship.player.cannon_skiff', getPlayerShipImageUrl('cannon_skiff')],
       ['v2.ship.player.shield_cruiser', getPlayerShipImageUrl('shield_cruiser')],
       ['v2.ship.player.heavy_freighter', getPlayerShipImageUrl('heavy_freighter')],
+      ['v2.ship.player.stargate_cruiser', getPlayerShipImageUrl('stargate_cruiser')],
       ['ship.enemy.scout', getEnemyShipImageUrl('scout')],
       ['ship.enemy.interceptor', getEnemyShipImageUrl('interceptor')],
       ['ship.enemy.frigate', getEnemyShipImageUrl('frigate')],
@@ -783,13 +784,19 @@ export class V2CombatScene extends Phaser.Scene {
 
     // Player ship sprite (hide on wreck backdrop so the 3 interactive hull compartments stay unobstructed!)
     const showPlayerShip = pb.eventBackdrop !== 'wreck';
-    const pKey = `v2.ship.player.${pb.shipId}`;
+    const rawKey = `v2.ship.player.${pb.shipId}`;
+    const pKey = this.textures.exists(rawKey) ? rawKey : 'v2.ship.player.shield_cruiser';
     if (!this.playerSprite || !this.playerSprite.scene) {
       this.playerSprite = this.add.image(0, 0, pKey).setOrigin(0.5, 0.5).setDepth(3);
-    } else if (this.textures.exists(pKey)) {
+    } else {
       this.playerSprite.setTexture(pKey);
     }
-    this.playerSprite.setVisible(showPlayerShip).setAlpha(1).clearTint();
+    this.playerSprite.setVisible(showPlayerShip).setAlpha(1);
+    if (pb.shipId === 'stargate_cruiser') {
+      this.playerSprite.setTint(0xe6f8ff);
+    } else {
+      this.playerSprite.clearTint();
+    }
 
     if (showPlayerShip) {
       this.rebuildModuleSprites();
@@ -935,7 +942,8 @@ export class V2CombatScene extends Phaser.Scene {
     this.playerBaseY = hasCombatUnits ? h * 0.54 : h * 0.56;
 
     if (this.playerSprite && this.playerSprite.scene) {
-      const pScale = hasCombatUnits ? baseShipScale : baseShipScale * 1.15;
+      const flagshipMult = this.playback?.shipId === 'stargate_cruiser' ? 1.06 : 1.0;
+      const pScale = (hasCombatUnits ? baseShipScale : baseShipScale * 1.15) * flagshipMult;
       this.playerSprite.setScale(pScale).setPosition(this.playerBaseX, this.playerBaseY);
       this.layoutModules();
     }
@@ -1094,6 +1102,65 @@ export class V2CombatScene extends Phaser.Scene {
           life: 0.25,
           maxLife: 0.25,
         });
+      } else if (atk.sourceKind === 'salvo') {
+        if (!playedDrone) {
+          soundEngine.play('droneLaunch');
+          playedDrone = true;
+        }
+        const laneOffset = ((this.beams.length % 5) - 2) * 10;
+        this.beams.push({
+          x1: heavyMuzzle.x,
+          y1: heavyMuzzle.y + laneOffset,
+          x2: ePt.x,
+          y2: ePt.y,
+          color: 0xf97316,
+          thickness: 3.0,
+          life: 0.28,
+          maxLife: 0.28,
+        });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 22, color: 0xfb923c, life: 0.24, maxLife: 0.24 });
+      } else if (atk.sourceKind === 'emp') {
+        if (!playedLaser) {
+          soundEngine.play('laserFire');
+          playedLaser = true;
+        }
+        this.beams.push({
+          x1: counterMuzzle.x,
+          y1: counterMuzzle.y,
+          x2: ePt.x,
+          y2: ePt.y,
+          color: 0xa78bfa,
+          thickness: 3.8,
+          life: 0.3,
+          maxLife: 0.3,
+        });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 32, color: 0xa78bfa, life: 0.34, maxLife: 0.34 });
+      } else if (atk.sourceKind === 'grapple') {
+        this.beams.push({
+          x1: pMuzzle.x,
+          y1: pMuzzle.y + 6,
+          x2: ePt.x,
+          y2: ePt.y,
+          color: 0x34d399,
+          thickness: 2.8,
+          life: 0.26,
+          maxLife: 0.26,
+        });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 18, color: 0x34d399, life: 0.22, maxLife: 0.22 });
+      } else if (atk.sourceInstanceId === 'gadget_overcharge_cell') {
+        soundEngine.play('heavyBlast');
+        this.beams.push({
+          x1: pMuzzle.x,
+          y1: pMuzzle.y,
+          x2: ePt.x,
+          y2: ePt.y,
+          color: 0xfacc15,
+          thickness: 5.5,
+          life: 0.36,
+          maxLife: 0.36,
+        });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 34, color: 0xfacc15, life: 0.34, maxLife: 0.34 });
+        this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 38, '过载电池爆发！', '#FACC15');
       } else if (atk.sourceKind === 'flak') {
         if (!playedFlak) {
           soundEngine.play('laserFire');

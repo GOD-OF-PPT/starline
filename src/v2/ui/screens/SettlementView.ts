@@ -1,7 +1,8 @@
-import { V2_EQUIPMENT_DEFS, V2_WAREHOUSE_CAPACITY } from '../../data/equipment';
+import { V2_EQUIPMENT_DEFS } from '../../data/equipment';
 import { V3_FACTIONS } from '../../data/factions';
 import { previewSettlementCampaignOutcomes } from '../../domain/campaign';
 import { getDismantleSalvagePartsYield } from '../../domain/dismantle';
+import { getEffectiveWarehouseCapacity } from '../../domain/progressionV2';
 import type { V2SettlementSummary } from '../../domain/settlementV2';
 import type {
   FactionId,
@@ -68,6 +69,7 @@ export function renderSettlementView(
 ): void {
   const { run, profile: p, summary, nextGoal, readOnly } = props;
   const isSafe = summary.reason === 'safe_return';
+  const warehouseCap = getEffectiveWarehouseCapacity(p);
 
   // Partition strictly loan items into a compact 1-line collapsible summary; keep mission/loot/owned visible!
   const actionableLines = summary.lines.filter((l) => l.item.origin !== 'loan');
@@ -188,7 +190,7 @@ export function renderSettlementView(
                   !run.isShowcase
                     ? `<div class="v2-mig-row"><span>入库后仓库容量</span><strong class="num ${
                         summary.warehouseOverflow ? 'text-danger' : ''
-                      }">${summary.warehouseProjectedCount}/${V2_WAREHOUSE_CAPACITY}</strong></div>`
+                      }">${summary.warehouseProjectedCount}/${warehouseCap}</strong></div>`
                     : ''
                 }
               `
@@ -248,6 +250,8 @@ export function renderSettlementView(
                                   ? `<span class="v2-q-tag">${
                                       line.item.quality === 'improved' ? '良' : '普'
                                     }</span>`
+                                  : line.item.category === 'gadget'
+                                  ? `<span class="v2-q-tag">装置</span>`
                                   : ''
                               }
                             </div>
@@ -289,7 +293,7 @@ export function renderSettlementView(
         ${
           summary.warehouseOverflow && !run.isShowcase
             ? `<div class="system-banner banner-danger">
-                设备库容量超出上限（${summary.warehouseProjectedCount}/${V2_WAREHOUSE_CAPACITY}），请将部分「入库」改为「出售」或转为零件。
+                设备库容量超出上限（${summary.warehouseProjectedCount}/${warehouseCap}），请将部分「入库」改为「出售」或转为零件。
               </div>`
             : ''
         }

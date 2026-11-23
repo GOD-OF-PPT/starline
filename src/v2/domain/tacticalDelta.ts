@@ -108,21 +108,31 @@ function resolveReferenceEncounter(run: V2RunState | null): ReferenceEncounter {
 function getSynergyPartnerKinds(kind: V2EquipmentKind): readonly V2EquipmentKind[] {
   switch (kind) {
     case 'laser':
-      return ['battery'];
+      return ['battery', 'overdrive_core'];
     case 'battery':
       return ['laser'];
     case 'heavy':
-      return ['capacitor'];
+      return ['capacitor', 'coolant_vent', 'overdrive_core'];
     case 'capacitor':
-      return ['heavy'];
+      return ['heavy', 'salvo_pod'];
     case 'hangar':
-      return ['relay'];
+      return ['relay', 'overdrive_core'];
     case 'relay':
-      return ['hangar'];
+      return ['hangar', 'salvo_pod'];
     case 'shield':
       return ['counter'];
     case 'counter':
       return ['shield'];
+    case 'coolant_vent':
+      return ['heavy', 'salvo_pod'];
+    case 'overdrive_core':
+      return ['salvo_pod', 'heavy', 'laser', 'emp_jammer', 'hangar', 'flak'];
+    case 'salvo_pod':
+      return ['capacitor', 'relay', 'coolant_vent', 'overdrive_core'];
+    case 'emp_jammer':
+      return ['overdrive_core'];
+    case 'salvage_grapple':
+      return ['overdrive_core'];
     default:
       return [];
   }
@@ -284,6 +294,18 @@ export function computeV2PlacementTacticalDelta(params: {
         synergyLine: '委托专属大件 · 不参战，安全带回即可交付悬赏',
         combatDeltaLine: '占据核心装载区，可能需要取舍部分旧货或副装备',
         spaceLine: fit,
+        positiveImpact: true,
+      };
+    }
+
+    if (params.item.category === 'gadget') {
+      return {
+        synergyLine: `一次性战术消耗装置 · ${def?.gadgetDef?.shortEffectLabel ?? '主动消耗使用'}`,
+        combatDeltaLine: def?.summary ?? '装入船舱后可在对应阶段主动触发并消耗',
+        spaceLine:
+          params.zone === 'grid'
+            ? `已占 ${cellCount} 格 · 船舱剩余 ${freeInfo.free}/${freeInfo.total} 格`
+            : `占 ${cellCount} 格 · 当前船舱剩余 ${freeInfo.free}/${freeInfo.total} 格`,
         positiveImpact: true,
       };
     }

@@ -1,5 +1,7 @@
 import { getTitleKeyArtUrl } from '../../../assets/itemArt';
 import { CAMPAIGN_CHAPTERS } from '../../data/campaign';
+import { V2_ALL_EQUIPMENT_KINDS } from '../../data/equipment';
+import { V2_SHIP_ORDER } from '../../data/ships';
 import { getV2RelicSummary } from '../../domain/progressionV2';
 import type { V2ProfileState } from '../../domain/types';
 import { svgIcon } from '../icons';
@@ -43,8 +45,8 @@ export function renderTitleView(
 
           <div class="title-telemetry">
             <div class="title-stat"><span>信用点</span><strong class="num">${p.credits}¤</strong></div>
-            <div class="title-stat"><span>舰船</span><strong class="num">${p.unlockedShips.length}/3</strong></div>
-            <div class="title-stat"><span>蓝图</span><strong class="num">${p.blueprints.length}/10</strong></div>
+            <div class="title-stat"><span>舰船</span><strong class="num">${p.unlockedShips.length}/${V2_SHIP_ORDER.length}</strong></div>
+            <div class="title-stat"><span>蓝图</span><strong class="num">${p.blueprints.length}/${V2_ALL_EQUIPMENT_KINDS.length}</strong></div>
             <div class="title-stat"><span>藏品馆</span><strong class="num">${relicSum.restoredCount}/${relicSum.totalCount}</strong></div>
           </div>
 

@@ -1,26 +1,26 @@
 import { soundEngine } from '../../audio/soundEngine';
-import type { BuildingId } from '../../data/buildings';
-import type { BaseProgression } from '../../domain/progression';
+import type { V2BaseDioramaState } from '../../scenes/BaseScene';
 import { MultiTabGuard } from '../../domain/tabLock';
 import { PhaserHost } from '../../scenes/PhaserHost';
 import { hasOpenModal, registerModalBackgroundRoot } from '../../ui/Modals';
 import { CAMPAIGN_CHAPTERS, type CampaignCommTrigger } from '../data/campaign';
 import { V2_CREW, type V2CrewId } from '../data/crew';
 import {
+  V2_ALL_EQUIPMENT_KINDS,
   V2_EQUIPMENT_DEFS,
-  V2_WAREHOUSE_CAPACITY,
   getV2EquipmentDefByKind,
   type V2EquipmentKind,
 } from '../data/equipment';
 import {
-  V2_FACILITIES,
   V2_RELICS,
   V2_RELIC_ORDER,
-  type V2FacilityId,
+  V3_STATION_FACILITIES,
+  type V3StationFacilityId,
 } from '../data/facilities';
 import { V3_FACTIONS } from '../data/factions';
+import { getV3GadgetDef, type V3GadgetKind } from '../data/gadgets';
 import { getV3SectorDef } from '../data/sectors';
-import { V2_SHIPS, type V2ShipId } from '../data/ships';
+import { V2_SHIPS, V2_SHIP_ORDER, type V2ShipId } from '../data/ships';
 import { createV2ShowcaseRun } from '../data/showcaseRun';
 import {
   V2_TRIAL_BUILDS,
@@ -52,6 +52,7 @@ import {
   craftV2EquipmentWithParts,
   dismantleV2WarehouseItem,
   getEffectiveShipLoadoutBudget,
+  getEffectiveShipMaxHp,
   tuneV2ShipHull,
   upgradeV2EquipmentToImproved,
 } from '../domain/dismantle';
@@ -72,11 +73,13 @@ import {
   resolveV2EventOption,
   selectV2MapNode,
   sellV2ItemToMerchant,
+  useV3GadgetInRun,
 } from '../domain/encounter';
 import { findFirstLegalV2Placement } from '../domain/inventoryV2';
 import {
   collectVisibleV2DefIdsForRun,
   createV2EquipmentInstance,
+  createV3GadgetInstance,
   recordV2SeenItems,
 } from '../domain/itemCatalog';
 import {
@@ -100,18 +103,22 @@ import {
   persistV2SaveData,
 } from '../domain/persistenceV2';
 import {
-  canBuildV2Facility,
   canResearchV2Instance,
   canRestoreV2Relic,
+  canUpgradeV3Facility,
   claimV2PendingGiftToWarehouse,
   craftV2CommonEquipment,
+  craftV3GadgetWithParts,
+  getActiveRelicPassives,
   getEffectiveV2ResearchCost,
+  getEffectiveWarehouseCapacity,
+  getFacilityTier,
   getV2RelicSummary,
-  purchaseV2Facility,
   researchV2Equipment,
   restoreV2Relic,
   sellV2PendingGift,
   sellV2WarehouseItem,
+  upgradeV3Facility,
 } from '../domain/progressionV2';
 import { deriveSessionRunSeed, parseDeterministicSeedParam } from '../domain/seedParam';
 import { applyV2Settlement, calculateV2Settlement } from '../domain/settlementV2';
@@ -205,7 +212,7 @@ export class V2AppController {
   private storageError: string | null = null;
   private actionToast: string | null = null;
   private actionToastTimer: number | null = null;
-  private recentlyBuiltPin: BuildingId | null = null;
+  private recentlyBuiltPin: string | null = null;
   private titleEntered = false;
   private v1Inspection: V1MigrationInspection;
   private migrationPromptDismissed = false;
@@ -275,7 +282,7 @@ export class V2AppController {
   }
 
   private getBonusBossCharges(): number {
-    return this.save.profile.relics.obsidian_crown?.restored ? 1 : 0;
+    return getActiveRelicPassives(this.save.profile).bossTacticalChargeBonus;
   }
 
   private getCurrentRun(): V2RunState | null {
@@ -550,35 +557,39 @@ export class V2AppController {
       }
     }
 
-    const shortTag: Record<V2FacilityId, string> = {
-      workbench: '免费启用基础工作台与预设',
-      contract_hub: '开启三类标准远航委托',
-      research_lab: '解锁 12 格设备库与永久蓝图研究',
-      drydock: '解锁护盾工程艇（+4 护盾）',
-      display: '开启 4 件稀世遗物展台陈列',
-      drydock_tier2: '解锁 5×4 远航货船（18 格大舱）',
-    };
-    const priorityOrder: V2FacilityId[] = ['research_lab', 'drydock', 'display', 'drydock_tier2'];
+    const priorityOrder: V3StationFacilityId[] = [
+      'research_lab',
+      'drydock',
+      'display',
+      'stargate_relay',
+      'workbench',
+      'contract_hub',
+    ];
     for (const fid of priorityOrder) {
-      if (p.buildings[fid]) continue;
-      const fac = V2_FACILITIES[fid];
-      const chk = canBuildV2Facility(p, fid);
-      const diff = Math.max(0, fac.cost - projectedCredits);
+      const def = V3_STATION_FACILITIES[fid];
+      const chk = canUpgradeV3Facility(p, fid);
+      if (!chk.nextSpec || !chk.nextTier) continue;
+      if (chk.nextSpec.creditCost === 0 && chk.nextSpec.partsCost === 0) continue;
+      const diff = Math.max(0, chk.nextSpec.creditCost - projectedCredits);
+      const partsDiff = Math.max(0, chk.nextSpec.partsCost - p.salvageParts);
       return {
-        title: `扩建目标：${fac.name}`,
-        detail:
-          chk.canBuild || diff === 0
-            ? `${shortTag[fid]}（资金已就绪）`
-            : `还差 ${diff}¤ · ${shortTag[fid]}`,
+        title: `扩建目标：${def.name} T${chk.nextTier}`,
+        detail: chk.canUpgrade
+          ? `${chk.nextSpec.effectSummary}（资源已就绪）`
+          : diff > 0
+          ? `还差 ${diff}¤ · ${chk.nextSpec.effectSummary}`
+          : partsDiff > 0
+          ? `还差 ${partsDiff} 精密零件 · ${chk.nextSpec.effectSummary}`
+          : chk.reason ?? chk.nextSpec.effectSummary,
         actionKind: 'facilities',
-        targetCost: fac.cost,
-        ready: chk.canBuild,
+        targetCost: chk.nextSpec.creditCost,
+        ready: chk.canUpgrade,
       };
     }
 
     return {
-      title: '拆解站主力设施已全建成',
-      detail: '挑战深入委托与搜集全部 4 件星际遗物',
+      title: '拆解站全部门已满级 T3',
+      detail: '驾驶旗舰挑战终局星门与无尽深渊',
       actionKind: 'relics',
       ready: true,
     };
@@ -860,10 +871,11 @@ export class V2AppController {
                   this.activeDockingNotice.progress
             )
           : p.credits;
+      const warehouseCap = getEffectiveWarehouseCapacity(p);
       pillsHtml = `
         <div class="hud-pill pill-accent"><span class="k">${svgIcon('credits', 13)} 信用点</span><strong class="v num">${displayCredits}¤</strong></div>
         <div class="hud-pill"><span class="k">${svgIcon('parts', 13)} 精密零件</span><strong class="v num">${p.salvageParts}</strong></div>
-        <div class="hud-pill"><span class="k">${svgIcon('warehouse', 13)} 库存</span><strong class="v num">${p.equipmentWarehouse.length}/${V2_WAREHOUSE_CAPACITY}</strong></div>
+        <div class="hud-pill"><span class="k">${svgIcon('warehouse', 13)} 库存</span><strong class="v num">${p.equipmentWarehouse.length}/${warehouseCap}</strong></div>
         <div class="hud-pill"><span class="k">${svgIcon('museum', 13)} 藏品</span><strong class="v num">${relicSum.restoredCount}/${relicSum.totalCount}</strong></div>
       `;
     }
@@ -1060,25 +1072,35 @@ export class V2AppController {
 
   // --- Phaser Stage Bridge ---
 
-  private adaptProfileToV1BaseProgression(): BaseProgression {
+  private buildV2DioramaState(): V2BaseDioramaState {
     const p = this.save.profile;
+    const relicSum = getV2RelicSummary(p);
+    const nextGoal = this.computeNextBaseGoal(p);
+    const restoredRelicIds = V2_RELIC_ORDER.filter((id) => Boolean(p.relics[id]?.restored));
+    const relayTier = getFacilityTier(p, 'stargate_relay');
     return {
-      credits: p.credits,
-      buildings: {
-        workbench: p.buildings.workbench,
-        display: p.buildings.display,
-        drydock: p.buildings.drydock,
+      activeShipId: p.selectedShipId,
+      facilityTiers: {
+        workbench: getFacilityTier(p, 'workbench'),
+        contract_hub: getFacilityTier(p, 'contract_hub'),
+        drydock: getFacilityTier(p, 'drydock'),
+        research_lab: getFacilityTier(p, 'research_lab'),
+        display: getFacilityTier(p, 'display'),
+        stargate_relay: relayTier,
       },
-      relics: p.relics,
-      discoveredItems: p.discoveredItems,
-      selectedLoadout: p.selectedShipId === 'shield_cruiser' ? 'shield_cruiser' : 'cannon_skiff',
-      selectedRegion: undefined,
-      deepestNodeReached: p.deepestLayerReached,
-      totalExpeditions: p.totalRuns,
-      safeReturns: p.totalRuns,
-      totalCreditsEarned: p.credits,
-      tutorialCompleted: p.tutorialCompleted,
-      settledExpeditionIds: p.settledRunIds,
+      restoredRelicIds,
+      campaignAct: p.campaign.currentAct,
+      stargatePowered: relayTier >= 1,
+      settings: this.save.settings,
+      recentlyBuiltId: this.recentlyBuiltPin,
+      restorableRelicCount: relicSum.restorableIds.length,
+      workbenchWorking: Boolean(this.activeDockingNotice || nextGoal.ready),
+      blueprintsCount: p.blueprints.length,
+      totalBlueprints: V2_ALL_EQUIPMENT_KINDS.length,
+      warehouseCount: p.equipmentWarehouse.length,
+      warehouseCapacity: getEffectiveWarehouseCapacity(p),
+      unlockedShipsCount: p.unlockedShips.length,
+      totalShips: V2_SHIP_ORDER.length,
     };
   }
 
@@ -1086,36 +1108,11 @@ export class V2AppController {
     if (!this.phaserHost) return;
     const run = this.getCurrentRun();
 
-    // 1. BASE HERO STAGE
+    // 1. BASE HERO STAGE (Native V2 Diorama Parity — Contract #4)
     if (!run && !this.prepareDraft) {
       this.activeCombatPlaybackKey = null;
       this.awaitingEliteDecision = false;
-      const p = this.save.profile;
-      const relicSum = getV2RelicSummary(p);
-      const nextGoal = this.computeNextBaseGoal(p);
-      this.phaserHost.showBase({
-        progression: this.adaptProfileToV1BaseProgression(),
-        settings: this.save.settings,
-        recentlyBuiltId: this.recentlyBuiltPin,
-        v2Override: {
-          shipId: p.selectedShipId,
-          wbText: p.buildings.research_lab
-            ? `研究工作台 · ${p.blueprints.length}/10 蓝图`
-            : p.buildings.workbench
-            ? `工作台 · 设备库 ${p.equipmentWarehouse.length}/12`
-            : '首航启用工作台',
-          dispText: p.buildings.display
-            ? `藏品展台 ${relicSum.restoredCount}/${relicSum.totalCount}`
-            : `收藏展台 · ${V2_FACILITIES.display.cost}¤`,
-          dockText: p.buildings.drydock_tier2
-            ? '船坞二阶 · 3 舰就绪'
-            : p.buildings.drydock
-            ? '船坞一阶 · 2 舰就绪'
-            : `扩建船坞 · ${V2_FACILITIES.drydock.cost}¤`,
-          workbenchWorking: Boolean(this.activeDockingNotice || nextGoal.ready),
-          showAllPins: true,
-        },
-      });
+      this.phaserHost.showV2Base(this.buildV2DioramaState());
       this.renderBaseHeroOverlay();
       return;
     }
@@ -1546,7 +1543,9 @@ export class V2AppController {
           if (!this.canMutate()) return;
           const cur = this.getCurrentRun();
           if (!cur) return;
-          const res = commitV2EliteTacticDecision(cur, decisionId, choice);
+          const res = commitV2EliteTacticDecision(cur, decisionId, choice, {
+            stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
+          });
           if (!res.ok) {
             this.showToast(res.error ?? '战术指令无效');
             return;
@@ -1658,7 +1657,8 @@ export class V2AppController {
     const placed: V2PlacedItem[] = [];
     for (const s of draft.slots) {
       const def = V2_EQUIPMENT_DEFS[s.definitionId];
-      if (!def) continue;
+      const gdDef = def ? undefined : getV3GadgetDef(s.definitionId);
+      if (!def && !gdDef) continue;
       if (s.origin === 'owned' && s.warehouseInstanceId) {
         const real = this.save.profile.equipmentWarehouse.find(
           (w) => w.instanceId === s.warehouseInstanceId
@@ -1673,11 +1673,26 @@ export class V2AppController {
           continue;
         }
       }
+      if (gdDef) {
+        placed.push({
+          item: createV3GadgetInstance({
+            instanceId: s.slotKey,
+            kind: gdDef.kind,
+            origin: 'owned',
+            acquiredDepth: 0,
+            location: 'bay',
+          }),
+          x: s.x,
+          y: s.y,
+          rotation: s.rotation,
+        });
+        continue;
+      }
       placed.push({
         item: createV2EquipmentInstance({
           instanceId: s.slotKey,
-          kind: def.kind,
-          quality: def.quality,
+          kind: def!.kind,
+          quality: def!.quality,
           origin: s.origin,
           acquiredDepth: 0,
           location: 'bay',
@@ -1799,7 +1814,21 @@ export class V2AppController {
           this.syncAll();
         },
         onSelectShip: (nextShip: V2ShipId) => {
-          if (nextShip === draft.shipId) return;
+          const curProfile = this.save.profile;
+          if (!curProfile.unlockedShips.includes(nextShip)) return;
+          const canPersistShip =
+            !this.isReadOnlyTab && this.tabGuard.canWrite() && !this.showcaseRun;
+          if (nextShip === draft.shipId) {
+            if (curProfile.selectedShipId !== nextShip && canPersistShip) {
+              this.save = {
+                ...this.save,
+                profile: { ...curProfile, selectedShipId: nextShip },
+              };
+              this.persist();
+              this.syncAll();
+            }
+            return;
+          }
           draft.shipId = nextShip;
           draft.playingDemo = false;
           draft.demoPlaybackKey = null;
@@ -1808,12 +1837,19 @@ export class V2AppController {
             : [
                 ...buildFreeFallbackPrepareSlots(
                   nextShip,
-                  p.blueprints,
-                  getEffectiveShipLoadoutBudget(p, nextShip)
+                  curProfile.blueprints,
+                  getEffectiveShipLoadoutBudget(curProfile, nextShip)
                 ),
               ];
           draft.missingPresetEntries = [];
           draft.presetNotice = null;
+          if (canPersistShip) {
+            this.save = {
+              ...this.save,
+              profile: { ...curProfile, selectedShipId: nextShip },
+            };
+            this.persist();
+          }
           soundEngine.play('click');
           this.syncAll();
         },
@@ -1992,7 +2028,7 @@ export class V2AppController {
       }
     );
 
-    const shipMaxHp = V2_SHIPS[draft.shipId].maxHp;
+    const shipMaxHp = getEffectiveShipMaxHp(p, draft.shipId);
     const draftMasteryTier = draft.crewId ? p.crewMastery[draft.crewId] ?? 0 : 0;
     this.mountV2CargoBay(previewBay, !readOnly, {
       title: `整备船舱 · ${V2_SHIPS[draft.shipId].name}`,
@@ -2044,8 +2080,24 @@ export class V2AppController {
     });
   }
 
+  private handleUseGadget(run: V2RunState, instanceId: string): void {
+    if (!this.canMutate()) return;
+    const res = useV3GadgetInRun(run, instanceId, this.save.profile);
+    if (!res.ok) {
+      this.showToast(res.error ?? '当前无法使用该装置');
+      return;
+    }
+    this.setCurrentRun(res.run);
+    if (res.gadgetKind === 'repair_kit') soundEngine.play('repairPulse');
+    else if (res.gadgetKind === 'overcharge_cell') soundEngine.play('energyLink');
+    else soundEngine.play('place');
+    if (res.message) this.showToast(res.message);
+    this.syncAll();
+  }
+
   private renderMapPhase(run: V2RunState): void {
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
+    const relicPassives = getActiveRelicPassives(this.save.profile);
     renderMapView(
       this.leftPanelEl,
       {
@@ -2056,6 +2108,8 @@ export class V2AppController {
         isCompactViewport: window.innerWidth < 860,
         pureAutoCombat: isPureAutoCombat(this.save.settings),
         bonusBossCharges: this.getBonusBossCharges(),
+        fullMapReveal: relicPassives.fullMapReveal,
+        stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
       },
       {
         onToggleMobileMap: () => {
@@ -2089,6 +2143,7 @@ export class V2AppController {
           soundEngine.play('warpJump');
           this.syncAll();
         },
+        onUseGadget: (instanceId) => this.handleUseGadget(run, instanceId),
         onSafeReturn: () => {
           if (!this.canMutate()) return;
           const res = initiateV2SafeReturnFromMap(run);
@@ -2135,6 +2190,7 @@ export class V2AppController {
 
       const pureAuto = isPureAutoCombat(this.save.settings);
       const bonusBossCharges = this.getBonusBossCharges();
+      const stargateRelayTier = getFacilityTier(this.save.profile, 'stargate_relay');
       renderCombatPreView(
         this.leftPanelEl,
         {
@@ -2144,6 +2200,7 @@ export class V2AppController {
           showCombatLogDetails: this.showCombatLogDetails,
           pureAutoCombat: pureAuto,
           bonusBossCharges,
+          stargateRelayTier,
         },
         {
           onSelectPolicy: (policy) => {
@@ -2156,6 +2213,7 @@ export class V2AppController {
             this.showCombatLogDetails = !this.showCombatLogDetails;
             this.renderEncounterPhase(run);
           },
+          onUseGadget: (instanceId) => this.handleUseGadget(run, instanceId),
           onStartCombat: () => {
             if (!this.canMutate()) return;
             const curPureAuto = isPureAutoCombat(this.save.settings);
@@ -2163,6 +2221,7 @@ export class V2AppController {
               enableTacticalCommands: !curPureAuto,
               pureAutoCombat: curPureAuto,
               bonusBossCharges: this.getBonusBossCharges(),
+              stargateRelayTier,
             });
             if (!res.ok) {
               this.showToast(res.error ?? '无法开始战斗');
@@ -2219,6 +2278,7 @@ export class V2AppController {
             }
             this.syncAll();
           },
+          onUseGadget: (instanceId) => this.handleUseGadget(run, instanceId),
           onExtract: () => {
             if (!this.canMutate()) return;
             const res = extractV2Wreck(run);
@@ -2429,6 +2489,7 @@ export class V2AppController {
           this.showToast('航迹勘测完成！');
           this.syncAll();
         },
+        onUseGadget: (instanceId) => this.handleUseGadget(run, instanceId),
         onAbortContract: () => {
           if (!this.canMutate()) return;
           const nextRun = abortActiveV2Contract(run);
@@ -2696,19 +2757,14 @@ export class V2AppController {
   private openFacilitiesModal(): void {
     openV2FacilitiesDrawerModal(this.modalHostEl, () => this.save.profile, {
       readOnly: this.isReadOnlyTab,
-      onBuild: (fid: V2FacilityId) => {
+      onUpgrade: (fid: V3StationFacilityId) => {
         if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
           return { ok: false, error: '当前窗口为只读状态' };
         }
-        const res = purchaseV2Facility(this.save.profile, fid);
+        const res = upgradeV3Facility(this.save.profile, fid);
         if (res.ok) {
           this.save = { ...this.save, profile: res.profile };
-          this.recentlyBuiltPin =
-            fid === 'display'
-              ? 'display'
-              : fid === 'drydock' || fid === 'drydock_tier2'
-              ? 'drydock'
-              : 'workbench';
+          this.recentlyBuiltPin = fid;
           this.persist();
           soundEngine.play('buildComplete');
           this.syncAll();
@@ -2783,6 +2839,19 @@ export class V2AppController {
           return { ok: false, error: '当前窗口为只读状态' };
         }
         const res = craftV2EquipmentWithParts(this.save.profile, kind);
+        if (res.ok) {
+          this.save = { ...this.save, profile: res.profile };
+          this.persist();
+          soundEngine.play('buildComplete');
+          this.syncAll();
+        }
+        return res;
+      },
+      onCraftGadget: (kind: V3GadgetKind) => {
+        if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
+          return { ok: false, error: '当前窗口为只读状态' };
+        }
+        const res = craftV3GadgetWithParts(this.save.profile, kind);
         if (res.ok) {
           this.save = { ...this.save, profile: res.profile };
           this.persist();

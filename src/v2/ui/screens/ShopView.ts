@@ -1,9 +1,5 @@
 import { getItemImageUrl } from '../../../assets/itemArt';
-import {
-  V2_EQUIPMENT_DEFS,
-  getMerchantBuybackPrice,
-  type V2EquipmentKind,
-} from '../../data/equipment';
+import { getMerchantBuybackPrice, type V2EquipmentKind } from '../../data/equipment';
 import {
   getEffectiveMerchantEquipmentPrice,
   getEffectiveMerchantServicePrice,
@@ -72,11 +68,11 @@ export function renderShopView(
       ${guildBannerHtml}
 
       <div class="v2-shop-section">
-        <div class="v2-prep-label">限购设备</div>
+        <div class="v2-prep-label">限购设备与消耗装置</div>
         <div class="v2-shop-offers">
           ${shop.offers
             .map((off) => {
-              const def = V2_EQUIPMENT_DEFS[off.item.definitionId];
+              const def = getAnyV2ItemDef(off.item.definitionId);
               const effPrice = getEffectiveMerchantEquipmentPrice(
                 off.buyPrice,
                 off.item.fixedValue,
@@ -84,12 +80,16 @@ export function renderShopView(
               );
               const discounted = effPrice < off.buyPrice;
               const canBuy = !off.sold && run.wallet >= effPrice;
+              const isGadget = off.item.category === 'gadget';
+              const tagHtml = isGadget
+                ? `<span class="v2-quality-chip common">消耗装置</span>`
+                : `<span class="v2-quality-chip ${off.item.quality}">${
+                    off.item.quality === 'improved' ? '优良' : '普通'
+                  }</span>`;
               return `<div class="v2-shop-card ${off.sold ? 'sold' : ''}">
                 <img class="v2-wh-icon" src="${getItemImageUrl(off.item.definitionId)}" alt="${def?.name ?? ''}" />
                 <div class="v2-wh-info">
-                  <div class="v2-wh-name">${def?.name ?? off.item.definitionId} <span class="v2-quality-chip ${
-                off.item.quality
-              }">${off.item.quality === 'improved' ? '优良' : '普通'}</span></div>
+                  <div class="v2-wh-name">${def?.name ?? off.item.definitionId} ${tagHtml}</div>
                   <div class="v2-wh-sub">${
                     def ? `${renderV2MiniMaskHtml(def.shapeId)} ${def.summary}` : ''
                   }${

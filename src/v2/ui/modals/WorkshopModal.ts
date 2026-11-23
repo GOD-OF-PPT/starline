@@ -2,11 +2,16 @@ import { getItemImageUrl } from '../../../assets/itemArt';
 import {
   V2_ALL_EQUIPMENT_KINDS,
   V2_EQUIPMENT_DEFS,
-  V2_WAREHOUSE_CAPACITY,
   getEffectiveV2EquipmentBudgetCost,
   getV2EquipmentDefByKind,
   type V2EquipmentKind,
 } from '../../data/equipment';
+import {
+  V3_GADGET_ORDER,
+  getV3GadgetDef,
+  getV3GadgetDefByKind,
+  type V3GadgetKind,
+} from '../../data/gadgets';
 import { V2_SHAPES } from '../../data/shapes';
 import { V2_SHIPS, type V2ShipId } from '../../data/ships';
 import {
@@ -23,9 +28,11 @@ import {
 import { getFactionRank, getWorkshopDiscountRate } from '../../domain/factions';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
 import {
+  canCraftV3GadgetWithParts,
   canResearchV2Instance,
   getEffectiveV2CraftCost,
   getEffectiveV2ResearchCost,
+  getEffectiveWarehouseCapacity,
 } from '../../domain/progressionV2';
 import type { V2ProfileState, V3HullTuningTrack } from '../../domain/types';
 import { originTagText, renderV2MiniMaskHtml } from '../CargoGridV2';
@@ -39,6 +46,9 @@ export interface V3WorkshopModalOptions {
   readonly onCraft: (kind: V2EquipmentKind) => { readonly ok: boolean; readonly error?: string };
   readonly onCraftWithParts?: (
     kind: V2EquipmentKind
+  ) => { readonly ok: boolean; readonly error?: string };
+  readonly onCraftGadget?: (
+    kind: V3GadgetKind
   ) => { readonly ok: boolean; readonly error?: string };
   readonly onUpgradeItem?: (
     instanceId: string
@@ -75,6 +85,7 @@ export function openV3WorkshopModal(
     (body) => {
       const renderBody = () => {
         const profile = getProfile();
+        const warehouseCap = getEffectiveWarehouseCapacity(profile);
         const hasLab = profile.buildings.research_lab;
         const researchCost = getEffectiveV2ResearchCost(profile);
         const instituteRank = getFactionRank(profile.factionRep.deep_institute);
@@ -116,7 +127,7 @@ export function openV3WorkshopModal(
                           <button type="button" class="btn btn-sm btn-primary" data-claim-gift="${
                             g.instanceId
                           }" ${
-                        options.readOnly || profile.equipmentWarehouse.length >= V2_WAREHOUSE_CAPACITY
+                        options.readOnly || profile.equipmentWarehouse.length >= warehouseCap
                           ? 'disabled'
                           : ''
                       }>收入库</button>
@@ -134,7 +145,7 @@ export function openV3WorkshopModal(
         const warehouseHtml = `
           ${giftHtml}
           <div class="v2-wh-summary">
-            <span>仓库容量：<strong class="num">${safeWarehouseItems.length}/${V2_WAREHOUSE_CAPACITY}</strong></span>
+            <span>仓库容量：<strong class="num">${safeWarehouseItems.length}/${warehouseCap}</strong></span>
             <span class="v3-parts-pill">${svgIcon('parts', 13)} 精密零件：<strong class="num">${
           profile.salvageParts
         }</strong></span>
@@ -149,6 +160,8 @@ export function openV3WorkshopModal(
                   ${safeWarehouseItems
                     .map((item) => {
                       const def = V2_EQUIPMENT_DEFS[item.definitionId];
+                      const gdDef = def ? undefined : getV3GadgetDef(item.definitionId);
+                      const isGadget = item.category === 'gadget' || Boolean(gdDef);
                       const resCheck = canResearchV2Instance(profile, item.instanceId);
                       const upgCheck = canUpgradeV2Equipment(profile, item.instanceId);
                       const upgCost = def ? getUpgradeToImprovedCost(def, profile).parts : 0;
@@ -158,26 +171,29 @@ export function openV3WorkshopModal(
                         profile,
                         profile.selectedShipId
                       );
-                      const effBudget = def ? getEffectiveV2EquipmentBudgetCost(def, 'owned') : 0;
+                      const effBudget = def
+                        ? getEffectiveV2EquipmentBudgetCost(def, 'owned')
+                        : gdDef?.budgetCost ?? 1;
                       const discountTag = def && effBudget < def.budgetCost ? '（自有-1）' : '';
+                      const displayName = def?.name ?? gdDef?.name ?? item.definitionId;
 
                       const upgradeNote =
-                        item.quality === 'common' && !upgCheck.canUpgrade && upgCost > 0
+                        !isGadget && item.quality === 'common' && !upgCheck.canUpgrade && upgCost > 0
                           ? `<div class="v3-wh-upgrade-note">精炼升级需要 ${upgCost} 精密零件（零件不足）</div>`
                           : '';
 
                       return `<div class="v2-wh-row" data-instance-id="${item.instanceId}" data-testid="warehouse-item-${item.instanceId}" data-origin="${item.origin}">
-                        <img class="v2-wh-icon" src="${getItemImageUrl(item.definitionId)}" alt="${
-                        def?.name ?? item.definitionId
-                      }" />
+                        <img class="v2-wh-icon" src="${getItemImageUrl(item.definitionId)}" alt="${displayName}" />
                         <div class="v2-wh-info">
                           <div class="v2-wh-name">
                             <span class="v2-origin-badge origin-${item.origin}">${originTagText(
                         item.origin
                       )}</span>
-                            ${def?.name ?? item.definitionId}
+                            ${displayName}
                             ${
-                              item.quality === 'improved'
+                              isGadget
+                                ? `<span class="v2-quality-chip common">消耗装置</span>`
+                                : item.quality === 'improved'
                                 ? `<span class="v3-max-quality-chip">优良 · 已达最高品质</span>`
                                 : `<span class="v2-quality-chip common">普通</span>`
                             }
@@ -185,11 +201,13 @@ export function openV3WorkshopModal(
                           <div class="v2-wh-sub">${
                             def
                               ? `${V2_SHAPES[def.shapeId].label} · 出航预算 ${effBudget}${discountTag} · 回收 ${item.fixedValue}¤`
+                              : gdDef
+                              ? `1×1 · 出航预算 ${gdDef.budgetCost} · ${gdDef.shortEffectLabel}`
                               : ''
                           }${
-                        resCheck.canResearch && resCheck.isImproved
+                        !isGadget && resCheck.canResearch && resCheck.isImproved
                           ? ' · 提示：研究优良件仅解锁普通蓝图'
-                          : !resCheck.canResearch && resCheck.reason
+                          : !isGadget && !resCheck.canResearch && resCheck.reason
                           ? ` · ${resCheck.reason}`
                           : ''
                       }</div>
@@ -197,7 +215,7 @@ export function openV3WorkshopModal(
                         </div>
                         <div class="v2-wh-actions">
                           ${
-                            item.quality === 'common' && options.onUpgradeItem
+                            !isGadget && item.quality === 'common' && options.onUpgradeItem
                               ? `<button type="button" class="btn btn-sm btn-primary v3-btn-upgrade" data-upgrade-id="${
                                   item.instanceId
                                 }" data-testid="btn-upgrade-${item.instanceId}" ${
@@ -214,11 +232,15 @@ export function openV3WorkshopModal(
                                 }>${svgIcon('cut', 12)} 拆解 +${partsYield} 零件</button>`
                               : ''
                           }
-                          <button type="button" class="btn btn-sm btn-secondary" data-research-id="${
-                            item.instanceId
-                          }" data-testid="btn-research-${item.instanceId}" ${
-                        options.readOnly || !resCheck.canResearch ? 'disabled' : ''
-                      }>研究 (-${researchCost}¤)</button>
+                          ${
+                            !isGadget
+                              ? `<button type="button" class="btn btn-sm btn-secondary" data-research-id="${
+                                  item.instanceId
+                                }" data-testid="btn-research-${item.instanceId}" ${
+                                  options.readOnly || !resCheck.canResearch ? 'disabled' : ''
+                                }>研究 (-${researchCost}¤)</button>`
+                              : ''
+                          }
                           <button type="button" class="btn btn-sm btn-ghost" data-sell-wh="${
                             item.instanceId
                           }" ${options.readOnly ? 'disabled' : ''}>出售 +${item.fixedValue}¤</button>
@@ -270,6 +292,30 @@ export function openV3WorkshopModal(
             </div>`
           : '';
 
+        const gadgetCraftHtml = options.onCraftGadget
+          ? `<div class="v3-hull-tuning-section" style="margin-top:12px;">
+              <div class="v2-section-mini-title">${svgIcon('bolt', 14)} 战术消耗装置组装（1×1 · 需工作台 T2）</div>
+              <div class="v2-wh-list">
+                ${V3_GADGET_ORDER.map((gKind) => {
+                  const gDef = getV3GadgetDefByKind(gKind);
+                  const chk = canCraftV3GadgetWithParts(profile, gKind);
+                  return `<div class="v2-wh-row">
+                    <img class="v2-wh-icon" src="${getItemImageUrl(gDef.defId)}" alt="${gDef.name}" />
+                    <div class="v2-wh-info">
+                      <div class="v2-wh-name">${gDef.name} <span class="v2-quality-chip common">${gDef.shortEffectLabel}</span></div>
+                      <div class="v2-wh-sub">${gDef.summary}${chk.reason ? ` · ${chk.reason}` : ''}</div>
+                    </div>
+                    <div class="v2-wh-actions">
+                      <button type="button" class="btn btn-sm btn-primary" data-craft-gadget="${gKind}" data-testid="btn-craft-gadget-${gKind}" ${
+                        options.readOnly || !chk.canCraft ? 'disabled' : ''
+                      }>制造 (-${chk.partsCost} 零件)</button>
+                    </div>
+                  </div>`;
+                }).join('')}
+              </div>
+            </div>`
+          : '';
+
         const researchHtml = `
           <div class="v2-wh-summary">
             <span>永久蓝图：<strong class="num">${profile.blueprints.length}/${V2_ALL_EQUIPMENT_KINDS.length}</strong></span>
@@ -292,7 +338,7 @@ export function openV3WorkshopModal(
                 hasLab &&
                 unlocked &&
                 profile.credits >= craftCost &&
-                profile.equipmentWarehouse.length < V2_WAREHOUSE_CAPACITY;
+                profile.equipmentWarehouse.length < warehouseCap;
               const partsCheck = canCraftV2EquipmentWithParts(profile, kind);
 
               return `<div class="v2-wh-row">
@@ -323,6 +369,7 @@ export function openV3WorkshopModal(
               </div>`;
             }).join('')}
           </div>
+          ${gadgetCraftHtml}
           ${hullTuningHtml}
         `;
 
@@ -331,7 +378,7 @@ export function openV3WorkshopModal(
             <div class="v2-modal-tabs">
               <button type="button" class="btn btn-sm ${
                 activeTab === 'warehouse' ? 'btn-primary' : 'btn-secondary'
-              }" id="v2-tab-wh">设备库 (${safeWarehouseItems.length}/${V2_WAREHOUSE_CAPACITY})</button>
+              }" id="v2-tab-wh">设备库 (${safeWarehouseItems.length}/${warehouseCap})</button>
               <button type="button" class="btn btn-sm ${
                 activeTab === 'research' ? 'btn-primary' : 'btn-secondary'
               }" id="v2-tab-res">蓝图工坊 (${profile.blueprints.length}/${V2_ALL_EQUIPMENT_KINDS.length})</button>
@@ -432,6 +479,17 @@ export function openV3WorkshopModal(
             feedbackMsg = res.ok
               ? { text: '零件组装完成！自有设备已放入设备库。', isError: false }
               : { text: res.error ?? '组装失败', isError: true };
+            renderBody();
+          });
+        });
+        body.querySelectorAll<HTMLButtonElement>('[data-craft-gadget]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            if (!options.onCraftGadget) return;
+            const kind = btn.dataset.craftGadget as V3GadgetKind;
+            const res = options.onCraftGadget(kind);
+            feedbackMsg = res.ok
+              ? { text: `装置「${getV3GadgetDefByKind(kind).name}」已组装入库！`, isError: false }
+              : { text: res.error ?? '装置制造失败', isError: true };
             renderBody();
           });
         });

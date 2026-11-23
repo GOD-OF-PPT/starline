@@ -1,7 +1,12 @@
 import Phaser from 'phaser';
 import type { BuildingId } from '../data/buildings';
 import type { GameSettings } from '../domain/progression';
-import { BaseScene, type BaseSceneState, type ReturnDockingPlayback } from './BaseScene';
+import {
+  BaseScene,
+  type BaseSceneState,
+  type ReturnDockingPlayback,
+  type V2BaseDioramaState,
+} from './BaseScene';
 import { CombatScene, type CombatScenePlayback } from './CombatScene';
 import { V2CombatScene, type V2StagePlayback } from '../v2/scenes/V2CombatScene';
 
@@ -22,6 +27,7 @@ export class PhaserHost {
 
   private currentMode: ActiveSceneMode | null = null;
   private pendingBase: BaseSceneState | null = null;
+  private pendingV2Base: V2BaseDioramaState | null = null;
   private pendingCombat: CombatScenePlayback | null = null;
   private pendingV2Stage: V2StagePlayback | null = null;
   private buildingClickHandler: ((id: BuildingId) => void) | null = null;
@@ -83,7 +89,15 @@ export class PhaserHost {
       this.syncSizeNow();
       const targetMode = this.currentMode;
       this.currentMode = null;
-      if (targetMode === 'base' && this.pendingBase) {
+      if (targetMode === 'base' && this.pendingV2Base) {
+        this.game.scene.start('BaseScene', {
+          v2State: this.pendingV2Base,
+          onBuildingClick: this.buildingClickHandler ?? undefined,
+          onBerthClick: this.berthClickHandler ?? undefined,
+          onAssetError: this.handleSceneAssetError,
+        });
+        this.currentMode = 'base';
+      } else if (targetMode === 'base' && this.pendingBase) {
         this.game.scene.start('BaseScene', {
           state: this.pendingBase,
           onBuildingClick: this.buildingClickHandler ?? undefined,
@@ -229,7 +243,14 @@ export class PhaserHost {
   retryFailedAssets(): void {
     this.failedAssetKeys.clear();
     if (!this.ready) return;
-    if (this.currentMode === 'base' && this.pendingBase) {
+    if (this.currentMode === 'base' && this.pendingV2Base) {
+      this.game.scene.start('BaseScene', {
+        v2State: this.pendingV2Base,
+        onBuildingClick: this.buildingClickHandler ?? undefined,
+        onBerthClick: this.berthClickHandler ?? undefined,
+        onAssetError: this.handleSceneAssetError,
+      });
+    } else if (this.currentMode === 'base' && this.pendingBase) {
       this.game.scene.start('BaseScene', {
         state: this.pendingBase,
         onBuildingClick: this.buildingClickHandler ?? undefined,
@@ -250,8 +271,10 @@ export class PhaserHost {
     this.scheduleResize();
   }
 
+  /** Legacy V1 base stage — preserved 100% intact for ?mode=v1 */
   showBase(state: BaseSceneState): void {
     this.pendingBase = state;
+    this.pendingV2Base = null;
     const switching = this.currentMode !== 'base';
     this.currentMode = 'base';
     if (!this.ready) return;
@@ -270,6 +293,36 @@ export class PhaserHost {
     } else {
       this.game.scene.start('BaseScene', {
         state,
+        onBuildingClick: this.buildingClickHandler ?? undefined,
+        onBerthClick: this.berthClickHandler ?? undefined,
+        onAssetError: this.handleSceneAssetError,
+      });
+    }
+    this.scheduleResize();
+  }
+
+  /** Native V2/V3 Orbital Station Diorama stage (Contract #4) */
+  showV2Base(state: V2BaseDioramaState): void {
+    this.pendingV2Base = state;
+    this.pendingBase = null;
+    const switching = this.currentMode !== 'base';
+    this.currentMode = 'base';
+    if (!this.ready) return;
+
+    if (switching) {
+      if (this.game.scene.isActive('CombatScene')) this.game.scene.stop('CombatScene');
+      if (this.game.scene.isActive('V2CombatScene')) this.game.scene.stop('V2CombatScene');
+      this.game.scene.start('BaseScene', {
+        v2State: state,
+        onBuildingClick: this.buildingClickHandler ?? undefined,
+        onBerthClick: this.berthClickHandler ?? undefined,
+        onAssetError: this.handleSceneAssetError,
+      });
+    } else if (this.game.scene.isActive('BaseScene')) {
+      this.baseScene.setV2StationState(state);
+    } else {
+      this.game.scene.start('BaseScene', {
+        v2State: state,
         onBuildingClick: this.buildingClickHandler ?? undefined,
         onBerthClick: this.berthClickHandler ?? undefined,
         onAssetError: this.handleSceneAssetError,

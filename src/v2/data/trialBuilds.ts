@@ -26,10 +26,10 @@ export const V2_TRIAL_BUILD_ORDER: readonly V2TrialBuildId[] = [
 export const V2_TRIAL_BUILDS: Record<V2TrialBuildId, V2TrialBuildSpec> = {
   trial_heavy: {
     id: 'trial_heavy',
-    name: '重炮破甲方案',
+    name: '全息模板 · 重炮破甲',
     shortName: '重炮破甲',
     archetypeId: 'heavy',
-    tagline: '重炮 + 蓄能器抢占第 1 轮先手，单发高伤击穿重甲',
+    tagline: '全息战术模板：重炮 + 蓄能器抢占第 1 轮先手，单发高伤击穿重甲',
     advantage: '克制装甲护卫舰 · 首轮即轰出 12 点重炮直伤',
     tradeoff: '遇 4 目标蜂群易过量溢出，且偶数轮进入蓄能空窗',
     allowedKinds: ['heavy', 'capacitor', 'shield'],
@@ -38,10 +38,10 @@ export const V2_TRIAL_BUILDS: Record<V2TrialBuildId, V2TrialBuildSpec> = {
   },
   trial_hangar: {
     id: 'trial_hangar',
-    name: '无人机编队方案',
+    name: '全息模板 · 无人机编队',
     shortName: '无人机编队',
     archetypeId: 'hangar',
-    tagline: '无人机库 + 编队中继每轮扩编，满编 4 架独立索敌自动转火',
+    tagline: '全息战术模板：无人机库 + 编队中继每轮扩编，满编 4 架独立索敌自动转火',
     advantage: '克制多目标蜂群 · 无过量浪费且中长战火力持续攀升',
     tradeoff: '首轮仅升空 1 架启动偏慢，遇重甲逐发受护甲减伤',
     allowedKinds: ['hangar', 'relay', 'shield'],
@@ -50,10 +50,10 @@ export const V2_TRIAL_BUILDS: Record<V2TrialBuildId, V2TrialBuildSpec> = {
   },
   trial_counter: {
     id: 'trial_counter',
-    name: '护盾反击方案',
+    name: '全息模板 · 护盾反击',
     shortName: '护盾反击',
     archetypeId: 'counter',
-    tagline: '护盾板 + 反击环构建 10–14 点厚盾，激光补刀并回劈吸收电弧',
+    tagline: '全息战术模板：护盾板 + 反击环构建 10–14 点厚盾，激光补刀并回劈吸收电弧',
     advantage: '高盾低战损 · 克制齐射蜂群与高频率常规火力',
     tradeoff: '遇 50% 穿盾猎手时吸收锐减，破重甲速度逊于重炮',
     allowedKinds: ['shield', 'counter', 'laser'],
@@ -63,30 +63,32 @@ export const V2_TRIAL_BUILDS: Record<V2TrialBuildId, V2TrialBuildSpec> = {
 };
 
 /**
- * Builds an exact, orthogonally linked, budget-legal common borrowed loadout for the selected trial build.
- * Strictly obeys ship loadoutBudget (6 on 4×4 hulls, 5 on 5×4 heavy freighter) and hull disabledCells.
+ * Builds an exact, orthogonally linked, budget-legal common borrowed loadout for the selected Holodeck template.
+ * Strictly obeys ship loadoutBudget and hull disabledCells (including stargate_cruiser's (0,0) corner bulkhead).
  */
 export function buildTrialPrepareSlots(
   trialId: V2TrialBuildId,
   shipId: V2ShipId
 ): readonly V2PrepareSlotEntry[] {
   const isFreighter = shipId === 'heavy_freighter';
+  const isFlagship = shipId === 'stargate_cruiser';
 
   if (trialId === 'trial_heavy') {
+    const ox = isFlagship ? 1 : 0;
     const base: V2PrepareSlotEntry[] = [
       {
         slotKey: 'trial_heavy_1',
         origin: 'loan',
-        definitionId: 'equipment.heavy.common', // 1x3, budget 3 -> (0,0),(0,1),(0,2)
-        x: 0,
+        definitionId: 'equipment.heavy.common', // 1x3, budget 3
+        x: ox,
         y: 0,
         rotation: 0,
       },
       {
         slotKey: 'trial_heavy_2',
         origin: 'loan',
-        definitionId: 'equipment.capacitor.common', // 1x1, budget 1 -> (1,0) adjacent!
-        x: 1,
+        definitionId: 'equipment.capacitor.common', // 1x1, budget 1 -> adjacent!
+        x: ox + 1,
         y: 0,
         rotation: 0,
       },
@@ -95,8 +97,8 @@ export function buildTrialPrepareSlots(
       base.push({
         slotKey: 'trial_heavy_3',
         origin: 'loan',
-        definitionId: 'equipment.shield.common', // 1x2, budget 2 -> (2,0),(2,1) (total 6/6)
-        x: 2,
+        definitionId: 'equipment.shield.common', // 1x2, budget 2 -> (2,0) or (3,0)
+        x: ox + 2,
         y: 0,
         rotation: 0,
       });
@@ -105,6 +107,34 @@ export function buildTrialPrepareSlots(
   }
 
   if (trialId === 'trial_hangar') {
+    if (isFlagship) {
+      return [
+        {
+          slotKey: 'trial_hangar_1',
+          origin: 'loan',
+          definitionId: 'equipment.hangar.common', // 2x2 -> (1,0),(2,0),(1,1),(2,1)
+          x: 1,
+          y: 0,
+          rotation: 0,
+        },
+        {
+          slotKey: 'trial_hangar_2',
+          origin: 'loan',
+          definitionId: 'equipment.relay.common', // 1x1 -> (3,0) adjacent!
+          x: 3,
+          y: 0,
+          rotation: 0,
+        },
+        {
+          slotKey: 'trial_hangar_3',
+          origin: 'loan',
+          definitionId: 'equipment.shield.common', // 1x2 -> (0,1),(0,2)
+          x: 0,
+          y: 1,
+          rotation: 0,
+        },
+      ];
+    }
     const base: V2PrepareSlotEntry[] = [
       {
         slotKey: 'trial_hangar_1',
@@ -136,21 +166,22 @@ export function buildTrialPrepareSlots(
     return base;
   }
 
-  // trial_counter: shield(2) + counter(2, built-in +4 shield!) + laser(2) on 4x4 hulls (6/6, 10–14 shield + real DPS!)
+  // trial_counter: shield(2) + counter(2) + laser(2)
+  const ox = isFlagship ? 1 : 0;
   const base: V2PrepareSlotEntry[] = [
     {
       slotKey: 'trial_counter_1',
       origin: 'loan',
-      definitionId: 'equipment.shield.common', // 1x2, budget 2 -> (0,0),(0,1)
-      x: 0,
+      definitionId: 'equipment.shield.common', // 1x2, budget 2
+      x: ox,
       y: 0,
       rotation: 0,
     },
     {
       slotKey: 'trial_counter_2',
       origin: 'loan',
-      definitionId: 'equipment.counter.common', // 1x2, budget 2 -> (1,0),(1,1) adjacent!
-      x: 1,
+      definitionId: 'equipment.counter.common', // 1x2, budget 2 -> adjacent!
+      x: ox + 1,
       y: 0,
       rotation: 0,
     },
@@ -159,8 +190,8 @@ export function buildTrialPrepareSlots(
     base.push({
       slotKey: 'trial_counter_3',
       origin: 'loan',
-      definitionId: 'equipment.laser.common', // 1x2, budget 2 -> (2,0),(2,1) (total 6/6)
-      x: 2,
+      definitionId: 'equipment.laser.common', // 1x2, budget 2 -> (2,0) or (3,0)
+      x: ox + 2,
       y: 0,
       rotation: 0,
     });
