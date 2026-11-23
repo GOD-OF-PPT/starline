@@ -1,12 +1,19 @@
 import { V2_CARGO_DEFS, computeV2CargoPrice, type V2CargoDef } from '../data/cargo';
 import {
   V2_EQUIPMENT_DEFS,
+  getV2EquipmentDefByKind,
   type V2EquipmentDef,
   type V2EquipmentKind,
   type V2Quality,
 } from '../data/equipment';
 import type { V2ShapeId } from '../data/shapes';
-import type { V2ItemInstance, V2ItemLocation, V2ItemOrigin } from './types';
+import type {
+  V2ItemInstance,
+  V2ItemLocation,
+  V2ItemOrigin,
+  V2ProfileState,
+  V2RunState,
+} from './types';
 
 export interface V2UnifiedItemDef {
   readonly defId: string;
@@ -108,3 +115,92 @@ export function createV2CargoInstance(params: {
     location: params.location,
   };
 }
+
+/**
+ * Purely records known item definition IDs into `profile.seenItems`.
+ * Returns the exact original `profile` reference if no new valid defId is added.
+ */
+export function recordV2SeenItems(
+  profile: V2ProfileState,
+  defIds: readonly string[]
+): V2ProfileState {
+  if (defIds.length === 0) return profile;
+  const existing = new Set(profile.seenItems);
+  const additions: string[] = [];
+  for (const id of defIds) {
+    if (!existing.has(id) && getAnyV2ItemDef(id)) {
+      existing.add(id);
+      additions.push(id);
+    }
+  }
+  if (additions.length === 0) return profile;
+  return {
+    ...profile,
+    seenItems: [...profile.seenItems, ...additions],
+  };
+}
+
+/**
+ * Collects item definition IDs that are legitimately visible to the player in the current run state.
+ * Respects fog-of-war: NEVER leaks unpeeked/uncut wreck contents when crewId !== 'salvager'.
+ */
+export function collectVisibleV2DefIdsForRun(run: V2RunState): readonly string[] {
+  const seen = new Set<string>();
+
+  for (const p of run.bay.placed) {
+    seen.add(p.item.definitionId);
+  }
+  for (const s of run.bay.staging) {
+    seen.add(s.item.definitionId);
+  }
+
+  if (run.pendingReward) {
+    seen.add(run.pendingReward.equipmentOption.definitionId);
+    seen.add(run.pendingReward.cargoOption.definitionId);
+  }
+
+  if (run.activeEngineerOffer && !run.activeEngineerOffer.used) {
+    for (const kind of run.activeEngineerOffer.candidates) {
+      seen.add(getV2EquipmentDefByKind(kind, 'common').defId);
+    }
+  }
+
+  if (run.currentNodeId) {
+    const node = run.graph.nodes[run.currentNodeId];
+    if (node) {
+      if (node.merchant && (run.phase === 'SHOP' || node.resolved)) {
+        for (const offer of node.merchant.offers) {
+          seen.add(offer.item.definitionId);
+        }
+      }
+      if (node.wreck) {
+        if (run.crewId === 'salvager') {
+          seen.add(node.wreck.armoryItem.definitionId);
+          for (const cg of node.wreck.cargoItems) {
+            seen.add(cg.definitionId);
+          }
+        } else if (node.wreck.chosenRoom === 'armory') {
+          seen.add(node.wreck.armoryItem.definitionId);
+        } else if (node.wreck.chosenRoom === 'cargo') {
+          for (const cg of node.wreck.cargoItems) {
+            seen.add(cg.definitionId);
+          }
+        }
+      }
+      if (node.anomaly && (run.phase === 'ENCOUNTER' || node.resolved)) {
+        seen.add(node.anomaly.safeCargoItem.definitionId);
+        if (node.anomaly.chosenOption === 'breach') {
+          for (const cg of node.anomaly.breachCargoItems) {
+            seen.add(cg.definitionId);
+          }
+        }
+      }
+      if (node.distress && (run.phase === 'ENCOUNTER' || node.resolved)) {
+        seen.add(node.distress.haulCargoItem.definitionId);
+      }
+    }
+  }
+
+  return Array.from(seen);
+}
+

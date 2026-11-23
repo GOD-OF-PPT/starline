@@ -580,7 +580,7 @@ export function commitV2EliteTacticDecision(
 export function completeV2CombatAtCurrentNode(
   run: V2RunState,
   unlockedFamilies: readonly V2UnlockFamilyId[],
-  recentEquipmentKinds: readonly V2EquipmentKind[] = []
+  recentEquipmentKinds?: readonly V2EquipmentKind[]
 ): { readonly ok: boolean; readonly run: V2RunState; readonly error?: string } {
   if (run.phase !== 'ENCOUNTER' || !run.activeCombat || !run.currentNodeId) {
     return { ok: false, run, error: '没有进行中的战斗可结算' };
@@ -612,12 +612,23 @@ export function completeV2CombatAtCurrentNode(
     };
   }
 
+  const effectiveRecent =
+    recentEquipmentKinds && recentEquipmentKinds.length > 0
+      ? recentEquipmentKinds
+      : run.recentEquipmentKinds ?? [];
+
   const { bundle, nextStreams } = generateV2CombatRewardBundle(
     run,
     node,
     unlockedFamilies,
-    recentEquipmentKinds
+    effectiveRecent
   );
+
+  const offeredKind = bundle.equipmentOption.definitionId.split('.')[1] as V2EquipmentKind;
+  const nextRecentKinds =
+    node.layer <= 3
+      ? [...effectiveRecent, offeredKind].slice(-4)
+      : [...effectiveRecent];
 
   return {
     ok: true,
@@ -630,6 +641,7 @@ export function completeV2CombatAtCurrentNode(
       pendingReward: bundle,
       phase: 'REWARD',
       claimedEventIds: [...run.claimedEventIds, claimKey],
+      recentEquipmentKinds: nextRecentKinds,
     },
   };
 }

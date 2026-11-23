@@ -15,28 +15,56 @@ export function isDeepTierUnlocked(profile: V2ProfileState): boolean {
   return profile.completedContractTypes.length >= 1 && profile.deepestLayerReached >= 4;
 }
 
+export function getDeepTierLockReason(profile: V2ProfileState): string | null {
+  if (isDeepTierUnlocked(profile)) return null;
+  const unmet: string[] = [];
+  if (profile.completedContractTypes.length < 1) {
+    unmet.push('完成任意 1 份标准委托');
+  }
+  if (profile.deepestLayerReached < 4) {
+    unmet.push(`曾抵达第 4 层（当前最深 L${profile.deepestLayerReached}）`);
+  }
+  return `解锁条件：${unmet.join(' 且 ')}`;
+}
+
+export interface V2LockedContractEntry {
+  readonly template: V2ContractTemplate;
+  readonly locked: boolean;
+  readonly lockReason: string | null;
+}
+
 /**
  * Returns the V2 contract board: always one template per core type (transport/rescue/survey)
- * plus free salvage; includes deep-tier templates once unlocked (§4.2).
+ * plus free salvage, and ALWAYS returns all 3 deep-tier templates with lock status & reason (§4.2).
  */
 export function getAvailableContractBoard(profile: V2ProfileState): {
   readonly standardTemplates: readonly V2ContractTemplate[];
   readonly deepTemplates: readonly V2ContractTemplate[];
+  readonly deepEntries: readonly V2LockedContractEntry[];
   readonly freeTemplate: V2ContractTemplate;
   readonly deepUnlocked: boolean;
+  readonly deepLockReason: string | null;
 } {
   const deepUnlocked = isDeepTierUnlocked(profile);
+  const deepLockReason = getDeepTierLockReason(profile);
   const standardTemplates = V2_CORE_CONTRACT_TYPES.map(
     (type) => V2_CONTRACT_TEMPLATES[`${type}_std`]
   );
-  const deepTemplates = deepUnlocked
-    ? V2_CORE_CONTRACT_TYPES.map((type) => V2_CONTRACT_TEMPLATES[`${type}_deep`])
-    : [];
+  const deepTemplates = V2_CORE_CONTRACT_TYPES.map(
+    (type) => V2_CONTRACT_TEMPLATES[`${type}_deep`]
+  );
+  const deepEntries: V2LockedContractEntry[] = deepTemplates.map((template) => ({
+    template,
+    locked: !deepUnlocked,
+    lockReason: deepLockReason,
+  }));
   return {
     standardTemplates,
     deepTemplates,
+    deepEntries,
     freeTemplate: V2_CONTRACT_TEMPLATES.free_salvage,
     deepUnlocked,
+    deepLockReason,
   };
 }
 

@@ -12,7 +12,9 @@ import type {
   V2ProfileState,
   V2RunState,
   V2SettlementDisposition,
+  V3RunHistoryEntry,
 } from './types';
+import { V3_MAX_RUN_HISTORY } from './persistenceV2';
 
 export interface V2SettlementItemLine {
   readonly item: V2ItemInstance;
@@ -105,7 +107,7 @@ export function calculateV2Settlement(
   const placedItems = run.bay.placed.map((p) => p.item);
   const discoveredSet = new Set<string>();
   for (const item of placedItems) {
-    if (item.origin !== 'mission') {
+    if (item.origin !== 'mission' || (reason === 'safe_return' && contractCompleted)) {
       discoveredSet.add(item.definitionId);
     }
   }
@@ -269,10 +271,13 @@ export function applyV2Settlement(
     };
   }
 
+  const placedDefIds = run.bay.placed.map((p) => p.item.definitionId);
   const nextDiscovered = Array.from(
     new Set([...profile.discoveredItems, ...summary.discoveredDefIds])
   );
-  const nextSeen = Array.from(new Set([...profile.seenItems, ...summary.discoveredDefIds]));
+  const nextSeen = Array.from(
+    new Set([...profile.seenItems, ...summary.discoveredDefIds, ...placedDefIds])
+  );
 
   // Deepest layer reached during this run
   let maxLayerThisRun = 0;
@@ -283,9 +288,12 @@ export function applyV2Settlement(
 
   // Buildings auto-unlocked on tutorial completion regardless of delivery success (§12)
   const nextBuildings = { ...profile.buildings };
+  const nextFacilityTiers: Record<string, number> = { ...profile.facilityTiers };
   if (run.isTutorial) {
     nextBuildings.workbench = true;
     nextBuildings.contract_hub = true;
+    nextFacilityTiers.workbench = Math.max(1, nextFacilityTiers.workbench ?? 0);
+    nextFacilityTiers.contract_hub = Math.max(1, nextFacilityTiers.contract_hub ?? 0);
   }
 
   // Contract completion unlocks: crew + ordered equipment families (§6.2 & §10.4)
@@ -339,10 +347,39 @@ export function applyV2Settlement(
     }
   }
 
+  const salvageEarned = Math.max(0, Math.floor(run.salvagePartsEarned ?? 0));
+  const historyEntry: V3RunHistoryEntry = {
+    runId: run.runId,
+    finishedAt: new Date().toISOString(),
+    sectorId: run.sectorId,
+    contractTemplateId: run.contract.templateId,
+    contractName: run.contract.name,
+    shipId: run.shipId,
+    crewId: run.crewId,
+    outcome: summary.reason,
+    contractCompleted: summary.contractCompleted,
+    maxLayerReached: maxLayerThisRun,
+    creditsEarned: summary.finalCreditsEarned,
+    salvagePartsEarned: salvageEarned,
+    endlessThreat: run.endlessThreat ?? 0,
+    isFinalCampaignRun: run.isFinalCampaignRun,
+  };
+  const nextRunHistory = [historyEntry, ...profile.runHistory].slice(0, V3_MAX_RUN_HISTORY);
+  const nextCareer = {
+    ...profile.career,
+    totalWins: profile.career.totalWins + (summary.contractCompleted ? 1 : 0),
+    totalDefeats: profile.career.totalDefeats + (summary.reason === 'defeat' ? 1 : 0),
+    totalSafeReturns: profile.career.totalSafeReturns + (summary.reason === 'safe_return' ? 1 : 0),
+    totalCreditsEarned: profile.career.totalCreditsEarned + Math.max(0, summary.finalCreditsEarned),
+    totalSalvagePartsEarned: profile.career.totalSalvagePartsEarned + salvageEarned,
+  };
+
   const nextProfile: V2ProfileState = {
     ...profile,
     credits: profile.credits + summary.finalCreditsEarned,
+    salvageParts: profile.salvageParts + salvageEarned,
     buildings: nextBuildings,
+    facilityTiers: nextFacilityTiers,
     unlockedCrew: nextCrew,
     unlockedFamilies: nextFamilies,
     blueprints: nextBlueprints,
@@ -362,6 +399,8 @@ export function applyV2Settlement(
     tutorialBonusClaimed:
       profile.tutorialBonusClaimed || summary.tutorialBonusCredits > 0,
     settledRunIds: [...profile.settledRunIds, run.runId],
+    runHistory: nextRunHistory,
+    career: nextCareer,
   };
 
   return {

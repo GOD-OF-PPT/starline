@@ -71,6 +71,14 @@ export function purchaseV2Facility(
     nextShips.push('heavy_freighter');
   }
 
+  const nextFacilityTiers: Record<string, number> = {
+    ...profile.facilityTiers,
+    [facilityId]: Math.max(1, profile.facilityTiers[facilityId] ?? 0),
+  };
+  if (facilityId === 'drydock_tier2') {
+    nextFacilityTiers.drydock = Math.max(2, nextFacilityTiers.drydock ?? 0);
+  }
+
   return {
     ok: true,
     profile: {
@@ -80,6 +88,7 @@ export function purchaseV2Facility(
         ...profile.buildings,
         [facilityId]: true,
       },
+      facilityTiers: nextFacilityTiers,
       unlockedShips: nextShips,
     },
   };
@@ -183,6 +192,9 @@ export function craftV2CommonEquipment(
       discoveredItems: profile.discoveredItems.includes(item.definitionId)
         ? profile.discoveredItems
         : [...profile.discoveredItems, item.definitionId],
+      seenItems: profile.seenItems.includes(item.definitionId)
+        ? profile.seenItems
+        : [...profile.seenItems, item.definitionId],
     },
   };
 }
@@ -235,6 +247,9 @@ export function claimV2PendingGiftToWarehouse(
       discoveredItems: profile.discoveredItems.includes(stored.definitionId)
         ? profile.discoveredItems
         : [...profile.discoveredItems, stored.definitionId],
+      seenItems: profile.seenItems.includes(stored.definitionId)
+        ? profile.seenItems
+        : [...profile.seenItems, stored.definitionId],
     },
   };
 }

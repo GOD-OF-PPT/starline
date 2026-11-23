@@ -76,7 +76,12 @@ import {
 import { createV2RngStreams } from '../src/v2/domain/rngStreams';
 import { generateV2StarGraph, verifyV2GraphInvariants } from '../src/v2/domain/routeGenerator';
 import { applyV2Settlement } from '../src/v2/domain/settlementV2';
-import { V2_BACKUP_KEY, V2_SAVE_KEY } from '../src/v2/domain/types';
+import {
+  V2_RULES_VERSION,
+  V2_SAVE_KEY,
+  V2_SCHEMA_VERSION,
+  V3_BACKUP_KEY,
+} from '../src/v2/domain/types';
 
 class MemoryStorage implements V2StorageLike {
   private map = new Map<string, string>();
@@ -927,11 +932,11 @@ describe('V2 规则与验收矩阵核心测试（T01–T12 / AC01–AC18, AC22�
     // 2. Semantic corruption in starline_save_v2 triggers backup recovery without losing valid backup!
     const v2Second = { ...v2Migrated, profile: { ...v2Migrated.profile, credits: 999 } };
     expect(persistV2SaveData(store, v2Second).ok).toBe(true);
-    expect(store.getItem(V2_BACKUP_KEY)).not.toBeNull();
+    expect(store.getItem(V3_BACKUP_KEY)).not.toBeNull();
 
     // Corrupt primary with illegal negative wallet in activeRun
     const corrupt = JSON.parse(store.getItem(V2_SAVE_KEY)!);
-    corrupt.activeRun = { runId: 'bad', schemaVersion: 2, rulesVersion: '2.0.0', shipId: 'cannon_skiff', wallet: -50 };
+    corrupt.activeRun = { runId: 'bad', schemaVersion: V2_SCHEMA_VERSION, rulesVersion: V2_RULES_VERSION, shipId: 'cannon_skiff', wallet: -50 };
     store.setItem(V2_SAVE_KEY, JSON.stringify(corrupt));
 
     expect(validateV2SaveDataDetailed(corrupt).ok).toBe(false);

@@ -3,3 +3,6 @@ dist/
 .DS_Store
 *.log
 coverage/
+.agents/
+playwright-report/
+test-results/

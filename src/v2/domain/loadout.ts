@@ -24,6 +24,7 @@ import {
   V2_RULES_VERSION,
   V2_SCHEMA_VERSION,
   V2_STARTING_FUEL,
+  type SectorId,
   type V2CargoBayState,
   type V2LoadoutPreset,
   type V2PlacedItem,
@@ -232,6 +233,10 @@ export function launchV2Expedition(params: {
   readonly seed?: number;
   readonly allowImproved?: boolean;
   readonly maxLayers?: number;
+  readonly sectorId?: SectorId;
+  readonly endlessThreat?: number;
+  readonly endlessMutatorIds?: readonly string[];
+  readonly isFinalCampaignRun?: boolean;
 }): {
   readonly ok: boolean;
   readonly profile: V2ProfileState;
@@ -344,6 +349,15 @@ export function launchV2Expedition(params: {
     activeEngineerOffer: null,
     navigatorFreeJumpUsed: false,
     settlementReason: null,
+    sectorId: params.sectorId ?? 'near_orbit',
+    endlessThreat: params.endlessThreat ?? 0,
+    endlessMutatorIds: params.endlessMutatorIds ? [...params.endlessMutatorIds] : [],
+    recentEquipmentKinds: [],
+    usedEventIds: [],
+    tacticalChargesMax: 1,
+    tacticalChargesUsed: 0,
+    salvagePartsEarned: 0,
+    isFinalCampaignRun: Boolean(params.isFinalCampaignRun),
   };
 
   const nextProfile: V2ProfileState = {

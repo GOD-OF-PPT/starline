@@ -93,7 +93,9 @@ export function openV2ContractsDrawerModal(
     const completedBefore = profile.completedContractIds.includes(tpl.templateId);
     const isDeep = tpl.tier === 'deep';
     return `
-      <div class="v2-contract-card ${isDeep ? 'tier-deep' : ''} ${lockedReason ? 'is-locked' : ''}">
+      <div class="v2-contract-card ${isDeep ? 'tier-deep' : ''} ${lockedReason ? 'is-locked' : ''}" ${
+      lockedReason ? 'data-contract-locked="true"' : ''
+    }>
         <div class="v2-contract-head">
           <span class="v2-contract-name">${tpl.name}</span>
           <span class="v2-contract-reward num">${
@@ -128,12 +130,12 @@ export function openV2ContractsDrawerModal(
           ${board.standardTemplates.map((c) => renderCard(c.templateId)).join('')}
         </div>
         <div class="v2-contract-section-title">深入委托（第 5–6 层高危悬赏${
-          board.deepUnlocked ? '' : ' · 完成任意 1 份标准委托解锁'
+          board.deepLockReason ? ` · ${board.deepLockReason}` : ''
         }）</div>
         <div class="v2-contract-grid">
-          ${board.deepTemplates
-            .map((c) =>
-              renderCard(c.templateId, board.deepUnlocked ? undefined : '需先完成任意 1 份标准委托')
+          ${board.deepEntries
+            .map((entry) =>
+              renderCard(entry.template.templateId, entry.locked ? entry.lockReason ?? undefined : undefined)
             )
             .join('')}
         </div>
@@ -276,6 +278,59 @@ export function openV2ShowcasePickerModal(
           modal.close();
           onPickTrial(tid);
         });
+      });
+    }
+  );
+}
+
+export function openV2MoreModesModal(
+  host: HTMLElement,
+  options: {
+    readonly onStartShowcase: (trialId: V2TrialBuildId) => void;
+    readonly onSwitchToV1: () => void;
+  }
+): void {
+  openTitledV2Modal(
+    host,
+    { title: '更多模式 / 试航演练', dismissible: true },
+    (body, modal) => {
+      body.innerHTML = `
+        <div class="v3-more-modes-list">
+          <div class="v3-mode-card">
+            <div class="v3-mode-card-head">
+              <strong>${svgIcon('bolt', 15)} 4 站精华试玩（独立演练）</strong>
+              <span class="v2-origin-chip origin-loan">不改正式存档</span>
+            </div>
+            <p class="v3-mode-card-desc">
+              直接选用成型三流派构筑体验完整 4 站循环：克制交火 → 废船切割 → 2×3 反应堆腾舱 → 末层精英战。
+            </p>
+            <button type="button" class="btn btn-primary btn-sm" id="v3-btn-mode-showcase" data-testid="btn-mode-showcase">
+              选择试航构筑 →
+            </button>
+          </div>
+          <div class="v3-mode-card">
+            <div class="v3-mode-card-head">
+              <strong>${svgIcon('rocket', 15)} 经典模式（V1 初代版本）</strong>
+              <span class="v2-origin-chip origin-owned">独立存档</span>
+            </div>
+            <p class="v3-mode-card-desc">
+              切换回初代《星际拆解站》经典流程体验；原有 V1 存档与新版远征存档完全独立互不覆盖。
+            </p>
+            <button type="button" class="btn btn-secondary btn-sm" id="v3-btn-mode-v1" data-testid="btn-mode-v1">
+              切换至经典模式
+            </button>
+          </div>
+        </div>
+      `;
+
+      body.querySelector('#v3-btn-mode-showcase')?.addEventListener('click', () => {
+        modal.close();
+        openV2ShowcasePickerModal(host, options.onStartShowcase);
+      });
+
+      body.querySelector('#v3-btn-mode-v1')?.addEventListener('click', () => {
+        modal.close();
+        options.onSwitchToV1();
       });
     }
   );
@@ -739,26 +794,84 @@ export function openV2CodexModal(host: HTMLElement, profile: V2ProfileState): vo
   const cargoList = Object.values(V2_CARGO_DEFS);
   const allDefs = [...eqList, ...cargoList];
   const discovered = new Set(profile.discoveredItems);
-  const count = allDefs.filter((d) => discovered.has(d.defId)).length;
+  const seen = new Set([...profile.seenItems, ...profile.discoveredItems]);
+
+  const discoveredCount = allDefs.filter((d) => discovered.has(d.defId)).length;
+  const seenOnlyCount = allDefs.filter((d) => !discovered.has(d.defId) && seen.has(d.defId)).length;
+  const unknownCount = allDefs.length - discoveredCount - seenOnlyCount;
+  const pct = allDefs.length > 0 ? Math.round((discoveredCount / allDefs.length) * 100) : 0;
 
   openTitledV2Modal(
     host,
-    { title: `装备与货物图鉴 (${count}/${allDefs.length})`, dismissible: true },
+    {
+      title: `装备与货物图鉴 (${discoveredCount}/${allDefs.length} · ${pct}%)`,
+      dismissible: true,
+    },
     (body) => {
       body.innerHTML = `
+        <div class="v2-wh-summary">
+          <span>已获得 <strong>${discoveredCount}/${allDefs.length}</strong> (${pct}%)</span>
+          <span>已见闻 <strong>${seenOnlyCount}</strong></span>
+          <span>未发现 <strong>${unknownCount}</strong></span>
+        </div>
         <div class="codex-grid">
           ${allDefs
             .map((d) => {
-              const found = discovered.has(d.defId);
+              const isFound = discovered.has(d.defId);
+              const isSeen = !isFound && seen.has(d.defId);
+              const state: 'found' | 'seen' | 'locked' = isFound
+                ? 'found'
+                : isSeen
+                ? 'seen'
+                : 'locked';
               const isEq = d.defId.startsWith('equipment.');
-              return `<div class="codex-card ${found ? 'found' : 'locked'}">
-                <img class="codex-icon" src="${getItemImageUrl(d.defId)}" alt="${d.name}" />
+              const isMission = d.defId.startsWith('mission.');
+              const cargoDef = V2_CARGO_DEFS[d.defId];
+              const categoryLabel = isEq
+                ? d.defId.endsWith('.improved')
+                  ? '优良设备'
+                  : '普通设备'
+                : isMission
+                ? '任务物资'
+                : cargoDef?.isCollectible
+                ? '珍稀藏品'
+                : '普通货物';
+              const displayName =
+                state === 'locked'
+                  ? isEq
+                    ? '未发现模块'
+                    : isMission
+                    ? '未知任务物资'
+                    : '未知货物'
+                  : d.name;
+              const stateBadge =
+                state === 'found'
+                  ? '<span class="v3-codex-state found">已获得</span>'
+                  : state === 'seen'
+                  ? '<span class="v3-codex-state seen">已见闻</span>'
+                  : '<span class="v3-codex-state locked">未发现</span>';
+              const desc =
+                state === 'found'
+                  ? d.summary
+                  : state === 'seen'
+                  ? '曾在航路中目击 · 安全带回或完成交付后解锁完整档案'
+                  : '尚未在航路中发现';
+              const iconClass =
+                state === 'found'
+                  ? 'codex-icon'
+                  : state === 'seen'
+                  ? 'codex-icon is-seen'
+                  : 'codex-icon is-locked';
+
+              return `<div class="codex-card ${state}" data-codex-state="${state}" data-def-id="${d.defId}">
+                <img class="${iconClass}" src="${getItemImageUrl(d.defId)}" alt="${displayName}" />
                 <div class="codex-meta">
-                  <div class="codex-name">${found ? d.name : '未发现模块'}</div>
-                  <div class="codex-sub">${renderV2MiniMaskHtml(d.shapeId)} ${V2_SHAPES[d.shapeId].label} · ${
-                isEq ? (d.defId.endsWith('.improved') ? '优良设备' : '普通设备') : '货物/藏品'
-              }</div>
-                  <div class="codex-desc">${found ? d.summary : '完成探索并安全带回后解锁完整记录'}</div>
+                  <div class="codex-name-row">
+                    <span class="codex-name">${displayName}</span>
+                    ${stateBadge}
+                  </div>
+                  <div class="codex-sub">${renderV2MiniMaskHtml(d.shapeId)} ${V2_SHAPES[d.shapeId].label} · ${categoryLabel}</div>
+                  <div class="codex-desc">${desc}</div>
                 </div>
               </div>`;
             })

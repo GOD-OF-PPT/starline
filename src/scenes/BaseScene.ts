@@ -120,8 +120,16 @@ export class BaseScene extends Phaser.Scene {
 
   create(): void {
     this.dpr = (this.game.registry.get('dpr') as number) || 1;
-    this.viewW = Math.round((this.scale.width || 390) / this.dpr);
-    this.viewH = Math.round((this.scale.height || 340) / this.dpr);
+    const parentRect = this.game.canvas?.parentElement?.getBoundingClientRect();
+    const liveW = parentRect && parentRect.width >= 16 ? Math.round(parentRect.width) : 0;
+    const liveH = parentRect && parentRect.height >= 16 ? Math.round(parentRect.height) : 0;
+    this.viewW = liveW || Math.round((this.scale.width || 390) / this.dpr);
+    this.viewH = liveH || Math.round((this.scale.height || 340) / this.dpr);
+    const expectedBw = Math.round(this.viewW * this.dpr);
+    const expectedBh = Math.round(this.viewH * this.dpr);
+    if (this.scale.width !== expectedBw || this.scale.height !== expectedBh) {
+      this.scale.resize(expectedBw, expectedBh);
+    }
     this.applyCameraViewport();
     this.cameras.main.setBackgroundColor('#0B1320');
 
@@ -166,8 +174,8 @@ export class BaseScene extends Phaser.Scene {
 
   private applyCameraViewport(): void {
     if (!this.cameras?.main) return;
-    const bw = Math.round(this.viewW * this.dpr);
-    const bh = Math.round(this.viewH * this.dpr);
+    const bw = Math.max(1, Math.round(this.viewW * this.dpr));
+    const bh = Math.max(1, Math.round(this.viewH * this.dpr));
     this.cameras.main.setViewport(0, 0, bw, bh);
     this.cameras.main.setZoom(this.dpr);
     this.cameras.main.centerOn(this.viewW * 0.5, this.viewH * 0.5);
@@ -179,7 +187,7 @@ export class BaseScene extends Phaser.Scene {
     this.viewH = h;
     if (dpr !== undefined) this.dpr = dpr;
     this.applyCameraViewport();
-    if (this.scene.isActive() && this.texturesReady) {
+    if (this.sys?.isActive() && this.texturesReady) {
       this.redrawStatic();
     }
   }
@@ -249,17 +257,11 @@ export class BaseScene extends Phaser.Scene {
   }
 
   private handleResize(gameSize?: Phaser.Structs.Size): void {
-    if (!this.scene.isActive()) return;
+    if (!this.sys?.isActive()) return;
     const dpr = (this.game.registry.get('dpr') as number) || this.dpr || 1;
-    if (gameSize && gameSize.width > 0 && gameSize.height > 0) {
-      this.syncViewport(Math.round(gameSize.width / dpr), Math.round(gameSize.height / dpr), dpr);
-    } else {
-      this.syncViewport(
-        Math.round((this.scale.width || 390) / dpr),
-        Math.round((this.scale.height || 340) / dpr),
-        dpr
-      );
-    }
+    const bw = gameSize && gameSize.width > 0 ? gameSize.width : this.scale.width || 390;
+    const bh = gameSize && gameSize.height > 0 ? gameSize.height : this.scale.height || 340;
+    this.syncViewport(Math.round(bw / dpr), Math.round(bh / dpr), dpr);
   }
 
   /**

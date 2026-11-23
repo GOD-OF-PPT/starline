@@ -14,10 +14,13 @@ import type { V2FacilityId } from '../data/facilities';
 import type { V2Rotation } from '../data/shapes';
 import type { V2ShipId } from '../data/ships';
 
-export const V2_SCHEMA_VERSION = 2;
-export const V2_RULES_VERSION = '2.0.0';
+export const V2_SCHEMA_VERSION = 3;
+export const V2_RULES_VERSION = '3.0.0';
+export const V2_LEGACY_SCHEMA_VERSION = 2;
+export const V2_LEGACY_RULES_VERSION = '2.0.0';
 export const V2_SAVE_KEY = 'starline_save_v2';
 export const V2_BACKUP_KEY = 'starline_save_backup_v2';
+export const V3_BACKUP_KEY = 'starline_save_backup_v3';
 export const V2_TAB_LOCK_KEY = 'starline_active_tab_lock_v2';
 export const V2_TAB_CHANNEL = 'starline_tab_sync_v2';
 
@@ -294,6 +297,60 @@ export interface V2EngineerSwapOffer {
 
 export type V2TrialBuildId = 'trial_heavy' | 'trial_hangar' | 'trial_counter';
 
+export type CampaignActId = 'prologue' | 'act1' | 'act2' | 'act3' | 'endless';
+export type SectorId = 'near_orbit' | 'frozen_graveyard' | 'stargate_abyss';
+export type FactionId = 'starport_guild' | 'deep_institute' | 'free_salvagers';
+export type EndingId = 'stargate_reignited' | 'free_haven' | 'fleet_heir';
+
+export interface V3CampaignState {
+  readonly currentAct: CampaignActId;
+  readonly unlockedSectors: readonly SectorId[];
+  readonly completedMilestones: readonly string[];
+  readonly defeatedBossIds: readonly string[];
+  readonly readCommsIds: readonly string[];
+  readonly relicPityCounters: Record<string, number>;
+  readonly endingsUnlocked: readonly EndingId[];
+  readonly finalMissionUnlocked: boolean;
+  readonly endlessUnlocked: boolean;
+  readonly maxEndlessThreat: number; // 0..10
+}
+
+export interface V3CareerStats {
+  readonly totalWins: number;
+  readonly totalDefeats: number;
+  readonly totalSafeReturns: number;
+  readonly totalCreditsEarned: number;
+  readonly totalSalvagePartsEarned: number;
+  readonly totalBossesDefeated: number;
+  readonly totalWrecksDissected: number;
+  readonly totalItemsDismantled: number;
+  readonly deepestEndlessCleared: number;
+}
+
+export interface V3RunHistoryEntry {
+  readonly runId: string;
+  readonly finishedAt: string;
+  readonly sectorId: SectorId;
+  readonly contractTemplateId: string;
+  readonly contractName: string;
+  readonly shipId: V2ShipId;
+  readonly crewId: V2CrewId | null;
+  readonly outcome: 'safe_return' | 'defeat';
+  readonly contractCompleted: boolean;
+  readonly maxLayerReached: number;
+  readonly creditsEarned: number;
+  readonly salvagePartsEarned: number;
+  readonly endlessThreat: number;
+  readonly isFinalCampaignRun?: boolean;
+}
+
+export interface V3RunBonusObjective {
+  readonly id: string;
+  readonly label: string;
+  readonly completed: boolean;
+  readonly rewardCredits: number;
+}
+
 export interface V2RunState {
   readonly runId: string;
   readonly schemaVersion: number;
@@ -327,6 +384,17 @@ export interface V2RunState {
   readonly activeEngineerOffer: V2EngineerSwapOffer | null;
   readonly navigatorFreeJumpUsed: boolean;
   readonly settlementReason: 'safe_return' | 'defeat' | null;
+  // V3 additive run fields
+  readonly sectorId: SectorId;
+  readonly endlessThreat?: number;
+  readonly endlessMutatorIds?: readonly string[];
+  readonly recentEquipmentKinds: readonly V2EquipmentKind[];
+  readonly usedEventIds: readonly string[];
+  readonly bonusObjective?: V3RunBonusObjective;
+  readonly tacticalChargesMax: number;
+  readonly tacticalChargesUsed: number;
+  readonly salvagePartsEarned: number;
+  readonly isFinalCampaignRun?: boolean;
 }
 
 export interface V2PresetSlot {
@@ -381,6 +449,16 @@ export interface V2ProfileState {
   readonly selectedCrewId: V2CrewId | null;
   readonly selectedArchetype: V2ArchetypeId;
   readonly migrationRecord: V2MigrationRecord | null;
+  // V3 additive profile fields
+  readonly salvageParts: number;
+  readonly facilityTiers: Record<string, number>;
+  readonly campaign: V3CampaignState;
+  readonly factionRep: Record<FactionId, number>;
+  readonly crewMastery: Record<V2CrewId, number>;
+  readonly achievementsUnlocked: readonly string[];
+  readonly defeatedEnemyKinds: readonly string[];
+  readonly runHistory: readonly V3RunHistoryEntry[];
+  readonly career: V3CareerStats;
 }
 
 export interface V2SaveData {

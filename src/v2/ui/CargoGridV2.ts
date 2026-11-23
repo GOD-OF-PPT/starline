@@ -44,6 +44,8 @@ export interface CargoGridV2Callbacks {
     item: V2ItemInstance,
     zone: 'grid' | 'staging'
   ) => V2TacticalDelta | null;
+  /** Optional external container for mounting the selected-item inspector (e.g. desktop left panel in ARRANGE) */
+  readonly getInspectorHost?: () => HTMLElement | null;
 }
 
 interface SelectedRef {
@@ -163,6 +165,7 @@ export class CargoGridV2Component {
   private invalidToastTimer: number | null = null;
   private prevLinkCount = 0;
   private boardEl: HTMLElement | null = null;
+  private lastExternalInspectorHost: HTMLElement | null = null;
 
   constructor(root: HTMLElement, callbacks: CargoGridV2Callbacks) {
     this.root = root;
@@ -179,6 +182,10 @@ export class CargoGridV2Component {
     window.removeEventListener('pointercancel', this.handleWindowPointerCancel);
     window.removeEventListener('keydown', this.handleKeyDown);
     this.clearDragGhost();
+    if (this.lastExternalInspectorHost) {
+      this.lastExternalInspectorHost.innerHTML = '';
+      this.lastExternalInspectorHost = null;
+    }
     if (this.invalidToastTimer !== null) {
       window.clearTimeout(this.invalidToastTimer);
       this.invalidToastTimer = null;
@@ -796,6 +803,20 @@ export class CargoGridV2Component {
     }
   }
 
+  private mountInspectorBox(box: HTMLElement): void {
+    const externalHost = this.callbacks.getInspectorHost?.() ?? null;
+    if (this.lastExternalInspectorHost && this.lastExternalInspectorHost !== externalHost) {
+      this.lastExternalInspectorHost.innerHTML = '';
+    }
+    this.lastExternalInspectorHost = externalHost;
+    if (externalHost) {
+      externalHost.innerHTML = '';
+      externalHost.appendChild(box);
+    } else {
+      this.root.appendChild(box);
+    }
+  }
+
   private renderSelectedInspector(editable: boolean, delta: V2TacticalDelta | null): void {
     const sel = this.getSelectedItemInfo();
     const box = document.createElement('div');
@@ -809,12 +830,17 @@ export class CargoGridV2Component {
             : '点选或拖拽整理船舱（快捷键：方向键移格 · 回车拿放 · R 旋转 · Del 舍弃）。'
           : '点击任意已装设备查看联动与战力变化。'
       }</div>`;
-      this.root.appendChild(box);
+      this.mountInspectorBox(box);
       return;
     }
 
     const def = getAnyV2ItemDef(sel.item.definitionId);
-    if (!def) return;
+    if (!def) {
+      if (this.lastExternalInspectorHost) {
+        this.lastExternalInspectorHost.innerHTML = '';
+      }
+      return;
+    }
     const eqDef = sel.item.category === 'equipment' ? V2_EQUIPMENT_DEFS[sel.item.definitionId] : undefined;
 
     const deltaHtml = delta
@@ -916,7 +942,7 @@ export class CargoGridV2Component {
       });
     }
 
-    this.root.appendChild(box);
+    this.mountInspectorBox(box);
   }
 
   private getSelectedItemInfo(): {

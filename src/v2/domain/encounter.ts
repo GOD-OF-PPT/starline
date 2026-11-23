@@ -266,6 +266,14 @@ export function resolveV2WreckChoice(
     wreck: { ...node.wreck, chosenRoom: room },
   };
 
+  const armoryKind =
+    room === 'armory' && node.layer <= 3
+      ? (node.wreck.armoryItem.definitionId.split('.')[1] as V2EquipmentKind)
+      : null;
+  const nextRecentKinds = armoryKind
+    ? [...(run.recentEquipmentKinds ?? []), armoryKind].slice(-4)
+    : [...(run.recentEquipmentKinds ?? [])];
+
   let nextRun: V2RunState = {
     ...run,
     fuel: nextFuel,
@@ -273,6 +281,7 @@ export function resolveV2WreckChoice(
     bay: nextBay,
     phase: 'ARRANGE',
     claimedEventIds: [...run.claimedEventIds, claimKey],
+    recentEquipmentKinds: nextRecentKinds,
     graph: {
       ...run.graph,
       nodes: { ...run.graph.nodes, [node.nodeId]: updatedNode },
@@ -668,19 +677,21 @@ export function generateV2CombatRewardBundle(
   const unlockedKinds = getUnlockedEquipmentKinds(unlockedFamilies);
 
   const draw = withV2Stream(run.rngStreams, 'rewards', (rng) => {
+    const blockedKind: V2EquipmentKind | null =
+      node.layer <= 3 &&
+      recentEquipmentKinds.length >= 2 &&
+      recentEquipmentKinds[recentEquipmentKinds.length - 1] ===
+        recentEquipmentKinds[recentEquipmentKinds.length - 2]
+        ? recentEquipmentKinds[recentEquipmentKinds.length - 1]
+        : null;
+
     let eqKind: V2EquipmentKind;
-    if (combat.guaranteedSupportKind) {
+    if (combat.guaranteedSupportKind && combat.guaranteedSupportKind !== blockedKind) {
       eqKind = combat.guaranteedSupportKind;
     } else {
       let pool = [...unlockedKinds];
-      if (
-        node.layer <= 3 &&
-        recentEquipmentKinds.length >= 2 &&
-        recentEquipmentKinds[recentEquipmentKinds.length - 1] ===
-          recentEquipmentKinds[recentEquipmentKinds.length - 2]
-      ) {
-        const blocked = recentEquipmentKinds[recentEquipmentKinds.length - 1];
-        const filtered = pool.filter((k) => k !== blocked);
+      if (blockedKind) {
+        const filtered = pool.filter((k) => k !== blockedKind);
         if (filtered.length > 0) pool = filtered;
       }
       eqKind = rng.pick(pool);
