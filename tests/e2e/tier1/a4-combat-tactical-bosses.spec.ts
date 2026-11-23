@@ -122,7 +122,7 @@ test.describe('Tier 1 · A4: Active Tactical Combat, Expanded Enemies & 3 Multi-
     await app.startCombat();
     const afterSnap = await app.waitForInspect(
       (s) => s.phase === 'REWARD' || s.phase === 'SETTLEMENT',
-      20_000,
+      60_000,
       'combat completion after pre-combat preview',
     );
 

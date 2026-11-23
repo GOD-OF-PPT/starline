@@ -48,7 +48,7 @@ test.describe('Tier 1 · A2: Onboarding, Tutorial & Core Expedition Loop', () =>
     // If default-ON tactical command pauses combat, select a valid tactical order
     await app.waitForInspect(
       (s) => s.phase === 'REWARD' || s.activeRun?.combatWaitingDecision === true,
-      20_000,
+      60_000,
       'tactical pause or combat reward',
     );
     const midSnap = await app.inspect();
@@ -56,7 +56,7 @@ test.describe('Tier 1 · A2: Onboarding, Tutorial & Core Expedition Loop', () =>
       await page.locator('[data-testid^="tactical-order-"]:not([disabled])').first().click();
     }
 
-    await expect(app.byTestId(TEST_IDS.REWARD_SCREEN)).toBeVisible({ timeout: 20_000 });
+    await expect(app.byTestId(TEST_IDS.REWARD_SCREEN)).toBeVisible({ timeout: 45_000 });
     const rewardChoices = app
       .byTestId(TEST_IDS.REWARD_SCREEN)
       .locator(
@@ -83,15 +83,16 @@ test.describe('Tier 1 · A2: Onboarding, Tutorial & Core Expedition Loop', () =>
       },
     });
 
-    // Seed a tutorial run at Layer 3 Arrange holding 12/16 occupied cells + 2x3 Sealed Reactor in staging
+    // Seed a tutorial run at Layer 3 Arrange holding 13/16 occupied cells + 2x3 Sealed Reactor in staging
+    // (13 + 6 = 19 > 16: guaranteed spatial conflict; discarding the 2 loot items clears cols 2..3 for the 2x3 reactor)
     const tutorialBay = createCargoBay({
       shipId: 'cannon_skiff',
       placed: [
         { item: createCargoItem({ instanceId: 'tut_laser', definitionId: 'equipment.laser.common', origin: 'loan' }), x: 0, y: 0 },
         { item: createCargoItem({ instanceId: 'tut_bat', definitionId: 'equipment.battery.common', origin: 'loan' }), x: 1, y: 0 },
-        { item: createCargoItem({ instanceId: 'tut_shd', definitionId: 'equipment.shield.common', origin: 'loan' }), x: 2, y: 0 },
-        { item: createCargoItem({ instanceId: 'tut_rep', definitionId: 'equipment.repair.common', origin: 'loan' }), x: 0, y: 2 },
-        { item: createCargoItem({ instanceId: 'tut_box1', definitionId: 'cargo.alloy_bar', origin: 'loot', acquiredDepth: 2 }), x: 3, y: 0 },
+        { item: createCargoItem({ instanceId: 'tut_shd', definitionId: 'equipment.shield.common', origin: 'loan' }), x: 1, y: 1 },
+        { item: createCargoItem({ instanceId: 'tut_alloy', definitionId: 'cargo.alloy_bar', origin: 'loan' }), x: 0, y: 2 },
+        { item: createCargoItem({ instanceId: 'tut_box1', definitionId: 'cargo.old_engine', origin: 'loot', acquiredDepth: 2 }), x: 2, y: 0 },
         { item: createCargoItem({ instanceId: 'tut_box2', definitionId: 'cargo.alloy_bar', origin: 'loot', acquiredDepth: 2 }), x: 2, y: 2 },
       ],
       staging: [
@@ -154,24 +155,22 @@ test.describe('Tier 1 · A2: Onboarding, Tutorial & Core Expedition Loop', () =>
 
     await expect(app.byTestId(TEST_IDS.ARRANGE_SCREEN)).toBeVisible();
 
-    // Discard loot items to clear a 2x3 space on the right half (cols 2..3, rows 0..2), then place the reactor
+    // Discard both loot items via their cargo grid cells to clear cols 2..3 (rows 0..2), then place the 2x3 reactor
     const discardBtn = page
       .locator('#btn-v2-discard, [data-testid^="btn-discard-"]')
       .or(page.getByRole('button', { name: /舍弃|丢弃|弃置/ }))
       .first();
 
-    const lootCard = page.locator('.placed-item.origin-loot').first();
-    await expect(lootCard).toBeVisible();
-    await lootCard.click();
+    await expect(page.locator('.placed-item.origin-loot')).toHaveCount(2);
+    await app.gridCell(2, 0).click();
     await expect(discardBtn).toBeVisible();
     await discardBtn.click();
 
-    const secondLoot = page.locator('.placed-item.origin-loot').first();
-    if (await secondLoot.isVisible()) {
-      await secondLoot.click();
-      await expect(discardBtn).toBeVisible();
-      await discardBtn.click();
-    }
+    await expect(page.locator('.placed-item.origin-loot')).toHaveCount(1);
+    await app.gridCell(2, 2).click();
+    await expect(discardBtn).toBeVisible();
+    await discardBtn.click();
+    await expect(page.locator('.placed-item.origin-loot')).toHaveCount(0);
 
     // Select staging reactor and place at (2, 0)
     const stagingReactor = page

@@ -1,8 +1,39 @@
+import { existsSync } from 'node:fs';
 import { defineConfig } from '@playwright/test';
+
+export const CHROMIUM_EXECUTABLE_CANDIDATES = [
+  '/usr/bin/chromium',
+  '/opt/ms-playwright/chromium-1255/chrome-linux64/chrome',
+  '/usr/bin/google-chrome-stable',
+] as const;
+
+/**
+ * Auto-detects an available Chromium executable in strict fallback priority order:
+ * 1. `CHROMIUM_PATH` env var (trimmed; only if present on disk, otherwise falls through)
+ * 2. `/usr/bin/chromium`
+ * 3. `/opt/ms-playwright/chromium-1255/chrome-linux64/chrome`
+ * 4. `/usr/bin/google-chrome-stable`
+ * 5. `undefined` (Playwright built-in default resolution)
+ */
+export function resolveChromiumExecutablePath(
+  envPath: string | undefined = process.env.CHROMIUM_PATH,
+  exists: (p: string) => boolean = existsSync,
+): string | undefined {
+  const trimmedEnv = typeof envPath === 'string' ? envPath.trim() : '';
+  if (trimmedEnv.length > 0 && exists(trimmedEnv)) {
+    return trimmedEnv;
+  }
+  for (const candidate of CHROMIUM_EXECUTABLE_CANDIDATES) {
+    if (exists(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
 
 const usePreview = process.env.E2E_USE_PREVIEW === '1';
 const isCI = Boolean(process.env.CI);
-const chromiumPath = process.env.CHROMIUM_PATH || '/usr/bin/chromium';
+const chromiumPath = resolveChromiumExecutablePath();
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -26,7 +57,7 @@ export default defineConfig({
     video: 'off',
     headless: true,
     launchOptions: {
-      executablePath: chromiumPath,
+      ...(chromiumPath !== undefined ? { executablePath: chromiumPath } : {}),
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',

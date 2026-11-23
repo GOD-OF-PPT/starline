@@ -59,7 +59,7 @@ V2AppController (thin coordinator + persistence + soundEngine + PhaserHost + __S
   - `src/v2/ui/`: `V2AppController.ts` (thin coordinator), `CargoGridV2.ts`, `V2Modals.ts`, `icons.ts`, `screens/` (`TitleView.ts`, `BaseView.ts`, `PrepareView.ts`, `MapView.ts`, `CombatView.ts`, `WreckView.ts`, `EventView.ts`, `ShopView.ts`, `RewardView.ts`, `ArrangeView.ts`, `SettlementView.ts`, `EndingView.ts`), `modals/` (`CampaignModal.ts`, `ContractsModal.ts`, `WorkshopModal.ts`, `CareerModal.ts`), `styles/` (`v3-layout.css`, `v3-campaign.css`, `v3-combat.css`, `v3-dismantle.css`, `v3-endgame.css`).
 - **Tests**:
   - Unit & Simulation (Vitest, `npm run test`): `tests/rules.test.ts`, `tests/simulation.test.ts`, `tests/v2-rules.test.ts`, `tests/v2-simulation.test.ts`, `tests/v2-polish.test.ts`, plus new suites `tests/v2-foundation.test.ts`, `tests/v2-campaign.test.ts`, `tests/v2-combat-boss.test.ts`, `tests/v2-dismantle-events.test.ts`, `tests/v2-station-buildcraft.test.ts`, `tests/v2-endgame.test.ts`.
-  - Opaque-Box E2E (Playwright + `/usr/bin/chromium`, owned by E2E Testing Track): `playwright.config.ts`, `tests/e2e/**`.
+  - Opaque-Box E2E (Playwright + auto-detected Chromium, owned by E2E Testing Track): `playwright.config.ts`, `tests/e2e/**`.
 - **Build & Test Commands**:
   - Install: `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install`
   - Unit/Sim tests: `npm run test` (`vitest run`)
@@ -100,8 +100,8 @@ Every feature discovered across all 3 Survey reports (Spec Miner + Explorer #1 +
 
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|--------------|--------|
-| E2E | E2E Testing Track | Opaque-box requirement-driven E2E test infrastructure (`TEST_INFRA.md`, `playwright.config.ts`, `tests/e2e/` Tiers 1–4) using pre-installed `/usr/bin/chromium`, publishing `TEST_READY.md`. | none (uses `@playwright/test` installed by M1) | IN_PROGRESS (`121fc17febfc1c4ba2d416b5efbdce64`) |
-| M1 | Foundation, Schema V3, Screen Split & V2 Bug Fixes | F01, F02, F03, F04 — `.gitignore`, `npm install`, `@playwright/test`, `schemaVersion: 3` migration, screen/CSS split, E2E testability hooks, all V2 bug & layout fixes. | none | IN_PROGRESS (`b85e5a4f7c30b52bf8e200d53b75762f`) |
+| E2E | E2E Testing Track | Opaque-box requirement-driven E2E test infrastructure (`TEST_INFRA.md`, `playwright.config.ts`, `tests/e2e/` Tiers 1–4) using auto-detected Chromium, publishing `TEST_READY.md`. | none (uses `@playwright/test` installed by M1) | DONE (`TEST_READY.md`, 33 files / 135 tests, 5/5 unanimous + Auditor CLEAN) |
+| M1 | Foundation, Schema V3, Screen Split & V2 Bug Fixes | F01, F02, F03, F04 — `.gitignore`, `npm install`, `@playwright/test`, `schemaVersion: 3` migration, screen/CSS split, E2E testability hooks, all V2 bug & layout fixes. | none | DONE (`tsc` 0 errors, Vitest 64/64, `vite build` pass, 5/5 unanimous + Auditor CLEAN) |
 | M2 | Mainline Campaign, 3 Star Sectors & Named Crew | F05, F06, F07 — 4-Act campaign engine, HUD tracker & modal, 3 sectors + env modifiers, pity-protected relic signals, named crew portraits/comms/mastery, pluggable `routeGenerator` registries. | M1 | PLANNED |
 | M3 | Active Tactical Combat, Expanded Enemies & 3 Multi-Phase Bosses | F08, F09, F10 — Default-ON tactical command system + ship signatures, 8+ enemies with telegraphed round intents, 3 multi-phase Act Bosses (`铁砧号`, `铁壁无畏`, `黑曜利维坦`), VFX/SFX. | M1, M2 | PLANNED |
 | M4 | True Dismantling Loop, 16+ Event Deck & Faction Contracts | F11, F12, F13 — Multi-cut press-your-luck derelict dissection, Salvage Parts dismantling & Common→Improved upgrades, 16+ crew-reactive event deck, 3 factions + rep + Bounty/Derelict contracts + bonus objectives. | M1, M2 | PLANNED |

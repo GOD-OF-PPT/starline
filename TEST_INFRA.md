@@ -2,7 +2,7 @@
 
 > **Track**: Independent Opaque-Box Requirement-Driven E2E Testing Track (Dual Track)
 > **Authority Sources**: `.agents/teamwork/ORIGINAL_REQUEST.md` (`"游戏主线不明确，玩法不完整；整个游戏比较像demo，请规划分析全方位完善游戏"`) & `PROJECT.md` (§ Feature Inventory `F01–F19`, § Interface Contracts `#1–#4`)
-> **Browser Runtime**: Playwright (`@playwright/test`) + pre-installed `/usr/bin/chromium` (`Chromium 156`, headless WebGL via SwiftShader ANGLE)
+> **Browser Runtime**: Playwright (`@playwright/test`) + auto-detected Chromium (`CHROMIUM_PATH` → `/usr/bin/chromium` → `/opt/ms-playwright/chromium-1255/chrome-linux64/chrome` → `/usr/bin/google-chrome-stable` → Playwright default `undefined`; detected on this VM: `/opt/ms-playwright/chromium-1255/chrome-linux64/chrome`, `Google Chrome for Testing 159.0.8154.6`, headless WebGL via SwiftShader ANGLE)
 
 ---
 
@@ -47,9 +47,14 @@
 ### 3.1 Playwright Configuration (`playwright.config.ts`)
 - **Test Discovery**: `testDir: './tests/e2e'`, `testMatch: /.*\.spec\.ts/`.
   - **Vitest Collision Guard**: `vite.config.ts` matches `tests/**/*.test.ts` for Vitest. Every E2E test MUST use `.spec.ts` (never `.test.ts`).
-- **Pre-Installed Chromium & Golden Headless WebGL Flags**:
-  - `executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium'`
-  - Empirically verified flags for Chromium 156 + Phaser 3.90 WebGL (`Phaser.AUTO` + `.setTint()`/`.setTintFill()`) with zero Skia/mailbox/sandbox errors:
+- **Auto-Detected Chromium & Golden Headless WebGL Flags**:
+  - `resolveChromiumExecutablePath()` in `playwright.config.ts` checks disk existence (`existsSync`) in strict fallback priority order:
+    1. `process.env.CHROMIUM_PATH` (trimmed; if unset, empty, or not present on disk, falls through safely)
+    2. `/usr/bin/chromium`
+    3. `/opt/ms-playwright/chromium-1255/chrome-linux64/chrome` *(detected on this VM: `Google Chrome for Testing 159.0.8154.6`)*
+    4. `/usr/bin/google-chrome-stable` *(also present on this VM as next fallback: `Google Chrome 158.0.8127.36`)*
+    5. `undefined` (Playwright built-in default resolution)
+  - Empirically verified flags for Chromium + Phaser 3.90 WebGL (`Phaser.AUTO` + `.setTint()`/`.setTintFill()`) with zero Skia/mailbox/sandbox errors:
     ```ts
     [
       '--no-sandbox',

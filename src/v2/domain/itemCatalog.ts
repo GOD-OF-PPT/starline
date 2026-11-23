@@ -29,9 +29,14 @@ export interface V2UnifiedItemDef {
   readonly cargoDef?: V2CargoDef;
 }
 
+function hasOwn(obj: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
 export function getAnyV2ItemDef(defId: string): V2UnifiedItemDef | undefined {
-  const eq = V2_EQUIPMENT_DEFS[defId];
-  if (eq) {
+  if (typeof defId !== 'string') return undefined;
+  if (hasOwn(V2_EQUIPMENT_DEFS, defId)) {
+    const eq = V2_EQUIPMENT_DEFS[defId];
     return {
       defId: eq.defId,
       category: 'equipment',
@@ -44,8 +49,8 @@ export function getAnyV2ItemDef(defId: string): V2UnifiedItemDef | undefined {
       equipmentDef: eq,
     };
   }
-  const cg = V2_CARGO_DEFS[defId];
-  if (cg) {
+  if (hasOwn(V2_CARGO_DEFS, defId)) {
+    const cg = V2_CARGO_DEFS[defId];
     return {
       defId: cg.defId,
       category: cg.isMissionItem ? 'mission' : 'cargo',
@@ -70,7 +75,11 @@ export function createV2EquipmentInstance(params: {
   readonly acquiredDepth: number;
   readonly location: V2ItemLocation;
 }): V2ItemInstance {
-  const def = V2_EQUIPMENT_DEFS[`equipment.${params.kind}.${params.quality}`];
+  const key = `equipment.${params.kind}.${params.quality}`;
+  if (!hasOwn(V2_EQUIPMENT_DEFS, key)) {
+    throw new Error(`Unknown V2 equipment defId: ${key}`);
+  }
+  const def = V2_EQUIPMENT_DEFS[key];
   return {
     instanceId: params.instanceId,
     definitionId: def.defId,
@@ -92,10 +101,10 @@ export function createV2CargoInstance(params: {
   readonly missionBinding?: string;
   readonly fixedValueOverride?: number;
 }): V2ItemInstance {
-  const def = V2_CARGO_DEFS[params.defId];
-  if (!def) {
-    throw new Error(`Unknown V2 cargo defId: ${params.defId}`);
+  if (typeof params.defId !== 'string' || !hasOwn(V2_CARGO_DEFS, params.defId)) {
+    throw new Error(`Unknown V2 cargo defId: ${String(params.defId)}`);
   }
+  const def = V2_CARGO_DEFS[params.defId];
   const isMission = def.isMissionItem;
   const origin: V2ItemOrigin = isMission ? 'mission' : params.origin;
   const fixedValue =
@@ -165,7 +174,7 @@ export function collectVisibleV2DefIdsForRun(run: V2RunState): readonly string[]
     }
   }
 
-  if (run.currentNodeId) {
+  if (run.currentNodeId && hasOwn(run.graph.nodes, run.currentNodeId)) {
     const node = run.graph.nodes[run.currentNodeId];
     if (node) {
       if (node.merchant && (run.phase === 'SHOP' || node.resolved)) {

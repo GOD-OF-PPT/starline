@@ -36,24 +36,26 @@ test.describe('Tier 1 · A7: Deepened Buildcraft — 16 Modules, 4 Gadgets, 4th 
 
     await expect(app.byTestId(TEST_IDS.ARRANGE_SCREEN)).toBeVisible();
 
-    // Place battery from staging at (1, 0) adjacent to laser at (0, 0)
+    // Place battery from staging at (1, 1) orthogonally adjacent to laser at (0, 0)-(0, 1)
     const stagingCard = page
       .locator('.staging-card, .v2-staging-card, [data-testid^="staging-item"]')
       .first();
     await expect(stagingCard).toBeVisible();
     await stagingCard.click();
-    await app.gridCell(1, 0).click();
+    await app.gridCell(1, 1).click();
 
     await expect(page.locator('.placed-item.v2-placed-item')).toHaveCount(2);
+    await expect(page.locator('.placed-item.synergy-active')).toHaveCount(2);
 
-    // Select laser and test rotation via keyboard 'R'
-    await page.locator('.placed-item.v2-placed-item').first().click();
+    // Select laser via its cargo cell and test unobstructed 90° rotation via keyboard 'R'
+    await app.gridCell(0, 0).click();
     await page.keyboard.press('r');
+    // Laser now occupies (0,0)-(1,0), still orthogonally adjacent to battery at (1,1)
+    await expect(page.locator('.placed-item.synergy-active')).toHaveCount(2);
 
-    // Discard the loot battery and verify Undo restores it cleanly
-    const lootPlaced = page.locator('.placed-item.origin-loot').first();
-    await expect(lootPlaced).toBeVisible();
-    await lootPlaced.click();
+    // Discard the loot battery via its cargo cell and verify Undo restores it cleanly
+    await expect(page.locator('.placed-item.origin-loot')).toHaveCount(1);
+    await app.gridCell(1, 1).click();
     const discardBtn = page
       .locator('#btn-v2-discard, [data-testid^="btn-discard-"]')
       .or(page.getByRole('button', { name: /舍弃|丢弃|弃置/ }))
