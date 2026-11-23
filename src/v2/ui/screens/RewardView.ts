@@ -10,6 +10,7 @@ import { svgIcon } from '../icons';
 export interface RewardViewProps {
   readonly run: V2RunState;
   readonly readOnly: boolean;
+  readonly stargateRelayTier?: number;
 }
 
 export interface RewardViewActions {
@@ -21,7 +22,7 @@ export function renderRewardView(
   props: RewardViewProps,
   actions: RewardViewActions
 ): void {
-  const { run, readOnly } = props;
+  const { run, readOnly, stargateRelayTier = 0 } = props;
   const bundle = run.pendingReward;
   if (!bundle) return;
 
@@ -36,6 +37,7 @@ export function renderRewardView(
     targetPolicy: run.targetPolicy,
     item: bundle.equipmentOption,
     zone: 'staging',
+    stargateRelayTier,
   });
 
   leftPanelEl.innerHTML = `

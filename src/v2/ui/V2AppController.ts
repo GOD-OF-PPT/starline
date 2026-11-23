@@ -2243,6 +2243,7 @@ export class V2AppController {
           sectorId: draft.sectorId,
           crewId: draft.crewId,
           crewMasteryTier: draftMasteryTier,
+          stargateRelayTier: getFacilityTier(p, 'stargate_relay'),
         }),
       onChange: (nextBay) => {
         draft.playingDemo = false;
@@ -2461,7 +2462,13 @@ export class V2AppController {
             const spotCoords =
               spotId === 'armory' ? [0.22, 0.48] : spotId === 'cargo' ? [0.78, 0.5] : [0.5, 0.45];
             this.phaserHost?.triggerV2WreckCutFx(spotCoords[0], spotCoords[1]);
-            const res = cutV2WreckHotspot(run, spotId, this.save.profile.unlockedFamilies);
+            const res = cutV2WreckHotspot(
+              run,
+              spotId,
+              this.save.profile.unlockedFamilies,
+              undefined,
+              this.save.profile
+            );
             if (!res.ok) return this.showToast(res.error ?? '无法切割该舱室');
             this.selectedWreckHotspot = spotId;
             this.setCurrentRun(res.run);
@@ -2635,6 +2642,7 @@ export class V2AppController {
           targetPolicy: run.targetPolicy,
           item,
           zone,
+          stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
         }),
       onChange: (nextBay) => {
         if (!this.canMutate()) return;
@@ -2648,7 +2656,11 @@ export class V2AppController {
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     renderRewardView(
       this.leftPanelEl,
-      { run, readOnly },
+      {
+        run,
+        readOnly,
+        stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
+      },
       {
         onPickReward: (choice) => {
           if (!this.canMutate()) return;
@@ -2733,6 +2745,7 @@ export class V2AppController {
           targetPolicy: run.targetPolicy,
           item,
           zone,
+          stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
         }),
       onChange: (nextBay) => {
         if (!this.canMutate()) return;

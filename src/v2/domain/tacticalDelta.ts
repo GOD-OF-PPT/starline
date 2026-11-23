@@ -126,12 +126,14 @@ function getSynergyPartnerKinds(kind: V2EquipmentKind): readonly V2EquipmentKind
     case 'coolant_vent':
       return ['heavy', 'salvo_pod'];
     case 'overdrive_core':
-      return ['salvo_pod', 'heavy', 'laser', 'emp_jammer', 'hangar', 'flak'];
+      return ['salvo_pod', 'heavy', 'laser', 'emp_jammer', 'hangar', 'flak', 'salvage_grapple'];
     case 'salvo_pod':
       return ['capacitor', 'relay', 'coolant_vent', 'overdrive_core'];
     case 'emp_jammer':
       return ['overdrive_core'];
     case 'salvage_grapple':
+      return ['overdrive_core'];
+    case 'flak':
       return ['overdrive_core'];
     default:
       return [];
@@ -156,6 +158,7 @@ interface DeltaSimContext {
   readonly bossId?: string;
   readonly endlessThreat?: number;
   readonly endlessMutatorIds?: readonly string[];
+  readonly stargateRelayTier?: number;
 }
 
 function findBestPlacementForItem(
@@ -211,6 +214,7 @@ function findBestPlacementForItem(
           bossId: simCtx?.bossId,
           endlessThreat: simCtx?.endlessThreat,
           endlessMutatorIds: simCtx?.endlessMutatorIds,
+          stargateRelayTier: simCtx?.stargateRelayTier,
         });
         const linkBonus = st.links.length * 100;
         const winBonus = sim.outcome === 'victory' ? 10_000 : 0;
@@ -280,6 +284,7 @@ export function computeV2PlacementTacticalDelta(params: {
   readonly sectorId?: SectorId;
   readonly crewId?: V2CrewId | null;
   readonly crewMasteryTier?: number;
+  readonly stargateRelayTier?: number;
 }): V2TacticalDelta {
   const def = getAnyV2ItemDef(params.item.definitionId);
   const cellCount = def ? V2_SHAPES[def.shapeId].cells.length : 1;
@@ -337,6 +342,7 @@ export function computeV2PlacementTacticalDelta(params: {
     bossId: ref.bossId,
     endlessThreat: params.run?.endlessThreat,
     endlessMutatorIds: params.run?.endlessMutatorIds,
+    stargateRelayTier: params.stargateRelayTier,
   };
 
   if (params.zone === 'staging') {
@@ -354,6 +360,7 @@ export function computeV2PlacementTacticalDelta(params: {
       bossId: simCtx.bossId,
       endlessThreat: simCtx.endlessThreat,
       endlessMutatorIds: simCtx.endlessMutatorIds,
+      stargateRelayTier: simCtx.stargateRelayTier,
     });
 
     let chosenSpot: { x: number; y: number; rotation: V2Rotation; bayAfter: V2CargoBayState } | null = null;
@@ -428,6 +435,7 @@ export function computeV2PlacementTacticalDelta(params: {
       bossId: simCtx.bossId,
       endlessThreat: simCtx.endlessThreat,
       endlessMutatorIds: simCtx.endlessMutatorIds,
+      stargateRelayTier: simCtx.stargateRelayTier,
     });
     const cmp = formatSimComparison(ref.label, baselineSim, afterSim, 'install');
 
@@ -461,6 +469,7 @@ export function computeV2PlacementTacticalDelta(params: {
     bossId: simCtx.bossId,
     endlessThreat: simCtx.endlessThreat,
     endlessMutatorIds: simCtx.endlessMutatorIds,
+    stargateRelayTier: simCtx.stargateRelayTier,
   });
   const simCurrent = simulateV2Combat({
     resultId: 'delta_cur',
@@ -477,6 +486,7 @@ export function computeV2PlacementTacticalDelta(params: {
     bossId: simCtx.bossId,
     endlessThreat: simCtx.endlessThreat,
     endlessMutatorIds: simCtx.endlessMutatorIds,
+    stargateRelayTier: simCtx.stargateRelayTier,
   });
 
   let synergyLine: string;
