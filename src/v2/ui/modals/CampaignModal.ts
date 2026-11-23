@@ -26,6 +26,8 @@ export interface OpenCampaignModalOptions {
   readonly onMarkCommRead: (commId: string) => void;
   readonly onMarkCommsRead?: (commIds: readonly string[]) => void;
   readonly onSelectSectorFromCampaign?: (sectorId: SectorId) => void;
+  readonly onLaunchFinalMission?: () => void;
+  readonly onOpenEndless?: () => void;
 }
 
 export function openV3CampaignModal(
@@ -109,8 +111,21 @@ export function openV3CampaignModal(
             const actMilestones = CAMPAIGN_MILESTONES.filter((m) => m.actId === actId);
 
             const endlessLockHtml =
-              actId === 'endless' && !p.campaign.endlessUnlocked
-                ? `<div class="v3-act-lock-note">${svgIcon('lock', 12)} 通关第三幕后解锁 · 未解锁（威压 1–10 终局无尽深渊）</div>`
+              actId === 'endless'
+                ? !p.campaign.endlessUnlocked
+                  ? `<div class="v3-act-lock-note">${svgIcon('lock', 12)} 通关第三幕后解锁 · 未解锁（威压 1–10 终局无尽深渊）</div>`
+                  : `<div class="v3-act-meta">
+                      <span>已解锁结局：<strong>${p.campaign.endingsUnlocked.length}/3</strong></span>
+                      <span>最高可选威压：<strong>威压 ${Math.max(1, p.campaign.maxEndlessThreat)}/10</strong></span>
+                      <span>最高通关记录：<strong>威压 ${p.career.deepestEndlessCleared}/10</strong></span>
+                    </div>
+                    ${
+                      options.onOpenEndless && !options.readOnly
+                        ? `<div class="v3-cg-actions" style="margin-top:6px;">
+                            <button type="button" class="btn btn-sm btn-primary" data-camp-open-endless="1">${svgIcon('bolt', 13)} 前往无尽深渊整备</button>
+                          </div>`
+                        : ''
+                    }`
                 : '';
 
             const climaxGateHtml =
@@ -134,7 +149,9 @@ export function openV3CampaignModal(
                     <div class="v3-cg-actions">
                       ${
                         finalGate.unlocked
-                          ? `<button type="button" class="btn btn-sm btn-secondary" data-testid="btn-launch-final-mission" disabled>终战整备已解锁（请前往第三星区迎战黑曜利维坦）</button>`
+                          ? `<button type="button" class="btn btn-sm btn-primary" data-testid="btn-launch-final-mission" id="v3-camp-launch-final" ${
+                              options.readOnly ? 'disabled' : ''
+                            }>${svgIcon('rocket', 13)} 启动星门重启远征（终局决战）</button>`
                           : `<button type="button" class="btn btn-sm btn-primary" data-testid="btn-launch-final-mission" disabled>${svgIcon('lock', 12)} 星门重启远征（前置未满足 · 未解锁）</button>`
                       }
                     </div>
@@ -321,6 +338,18 @@ export function openV3CampaignModal(
             modal.close();
             options.onSelectSectorFromCampaign?.(sid);
           });
+        });
+
+        body.querySelector('#v3-camp-launch-final')?.addEventListener('click', () => {
+          if (options.readOnly || !finalGate.unlocked) return;
+          modal.close();
+          options.onLaunchFinalMission?.();
+        });
+
+        body.querySelector('[data-camp-open-endless]')?.addEventListener('click', () => {
+          if (options.readOnly || !p.campaign.endlessUnlocked) return;
+          modal.close();
+          options.onOpenEndless?.();
         });
       };
 

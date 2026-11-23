@@ -35,6 +35,8 @@ export type CampaignCommTrigger =
   | 'act2_boss_clear'
   | 'act3_start'
   | 'act3_boss_intro'
+  | 'act3_boss_clear'
+  | 'endless_unlock'
   | 'relic_recovered'
   | 'crew_salvager_join'
   | 'crew_navigator_join'
@@ -288,5 +290,21 @@ export const CAMPAIGN_COMMS: readonly CampaignCommDef[] = [
     speakerId: 'salvager',
     title: '苏岚 · 遭遇「黑曜利维坦」',
     text: '那就是守在星门前的终局巨舰「黑曜利维坦」！全员就位，这一仗决定整个拆解站的未来。',
+  },
+  {
+    id: 'comm_act3_boss_clear',
+    trigger: 'act3_boss_clear',
+    actId: 'endless',
+    speakerId: 'engineer',
+    title: '林工 · 星门终局凯旋',
+    text: '我们真的击穿了黑曜利维坦！星门中继阵列正在满功率回响，无论选哪条航向，拆解站都已经书写了新的历史。',
+  },
+  {
+    id: 'comm_endless_unlock',
+    trigger: 'endless_unlock',
+    actId: 'endless',
+    speakerId: 'navigator',
+    title: '陆衡 · 无尽深渊航标开启',
+    text: '星门彼端的深空信标已经同步完毕！无尽深渊（威压 1–10）与自定义挑战种子全面开放，随时准备再启极限远征。',
   },
 ];

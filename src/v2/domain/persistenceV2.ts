@@ -337,6 +337,12 @@ function isValidRunHistoryEntry(raw: unknown): raw is V3RunHistoryEntry {
   if (!isNonNegInt(raw.creditsEarned)) return false;
   if (!isNonNegInt(raw.salvagePartsEarned)) return false;
   if (!isFiniteInt(raw.endlessThreat) || raw.endlessThreat < 0 || raw.endlessThreat > 10) return false;
+  if (raw.endlessMutatorIds !== undefined && !isDenseArrayOf(raw.endlessMutatorIds, isString)) {
+    return false;
+  }
+  if (raw.seed !== undefined && (!isNonNegInt(raw.seed) || raw.seed > 0xffffffff)) {
+    return false;
+  }
   if (raw.isFinalCampaignRun !== undefined && typeof raw.isFinalCampaignRun !== 'boolean') {
     return false;
   }
@@ -1210,6 +1216,18 @@ function validateV2RunCore(
     if (sim.stargateRelayTier !== undefined && !isNonNegInt(sim.stargateRelayTier)) {
       return { ok: false, error: 'activeRun.activeCombat.simulation.stargateRelayTier 非法' };
     }
+    if (
+      sim.endlessThreat !== undefined &&
+      (!isFiniteInt(sim.endlessThreat) || sim.endlessThreat < 0 || sim.endlessThreat > 10)
+    ) {
+      return { ok: false, error: 'activeRun.activeCombat.simulation.endlessThreat 非法' };
+    }
+    if (
+      sim.endlessMutatorIds !== undefined &&
+      !isDenseArrayOf(sim.endlessMutatorIds, isString)
+    ) {
+      return { ok: false, error: 'activeRun.activeCombat.simulation.endlessMutatorIds 非法' };
+    }
     if (ac.pendingDecision !== undefined && ac.pendingDecision !== null) {
       const pd = ac.pendingDecision;
       if (
@@ -1325,6 +1343,9 @@ function validateV2RunCore(
       (!isFiniteInt(run.endlessThreat) || run.endlessThreat < 0 || run.endlessThreat > 10)
     ) {
       return { ok: false, error: 'activeRun.endlessThreat 越界或非法' };
+    }
+    if (run.isFinalCampaignRun !== undefined && typeof run.isFinalCampaignRun !== 'boolean') {
+      return { ok: false, error: 'activeRun.isFinalCampaignRun 非法' };
     }
     if (
       run.crewMasteryTier !== undefined &&
@@ -1683,6 +1704,12 @@ function validateSaveDataCore(
     ) {
       return { ok: false, error: 'profile V3 追踪数组损坏' };
     }
+    if (
+      p.achievementsClaimed !== undefined &&
+      !isDenseArrayOf(p.achievementsClaimed, isString)
+    ) {
+      return { ok: false, error: 'profile.achievementsClaimed 损坏' };
+    }
     if (!isPlainObject(p.career)) {
       return { ok: false, error: 'profile.career 损坏' };
     }
@@ -1693,6 +1720,9 @@ function validateSaveDataCore(
       const cVal = p.career[cKey];
       if (!isNonNegInt(cVal)) {
         return { ok: false, error: `profile.career.${cKey} 为负或非法` };
+      }
+      if (cKey === 'deepestEndlessCleared' && cVal > 10) {
+        return { ok: false, error: 'profile.career.deepestEndlessCleared 越界' };
       }
     }
     if (p.hullTuning !== undefined) {
@@ -2084,6 +2114,17 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
         new Set(rawProfile.achievementsUnlocked.filter((s): s is string => typeof s === 'string'))
       )
     : [];
+  const achievementsClaimed =
+    rawProfile.achievementsClaimed !== undefined
+      ? Array.from(
+          new Set(
+            (Array.isArray(rawProfile.achievementsClaimed)
+              ? rawProfile.achievementsClaimed
+              : []
+            ).filter((s): s is string => typeof s === 'string')
+          )
+        )
+      : undefined;
   const defeatedEnemyKinds = Array.isArray(rawProfile.defeatedEnemyKinds)
     ? Array.from(
         new Set(rawProfile.defeatedEnemyKinds.filter((s): s is string => typeof s === 'string'))
@@ -2227,7 +2268,7 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
     totalBossesDefeated: sanitizeNonNegInt(rawCareer.totalBossesDefeated),
     totalWrecksDissected: sanitizeNonNegInt(rawCareer.totalWrecksDissected),
     totalItemsDismantled: sanitizeNonNegInt(rawCareer.totalItemsDismantled),
-    deepestEndlessCleared: sanitizeNonNegInt(rawCareer.deepestEndlessCleared),
+    deepestEndlessCleared: Math.min(10, sanitizeNonNegInt(rawCareer.deepestEndlessCleared)),
   };
 
   const hullTuning: Record<string, V3HullTuningState> = {};
@@ -2318,6 +2359,7 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
       factionRep,
       crewMastery,
       achievementsUnlocked,
+      ...(achievementsClaimed !== undefined ? { achievementsClaimed } : {}),
       defeatedEnemyKinds,
       runHistory,
       campaign: {

@@ -1,4 +1,5 @@
 import type { BgmTrack } from '../../audio/soundEngine';
+import { isRunPendingCampaignEnding } from '../domain/campaign';
 import type { V2RunState } from '../domain/types';
 
 /**
@@ -9,7 +10,7 @@ export function resolveV2BgmTrack(params: {
   readonly run: V2RunState | null;
 }): BgmTrack {
   const { titleEntered, run } = params;
-  if (!run) {
+  if (!run || isRunPendingCampaignEnding(run)) {
     return titleEntered ? 'base' : 'none';
   }
   if (run.phase === 'ENCOUNTER' && run.currentNodeId) {

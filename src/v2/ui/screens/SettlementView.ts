@@ -1,5 +1,6 @@
 import { V2_EQUIPMENT_DEFS } from '../../data/equipment';
 import { V3_FACTIONS } from '../../data/factions';
+import { getV3EndlessMutatorDef } from '../../data/sectors';
 import { previewSettlementCampaignOutcomes } from '../../domain/campaign';
 import { getDismantleSalvagePartsYield } from '../../domain/dismantle';
 import { getEffectiveWarehouseCapacity } from '../../domain/progressionV2';
@@ -139,6 +140,28 @@ export function renderSettlementView(
       </div>
 
       <div class="v3-panel-scroll-body">
+        ${
+          (run.endlessThreat ?? 0) >= 1
+            ? `<div class="v3-endless-hud-banner" data-testid="settlement-endless-banner">
+                <div class="v3-endless-hud-head">
+                  <span>${svgIcon('bolt', 13)} 无尽深渊 · 威压 ${run.endlessThreat} 远征清点</span>
+                  <span class="num">种子 #${run.seed}</span>
+                </div>
+                ${
+                  run.endlessMutatorIds && run.endlessMutatorIds.length > 0
+                    ? `<div class="v3-endless-mut-chips">
+                        ${run.endlessMutatorIds
+                          .map((mid) => {
+                            const def = getV3EndlessMutatorDef(mid);
+                            return `<span class="v3-endless-mut-chip">词条 · ${def?.name ?? mid}</span>`;
+                          })
+                          .join('')}
+                      </div>`
+                    : ''
+                }
+              </div>`
+            : ''
+        }
         ${
           isSafe
             ? `<div class="v2-settle-banner ${summary.contractCompleted ? 'ok' : ''}">

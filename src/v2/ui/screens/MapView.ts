@@ -2,7 +2,7 @@ import { resolveV3BossDefForEncounter } from '../../data/bosses';
 import { getV2EncounterTemplate } from '../../data/enemies';
 import { V2_ARCHETYPE_LABELS } from '../../data/equipment';
 import { getV3GadgetDef } from '../../data/gadgets';
-import { getV3SectorDef } from '../../data/sectors';
+import { getV3EndlessMutatorDef, getV3SectorDef } from '../../data/sectors';
 import {
   computeCombatTacticalChargesMax,
   getEffectiveV2CombatBounty,
@@ -394,6 +394,38 @@ export function renderMapView(
       </div>`
     : '';
 
+  const finalMissionBannerHtml = run.isFinalCampaignRun
+    ? `<div class="v3-final-mission-banner" data-testid="final-mission-banner">
+        <strong>${svgIcon('star', 13)} 星门重启远征 · 第三幕终局任务</strong>
+        <span>终局目标：第 6 层击溃三阶段「黑曜利维坦」</span>
+      </div>`
+    : '';
+
+  const endlessThreat = run.endlessThreat ?? 0;
+  const endlessBannerHtml =
+    endlessThreat >= 1
+      ? `<div class="v3-endless-hud-banner" data-testid="endless-hud-banner">
+          <div class="v3-endless-hud-head">
+            <span>${svgIcon('bolt', 13)} 无尽深渊 · 威压 ${endlessThreat}</span>
+            <span class="num">挑战种子 #${run.seed}</span>
+          </div>
+          ${
+            run.endlessMutatorIds && run.endlessMutatorIds.length > 0
+              ? `<div class="v3-endless-mut-chips">
+                  ${run.endlessMutatorIds
+                    .map((mid) => {
+                      const def = getV3EndlessMutatorDef(mid);
+                      return `<span class="v3-endless-mut-chip">词条 · ${def?.name ?? mid}（${
+                        def?.shortBadge ?? mid
+                      }）</span>`;
+                    })
+                    .join('')}
+                </div>`
+              : `<div class="v3-endless-mut-chips"><span class="v3-endless-mut-chip">深渊威压词条激活中</span></div>`
+          }
+        </div>`
+      : '';
+
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root" data-testid="map-screen">
       <div class="panel-header">
@@ -405,6 +437,10 @@ export function renderMapView(
         <span class="v3-sector-mod-badge">${svgIcon(envIcon, 13)} ${sector.name} · ${sector.envModifier.name}</span>
         <span class="v3-sector-mod-desc">${sector.envModifier.combatRuleSummary}</span>
       </div>
+
+      ${finalMissionBannerHtml}
+
+      ${endlessBannerHtml}
 
       ${navigatorRevealHtml}
 

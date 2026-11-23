@@ -12,6 +12,7 @@ import { V2_CREW, type V2CrewId } from '../data/crew';
 import { isActBossEncounterKind } from '../data/enemies';
 import { V2_RELIC_ORDER } from '../data/facilities';
 import {
+  MAX_ENDLESS_THREAT,
   V3_SECTOR_ORDER,
   getV3SectorDef,
   type SectorBossId,
@@ -20,6 +21,7 @@ import { getAnyV2ItemDef } from './itemCatalog';
 import type { V2SettlementSummary } from './settlementV2';
 import type {
   CampaignActId,
+  EndingId,
   SectorId,
   V2ProfileState,
   V2RunState,
@@ -61,6 +63,7 @@ export interface CampaignRunAdvanceResult extends CampaignSyncResult {
   readonly newlyDefeatedBossIds: readonly string[];
   readonly recoveredRelicThisRun: boolean;
   readonly nextSectorPityCounter: number;
+  readonly endlessClearedThreat: number | null;
 }
 
 export interface ActiveCampaignObjective {
@@ -255,6 +258,13 @@ export function syncCampaignProgress(profile: V2ProfileState): CampaignSyncResul
   );
 
   const nextEndlessUnlocked = Boolean(prev.endlessUnlocked) || prev.endingsUnlocked.length > 0;
+  const clampedPrevThreat = Math.max(
+    0,
+    Math.min(MAX_ENDLESS_THREAT, Number.isFinite(prev.maxEndlessThreat) ? Math.floor(prev.maxEndlessThreat) : 0)
+  );
+  const nextMaxEndlessThreat = nextEndlessUnlocked
+    ? Math.max(1, clampedPrevThreat)
+    : clampedPrevThreat;
 
   let derivedAct: CampaignActId = 'prologue';
   if (nextEndlessUnlocked) {
@@ -282,6 +292,7 @@ export function syncCampaignProgress(profile: V2ProfileState): CampaignSyncResul
     completedMilestones: Array.from(milestoneSet),
     defeatedBossIds: Array.from(bossSet),
     endlessUnlocked: nextEndlessUnlocked,
+    maxEndlessThreat: nextMaxEndlessThreat,
   };
 
   const preliminaryProfile: V2ProfileState = {
@@ -430,10 +441,8 @@ export function advanceCampaignAfterRun(
   run: V2RunState,
   summary: V2SettlementSummary
 ): CampaignRunAdvanceResult {
-  const prevSectorCounter = Math.max(
-    0,
-    Math.floor(profile.campaign.relicPityCounters[run.sectorId] ?? 0)
-  );
+  const rawPity = profile.campaign.relicPityCounters[run.sectorId] ?? 0;
+  const prevSectorCounter = Number.isFinite(rawPity) ? Math.max(0, Math.floor(rawPity)) : 0;
   if (run.isShowcase) {
     return {
       profile,
@@ -444,6 +453,7 @@ export function advanceCampaignAfterRun(
       newlyDefeatedBossIds: [],
       recoveredRelicThisRun: false,
       nextSectorPityCounter: prevSectorCounter,
+      endlessClearedThreat: null,
     };
   }
 
@@ -490,9 +500,42 @@ export function advanceCampaignAfterRun(
     );
   }
 
+  // F18: Endless Abyss clear advancement (safe_return + threat >= 1 + deep reach / contract / boss)
+  const runEndlessThreat = Math.max(
+    0,
+    Math.min(
+      MAX_ENDLESS_THREAT,
+      Number.isFinite(run.endlessThreat) ? Math.floor(run.endlessThreat!) : 0
+    )
+  );
+  const isEndlessClear =
+    !run.isTutorial &&
+    summary.reason === 'safe_return' &&
+    runEndlessThreat >= 1 &&
+    (maxLayerReached >= run.graph.maxLayers ||
+      summary.contractCompleted ||
+      defeatedInRun.length > 0);
+
+  const prevDeepestEndless = Math.max(
+    0,
+    Math.min(MAX_ENDLESS_THREAT, Math.floor(profile.career.deepestEndlessCleared))
+  );
+  const prevMaxThreat = Math.max(
+    0,
+    Math.min(MAX_ENDLESS_THREAT, Math.floor(profile.campaign.maxEndlessThreat))
+  );
+
+  const nextDeepestEndless = isEndlessClear
+    ? Math.min(MAX_ENDLESS_THREAT, Math.max(prevDeepestEndless, runEndlessThreat))
+    : prevDeepestEndless;
+  const nextMaxEndlessThreat = isEndlessClear
+    ? Math.min(MAX_ENDLESS_THREAT, Math.max(prevMaxThreat, runEndlessThreat + 1))
+    : prevMaxThreat;
+
   const nextCareer = {
     ...profile.career,
     totalBossesDefeated: profile.career.totalBossesDefeated + defeatedInRun.length,
+    deepestEndlessCleared: nextDeepestEndless,
   };
 
   const preSyncProfile: V2ProfileState = {
@@ -504,6 +547,7 @@ export function advanceCampaignAfterRun(
       ...profile.campaign,
       defeatedBossIds: nextDefeatedBossIds,
       relicPityCounters: nextPityCounters,
+      maxEndlessThreat: nextMaxEndlessThreat,
     },
   };
 
@@ -514,6 +558,7 @@ export function advanceCampaignAfterRun(
     newlyDefeatedBossIds,
     recoveredRelicThisRun: recoveredRelic,
     nextSectorPityCounter,
+    endlessClearedThreat: isEndlessClear ? runEndlessThreat : null,
   };
 }
 
@@ -553,6 +598,14 @@ export function getUnlockedCampaignComms(profile: V2ProfileState): readonly Camp
         return actRank >= 3 || bosses.has('boss_dreadnought') || profile.campaign.unlockedSectors.includes('stargate_abyss');
       case 'act3_boss_intro':
         return bosses.has('boss_leviathan') || profile.campaign.finalMissionUnlocked || profile.campaign.readCommsIds.includes(comm.id);
+      case 'act3_boss_clear':
+      case 'endless_unlock':
+        return (
+          bosses.has('boss_leviathan') ||
+          profile.campaign.endlessUnlocked ||
+          profile.campaign.endingsUnlocked.length > 0 ||
+          profile.campaign.readCommsIds.includes(comm.id)
+        );
       default:
         return false;
     }
@@ -760,24 +813,103 @@ export function previewSettlementCampaignOutcomes(
       `船员专精提升：${crew.name} Lv.${adv.crewMasteryUpgraded.fromTier} → Lv.${adv.crewMasteryUpgraded.toTier}`
     );
   }
+  if (adv.endlessClearedThreat !== null) {
+    const nextMax = adv.profile.campaign.maxEndlessThreat;
+    headlines.push(
+      nextMax > profile.campaign.maxEndlessThreat
+        ? `无尽深渊 威压 ${adv.endlessClearedThreat} 通关！可选威压上限提升至 威压 ${nextMax}`
+        : `无尽深渊 威压 ${adv.endlessClearedThreat} 通关记录已归档`
+    );
+  }
 
   let pityLine: string | null = null;
   if (!run.isTutorial) {
     const sector = getV3SectorDef(run.sectorId);
+    const pityThreshold =
+      (profile.facilityTiers?.display ?? 0) >= 3
+        ? Math.max(2, RELIC_PITY_THRESHOLD - 1)
+        : RELIC_PITY_THRESHOLD;
     if (adv.recoveredRelicThisRun) {
-      pityLine = `${sector.name}：已带回古代遗物，遗物信号保底计数重置为 0/${RELIC_PITY_THRESHOLD}`;
+      pityLine = `${sector.name}：已带回古代遗物，遗物信号保底计数重置为 0/${pityThreshold}`;
     } else {
       const nextCount = adv.nextSectorPityCounter;
       const hasRemainingSectorRelic =
         getNextUncollectedSectorRelicDefId(adv.profile, run.sectorId) !== null;
       pityLine =
-        nextCount >= RELIC_PITY_THRESHOLD && hasRemainingSectorRelic
-          ? `${sector.name}：保底计数 ${nextCount}/${RELIC_PITY_THRESHOLD}，下次出航将锁定保底遗物信号！`
+        nextCount >= pityThreshold && hasRemainingSectorRelic
+          ? `${sector.name}：保底计数 ${nextCount}/${pityThreshold}，下次出航将锁定保底遗物信号！`
           : hasRemainingSectorRelic
-          ? `${sector.name}：遗物信号保底进度 ${nextCount}/${RELIC_PITY_THRESHOLD}`
+          ? `${sector.name}：遗物信号保底进度 ${nextCount}/${pityThreshold}`
           : `${sector.name}：本星区标志遗物已全部收集`;
     }
   }
 
   return { headlines, pityLine };
 }
+
+/**
+ * Pure reload-safe detector identifying when an active climax run has defeated
+ * `boss_leviathan` and is awaiting the player's Campaign Ending choice.
+ */
+export function isRunPendingCampaignEnding(run: V2RunState | null): boolean {
+  if (!run || !run.isFinalCampaignRun || run.isShowcase || run.isTutorial) {
+    return false;
+  }
+  if (run.phase !== 'SETTLEMENT' || run.settlementReason !== 'safe_return') {
+    return false;
+  }
+  if (run.defeatedBossIdsThisRun?.includes('boss_leviathan')) {
+    return true;
+  }
+  return Object.values(run.graph.nodes).some(
+    (n) =>
+      n.resolved &&
+      (n.bossId === 'boss_leviathan' || n.combat?.bossId === 'boss_leviathan')
+  );
+}
+
+/**
+ * Pure monotonic updater recording a chosen Campaign Ending (strictly deduplicated,
+ * preserves all previously unlocked endings, unlocks Endless Abyss with threat >= 1,
+ * and records `boss_leviathan` + `act3_boss_defeated`).
+ */
+export function recordCampaignEndingChoice(
+  profile: V2ProfileState,
+  endingId: EndingId
+): V2ProfileState {
+  const prevEndings = profile.campaign.endingsUnlocked;
+  const nextEndings = prevEndings.includes(endingId)
+    ? [...prevEndings]
+    : [...prevEndings, endingId];
+  const nextDefeatedBossIds = Array.from(
+    new Set([...profile.campaign.defeatedBossIds, 'boss_leviathan'])
+  );
+  const nextDefeatedEnemyKinds = Array.from(
+    new Set([...profile.defeatedEnemyKinds, 'boss_leviathan'])
+  );
+  const nextMilestones = Array.from(
+    new Set([...profile.campaign.completedMilestones, 'act3_boss_defeated'])
+  );
+  const nextMaxThreat = Math.max(
+    1,
+    Math.min(MAX_ENDLESS_THREAT, Math.floor(profile.campaign.maxEndlessThreat || 0))
+  );
+
+  const updated: V2ProfileState = {
+    ...profile,
+    defeatedEnemyKinds: nextDefeatedEnemyKinds,
+    campaign: {
+      ...profile.campaign,
+      currentAct: 'endless',
+      defeatedBossIds: nextDefeatedBossIds,
+      completedMilestones: nextMilestones,
+      endingsUnlocked: nextEndings,
+      finalMissionUnlocked: true,
+      endlessUnlocked: true,
+      maxEndlessThreat: nextMaxThreat,
+    },
+  };
+
+  return syncCampaignProgress(updated).profile;
+}
+

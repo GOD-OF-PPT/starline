@@ -418,6 +418,8 @@ export interface V2CombatSimulation {
   readonly bossId?: string;
   readonly overchargeApplied?: boolean;
   readonly stargateRelayTier?: number;
+  readonly endlessThreat?: number;
+  readonly endlessMutatorIds?: readonly string[];
 }
 
 export interface V2CombatRewardBundle {
@@ -503,6 +505,8 @@ export interface V3RunHistoryEntry {
   readonly creditsEarned: number;
   readonly salvagePartsEarned: number;
   readonly endlessThreat: number;
+  readonly endlessMutatorIds?: readonly string[];
+  readonly seed?: number;
   readonly isFinalCampaignRun?: boolean;
 }
 
@@ -644,6 +648,7 @@ export interface V2ProfileState {
   readonly factionRep: Record<FactionId, number>;
   readonly crewMastery: Record<V2CrewId, number>;
   readonly achievementsUnlocked: readonly string[];
+  readonly achievementsClaimed?: readonly string[];
   readonly defeatedEnemyKinds: readonly string[];
   readonly runHistory: readonly V3RunHistoryEntry[];
   readonly career: V3CareerStats;

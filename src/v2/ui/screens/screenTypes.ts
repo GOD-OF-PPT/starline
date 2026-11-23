@@ -32,6 +32,10 @@ export interface V2PrepareDraft {
   slots: V2PrepareSlotEntry[];
   missingPresetEntries: readonly V2ResolvedPresetSlot[];
   presetNotice: string | null;
+  isFinalCampaignRun: boolean;
+  endlessThreat: number;
+  customSeedInput: string;
+  defaultSeed: number;
 }
 
 export interface V2ReturnDockingNotice {

@@ -6,7 +6,8 @@ import {
   type V2EquipmentKind,
 } from '../data/equipment';
 import { V2_TUTORIAL_SUCCESS_BONUS } from '../data/facilities';
-import { advanceCampaignAfterRun } from './campaign';
+import { syncUnlockedAchievements } from './achievements';
+import { advanceCampaignAfterRun, recordCampaignEndingChoice } from './campaign';
 import { isContractReadyForDelivery } from './contracts';
 import { canDismantleV2Item, getDismantleSalvagePartsYield } from './dismantle';
 import {
@@ -19,6 +20,7 @@ import { V3_MAX_RUN_HISTORY } from './persistenceV2';
 import { getEffectiveWarehouseCapacity, getFacilityTier } from './progressionV2';
 import type {
   CampaignActId,
+  EndingId,
   FactionId,
   SectorId,
   V2ItemInstance,
@@ -395,12 +397,14 @@ export interface V2ApplySettlementResult {
     readonly toTier: number;
   } | null;
   readonly newlyDefeatedBossIds?: readonly string[];
+  readonly endlessClearedThreat?: number | null;
+  readonly newlyUnlockedAchievementIds?: readonly string[];
   readonly error?: string;
 }
 
 /**
  * Atomically applies settlement to V2ProfileState (100% idempotent via settledRunIds, AC13/AC17!).
- * Refuses to settle if warehouseProjectedCount > 12 (never silently drops equipment, §10.4!).
+ * Refuses to settle if warehouseProjectedCount > capacity (never silently drops equipment, §10.4!).
  */
 export function applyV2Settlement(
   profile: V2ProfileState,
@@ -408,6 +412,11 @@ export function applyV2Settlement(
   dispositionOverrides: Record<string, V2SettlementDisposition> = {}
 ): V2ApplySettlementResult {
   const summary = calculateV2Settlement(run, profile, dispositionOverrides);
+
+  // Showcase runs are strictly isolated and must NEVER mutate formal save/profile!
+  if (run.isShowcase) {
+    return { ok: true, profile, summary };
+  }
 
   // Idempotency guard: already settled this runId -> return untouched!
   if (profile.settledRunIds.includes(run.runId)) {
@@ -536,6 +545,10 @@ export function applyV2Settlement(
     creditsEarned: summary.finalCreditsEarned,
     salvagePartsEarned: salvageEarned,
     endlessThreat: run.endlessThreat ?? 0,
+    ...(run.endlessMutatorIds && run.endlessMutatorIds.length > 0
+      ? { endlessMutatorIds: [...run.endlessMutatorIds] }
+      : {}),
+    seed: run.seed,
     isFinalCampaignRun: run.isFinalCampaignRun,
   };
   const nextRunHistory = [historyEntry, ...profile.runHistory].slice(0, V3_MAX_RUN_HISTORY);
@@ -550,6 +563,11 @@ export function applyV2Settlement(
       profile.career.totalWrecksDissected + Math.max(0, Math.floor(run.wrecksDissectedThisRun ?? 0)),
     totalItemsDismantled: profile.career.totalItemsDismantled + summary.dismantledItemsCount,
   };
+
+  const baseClaimedAchievements =
+    profile.achievementsClaimed !== undefined
+      ? [...profile.achievementsClaimed]
+      : [...profile.achievementsUnlocked];
 
   const baseNextProfile: V2ProfileState = {
     ...profile,
@@ -582,10 +600,11 @@ export function applyV2Settlement(
   };
 
   const campaignAdvance = advanceCampaignAfterRun(baseNextProfile, run, summary);
+  const achSync = syncUnlockedAchievements(campaignAdvance.profile, baseClaimedAchievements);
 
   return {
     ok: true,
-    profile: campaignAdvance.profile,
+    profile: achSync.profile,
     summary,
     unlockedFamilyName,
     unlockedCrewName,
@@ -595,5 +614,92 @@ export function applyV2Settlement(
     newlyCompletedMilestones: campaignAdvance.newlyCompletedMilestones,
     crewMasteryUpgraded: campaignAdvance.crewMasteryUpgraded,
     newlyDefeatedBossIds: campaignAdvance.newlyDefeatedBossIds,
+    endlessClearedThreat: campaignAdvance.endlessClearedThreat,
+    newlyUnlockedAchievementIds: achSync.newlyUnlockedIds,
   };
 }
+
+export interface FinalizeClimaxEndingResult {
+  readonly ok: boolean;
+  readonly profile: V2ProfileState;
+  readonly summary: V2SettlementSummary;
+  readonly newlyUnlockedAchievementIds: readonly string[];
+}
+
+/**
+ * Non-destructively settles an Act III Final Mission victory and records the chosen Ending.
+ * - Safely caps returned warehouse gear to effective capacity (selling overflow instead of deadlocking)
+ *   so Ending Continue can NEVER fail or lose credits/salvageParts.
+ * - Preserves idempotency for credits/runHistory while ALWAYS recording new unique `endingId` choices
+ *   (supports re-clearing the Final Mission to unlock all 3 endings!).
+ */
+export function finalizeClimaxEnding(
+  profile: V2ProfileState,
+  run: V2RunState,
+  endingId: EndingId
+): FinalizeClimaxEndingResult {
+  const baseClaimedAchievements =
+    profile.achievementsClaimed !== undefined
+      ? [...profile.achievementsClaimed]
+      : [...profile.achievementsUnlocked];
+
+  const normalizedRun: V2RunState = {
+    ...run,
+    isFinalCampaignRun: true,
+    phase: 'SETTLEMENT',
+    settlementReason: 'safe_return',
+    contract: {
+      ...run.contract,
+      name: '星门重启远征',
+    },
+    defeatedBossIdsThisRun: Array.from(
+      new Set([...(run.defeatedBossIdsThisRun ?? []), 'boss_leviathan'])
+    ),
+    defeatedEnemyKindsThisRun: Array.from(
+      new Set([...(run.defeatedEnemyKindsThisRun ?? []), 'boss_leviathan'])
+    ),
+  };
+
+  // Build overflow-proof dispositions: keep owned gear up to remaining warehouse slots, sell overflow
+  const availableSlots = Math.max(
+    0,
+    getEffectiveWarehouseCapacity(profile) - profile.equipmentWarehouse.length
+  );
+  let storedCount = 0;
+  const contractCompleted = isContractReadyForDelivery(normalizedRun, 'safe_return');
+  const safeDispositions: Record<string, V2SettlementDisposition> = {};
+  for (const placed of normalizedRun.bay.placed) {
+    const defDisp = getDefaultDispositionForItem(
+      placed.item,
+      'safe_return',
+      contractCompleted,
+      profile
+    );
+    if (defDisp === 'store') {
+      if (storedCount < availableSlots) {
+        safeDispositions[placed.item.instanceId] = 'store';
+        storedCount += 1;
+      } else {
+        safeDispositions[placed.item.instanceId] = 'sell';
+      }
+    }
+  }
+
+  const settled = applyV2Settlement(profile, normalizedRun, safeDispositions);
+  const withEnding = recordCampaignEndingChoice(settled.profile, endingId);
+  const achSync = syncUnlockedAchievements(withEnding, baseClaimedAchievements);
+  const mergedNewAchievements = Array.from(
+    new Set([
+      ...(settled.newlyUnlockedAchievementIds ?? []),
+      ...achSync.newlyUnlockedIds,
+    ])
+  );
+
+  return {
+    ok: true,
+    profile: achSync.profile,
+    summary: settled.summary,
+    newlyUnlockedAchievementIds: mergedNewAchievements,
+  };
+}
+

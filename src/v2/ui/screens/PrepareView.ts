@@ -11,14 +11,25 @@ import {
 import { V3_FACTIONS } from '../../data/factions';
 import { V3_RELIC_PASSIVES } from '../../data/facilities';
 import { getV3GadgetDef } from '../../data/gadgets';
-import { V3_SECTORS, V3_SECTOR_ORDER, getV3SectorDef } from '../../data/sectors';
+import {
+  MAX_ENDLESS_THREAT,
+  V3_SECTORS,
+  V3_SECTOR_ORDER,
+  describeEndlessThreatScaling,
+  getV3EndlessMutatorDef,
+  getV3SectorDef,
+  rollEndlessMutators,
+} from '../../data/sectors';
 import { V2_SHAPES } from '../../data/shapes';
 import { V2_SHIPS, V2_SHIP_ORDER, type V2ShipId } from '../../data/ships';
 import { V2_TRIAL_BUILD_ORDER, V2_TRIAL_BUILDS } from '../../data/trialBuilds';
-import { shouldTriggerRelicPitySignal } from '../../domain/campaign';
+import {
+  isFinalCampaignMissionUnlocked,
+  shouldTriggerRelicPitySignal,
+} from '../../domain/campaign';
 import { previewContractBonusHint } from '../../domain/contracts';
 import { getEffectiveShipLoadoutBudget, getEffectiveShipMaxHp } from '../../domain/dismantle';
-import type { V2PrepareValidation } from '../../domain/loadout';
+import { parseV3CustomSeedInput, type V2PrepareValidation } from '../../domain/loadout';
 import { getActiveRelicPassives, getEffectiveMaxPresets } from '../../domain/progressionV2';
 import type { SectorId, V2ProfileState, V2TrialBuildId } from '../../domain/types';
 import { crewPortraitSvg, svgIcon } from '../icons';
@@ -29,6 +40,8 @@ export interface PrepareViewProps {
   readonly draft: V2PrepareDraft;
   readonly readOnly: boolean;
   readonly validation: V2PrepareValidation;
+  readonly effectivePreviewSeed: number;
+  readonly fallbackPreviewSeed?: number;
 }
 
 export interface PrepareViewActions {
@@ -36,6 +49,11 @@ export interface PrepareViewActions {
   readonly onPickTrial: (trialId: V2TrialBuildId) => void;
   readonly onExitTrial: () => void;
   readonly onSelectSector: (sectorId: SectorId) => void;
+  readonly onSelectStandardMode: () => void;
+  readonly onSelectFinalMissionMode: () => void;
+  readonly onSelectEndlessMode: () => void;
+  readonly onSelectEndlessThreat: (threat: number) => void;
+  readonly onChangeCustomSeed: (raw: string) => void;
   readonly onSelectShip: (shipId: V2ShipId) => void;
   readonly onSelectCrew: (crewId: V2CrewId) => void;
   readonly onSelectArchetype: (archetypeId: V2ArchetypeId) => void;
@@ -50,12 +68,43 @@ export interface PrepareViewActions {
   readonly onLaunch: () => void;
 }
 
+function escapeAttr(val: string): string {
+  return val.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function buildEndlessMutatorPreviewInnerHtml(seed: number, threat: number): string {
+  const scaling = describeEndlessThreatScaling(threat);
+  const mutatorIds = rollEndlessMutators(seed, threat);
+  const mutatorItemsHtml = mutatorIds
+    .map((mid) => {
+      const def = getV3EndlessMutatorDef(mid);
+      if (!def) return '';
+      return `<div class="v3-emp-mut-item"><strong>词条 · ${def.name}</strong><span>${def.combatRuleSummary}</span></div>`;
+    })
+    .join('');
+
+  return `
+    <div class="v3-emp-head">
+      <span>${svgIcon('bolt', 12)} 威压 ${scaling.threat} 词条与突变预览（种子 #${seed >>> 0}）</span>
+      <span class="num">敌耐久 +${scaling.hpBonusPct}% · 敌攻 +${scaling.dmgAdd} · 赏金 +${scaling.bountyBonusPct}%</span>
+    </div>
+    <div class="v3-emp-mut-list">${mutatorItemsHtml}</div>
+  `;
+}
+
 export function renderPrepareView(
   leftPanelEl: HTMLElement,
   props: PrepareViewProps,
   actions: PrepareViewActions
 ): void {
-  const { profile: p, draft, readOnly, validation: check } = props;
+  const {
+    profile: p,
+    draft,
+    readOnly,
+    validation: check,
+    effectivePreviewSeed,
+    fallbackPreviewSeed = effectivePreviewSeed,
+  } = props;
   const contractTpl =
     V2_CONTRACT_TEMPLATES[draft.contractTemplateId] ?? V2_CONTRACT_TEMPLATES.free_salvage;
   const usedOwnedIds = new Set(check.ownedInstancesUsed);
@@ -75,11 +124,132 @@ export function renderPrepareView(
   const bonusHint = previewContractBonusHint(contractTpl);
   const relicPassives = getActiveRelicPassives(p);
   const maxPresets = getEffectiveMaxPresets(p);
+  const finalGate = isFinalCampaignMissionUnlocked(p);
+  const endlessUnlocked = Boolean(p.campaign.endlessUnlocked);
+  const maxAllowedThreat = endlessUnlocked
+    ? Math.max(1, Math.min(MAX_ENDLESS_THREAT, Math.floor(p.campaign.maxEndlessThreat || 1)))
+    : 0;
+  const isEndlessActive = !draft.isFinalCampaignRun && draft.endlessThreat >= 1 && endlessUnlocked;
+  const isStandardActive = !draft.isFinalCampaignRun && !isEndlessActive;
+  const displayContractName = draft.isFinalCampaignRun ? '星门重启远征' : contractTpl.name;
+  const previewSeedForMutators = parseV3CustomSeedInput(draft.customSeedInput) ?? fallbackPreviewSeed;
+
+  const endlessThreatPillsHtml = isEndlessActive
+    ? Array.from({ length: MAX_ENDLESS_THREAT }, (_, i) => {
+        const lvl = i + 1;
+        const allowed = lvl <= maxAllowedThreat;
+        const selected = draft.endlessThreat === lvl;
+        return `<button
+          type="button"
+          class="v3-threat-pill ${selected ? 'active' : ''}"
+          data-endless-threat="${lvl}"
+          data-threat="${lvl}"
+          data-testid="endless-threat-${lvl}"
+          aria-pressed="${selected}"
+          ${!allowed || readOnly ? 'disabled' : ''}
+        >威压 ${lvl}</button>`;
+      }).join('')
+    : '';
+
+  const modeSelectorSectionHtml = `
+    <div class="v2-prep-group v3-mode-section">
+      <div class="v2-prep-label">${svgIcon('star', 13)} 出航模式（常规远征 / 第三幕终战 / 无尽深渊）</div>
+      <div class="v3-mode-selector-row" role="group" aria-label="出航模式">
+        <button
+          type="button"
+          class="v3-mode-btn mode-standard ${isStandardActive ? 'active' : ''}"
+          data-testid="btn-mode-standard"
+          data-mode="standard"
+          aria-pressed="${isStandardActive}"
+          ${readOnly ? 'disabled' : ''}
+        >
+          <strong>${svgIcon('radar', 13)} 常规远征</strong>
+          <small>自由选区与委托推进</small>
+        </button>
+        <button
+          type="button"
+          class="v3-mode-btn mode-final ${draft.isFinalCampaignRun ? 'active' : ''}"
+          data-testid="btn-mode-final"
+          data-mode="final"
+          aria-pressed="${draft.isFinalCampaignRun}"
+          ${!finalGate.unlocked || readOnly ? 'disabled' : ''}
+        >
+          <strong>${svgIcon(finalGate.unlocked ? 'boss' : 'lock', 13)} ${
+            finalGate.unlocked ? '星门重启远征' : '星门重启远征（未解锁）'
+          }</strong>
+          <small>${
+            finalGate.unlocked
+              ? '古代星门禁区 · 三阶段终局决战'
+              : finalGate.unmetReasons[0] ?? '需达成第三幕前置条件'
+          }</small>
+        </button>
+        <button
+          type="button"
+          class="v3-mode-btn mode-endless ${isEndlessActive ? 'active' : ''}"
+          data-testid="btn-mode-endless"
+          data-mode="endless"
+          aria-pressed="${isEndlessActive}"
+          ${!endlessUnlocked || readOnly ? 'disabled' : ''}
+        >
+          <strong>${svgIcon(endlessUnlocked ? 'bolt' : 'lock', 13)} ${
+            endlessUnlocked ? '无尽深渊' : '无尽深渊（通关第三幕解锁 · 未解锁）'
+          }</strong>
+          <small>${
+            endlessUnlocked
+              ? `当前开放至第 ${maxAllowedThreat} 阶 · 词条与种子挑战`
+              : '通关第三幕「星门重启远征」后解锁'
+          }</small>
+        </button>
+      </div>
+      ${
+        draft.isFinalCampaignRun
+          ? `<div class="v3-prep-climax-card" data-testid="final-mission-prep-card">
+              <strong>${svgIcon('star', 13)} 第三幕终局远征已就绪 · 古代星门禁区</strong>
+              <span>第 6 层必可抵达三阶段终局首领「黑曜利维坦」，击溃后直接进入星门终局抉择（3 种结局）并解锁无尽深渊。</span>
+            </div>`
+          : ''
+      }
+      ${
+        !endlessUnlocked
+          ? `<div class="v3-endless-locked-hint" data-endless-locked="true">
+              ${svgIcon('lock', 12)} <span>无尽深渊尚未解锁：通关第三幕「星门重启远征」后解锁威压 1–10 词条与种子挑战。</span>
+            </div>`
+          : isEndlessActive
+          ? `<div class="v3-prep-endless-panel" data-testid="endless-config-panel">
+              <div class="v2-prep-label-row">
+                <span class="v2-prep-label">${svgIcon('bolt', 12)} 无尽深渊威压等级（当前开放 威压 1–${maxAllowedThreat} / 10）</span>
+              </div>
+              <div class="v3-threat-pills" role="group" aria-label="无尽深渊威压等级">
+                ${endlessThreatPillsHtml}
+              </div>
+              <div class="v3-endless-mutator-preview" data-testid="endless-mutator-preview">
+                ${buildEndlessMutatorPreviewInnerHtml(previewSeedForMutators, draft.endlessThreat)}
+              </div>
+              <div class="v3-seed-row">
+                <label for="v3-endless-seed-input">挑战种子</label>
+                <input
+                  type="text"
+                  inputmode="numeric"
+                  id="v3-endless-seed-input"
+                  class="v3-seed-input"
+                  data-testid="endless-seed-input"
+                  name="seed"
+                  maxlength="12"
+                  placeholder="输入挑战种子（留空随机）"
+                  value="${escapeAttr(draft.customSeedInput)}"
+                  ${readOnly ? 'disabled' : ''}
+                />
+              </div>
+            </div>`
+          : ''
+      }
+    </div>
+  `;
 
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root v3-sticky-panel-root" data-testid="prepare-screen">
       <div class="panel-header">
-        <h2>出航整备 · ${contractTpl.name}</h2>
+        <h2>出航整备 · ${displayContractName}</h2>
         <button type="button" class="btn btn-sm btn-ghost" id="v2-prep-back">← 返回基地</button>
       </div>
 
@@ -154,6 +324,8 @@ export function renderPrepareView(
             </div>
           </div>
         </div>
+
+        ${modeSelectorSectionHtml}
 
         <div class="v2-prep-group v2-trial-section">
           <div class="v2-prep-label-row">
@@ -403,6 +575,40 @@ export function renderPrepareView(
       if (btn.disabled) return;
       actions.onSelectSector(btn.dataset.prepSector as SectorId);
     });
+  });
+
+  leftPanelEl.querySelector('[data-testid="btn-mode-standard"]')?.addEventListener('click', () => {
+    actions.onSelectStandardMode();
+  });
+  leftPanelEl.querySelector('[data-testid="btn-mode-final"]')?.addEventListener('click', () => {
+    if (!finalGate.unlocked || readOnly) return;
+    actions.onSelectFinalMissionMode();
+  });
+  leftPanelEl.querySelector('[data-testid="btn-mode-endless"]')?.addEventListener('click', () => {
+    if (!endlessUnlocked || readOnly) return;
+    actions.onSelectEndlessMode();
+  });
+
+  leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-endless-threat]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.disabled) return;
+      const lvl = Number(btn.dataset.endlessThreat);
+      if (Number.isInteger(lvl) && lvl >= 1 && lvl <= MAX_ENDLESS_THREAT) {
+        actions.onSelectEndlessThreat(lvl);
+      }
+    });
+  });
+
+  const seedInputEl = leftPanelEl.querySelector<HTMLInputElement>('#v3-endless-seed-input');
+  seedInputEl?.addEventListener('input', () => {
+    const raw = seedInputEl.value;
+    actions.onChangeCustomSeed(raw);
+    // Focus-stable in-place update of mutator preview without rebuilding leftPanelEl!
+    const previewEl = leftPanelEl.querySelector<HTMLElement>('[data-testid="endless-mutator-preview"]');
+    if (previewEl && draft.endlessThreat >= 1) {
+      const nextSeed = parseV3CustomSeedInput(raw) ?? fallbackPreviewSeed;
+      previewEl.innerHTML = buildEndlessMutatorPreviewInnerHtml(nextSeed, draft.endlessThreat);
+    }
   });
 
   leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-pick-trial]').forEach((btn) => {

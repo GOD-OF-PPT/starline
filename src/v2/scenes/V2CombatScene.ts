@@ -1278,7 +1278,8 @@ export class V2CombatScene extends Phaser.Scene {
       let playedRegenSfx = false;
       for (const item of log.enemyIntentsThisRound) {
         const src = this.enemies.find((e) => e.enemyId === item.enemyId);
-        if (!src || src.dead) continue;
+        const afterSnap = log.enemiesAfter.find((e) => e.enemyId === item.enemyId);
+        if (!src || src.dead || !afterSnap || afterSnap.hp <= 0) continue;
         if (item.intent.shieldGain && item.intent.shieldGain > 0) {
           if (!playedRegenSfx) {
             soundEngine.play('shieldOverload');

@@ -5,7 +5,11 @@ import {
   resolveUnitInitialShield,
 } from '../../data/enemies';
 import { getV3GadgetDef } from '../../data/gadgets';
-import { getV3SectorDef } from '../../data/sectors';
+import {
+  aggregateEndlessMutatorEffects,
+  getV3EndlessMutatorDef,
+  getV3SectorDef,
+} from '../../data/sectors';
 import { getShipSignatureCommand } from '../../data/ships';
 import {
   computeCombatTacticalChargesMax,
@@ -157,28 +161,48 @@ export function renderCombatPreView(
       </div>`
     : '';
 
+  const mutFx = aggregateEndlessMutatorEffects(run.endlessMutatorIds);
+
   const rosterHtml = node.combat.units
     .map((u) => {
+      const initSnap = pv?.initialEnemies.find((s) => s.enemyId === u.enemyId);
       const cycle = getUnitIntentCyclePreview(u, node.combat!.encounterKind, bossId);
       const initShield = resolveUnitInitialShield(u, node.combat!.encounterKind, bossId);
+      const dispMaxHp = initSnap?.maxHp ?? u.maxHp;
+      const dispShield = initSnap?.shield ?? initShield.shield;
+      const dispDmg = u.damagePerRound + mutFx.enemyDamageBonus;
+      const dispArmor = initSnap?.armor ?? u.armor;
+      const dispPierce = initSnap?.pierceRatio ?? u.pierceRatio;
       const intentCycleHtml = cycle
-        .map(
-          (intent, idx) =>
-            `<span class="enemy-intent-badge ${getIntentToneClass(intent.kind)}" data-enemy-intent="${
-              intent.kind
-            }" ${idx === 0 ? `data-testid="enemy-intent-${u.enemyId}"` : ''}>R${idx + 1} ${formatIntentShortText(
-              intent
-            )}</span>`
-        )
+        .map((intent, idx) => {
+          const dispIntent: V3EnemyIntent =
+            intent.damage > 0 && mutFx.enemyPierceBonus > 0
+              ? {
+                  ...intent,
+                  pierceRatio: Math.min(
+                    0.65,
+                    Number(
+                      (
+                        Math.max(0, Math.min(1, intent.pierceRatio ?? u.pierceRatio)) +
+                        mutFx.enemyPierceBonus
+                      ).toFixed(2)
+                    )
+                  ),
+                }
+              : intent;
+          return `<span class="enemy-intent-badge ${getIntentToneClass(dispIntent.kind)}" data-enemy-intent="${
+            dispIntent.kind
+          }" ${idx === 0 ? `data-testid="enemy-intent-${u.enemyId}"` : ''}>R${idx + 1} ${formatIntentShortText(
+            dispIntent
+          )}</span>`;
+        })
         .join('');
       return `<div class="v2-enemy-chip v3-enemy-card ${u.isBoss ? 'is-boss' : ''}">
         <div class="v3-enemy-card-head">
           <strong>${u.name}</strong>
-          <span class="v3-enemy-stats">HP ${u.maxHp}${initShield.shield > 0 ? ` · 盾 ${initShield.shield}` : ''} · 攻 ${
-        u.damagePerRound
-      }${u.armor > 0 ? ` · 甲 ${u.armor}` : ''}${
-        u.pierceRatio > 0 ? ` · 穿盾 ${Math.round(u.pierceRatio * 100)}%` : ''
-      }</span>
+          <span class="v3-enemy-stats">HP ${dispMaxHp}${dispShield > 0 ? ` · 盾 ${dispShield}` : ''} · 攻 ${dispDmg}${
+        dispArmor > 0 ? ` · 甲 ${dispArmor}` : ''
+      }${dispPierce > 0 ? ` · 穿盾 ${Math.round(dispPierce * 100)}%` : ''}</span>
         </div>
         <div class="intent-cycle">
           <span class="v3-intent-prefix">行动意图</span>
@@ -215,6 +239,38 @@ export function renderCombatPreView(
       </div>`
     : '';
 
+  const endlessThreat = run.endlessThreat ?? 0;
+  const endlessCombatBannerHtml =
+    endlessThreat >= 1
+      ? `<div class="v3-endless-hud-banner" data-testid="combat-endless-banner">
+          <div class="v3-endless-hud-head">
+            <span>${svgIcon('bolt', 12)} 无尽深渊 · 威压 ${endlessThreat}</span>
+            <span class="num">种子 #${run.seed}</span>
+          </div>
+          ${
+            run.endlessMutatorIds && run.endlessMutatorIds.length > 0
+              ? `<div class="v3-endless-mut-chips">
+                  ${run.endlessMutatorIds
+                    .map((mid) => {
+                      const def = getV3EndlessMutatorDef(mid);
+                      return `<span class="v3-endless-mut-chip">词条 · ${def?.name ?? mid}：${
+                        def?.combatRuleSummary ?? ''
+                      }</span>`;
+                    })
+                    .join('')}
+                </div>`
+              : ''
+          }
+        </div>`
+      : '';
+
+  const finalCombatBannerHtml = run.isFinalCampaignRun
+    ? `<div class="v3-final-mission-banner" data-testid="combat-final-banner">
+        <strong>${svgIcon('star', 12)} 星门重启远征</strong>
+        <span>终局战役节点</span>
+      </div>`
+    : '';
+
   leftPanelEl.innerHTML = `
     <div class="v3-screen-root v3-sticky-panel-root" data-testid="combat-screen">
       <div class="v3-panel-scroll-body">
@@ -228,6 +284,8 @@ export function renderCombatPreView(
           <span class="v3-sector-mod-desc">${sector.envModifier.combatRuleSummary}</span>
         </div>
 
+        ${finalCombatBannerHtml}
+        ${endlessCombatBannerHtml}
         ${tacticalSummaryHtml}
         ${overchargeBannerHtml}
         ${bossOverviewHtml}
@@ -492,6 +550,20 @@ export function renderCombatLiveOverlay(
         )} ${sector.name} · ${sector.envModifier.name}</span>`
       : '';
 
+  const endlessLivePillHtml =
+    (run.endlessThreat ?? 0) >= 1
+      ? `<span class="combat-pill v3-hud-endless-chip" data-testid="combat-live-endless-pill">${svgIcon(
+          'bolt',
+          12
+        )} 威压 ${run.endlessThreat}${
+          run.endlessMutatorIds && run.endlessMutatorIds.length > 0
+            ? ` · ${run.endlessMutatorIds
+                .map((mid) => getV3EndlessMutatorDef(mid)?.name ?? mid)
+                .join('/')}`
+            : ''
+        }</span>`
+      : '';
+
   overlayEl.innerHTML = `
     <div class="v3-overlay-screen v3-combat-live-overlay" data-testid="combat-screen">
       <div class="combat-hud-bar v2-combat-hero-hud">
@@ -506,6 +578,7 @@ export function renderCombatLiveOverlay(
           <span class="combat-pill">${svgIcon('combat', 13)} 敌 <strong class="num">${liveCombatEnemiesAlive}</strong></span>
           <span class="combat-pill v3-charge-pill">${svgIcon('bolt', 12)} 充能 <strong class="num">${chargesRemaining}/${chargesMax}</strong></span>
           ${envPillHtml}
+          ${endlessLivePillHtml}
         </div>
         <div class="v2-combat-ctrl-group">
           <button type="button" class="btn btn-sm btn-ghost" id="v2-combat-peek-bay">${svgIcon('grid', 13)} 查看船舱</button>

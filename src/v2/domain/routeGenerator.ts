@@ -323,6 +323,20 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
         else setB.add(nextMerchant);
       }
 
+      // F17: On Act III Final Campaign Run, guarantee BOTH L5A and L5B can reach the Layer 6 climax boss!
+      if (isFinalCampaignRun && layer === maxLayers - 1 && maxLayers >= 6) {
+        const bossNodeId =
+          nodeTypes[nextA] === 'elite' || nodeTypes[nextA] === 'boss'
+            ? nextA
+            : nodeTypes[nextB] === 'elite' || nodeTypes[nextB] === 'boss'
+            ? nextB
+            : null;
+        if (bossNodeId) {
+          setA.add(bossNodeId);
+          setB.add(bossNodeId);
+        }
+      }
+
       out[idA] = Array.from(setA).sort();
       out[idB] = Array.from(setB).sort();
     }

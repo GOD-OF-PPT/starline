@@ -1,6 +1,7 @@
 import { soundEngine } from '../../audio/soundEngine';
-import type { V2BaseDioramaState } from '../../scenes/BaseScene';
+import { createRandomSeed } from '../../domain/rng';
 import { MultiTabGuard } from '../../domain/tabLock';
+import type { V2BaseDioramaState } from '../../scenes/BaseScene';
 import { PhaserHost } from '../../scenes/PhaserHost';
 import { hasOpenModal, registerModalBackgroundRoot } from '../../ui/Modals';
 import { CAMPAIGN_CHAPTERS, type CampaignCommTrigger } from '../data/campaign';
@@ -28,9 +29,12 @@ import {
   getTrialDemoUnits,
 } from '../data/trialBuilds';
 import { V2_TUTORIAL_HINTS, createV2TutorialRun } from '../data/tutorialV2';
+import { claimV3Achievement } from '../domain/achievements';
 import {
   getActiveCampaignObjective,
   getTriggeredCommForContext,
+  isFinalCampaignMissionUnlocked,
+  isRunPendingCampaignEnding,
   markCampaignCommRead,
   markCampaignCommsRead,
 } from '../domain/campaign';
@@ -86,6 +90,7 @@ import {
   buildFreeFallbackPrepareSlots,
   deleteV2LoadoutPreset,
   launchV2Expedition,
+  parseV3CustomSeedInput,
   resolveV2PresetAgainstWarehouse,
   saveV2LoadoutPreset,
   validateV2PrepareLoadout,
@@ -121,13 +126,18 @@ import {
   upgradeV3Facility,
 } from '../domain/progressionV2';
 import { deriveSessionRunSeed, parseDeterministicSeedParam } from '../domain/seedParam';
-import { applyV2Settlement, calculateV2Settlement } from '../domain/settlementV2';
+import {
+  applyV2Settlement,
+  calculateV2Settlement,
+  finalizeClimaxEnding,
+} from '../domain/settlementV2';
 import { deriveV2ShipVisualSpec } from '../domain/shipVisualSpec';
 import { computeV2PlacementTacticalDelta } from '../domain/tacticalDelta';
 import {
   V2_TAB_CHANNEL,
   V2_TAB_LOCK_KEY,
   isPureAutoCombat,
+  type EndingId,
   type FactionId,
   type SectorId,
   type V2CargoBayState,
@@ -151,9 +161,11 @@ import {
   type StarlineScreenId,
 } from './inspectSnapshot';
 import { openV3CampaignModal, type CampaignModalTab } from './modals/CampaignModal';
+import { openV3CareerModal, type CareerModalTab } from './modals/CareerModal';
 import { renderArrangeView } from './screens/ArrangeView';
 import { renderBaseHeroView } from './screens/BaseView';
 import { renderCombatLiveOverlay, renderCombatPreView } from './screens/CombatView';
+import { renderEndingView } from './screens/EndingView';
 import { renderEventView } from './screens/EventView';
 import { renderMapView } from './screens/MapView';
 import { renderPrepareView } from './screens/PrepareView';
@@ -223,6 +235,8 @@ export class V2AppController {
   private activeDockingNotice: V2ReturnDockingNotice | null = null;
   private campaignBannerCollapsed = false;
   private preferredSectorId: SectorId | null = null;
+  private selectedEndingId: EndingId | null = null;
+  private endingGalleryId: EndingId | null = null;
   private activeCommBanner: {
     readonly id: string;
     readonly speakerId: V2CrewId;
@@ -252,6 +266,7 @@ export class V2AppController {
   // Persistent DOM anchors so Phaser canvas never flickers
   private appShellEl!: HTMLElement;
   private titleHostEl!: HTMLElement;
+  private endingHostEl!: HTMLElement;
   private topHudEl!: HTMLElement;
   private bannersEl!: HTMLElement;
   private mainLayoutEl!: HTMLElement;
@@ -304,6 +319,7 @@ export class V2AppController {
 
   private computeCurrentScreen(): StarlineScreenId {
     const run = this.getCurrentRun();
+    if (this.endingGalleryId !== null || isRunPendingCampaignEnding(run)) return 'ending';
     if (!this.titleEntered && !run) return 'title';
     if (run) return 'run';
     if (this.prepareDraft) return 'prepare';
@@ -655,11 +671,16 @@ export class V2AppController {
     this.titleHostEl = document.createElement('div');
     this.titleHostEl.className = 'title-host';
 
+    this.endingHostEl = document.createElement('div');
+    this.endingHostEl.className = 'ending-host';
+    this.endingHostEl.style.display = 'none';
+
     this.modalHostEl = document.createElement('div');
     this.modalHostEl.className = 'modal-host';
 
     this.mountEl.appendChild(this.appShellEl);
     this.mountEl.appendChild(this.titleHostEl);
+    this.mountEl.appendChild(this.endingHostEl);
     this.mountEl.appendChild(this.modalHostEl);
 
     registerModalBackgroundRoot(this.appShellEl);
@@ -668,8 +689,10 @@ export class V2AppController {
   private applyViewportClasses(): void {
     const run = this.getCurrentRun();
     const curNode = run?.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
-    const isBaseHero = !run && !this.prepareDraft;
-    const isPrepare = Boolean(!run && this.prepareDraft);
+    const currentScreen = this.computeCurrentScreen();
+    const isEnding = currentScreen === 'ending';
+    const isBaseHero = !run && !this.prepareDraft && !isEnding;
+    const isPrepare = Boolean(!run && this.prepareDraft && !isEnding);
     const isArrange = run?.phase === 'ARRANGE';
     const isSettlement = run?.phase === 'SETTLEMENT';
     const isLiveCombat = Boolean(run?.phase === 'ENCOUNTER' && run.activeCombat);
@@ -690,7 +713,7 @@ export class V2AppController {
     this.appShellEl.classList.toggle('phase-wreck-hero', isWreckHero);
     this.appShellEl.classList.toggle('phase-map-hero', isMapHero);
 
-    this.appShellEl.dataset.screen = this.computeCurrentScreen();
+    this.appShellEl.dataset.screen = currentScreen;
     this.appShellEl.dataset.phase = run ? run.phase : '';
     this.appShellEl.dataset.act = this.save.profile.campaign.currentAct;
     this.appShellEl.dataset.sector = run
@@ -719,6 +742,8 @@ export class V2AppController {
       })
     );
     this.renderTitleOverlay();
+    this.renderEndingOverlay();
+    this.syncOverlayBackgroundLock();
     this.renderTopHud();
     this.renderBanners();
     this.syncPhaserStage();
@@ -726,14 +751,20 @@ export class V2AppController {
     this.phaserHost?.resize();
   }
 
-  // --- Title Screen Overlay ---
+  private syncOverlayBackgroundLock(): void {
+    const showTitle = this.computeCurrentScreen() === 'title';
+    const showEnding = this.computeCurrentScreen() === 'ending';
+    const locked = showTitle || showEnding;
+    this.appShellEl.dataset.titleLocked = locked ? '1' : '0';
+    if ('inert' in this.appShellEl) {
+      (this.appShellEl as HTMLElement & { inert: boolean }).inert = locked || hasOpenModal();
+    }
+  }
+
+  // --- Title Screen & Ending Ceremony Overlays ---
 
   private renderTitleOverlay(): void {
-    const showTitle = !this.titleEntered && !this.getCurrentRun();
-    this.appShellEl.dataset.titleLocked = showTitle ? '1' : '0';
-    if ('inert' in this.appShellEl) {
-      (this.appShellEl as HTMLElement & { inert: boolean }).inert = showTitle || hasOpenModal();
-    }
+    const showTitle = this.computeCurrentScreen() === 'title';
 
     if (!showTitle) {
       this.titleHostEl.innerHTML = '';
@@ -777,10 +808,78 @@ export class V2AppController {
     );
   }
 
+  private renderEndingOverlay(): void {
+    const run = this.getCurrentRun();
+    const isGallery = this.endingGalleryId !== null;
+    const isClimax = !isGallery && isRunPendingCampaignEnding(run);
+    const showEnding = isGallery || isClimax;
+
+    if (!showEnding) {
+      this.endingHostEl.innerHTML = '';
+      this.endingHostEl.style.display = 'none';
+      return;
+    }
+
+    this.endingHostEl.style.display = 'block';
+    renderEndingView(
+      this.endingHostEl,
+      {
+        profile: this.save.profile,
+        mode: isGallery ? 'gallery' : 'climax',
+        selectedEndingId: isGallery ? this.endingGalleryId : this.selectedEndingId,
+        climaxRun: isClimax ? run : null,
+        readOnly: this.isReadOnlyTab,
+      },
+      {
+        onSelectEnding: (endingId) => {
+          if (isClimax && this.isReadOnlyTab) return;
+          this.selectedEndingId = endingId;
+          soundEngine.play('relicRestore');
+          this.renderEndingOverlay();
+        },
+        onClearSelection: () => {
+          this.selectedEndingId = null;
+          soundEngine.play('click');
+          this.renderEndingOverlay();
+        },
+        onContinueToBase: () => {
+          if (isGallery) {
+            this.endingGalleryId = null;
+            this.selectedEndingId = null;
+            soundEngine.play('click');
+            this.syncAll();
+            return;
+          }
+          if (!this.canMutate()) return;
+          const activeRun = this.save.activeRun;
+          if (!activeRun || !isRunPendingCampaignEnding(activeRun)) return;
+          const chosen: EndingId = this.selectedEndingId ?? 'stargate_reignited';
+          const res = finalizeClimaxEnding(this.save.profile, activeRun, chosen);
+          this.save = {
+            ...this.save,
+            profile: res.profile,
+            activeRun: null,
+          };
+          this.selectedEndingId = null;
+          this.settlementDispositions = {};
+          this.activeDockingNotice = null;
+          this.titleEntered = true;
+          this.writeTitleSession(true);
+          this.triggerCrewComm('endless_unlock');
+          this.persist();
+          soundEngine.play('contractDeliver');
+          this.syncAll();
+        },
+      }
+    );
+  }
+
   private startShowcaseRun(trialId: V2TrialBuildId): void {
     this.titleEntered = true;
     this.writeTitleSession(true);
     this.prepareDraft = null;
+    this.selectedEndingId = null;
+    this.endingGalleryId = null;
     this.activeDockingNotice = null;
     this.activeCommBanner = null;
     this.settlementDispositions = {};
@@ -888,6 +987,12 @@ export class V2AppController {
         <span class="hud-logo-dot"></span>
         <span class="hud-title">星际拆解站</span>
         ${run?.isShowcase ? `<span class="v2-showcase-chip">4 站试玩</span>` : ''}
+        ${run?.isFinalCampaignRun ? `<span class="v3-hud-climax-chip">终局远征</span>` : ''}
+        ${
+          (run?.endlessThreat ?? 0) >= 1
+            ? `<span class="v3-hud-endless-chip">威压 ${run!.endlessThreat}</span>`
+            : ''
+        }
       </div>
       <div class="hud-actions">
         ${
@@ -1333,8 +1438,17 @@ export class V2AppController {
               this.awaitingEliteDecision = false;
               this.livePhaseBannerText = null;
               this.liveEnemySnapshots = [];
+              if (isRunPendingCampaignEnding(res.run)) {
+                this.selectedEndingId = null;
+              }
               this.setCurrentRun(res.run);
-              soundEngine.play(sim.outcome === 'victory' ? 'enemyDestroy' : 'hullHit');
+              soundEngine.play(
+                isRunPendingCampaignEnding(res.run)
+                  ? 'contractDeliver'
+                  : sim.outcome === 'victory'
+                  ? 'enemyDestroy'
+                  : 'hullHit'
+              );
               this.syncAll();
             }
           },
@@ -1491,6 +1605,10 @@ export class V2AppController {
           soundEngine.play('click');
           openV2CodexModal(this.modalHostEl, this.save.profile);
         },
+        onOpenCareer: () => {
+          soundEngine.play('click');
+          this.openCareerModal('overview');
+        },
       }
     );
   }
@@ -1613,13 +1731,34 @@ export class V2AppController {
 
   private openPrepareForContract(
     contractTemplateId: string,
-    preferredSectorOverride?: SectorId
+    preferredSectorOverride?: SectorId,
+    modeOverride?: {
+      readonly isFinalCampaignRun?: boolean;
+      readonly endlessThreat?: number;
+    }
   ): void {
     const p = this.save.profile;
     const unlockedSectors =
       p.campaign.unlockedSectors.length > 0 ? p.campaign.unlockedSectors : (['near_orbit'] as const);
+    const wantsFinal = Boolean(
+      modeOverride?.isFinalCampaignRun && isFinalCampaignMissionUnlocked(p).unlocked
+    );
+    const wantsEndlessThreat =
+      !wantsFinal && p.campaign.endlessUnlocked && (modeOverride?.endlessThreat ?? 0) >= 1
+        ? Math.max(
+            1,
+            Math.min(
+              Math.max(1, Math.min(10, p.campaign.maxEndlessThreat)),
+              Math.floor(modeOverride!.endlessThreat!)
+            )
+          )
+        : 0;
     const chosenSector: SectorId =
-      preferredSectorOverride && unlockedSectors.includes(preferredSectorOverride)
+      wantsFinal || wantsEndlessThreat >= 1
+        ? unlockedSectors.includes('stargate_abyss')
+          ? 'stargate_abyss'
+          : unlockedSectors[0] ?? 'near_orbit'
+        : preferredSectorOverride && unlockedSectors.includes(preferredSectorOverride)
         ? preferredSectorOverride
         : this.preferredSectorId && unlockedSectors.includes(this.preferredSectorId)
         ? this.preferredSectorId
@@ -1648,6 +1787,10 @@ export class V2AppController {
       slots,
       missingPresetEntries: [],
       presetNotice: null,
+      isFinalCampaignRun: wantsFinal,
+      endlessThreat: wantsEndlessThreat,
+      customSeedInput: '',
+      defaultSeed: createRandomSeed() >>> 0,
     };
     this.activeDockingNotice = null;
     this.syncAll();
@@ -1712,7 +1855,10 @@ export class V2AppController {
 
   private launchExpeditionFromDraft(draft: V2PrepareDraft): void {
     if (!this.canMutate()) return;
-    const deterministicSeed = deriveSessionRunSeed(this.urlBaseSeed, this.sessionLaunchIndex);
+    const customSeed = parseV3CustomSeedInput(draft.customSeedInput);
+    const effectiveSeed =
+      customSeed ?? deriveSessionRunSeed(this.urlBaseSeed, this.sessionLaunchIndex) ?? draft.defaultSeed;
+    const effectiveThreat = draft.isFinalCampaignRun ? 0 : draft.endlessThreat;
     const res = launchV2Expedition({
       profile: this.save.profile,
       contractTemplateId: draft.contractTemplateId,
@@ -1722,13 +1868,15 @@ export class V2AppController {
       slots: draft.slots,
       trialBuildId: draft.trialBuildId,
       sectorId: draft.sectorId,
-      seed: deterministicSeed,
+      seed: effectiveSeed,
+      isFinalCampaignRun: draft.isFinalCampaignRun,
+      endlessThreat: effectiveThreat,
     });
     if (!res.ok || !res.run) {
       this.showToast(res.errors.join('；') || '无法出航');
       return;
     }
-    if (this.urlBaseSeed !== null) {
+    if (customSeed === null && this.urlBaseSeed !== null) {
       this.sessionLaunchIndex += 1;
     }
     const nextProfile = recordV2SeenItems(res.profile, collectVisibleV2DefIdsForRun(res.run));
@@ -1767,13 +1915,21 @@ export class V2AppController {
       draft.crewId,
       draft.slots,
       draft.trialBuildId,
-      draft.sectorId
+      draft.sectorId,
+      {
+        isFinalCampaignRun: draft.isFinalCampaignRun,
+        endlessThreat: draft.isFinalCampaignRun ? 0 : draft.endlessThreat,
+      }
     );
     const previewBay = this.buildPreparePreviewBay(draft);
+    const fallbackPreviewSeed =
+      deriveSessionRunSeed(this.urlBaseSeed, this.sessionLaunchIndex) ?? draft.defaultSeed;
+    const effectivePreviewSeed =
+      parseV3CustomSeedInput(draft.customSeedInput) ?? fallbackPreviewSeed;
 
     renderPrepareView(
       this.leftPanelEl,
-      { profile: p, draft, readOnly, validation },
+      { profile: p, draft, readOnly, validation, effectivePreviewSeed, fallbackPreviewSeed },
       {
         onBack: () => {
           this.prepareDraft = null;
@@ -1783,9 +1939,51 @@ export class V2AppController {
         onSelectSector: (sectorId) => {
           if (!p.campaign.unlockedSectors.includes(sectorId)) return;
           draft.sectorId = sectorId;
+          if (sectorId !== 'stargate_abyss' && draft.isFinalCampaignRun) {
+            draft.isFinalCampaignRun = false;
+          }
           this.preferredSectorId = sectorId;
           soundEngine.play('click');
           this.syncAll();
+        },
+        onSelectStandardMode: () => {
+          draft.isFinalCampaignRun = false;
+          draft.endlessThreat = 0;
+          soundEngine.play('click');
+          this.syncAll();
+        },
+        onSelectFinalMissionMode: () => {
+          if (!isFinalCampaignMissionUnlocked(p).unlocked) return;
+          draft.isFinalCampaignRun = true;
+          draft.endlessThreat = 0;
+          draft.sectorId = 'stargate_abyss';
+          this.preferredSectorId = 'stargate_abyss';
+          soundEngine.play('energyLink');
+          this.syncAll();
+        },
+        onSelectEndlessMode: () => {
+          if (!p.campaign.endlessUnlocked) return;
+          const maxAllowed = Math.max(1, Math.min(10, Math.floor(p.campaign.maxEndlessThreat || 1)));
+          draft.isFinalCampaignRun = false;
+          draft.endlessThreat = Math.max(1, Math.min(maxAllowed, draft.endlessThreat || 1));
+          if (p.campaign.unlockedSectors.includes('stargate_abyss')) {
+            draft.sectorId = 'stargate_abyss';
+            this.preferredSectorId = 'stargate_abyss';
+          }
+          soundEngine.play('energyLink');
+          this.syncAll();
+        },
+        onSelectEndlessThreat: (threat) => {
+          if (!p.campaign.endlessUnlocked) return;
+          const maxAllowed = Math.max(1, Math.min(10, Math.floor(p.campaign.maxEndlessThreat || 1)));
+          if (threat < 1 || threat > maxAllowed) return;
+          draft.isFinalCampaignRun = false;
+          draft.endlessThreat = threat;
+          soundEngine.play('click');
+          this.syncAll();
+        },
+        onChangeCustomSeed: (raw) => {
+          draft.customSeedInput = raw;
         },
         onPickTrial: (tid) => {
           const spec = V2_TRIAL_BUILDS[tid];
@@ -2610,6 +2808,12 @@ export class V2AppController {
             result.newlyUnlockedSectors && result.newlyUnlockedSectors.length > 0
               ? `解锁星区：${result.newlyUnlockedSectors.map((sid) => getV3SectorDef(sid).name).join('、')}`
               : null,
+            result.endlessClearedThreat
+              ? `无尽深渊 威压 ${result.endlessClearedThreat} 通关`
+              : null,
+            result.newlyUnlockedAchievementIds && result.newlyUnlockedAchievementIds.length > 0
+              ? `解锁成就 ×${result.newlyUnlockedAchievementIds.length}`
+              : null,
             result.crewMasteryUpgraded
               ? `${V2_CREW[result.crewMasteryUpgraded.crewId].name}专精升至 Lv.${result.crewMasteryUpgraded.toTier}`
               : null,
@@ -2751,6 +2955,62 @@ export class V2AppController {
         this.preferredSectorId = sectorId;
         this.openPrepareForContract(this.pickRecommendedContractId(this.save.profile), sectorId);
       },
+      onLaunchFinalMission: () => {
+        if (!this.canMutate()) return;
+        if (!isFinalCampaignMissionUnlocked(this.save.profile).unlocked) return;
+        this.preferredSectorId = 'stargate_abyss';
+        this.openPrepareForContract(
+          this.pickRecommendedContractId(this.save.profile),
+          'stargate_abyss',
+          { isFinalCampaignRun: true }
+        );
+      },
+      onOpenEndless: () => {
+        if (!this.canMutate()) return;
+        if (!this.save.profile.campaign.endlessUnlocked) return;
+        this.preferredSectorId = 'stargate_abyss';
+        this.openPrepareForContract(
+          this.pickRecommendedContractId(this.save.profile),
+          'stargate_abyss',
+          { endlessThreat: 1 }
+        );
+      },
+    });
+  }
+
+  private openCareerModal(initialTab: CareerModalTab = 'overview'): void {
+    openV3CareerModal(this.modalHostEl, () => this.save.profile, {
+      readOnly: this.isReadOnlyTab,
+      initialTab,
+      onClaimAchievement: (achievementId: string) => {
+        if (this.isReadOnlyTab || !this.tabGuard.canWrite()) {
+          return {
+            ok: false,
+            rewardCredits: 0,
+            rewardParts: 0,
+            error: '当前窗口为只读状态',
+          };
+        }
+        const res = claimV3Achievement(this.save.profile, achievementId);
+        if (res.ok) {
+          this.save = { ...this.save, profile: res.profile };
+          this.persist();
+          soundEngine.play('relicRestore');
+          this.syncAll();
+        }
+        return {
+          ok: res.ok,
+          rewardCredits: res.rewardCredits,
+          rewardParts: res.rewardParts,
+          error: res.error,
+        };
+      },
+      onReplayEnding: (endingId: EndingId) => {
+        this.endingGalleryId = endingId;
+        this.selectedEndingId = endingId;
+        soundEngine.play('click');
+        this.syncAll();
+      },
     });
   }
 
@@ -2793,6 +3053,8 @@ export class V2AppController {
         this.save = createFreshV2SaveData();
         this.showcaseRun = null;
         this.prepareDraft = null;
+        this.selectedEndingId = null;
+        this.endingGalleryId = null;
         this.activeDockingNotice = null;
         this.activeCommBanner = null;
         this.preferredSectorId = null;

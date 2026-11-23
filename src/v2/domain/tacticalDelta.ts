@@ -154,6 +154,8 @@ interface DeltaSimContext {
   readonly crewMasteryTier?: number;
   readonly encounterKind?: string;
   readonly bossId?: string;
+  readonly endlessThreat?: number;
+  readonly endlessMutatorIds?: readonly string[];
 }
 
 function findBestPlacementForItem(
@@ -207,6 +209,8 @@ function findBestPlacementForItem(
           crewMasteryTier: simCtx?.crewMasteryTier,
           encounterKind: simCtx?.encounterKind,
           bossId: simCtx?.bossId,
+          endlessThreat: simCtx?.endlessThreat,
+          endlessMutatorIds: simCtx?.endlessMutatorIds,
         });
         const linkBonus = st.links.length * 100;
         const winBonus = sim.outcome === 'victory' ? 10_000 : 0;
@@ -331,6 +335,8 @@ export function computeV2PlacementTacticalDelta(params: {
     crewMasteryTier: params.crewMasteryTier ?? params.run?.crewMasteryTier ?? 0,
     encounterKind: ref.encounterKind,
     bossId: ref.bossId,
+    endlessThreat: params.run?.endlessThreat,
+    endlessMutatorIds: params.run?.endlessMutatorIds,
   };
 
   if (params.zone === 'staging') {
@@ -346,6 +352,8 @@ export function computeV2PlacementTacticalDelta(params: {
       crewMasteryTier: simCtx.crewMasteryTier,
       encounterKind: simCtx.encounterKind,
       bossId: simCtx.bossId,
+      endlessThreat: simCtx.endlessThreat,
+      endlessMutatorIds: simCtx.endlessMutatorIds,
     });
 
     let chosenSpot: { x: number; y: number; rotation: V2Rotation; bayAfter: V2CargoBayState } | null = null;
@@ -418,6 +426,8 @@ export function computeV2PlacementTacticalDelta(params: {
       crewMasteryTier: simCtx.crewMasteryTier,
       encounterKind: simCtx.encounterKind,
       bossId: simCtx.bossId,
+      endlessThreat: simCtx.endlessThreat,
+      endlessMutatorIds: simCtx.endlessMutatorIds,
     });
     const cmp = formatSimComparison(ref.label, baselineSim, afterSim, 'install');
 
@@ -449,6 +459,8 @@ export function computeV2PlacementTacticalDelta(params: {
     crewMasteryTier: simCtx.crewMasteryTier,
     encounterKind: simCtx.encounterKind,
     bossId: simCtx.bossId,
+    endlessThreat: simCtx.endlessThreat,
+    endlessMutatorIds: simCtx.endlessMutatorIds,
   });
   const simCurrent = simulateV2Combat({
     resultId: 'delta_cur',
@@ -463,6 +475,8 @@ export function computeV2PlacementTacticalDelta(params: {
     crewMasteryTier: simCtx.crewMasteryTier,
     encounterKind: simCtx.encounterKind,
     bossId: simCtx.bossId,
+    endlessThreat: simCtx.endlessThreat,
+    endlessMutatorIds: simCtx.endlessMutatorIds,
   });
 
   let synergyLine: string;

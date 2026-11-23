@@ -8,10 +8,16 @@ import {
   type V2EquipmentKind,
 } from '../data/equipment';
 import { getV3GadgetDef } from '../data/gadgets';
-import { V3_SECTORS, getV3SectorDef } from '../data/sectors';
+import {
+  MAX_ENDLESS_THREAT,
+  V3_SECTORS,
+  getV3SectorDef,
+  isEndlessMutatorId,
+  rollEndlessMutators,
+} from '../data/sectors';
 import type { V2Rotation } from '../data/shapes';
 import { V2_SHIPS, type V2ShipId } from '../data/ships';
-import { shouldTriggerRelicPitySignal } from './campaign';
+import { isFinalCampaignMissionUnlocked, shouldTriggerRelicPitySignal } from './campaign';
 import { createV2ContractInstance, generateContractBonusObjective } from './contracts';
 import { getEffectiveShipLoadoutBudget, getEffectiveShipMaxHp } from './dismantle';
 import {
@@ -63,6 +69,25 @@ export interface V2PrepareValidation {
   readonly totalBudget: number;
   readonly maxBudget: number;
   readonly ownedInstancesUsed: readonly string[];
+}
+
+export interface V2PrepareModeOptions {
+  readonly isFinalCampaignRun?: boolean;
+  readonly endlessThreat?: number;
+  readonly endlessMutatorIds?: readonly string[];
+}
+
+/**
+ * Pure uint32 parser for Endless Challenge custom seed input (mirrors `?seed=<uint32>`).
+ * Returns null if blank or invalid.
+ */
+export function parseV3CustomSeedInput(raw: string | undefined | null): number | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const num = Number(trimmed);
+  if (!Number.isFinite(num) || !Number.isSafeInteger(num) || num < 0) return null;
+  return Math.min(0xffffffff, num) >>> 0;
 }
 
 /**
@@ -124,7 +149,8 @@ export function validateV2PrepareLoadout(
   crewId: V2CrewId | null,
   slots: readonly V2PrepareSlotEntry[],
   trialBuildId: V2TrialBuildId | null = null,
-  sectorId: SectorId = 'near_orbit'
+  sectorId: SectorId = 'near_orbit',
+  options?: V2PrepareModeOptions
 ): V2PrepareValidation {
   const errors: string[] = [];
   if (!Object.prototype.hasOwnProperty.call(V3_SECTORS, sectorId)) {
@@ -138,6 +164,47 @@ export function validateV2PrepareLoadout(
   }
   if (crewId !== null && !profile.unlockedCrew.includes(crewId)) {
     errors.push('所选船员尚未解锁');
+  }
+
+  // F17: Act III Final Campaign Mission domain gating
+  const isFinalCampaignRun = Boolean(options?.isFinalCampaignRun);
+  const rawThreat = options?.endlessThreat;
+  if (isFinalCampaignRun) {
+    const gate = isFinalCampaignMissionUnlocked(profile);
+    if (!gate.unlocked) {
+      errors.push(
+        `星门重启远征前置未满足：${gate.unmetReasons[0] ?? '请先完成第三幕前置目标'}`
+      );
+    }
+    if (sectorId !== 'stargate_abyss') {
+      errors.push('星门重启远征必须在「古代星门禁区」执行');
+    }
+    if (rawThreat !== undefined && rawThreat !== 0) {
+      errors.push('星门重启远征与无尽深渊不可同时启用');
+    }
+  }
+
+  // F18: Endless Abyss (威压 1..10) domain gating
+  if (rawThreat !== undefined && rawThreat !== 0) {
+    if (
+      typeof rawThreat !== 'number' ||
+      !Number.isFinite(rawThreat) ||
+      !Number.isInteger(rawThreat) ||
+      rawThreat < 1 ||
+      rawThreat > MAX_ENDLESS_THREAT
+    ) {
+      errors.push(`无尽深渊威压等级必须在 1–${MAX_ENDLESS_THREAT} 之间`);
+    } else if (!profile.campaign.endlessUnlocked) {
+      errors.push('无尽深渊尚未解锁（通关第三幕「星门重启远征」后解锁）');
+    } else {
+      const maxAllowed = Math.max(
+        1,
+        Math.min(MAX_ENDLESS_THREAT, Math.floor(profile.campaign.maxEndlessThreat))
+      );
+      if (rawThreat > maxAllowed) {
+        errors.push(`当前最高可选无尽深渊威压为 威压 ${maxAllowed}（需逐级通关解锁更高威压）`);
+      }
+    }
   }
 
   const maxBudget = getEffectiveShipLoadoutBudget(profile, shipId);
@@ -309,6 +376,7 @@ export function launchV2Expedition(params: {
   readonly errors: readonly string[];
 } {
   const trialBuildId = params.trialBuildId ?? null;
+  const isFinalCampaignRun = Boolean(params.isFinalCampaignRun);
   const sectorId: SectorId = params.sectorId ?? 'near_orbit';
   const check = validateV2PrepareLoadout(
     params.profile,
@@ -316,7 +384,12 @@ export function launchV2Expedition(params: {
     params.crewId,
     params.slots,
     trialBuildId,
-    sectorId
+    sectorId,
+    {
+      isFinalCampaignRun,
+      endlessThreat: params.endlessThreat,
+      endlessMutatorIds: params.endlessMutatorIds,
+    }
   );
   if (!check.valid) {
     return { ok: false, profile: params.profile, run: null, errors: check.errors };
@@ -324,7 +397,25 @@ export function launchV2Expedition(params: {
 
   const tpl =
     V2_CONTRACT_TEMPLATES[params.contractTemplateId] ?? V2_CONTRACT_TEMPLATES.free_salvage;
-  const seed = (params.seed ?? createRandomSeed()) >>> 0;
+  const rawSeed = params.seed;
+  const seed =
+    typeof rawSeed === 'number' && Number.isFinite(rawSeed) && rawSeed >= 0
+      ? Math.min(0xffffffff, Math.floor(rawSeed)) >>> 0
+      : createRandomSeed() >>> 0;
+  const effectiveThreat = isFinalCampaignRun
+    ? 0
+    : Math.max(0, Math.min(MAX_ENDLESS_THREAT, Math.floor(params.endlessThreat ?? 0)));
+  const explicitValidMutators =
+    params.endlessMutatorIds && params.endlessMutatorIds.length > 0
+      ? Array.from(new Set(params.endlessMutatorIds.filter((id) => isEndlessMutatorId(id))))
+      : [];
+  const effectiveMutatorIds =
+    effectiveThreat >= 1
+      ? explicitValidMutators.length > 0
+        ? explicitValidMutators
+        : [...rollEndlessMutators(seed, effectiveThreat)]
+      : [];
+
   const runId = `v2run_${seed.toString(36)}_${params.profile.totalRuns + 1}`;
   const streams = createV2RngStreams(seed);
   const pity = shouldTriggerRelicPitySignal(params.profile, sectorId);
@@ -338,20 +429,23 @@ export function launchV2Expedition(params: {
     allowImproved: params.allowImproved ?? true,
     maxLayers: params.maxLayers ?? 6,
     sectorId,
-    endlessThreat: params.endlessThreat ?? 0,
-    isFinalCampaignRun: Boolean(params.isFinalCampaignRun),
+    endlessThreat: effectiveThreat,
+    isFinalCampaignRun,
     guaranteedRelicDefId: pity.triggered ? pity.relicDefId : null,
     researchLabTier: getFacilityTier(params.profile, 'research_lab'),
     displayTier: getFacilityTier(params.profile, 'display'),
   });
 
   const bonusObjective = generateContractBonusObjective(tpl, seed);
-  const contract = createV2ContractInstance(
+  const baseContract = createV2ContractInstance(
     tpl.templateId,
     generated.markedNodeIds,
     runId,
     bonusObjective
   );
+  const contract = isFinalCampaignRun
+    ? { ...baseContract, name: '星门重启远征' }
+    : baseContract;
 
   // Atomically move selected owned items from warehouse into run bay, and mint loan items
   const usedOwnedIds = new Set<string>(check.ownedInstancesUsed);
@@ -441,15 +535,15 @@ export function launchV2Expedition(params: {
     navigatorFreeJumpUsed: false,
     settlementReason: null,
     sectorId,
-    endlessThreat: params.endlessThreat ?? 0,
-    endlessMutatorIds: params.endlessMutatorIds ? [...params.endlessMutatorIds] : [],
+    endlessThreat: effectiveThreat,
+    endlessMutatorIds: effectiveMutatorIds,
     recentEquipmentKinds: [],
     usedEventIds: [...generated.usedEventIds],
     ...(bonusObjective ? { bonusObjective } : {}),
     tacticalChargesMax: 1,
     tacticalChargesUsed: 0,
     salvagePartsEarned: 0,
-    isFinalCampaignRun: Boolean(params.isFinalCampaignRun),
+    isFinalCampaignRun,
     crewMasteryTier,
     defeatedBossIdsThisRun: [],
     defeatedEnemyKindsThisRun: [],

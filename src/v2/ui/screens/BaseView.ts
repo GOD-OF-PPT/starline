@@ -2,6 +2,7 @@ import { V2_CONTRACT_TEMPLATES } from '../../data/contracts';
 import { V2_ALL_EQUIPMENT_KINDS } from '../../data/equipment';
 import { V3_RELIC_PASSIVES } from '../../data/facilities';
 import { V2_SHIP_ORDER } from '../../data/ships';
+import { getClaimableAchievementCount } from '../../domain/achievements';
 import type { ActiveCampaignObjective } from '../../domain/campaign';
 import {
   getActiveRelicPassives,
@@ -35,6 +36,7 @@ export interface BaseViewActions {
   readonly onOpenFacilities: () => void;
   readonly onOpenRelics: () => void;
   readonly onOpenCodex: () => void;
+  readonly onOpenCareer: () => void;
 }
 
 export function renderBaseHeroView(
@@ -147,6 +149,7 @@ export function renderBaseHeroView(
   `;
 
   const warehouseCap = getEffectiveWarehouseCapacity(p);
+  const claimableAchCount = getClaimableAchievementCount(p);
   const relicPassives = getActiveRelicPassives(p);
   const activeRelicStripHtml =
     relicPassives.activeRelicIds.length > 0
@@ -194,7 +197,16 @@ export function renderBaseHeroView(
           <span>图鉴</span>
           <small class="num">${p.blueprints.length}/${V2_ALL_EQUIPMENT_KINDS.length} 蓝图</small>
         </button>
-        <!-- M6 (F18) slot: [data-testid="btn-open-career"] -->
+        <button type="button" class="v2-dock-btn" id="v2-dock-career" data-testid="btn-open-career">
+          ${
+            claimableAchCount > 0
+              ? `<span class="v3-dock-badge-dot" aria-label="可领取成就">${claimableAchCount}</span>`
+              : ''
+          }
+          ${svgIcon('medal', 17)}
+          <span>生涯档案</span>
+          <small class="num">${p.achievementsUnlocked.length}/18 成就</small>
+        </button>
       </div>
     </div>
   `;
@@ -232,4 +244,5 @@ export function renderBaseHeroView(
   overlayEl.querySelector('#v2-dock-fac')?.addEventListener('click', actions.onOpenFacilities);
   overlayEl.querySelector('#v2-dock-relics')?.addEventListener('click', actions.onOpenRelics);
   overlayEl.querySelector('#v2-dock-codex')?.addEventListener('click', actions.onOpenCodex);
+  overlayEl.querySelector('#v2-dock-career')?.addEventListener('click', actions.onOpenCareer);
 }

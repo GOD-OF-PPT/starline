@@ -19,7 +19,7 @@ import {
   type V2EquipmentKind,
   type V2UnlockFamilyId,
 } from '../data/equipment';
-import { getV3SectorDef } from '../data/sectors';
+import { aggregateEndlessMutatorEffects, getV3SectorDef } from '../data/sectors';
 import { getShipSignatureCommand } from '../data/ships';
 import { calculateV2BuildStats, type V2BuildStats } from './buildStatsV2';
 import { generateV2CombatRewardBundle } from './encounter';
@@ -164,15 +164,22 @@ function selectTargetByPolicy(
   return sorted[0];
 }
 
+function applyEnemyPierceBonus(basePierce: number, enemyPierceBonus: number): number {
+  const clampedBase = Math.max(0, Math.min(1, basePierce));
+  if (enemyPierceBonus <= 0) return clampedBase;
+  return Math.min(0.65, Number((clampedBase + enemyPierceBonus).toFixed(2)));
+}
+
 function snapshotUnits(
   units: readonly MutableUnit[],
   nextRound: number,
   bossDef: V3BossDefinition | null,
   encounterKind?: string,
-  bossId?: string
+  bossId?: string,
+  enemyPierceBonus = 0
 ): readonly V2CombatUnitSnapshot[] {
   return units.map((u) => {
-    const nextIntent =
+    const rawNextIntent =
       u.hp > 0
         ? resolveUnitIntentForRound({
             unit: u,
@@ -184,6 +191,20 @@ function snapshotUnits(
             bossId,
           })
         : undefined;
+    const nextIntent =
+      rawNextIntent && rawNextIntent.damage > 0 && enemyPierceBonus > 0
+        ? {
+            ...rawNextIntent,
+            pierceRatio: applyEnemyPierceBonus(
+              rawNextIntent.pierceRatio ?? u.pierceRatio,
+              enemyPierceBonus
+            ),
+          }
+        : rawNextIntent;
+    const displayPierceRatio =
+      enemyPierceBonus > 0
+        ? applyEnemyPierceBonus(u.pierceRatio, enemyPierceBonus)
+        : u.pierceRatio;
     return {
       enemyId: u.enemyId,
       name: u.name,
@@ -192,7 +213,7 @@ function snapshotUnits(
       maxHp: u.maxHp,
       damagePerRound: u.damagePerRound,
       armor: u.armor,
-      pierceRatio: u.pierceRatio,
+      pierceRatio: displayPierceRatio,
       ...(u.isBoss ? { isBoss: true } : {}),
       ...(u.maxShield > 0 || u.shield > 0
         ? { shield: u.shield, maxShield: Math.max(u.maxShield, u.shield) }
@@ -258,6 +279,7 @@ function processBossPhaseTransitions(params: {
   readonly justTransitionedBossIds: Set<string>;
   readonly encounterKind?: string;
   readonly bossId?: string;
+  readonly enemyPierceBonus?: number;
 }): void {
   const {
     enemies,
@@ -269,6 +291,7 @@ function processBossPhaseTransitions(params: {
     justTransitionedBossIds,
     encounterKind,
     bossId,
+    enemyPierceBonus = 0,
   } = params;
   if (!bossDef) return;
 
@@ -324,7 +347,14 @@ function processBossPhaseTransitions(params: {
           };
           enemies.push(summoned);
           livingCount += 1;
-          const snap = snapshotUnits([summoned], round + 1, bossDef, encounterKind, bossId)[0];
+          const snap = snapshotUnits(
+            [summoned],
+            round + 1,
+            bossDef,
+            encounterKind,
+            bossId,
+            enemyPierceBonus
+          )[0];
           if (snap) summonedEnemies.push(snap);
         }
       }
@@ -380,6 +410,8 @@ export function simulateV2Combat(params: {
   readonly bossId?: string;
   readonly overchargeCellActive?: boolean;
   readonly stargateRelayTier?: number;
+  readonly endlessThreat?: number;
+  readonly endlessMutatorIds?: readonly string[];
 }): V2CombatSimulation {
   const stats = params.precomputedStats ?? calculateV2BuildStats(params.bay);
   const sectorId: SectorId = params.sectorId ?? 'near_orbit';
@@ -387,6 +419,8 @@ export function simulateV2Combat(params: {
   const envModifierId = sector.envModifier.id;
   const masteryTier = Math.max(0, Math.min(2, Math.floor(params.crewMasteryTier ?? 0)));
   const relayTier = Math.max(0, Math.floor(params.stargateRelayTier ?? 0));
+  const endlessThreat = Math.max(0, Math.min(10, Math.floor(params.endlessThreat ?? 0)));
+  const mutatorEffects = aggregateEndlessMutatorEffects(params.endlessMutatorIds);
 
   const bossDef = resolveV3BossDefForEncounter({
     encounterKind: params.encounterKind,
@@ -410,39 +444,55 @@ export function simulateV2Combat(params: {
     const role = resolveUnitIntentRole(u, params.encounterKind, resolvedBossId);
     const shieldInit = resolveUnitInitialShield(u, params.encounterKind, resolvedBossId);
     const isMultiPhaseBoss = Boolean(u.isBoss && bossDef);
+    const effMaxHp =
+      mutatorEffects.enemyHpBonusPct > 0
+        ? Math.max(1, Math.round(u.maxHp * (1 + mutatorEffects.enemyHpBonusPct)))
+        : u.maxHp;
+    const effArmor = u.armor + (role === 'swarm_drone' ? 0 : mutatorEffects.enemyArmorBonus);
+    const effShield = shieldInit.shield + mutatorEffects.enemyOpeningShield;
+    const effMaxShield = Math.max(shieldInit.maxShield, effShield);
     return {
       enemyId: u.enemyId,
       name: u.name,
       spriteArchetype: u.spriteArchetype,
-      hp: u.maxHp,
-      maxHp: u.maxHp,
+      hp: effMaxHp,
+      maxHp: effMaxHp,
       damagePerRound: u.damagePerRound,
-      armor: u.armor,
+      armor: effArmor,
       pierceRatio: u.pierceRatio,
       isBoss: u.isBoss,
       role,
-      shield: shieldInit.shield,
-      maxShield: shieldInit.maxShield,
+      shield: effShield,
+      maxShield: effMaxShield,
       ...(isMultiPhaseBoss ? { currentPhase: 1, totalPhases: bossDef!.phases.length } : {}),
       phaseStartedRound: 1,
       summonsDone: 0,
     };
   });
 
-  const initialEnemies = snapshotUnits(enemies, 1, bossDef, params.encounterKind, resolvedBossId);
+  const initialEnemies = snapshotUnits(
+    enemies,
+    1,
+    bossDef,
+    params.encounterKind,
+    resolvedBossId,
+    mutatorEffects.enemyPierceBonus
+  );
   let playerHp = Math.max(0, params.startingHp);
 
-  // Opening shield: base build shield + Engineer Mastery T2 (+2) + Overcharge Cell (+4), capped at 20, then Sector 2 cryo_ion (-2, min 0)
+  // Opening shield: base build shield + Engineer Mastery T2 (+2) + Overcharge Cell (+4), capped at 20,
+  // then Sector 2 cryo_ion (-2, min 0) and Endless mutator openingShieldPenalty (e.g. ion_surge -2)
   const engineerOpeningShieldBonus = params.crewId === 'engineer' && masteryTier >= 2 ? 2 : 0;
   const overchargeShieldBonus = params.overchargeCellActive ? 4 : 0;
   const preEnvShield = Math.min(
     V2_MAX_BATTLE_SHIELD,
     stats.effectiveShield + engineerOpeningShieldBonus + overchargeShieldBonus
   );
-  const cryoOpenDrain = Math.max(0, 2 - stats.cryoDrainReduction);
-  let playerShield =
-    envModifierId === 'cryo_ion' ? Math.max(0, preEnvShield - cryoOpenDrain) : preEnvShield;
-  const cryoOpeningSuppressed = envModifierId === 'cryo_ion' && preEnvShield > playerShield;
+  const cryoOpenDrain = envModifierId === 'cryo_ion' ? Math.max(0, 2 - stats.cryoDrainReduction) : 0;
+  const mutatorOpenDrain = mutatorEffects.openingShieldPenalty;
+  let playerShield = Math.max(0, preEnvShield - cryoOpenDrain - mutatorOpenDrain);
+  const cryoOpeningSuppressed = envModifierId === 'cryo_ion' && cryoOpenDrain > 0 && preEnvShield > 0;
+  const mutatorOpeningSuppressed = mutatorOpenDrain > 0 && preEnvShield - cryoOpenDrain > playerShield;
   const startingPlayerShield = playerShield;
   const rounds: V2CombatRoundLog[] = [];
 
@@ -759,6 +809,7 @@ export function simulateV2Combat(params: {
       justTransitionedBossIds,
       encounterKind: params.encounterKind,
       bossId: resolvedBossId,
+      enemyPierceBonus: mutatorEffects.enemyPierceBonus,
     });
 
     // Step 4: Simultaneous enemy actions from startLiving using telegraphed round intents
@@ -782,7 +833,13 @@ export function simulateV2Combat(params: {
         encounterKind: params.encounterKind,
         bossId: resolvedBossId,
       });
-      enemyIntentsThisRound.push({ enemyId: enemy.enemyId, intent });
+      const basePierce = Math.max(0, Math.min(1, intent.pierceRatio ?? enemy.pierceRatio));
+      const mutatorPierce = applyEnemyPierceBonus(basePierce, mutatorEffects.enemyPierceBonus);
+      const loggedIntent: V3EnemyIntent =
+        intent.damage > 0 && mutatorEffects.enemyPierceBonus > 0
+          ? { ...intent, pierceRatio: mutatorPierce }
+          : intent;
+      enemyIntentsThisRound.push({ enemyId: enemy.enemyId, intent: loggedIntent });
 
       let rawDamage = 0;
       let pierceDamage = 0;
@@ -790,15 +847,14 @@ export function simulateV2Combat(params: {
       let hullDamage = 0;
       let empShieldDrained = 0;
 
-      // Gravity tide (+1) applies ONLY when the enemy actually fires an attack (intent.damage > 0)
+      // Gravity tide (+1) and Endless mutator enemyDamageBonus apply ONLY when enemy fires an attack (intent.damage > 0)
       if (intent.damage > 0) {
-        rawDamage = intent.damage + gravityEnemyDmgBonus;
+        rawDamage = intent.damage + gravityEnemyDmgBonus + mutatorEffects.enemyDamageBonus;
         if (empWeakenActiveThisRound && !empWeakenApplied) {
           rawDamage = Math.max(1, rawDamage - stats.enemyWeakenAmount);
           empWeakenApplied = true;
         }
-        const effectivePierceRatio =
-          Math.max(0, Math.min(1, intent.pierceRatio ?? enemy.pierceRatio)) * pierceMitigationFactor;
+        const effectivePierceRatio = mutatorPierce * pierceMitigationFactor;
         pierceDamage = effectivePierceRatio > 0 ? Math.floor(rawDamage * effectivePierceRatio) : 0;
         const normalDamage = rawDamage - pierceDamage;
         shieldAbsorbed = Math.min(playerShield, normalDamage);
@@ -879,7 +935,14 @@ export function simulateV2Combat(params: {
           };
           enemies.push(drone);
           livingCount += 1;
-          const snap = snapshotUnits([drone], round + 1, bossDef, params.encounterKind, resolvedBossId)[0];
+          const snap = snapshotUnits(
+            [drone],
+            round + 1,
+            bossDef,
+            params.encounterKind,
+            resolvedBossId,
+            mutatorEffects.enemyPierceBonus
+          )[0];
           if (snap) summonedEnemies.push(snap);
           enemySpecialNotes.push(`${enemy.name} 放出护航无人机`);
         }
@@ -914,31 +977,44 @@ export function simulateV2Combat(params: {
             justTransitionedBossIds,
             encounterKind: params.encounterKind,
             bossId: resolvedBossId,
+            enemyPierceBonus: mutatorEffects.enemyPierceBonus,
           });
         }
       }
     }
 
-    // Step 5b: End-of-round deterministic sector environmental effect + Coolant Vent shield regen
-    let envModifierEvent: string | undefined;
+    // Step 5b: End-of-round deterministic sector environmental effect + Endless mutator drain + Coolant Vent regen
+    const envNotes: string[] = [];
     if (envModifierId === 'cryo_ion') {
       if (round % 2 === 0) {
         const netCryoDrain = Math.max(0, 2 - stats.cryoDrainReduction);
         if (netCryoDrain === 0) {
-          envModifierEvent = '低温电离脉冲：冷却排热阀抵消余盾衰减';
+          envNotes.push('低温电离脉冲：冷却排热阀抵消余盾衰减');
         } else if (playerShield > 0) {
           const drained = Math.min(playerShield, netCryoDrain);
           playerShield -= drained;
-          envModifierEvent = `低温电离脉冲：余盾衰减 -${drained}`;
+          envNotes.push(`低温电离脉冲：余盾衰减 -${drained}`);
         } else {
-          envModifierEvent = '低温电离脉冲：无余盾，船体未受损';
+          envNotes.push('低温电离脉冲：无余盾，船体未受损');
         }
       } else if (round === 1 && cryoOpeningSuppressed) {
-        envModifierEvent = `低温电离场：开战护盾压制 -${preEnvShield - startingPlayerShield}`;
+        envNotes.push(`低温电离场：开战护盾压制 -${Math.min(preEnvShield, cryoOpenDrain)}`);
       }
     } else if (isGravitySurgeRound) {
-      envModifierEvent = '引力潮汐高潮：我方首击 +2 / 敌舰齐射各 +1';
+      envNotes.push('引力潮汐高潮：我方首击 +2 / 敌舰齐射各 +1');
     }
+
+    if (round === 1 && mutatorOpeningSuppressed) {
+      envNotes.push(`深渊电离过载：开战护盾 -${mutatorOpenDrain}`);
+    }
+    if (round % 2 === 0 && mutatorEffects.evenRoundShieldDrain > 0) {
+      if (playerShield > 0) {
+        const drained = Math.min(playerShield, mutatorEffects.evenRoundShieldDrain);
+        playerShield -= drained;
+        envNotes.push(`深渊电离过载：偶数轮余盾 -${drained}`);
+      }
+    }
+    const envModifierEvent = envNotes.length > 0 ? envNotes.join(' · ') : undefined;
 
     if (playerHp > 0 && enemies.some((u) => u.hp > 0) && stats.endOfRoundShieldRegen > 0) {
       playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + stats.endOfRoundShieldRegen);
@@ -954,7 +1030,14 @@ export function simulateV2Combat(params: {
       shieldAbsorbedTotal,
       playerHpAfter: playerHp,
       playerShieldAfter: playerShield,
-      enemiesAfter: snapshotUnits(enemies, round + 1, bossDef, params.encounterKind, resolvedBossId),
+      enemiesAfter: snapshotUnits(
+        enemies,
+        round + 1,
+        bossDef,
+        params.encounterKind,
+        resolvedBossId,
+        mutatorEffects.enemyPierceBonus
+      ),
       ...(envModifierEvent ? { envModifierEvent } : {}),
       ...(roundCmd ? { appliedTacticThisRound: roundCmd } : {}),
       ...(enemyIntentsThisRound.length > 0 ? { enemyIntentsThisRound } : {}),
@@ -1012,6 +1095,8 @@ export function simulateV2Combat(params: {
     ...(resolvedBossId ? { bossId: resolvedBossId } : {}),
     ...(params.overchargeCellActive ? { overchargeApplied: true } : {}),
     ...(relayTier > 0 ? { stargateRelayTier: relayTier } : {}),
+    ...(endlessThreat > 0 ? { endlessThreat } : {}),
+    ...(mutatorEffects.activeIds.length > 0 ? { endlessMutatorIds: mutatorEffects.activeIds } : {}),
   };
 }
 
@@ -1041,6 +1126,8 @@ export function previewV2CombatNode(
     bossId: resolveNodeBossId(node, run),
     overchargeCellActive: isCurrentNode ? Boolean(run.overchargeCellActive) : false,
     stargateRelayTier: options?.stargateRelayTier ?? 0,
+    endlessThreat: run.endlessThreat,
+    endlessMutatorIds: run.endlessMutatorIds,
   });
 }
 
@@ -1097,6 +1184,8 @@ function buildTacticalDecisionAtRound(params: {
       bossId,
       overchargeCellActive: Boolean(run.overchargeCellActive || baselineSim.overchargeApplied),
       stargateRelayTier: stargateRelayTier ?? baselineSim.stargateRelayTier ?? 0,
+      endlessThreat: run.endlessThreat ?? baselineSim.endlessThreat,
+      endlessMutatorIds: run.endlessMutatorIds ?? baselineSim.endlessMutatorIds,
     });
 
   const hpAtPause = prevRoundLog.playerHpAfter;
@@ -1171,11 +1260,14 @@ function buildTacticalDecisionAtRound(params: {
   const pauseRoundLog = baselineSim.rounds[pauseRound - 1];
   const isGravitySurge =
     getV3SectorDef(run.sectorId).envModifier.id === 'gravity_tide' && pauseRound % 2 === 0;
+  const mutatorEffects = aggregateEndlessMutatorEffects(
+    run.endlessMutatorIds ?? baselineSim.endlessMutatorIds
+  );
   const enemyThreatDamage = pauseRoundLog
     ? pauseRoundLog.enemyAttacks.reduce((sum, a) => sum + a.rawDamage, 0)
     : aliveEnemies.reduce((sum, e) => {
         const dmg = e.nextIntent ? e.nextIntent.damage : e.damagePerRound;
-        return sum + (dmg > 0 ? dmg + (isGravitySurge ? 1 : 0) : 0);
+        return sum + (dmg > 0 ? dmg + (isGravitySurge ? 1 : 0) + mutatorEffects.enemyDamageBonus : 0);
       }, 0);
 
   const bossSnap = aliveEnemies.find((e) => e.isBoss);
@@ -1235,12 +1327,15 @@ function findNextPauseRoundAfterCommit(
  * shared by Map forecast, Combat Pre-View, and completeV2CombatAtCurrentNode payout.
  */
 export function getEffectiveV2CombatBounty(
-  run: Pick<V2RunState, 'crewId' | 'crewMasteryTier'>,
+  run: Pick<V2RunState, 'crewId' | 'crewMasteryTier' | 'endlessMutatorIds'>,
   baseBounty: number
 ): number {
-  return run.crewId === 'salvager' && (run.crewMasteryTier ?? 0) >= 2
-    ? Math.ceil(baseBounty * 1.2)
-    : baseBounty;
+  const afterCrew =
+    run.crewId === 'salvager' && (run.crewMasteryTier ?? 0) >= 2
+      ? Math.ceil(baseBounty * 1.2)
+      : baseBounty;
+  const mutatorBonus = aggregateEndlessMutatorEffects(run.endlessMutatorIds).bountyMultBonus;
+  return mutatorBonus > 0 ? Math.round(afterCrew * (1 + mutatorBonus)) : afterCrew;
 }
 
 /**
@@ -1287,6 +1382,8 @@ export function startV2CombatAtCurrentNode(
     bossId,
     overchargeCellActive: Boolean(run.overchargeCellActive),
     stargateRelayTier: options?.stargateRelayTier ?? 0,
+    endlessThreat: run.endlessThreat,
+    endlessMutatorIds: run.endlessMutatorIds,
   });
 
   const tacticalEnabled =
@@ -1438,6 +1535,8 @@ export function commitV2EliteTacticDecision(
       run.overchargeCellActive || run.activeCombat.simulation.overchargeApplied
     ),
     stargateRelayTier: relayTier,
+    endlessThreat: run.endlessThreat ?? run.activeCombat.simulation.endlessThreat,
+    endlessMutatorIds: run.endlessMutatorIds ?? run.activeCombat.simulation.endlessMutatorIds,
   });
 
   // Check if another charge remains and combat continues to a later pause round (e.g. Boss Phase 2 / 3)
@@ -1527,6 +1626,55 @@ export function completeV2CombatAtCurrentNode(
     };
   }
 
+  const effectiveBounty = getEffectiveV2CombatBounty(run, node.combat.bounty);
+  const grappleWinParts = calculateV2BuildStats(run.bay).bonusSalvagePartsPerWin;
+  const mutatorWinParts = aggregateEndlessMutatorEffects(run.endlessMutatorIds).salvagePartsPerWin;
+  const totalWinParts = grappleWinParts + mutatorWinParts;
+  const bossIdOnNode = resolveNodeBossId(node, run);
+
+  const prevBosses = run.defeatedBossIdsThisRun ?? [];
+  const nextBosses =
+    bossIdOnNode && !prevBosses.includes(bossIdOnNode)
+      ? [...prevBosses, bossIdOnNode]
+      : [...prevBosses];
+
+  const prevKinds = run.defeatedEnemyKindsThisRun ?? [];
+  const kindAdditions = [node.combat.encounterKind, ...(bossIdOnNode ? [bossIdOnNode] : [])];
+  const nextDefeatedKinds = Array.from(new Set([...prevKinds, ...kindAdditions]));
+
+  // F17 Act III Climax Victory: defeating boss_leviathan during isFinalCampaignRun transitions
+  // directly into reload-safe SETTLEMENT/safe_return pending Campaign Ending Choice!
+  if (run.isFinalCampaignRun === true && bossIdOnNode === 'boss_leviathan') {
+    const resolvedNodes = {
+      ...run.graph.nodes,
+      [node.nodeId]: {
+        ...node,
+        resolved: true,
+      },
+    };
+    return {
+      ok: true,
+      run: {
+        ...run,
+        hp: sim.finalPlayerHpAfterRepair,
+        wallet: run.wallet + effectiveBounty,
+        salvagePartsEarned: (run.salvagePartsEarned ?? 0) + totalWinParts,
+        graph: {
+          ...run.graph,
+          nodes: resolvedNodes,
+        },
+        activeCombat: null,
+        overchargeCellActive: false,
+        pendingReward: null,
+        phase: 'SETTLEMENT',
+        settlementReason: 'safe_return',
+        claimedEventIds: [...run.claimedEventIds, claimKey],
+        defeatedBossIdsThisRun: nextBosses,
+        defeatedEnemyKindsThisRun: nextDefeatedKinds,
+      },
+    };
+  }
+
   const effectiveRecent =
     recentEquipmentKinds && recentEquipmentKinds.length > 0
       ? recentEquipmentKinds
@@ -1545,27 +1693,13 @@ export function completeV2CombatAtCurrentNode(
       ? [...effectiveRecent, offeredKind].slice(-4)
       : [...effectiveRecent];
 
-  const effectiveBounty = getEffectiveV2CombatBounty(run, node.combat.bounty);
-  const grappleWinParts = calculateV2BuildStats(run.bay).bonusSalvagePartsPerWin;
-  const bossIdOnNode = resolveNodeBossId(node, run);
-
-  const prevBosses = run.defeatedBossIdsThisRun ?? [];
-  const nextBosses =
-    bossIdOnNode && !prevBosses.includes(bossIdOnNode)
-      ? [...prevBosses, bossIdOnNode]
-      : [...prevBosses];
-
-  const prevKinds = run.defeatedEnemyKindsThisRun ?? [];
-  const kindAdditions = [node.combat.encounterKind, ...(bossIdOnNode ? [bossIdOnNode] : [])];
-  const nextDefeatedKinds = Array.from(new Set([...prevKinds, ...kindAdditions]));
-
   return {
     ok: true,
     run: {
       ...run,
       hp: sim.finalPlayerHpAfterRepair,
       wallet: run.wallet + effectiveBounty,
-      salvagePartsEarned: (run.salvagePartsEarned ?? 0) + grappleWinParts,
+      salvagePartsEarned: (run.salvagePartsEarned ?? 0) + totalWinParts,
       rngStreams: nextStreams,
       activeCombat: null,
       overchargeCellActive: false,
