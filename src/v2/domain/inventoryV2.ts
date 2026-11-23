@@ -9,6 +9,7 @@ import {
 import {
   V2_SHIPS,
   isCellDisabledForShip,
+  isCellPowerCellForShip,
   isCellValidForShip,
   type V2ShipId,
 } from '../data/ships';
@@ -417,6 +418,32 @@ export function areV2PlacedItemsAdjacent(a: V2PlacedItem, b: V2PlacedItem): bool
 }
 
 /**
+ * Returns true if any cell occupied by `placed` sits on one of the hull's highlighted Power Cells.
+ */
+export function doesV2PlacedItemTouchPowerCell(
+  bay: Pick<V2CargoBayState, 'shipId'>,
+  placed: V2PlacedItem
+): boolean {
+  const cells = getV2PlacedCells(placed);
+  return cells.some((c) => isCellPowerCellForShip(bay.shipId, c.x, c.y));
+}
+
+/**
+ * Returns the set of placed equipment instanceIds currently powered by at least one hull Power Cell.
+ */
+export function getV2PowerCellBoostedInstanceIds(
+  bay: V2CargoBayState
+): ReadonlySet<string> {
+  const boosted = new Set<string>();
+  for (const placed of bay.placed) {
+    if (placed.item.category === 'equipment' && doesV2PlacedItemTouchPowerCell(bay, placed)) {
+      boosted.add(placed.item.instanceId);
+    }
+  }
+  return boosted;
+}
+
+/**
  * Finds first legal placement on the hull for a shape (helpful for presets & AI simulation).
  */
 export function findFirstLegalV2Placement(
@@ -456,7 +483,7 @@ export function canFitAllV2Shapes(
     (a, b) => V2_SHAPES[b].cells.length - V2_SHAPES[a].cells.length
   );
 
-  // Build valid cell bitmask index (max 5*4 = 20 bits -> fits cleanly in 32-bit int!)
+  // Build valid cell bitmask index (max 5*5 = 25 bits -> fits cleanly in 32-bit int!)
   const bitIndex = (x: number, y: number) => y * ship.cols + x;
   let blockedMask = 0;
   for (let y = 0; y < ship.rows; y++) {

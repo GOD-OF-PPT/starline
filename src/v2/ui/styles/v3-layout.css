@@ -1,0 +1,360 @@
+/* ==========================================================================
+   V3 Modular Layout & Presentation Polish (Scoped strictly to V2/V3 Shell)
+   Legacy V1 (?mode=v1) stays 100% isolated from these rules.
+   ========================================================================== */
+
+/* Screen & Overlay Structural Wrappers */
+.v3-screen-root {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.v3-sticky-panel-root {
+  min-height: 0;
+  height: 100%;
+}
+
+.v3-overlay-screen {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.v3-overlay-screen > * {
+  pointer-events: auto;
+}
+
+.v3-overlay-screen > .scene-stage-tag,
+.v3-overlay-screen > .v2-combat-event-ticker {
+  pointer-events: none;
+}
+
+/* Title Screen Act Badge & More Modes Modal */
+.v3-title-act-row {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 6px;
+}
+
+.v3-title-act-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #f6d38b;
+  background: rgba(246, 184, 82, 0.14);
+  border: 1px solid rgba(246, 184, 82, 0.42);
+}
+
+.v3-more-modes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.v3-mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md, 10px);
+  background: rgba(15, 27, 44, 0.72);
+  border: 1px solid rgba(126, 162, 206, 0.24);
+}
+
+.v3-mode-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  font-size: 14px;
+}
+
+.v3-mode-card-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-secondary, #a8bdd4);
+}
+
+/* Sector Selector Strip in Prepare */
+.v2-sector-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.v2-sector-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 7px 11px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(14, 26, 44, 0.78);
+  border: 1px solid rgba(110, 148, 192, 0.3);
+  color: var(--text-primary, #eaf2fc);
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.v2-sector-chip strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.v2-sector-chip small {
+  font-size: 11px;
+  color: var(--text-secondary, #9db4ce);
+}
+
+.v2-sector-chip.active {
+  border-color: rgba(98, 214, 223, 0.72);
+  background: rgba(24, 54, 78, 0.65);
+  box-shadow: 0 0 0 1px rgba(98, 214, 223, 0.25);
+}
+
+.v2-shell .banners-stack:empty {
+  display: none;
+}
+
+/* Sticky Scrollable Panels (Prepare & Settlement 1366x768 fold fix) */
+.v3-panel-scroll-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.v3-sticky-cta-footer {
+  flex-shrink: 0;
+  position: sticky;
+  bottom: 0;
+  z-index: 6;
+  background: linear-gradient(180deg, rgba(16, 25, 40, 0.84) 0%, rgba(16, 25, 40, 0.98) 28%);
+  border-top: 1px solid rgba(126, 162, 206, 0.2);
+  padding: 8px 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+@media (min-width: 860px) and (min-height: 540px) {
+  .v2-shell.phase-prepare,
+  .v2-shell.phase-settlement {
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow: hidden;
+    padding-bottom: 10px;
+  }
+
+  .v2-shell.phase-prepare .v2-top-hud,
+  .v2-shell.phase-settlement .v2-top-hud,
+  .v2-shell.phase-prepare .banners-stack,
+  .v2-shell.phase-settlement .banners-stack {
+    flex-shrink: 0;
+  }
+
+  .v2-shell.phase-prepare .main-layout,
+  .v2-shell.phase-settlement .main-layout {
+    flex: 1 1 0;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .v2-shell.phase-prepare .scene-card {
+    height: 148px;
+  }
+
+  .v2-shell.phase-settlement .scene-card {
+    height: 136px;
+  }
+
+  .v2-shell.phase-prepare .panel-left,
+  .v2-shell.phase-settlement .panel-left {
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    padding-bottom: 0;
+  }
+
+  .v2-shell.phase-prepare .panel-right,
+  .v2-shell.phase-settlement .panel-right {
+    max-height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .v2-shell.phase-prepare .v3-panel-scroll-body,
+  .v2-shell.phase-settlement .v3-panel-scroll-body {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+    padding-bottom: 8px;
+  }
+}
+
+@media (min-width: 860px) {
+  .v2-shell.phase-arrange .v3-arrange-inspector-slot {
+    min-width: 0;
+  }
+
+  .v2-shell.phase-arrange .v3-arrange-inspector-slot:empty {
+    display: none;
+  }
+
+  .v2-shell.phase-arrange .v3-arrange-inspector-slot .v2-inspector-bar {
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 859px) {
+  .v3-sticky-cta-footer {
+    bottom: env(safe-area-inset-bottom, 0px);
+    background: rgba(16, 25, 40, 0.96);
+    padding: 8px 0 10px;
+  }
+
+  .v3-arrange-inspector-slot {
+    display: none;
+  }
+}
+
+/* Settlement Collapsed Loan Summary */
+.v3-loan-summary-collapse {
+  margin-top: 6px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(15, 27, 44, 0.62);
+  border: 1px dashed rgba(126, 152, 184, 0.36);
+  padding: 6px 10px;
+  font-size: 12.5px;
+  color: var(--text-secondary, #a8bdd4);
+}
+
+.v3-loan-summary-collapse > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.v3-loan-summary-collapse > summary::-webkit-details-marker {
+  display: none;
+}
+
+.v3-loan-summary-hint {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.78;
+}
+
+.v3-loan-summary-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(126, 152, 184, 0.18);
+}
+
+.v3-loan-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  background: rgba(34, 52, 76, 0.65);
+  color: var(--text-primary, #dce8f8);
+}
+
+/* High-Contrast Star Map DAG Arrows */
+.v2-shell .v2-dag-stage .v2-dag-grid {
+  column-gap: 18px;
+  row-gap: 10px;
+  grid-auto-columns: minmax(68px, 1fr);
+}
+
+.v2-shell .v2-dag-pair {
+  gap: 12px;
+}
+
+.v2-shell .v2-dag-edges-svg {
+  overflow: visible;
+}
+
+.v3-dag-edge.is-active {
+  filter: drop-shadow(0 0 3px rgba(246, 184, 82, 0.58));
+}
+
+.v3-dag-edge.is-visited {
+  filter: drop-shadow(0 0 2px rgba(98, 214, 223, 0.4));
+}
+
+/* Codex 3-State Cards (found / seen / locked) */
+.codex-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.v3-codex-state {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.v3-codex-state.found {
+  color: #7ae582;
+  background: rgba(122, 229, 130, 0.14);
+  border: 1px solid rgba(122, 229, 130, 0.36);
+}
+
+.v3-codex-state.seen {
+  color: #f6c969;
+  background: rgba(246, 184, 82, 0.14);
+  border: 1px solid rgba(246, 184, 82, 0.38);
+}
+
+.v3-codex-state.locked {
+  color: #8ea2ba;
+  background: rgba(142, 162, 186, 0.12);
+  border: 1px solid rgba(142, 162, 186, 0.26);
+}
+
+.codex-card.seen {
+  border-color: rgba(98, 214, 223, 0.38);
+  opacity: 0.92;
+}
+
+.codex-icon.is-seen {
+  filter: saturate(0.45) brightness(0.92);
+}
+
+.codex-icon.is-locked {
+  filter: brightness(0) saturate(0);
+  opacity: 0.35;
+}

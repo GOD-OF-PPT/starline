@@ -428,5 +428,14 @@ export function createV2ShowcaseRun(
     activeEngineerOffer: null,
     navigatorFreeJumpUsed: false,
     settlementReason: null,
+    sectorId: 'near_orbit',
+    endlessThreat: 0,
+    endlessMutatorIds: [],
+    recentEquipmentKinds: [],
+    usedEventIds: [],
+    tacticalChargesMax: 1,
+    tacticalChargesUsed: 0,
+    salvagePartsEarned: 0,
+    isFinalCampaignRun: false,
   };
 }

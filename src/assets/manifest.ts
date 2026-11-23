@@ -230,6 +230,22 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
     source: 'public/assets/ships/player_shield_cruiser.webp',
     license: 'Original Starline First-Party Illustrated',
   },
+  'ship.player.stargate_cruiser': {
+    key: 'ship.player.stargate_cruiser',
+    version: 'v006',
+    view: 'side',
+    canvasWidth: 512,
+    canvasHeight: 256,
+    anchor: { x: 0.5, y: 0.5 },
+    hardpoints: {
+      muzzle: { x: 0.49, y: 0.19 },
+      hit: { x: 0.60, y: 0.50 },
+      engine: { x: 0.08, y: 0.54 },
+      shieldCenter: { x: 0.72, y: 0.52 },
+    },
+    source: 'public/assets/ships/player_shield_cruiser.webp',
+    license: 'Original Starline First-Party Illustrated',
+  },
   'ship.enemy.scout': {
     key: 'ship.enemy.scout',
     version: 'v004',

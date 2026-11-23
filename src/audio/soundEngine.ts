@@ -20,9 +20,13 @@ export type SfxKind =
   | 'creditTick'
   | 'rewardRare'
   | 'buildComplete'
-  | 'returnDock';
+  | 'returnDock'
+  | 'tacticalOrder'
+  | 'bossPhase'
+  | 'shieldOverload'
+  | 'empDisrupt';
 
-export type BgmTrack = 'base' | 'expedition' | 'none';
+export type BgmTrack = 'base' | 'expedition' | 'boss' | 'none';
 
 /**
  * Procedural Web Audio synthesizer delivering tactile mechanical sci-fi SFX and
@@ -75,6 +79,10 @@ export class SoundEngine {
     if (track !== 'none' && !this.bgmMuted) {
       this.startBgmLoop();
     }
+  }
+
+  getCurrentTrack(): BgmTrack {
+    return this.currentTrack;
   }
 
   play(kind: SfxKind): void {
@@ -190,6 +198,27 @@ export class SoundEngine {
           this.tone(ctx, 'triangle', 523, 659, 0.16, 0.08, now + 0.14);
           this.tone(ctx, 'sine', 784, 1046, 0.24, 0.085, now + 0.26);
           break;
+        case 'tacticalOrder':
+          // Crisp bridge command confirmation chirp
+          this.tone(ctx, 'triangle', 660, 990, 0.11, 0.09, now);
+          this.tone(ctx, 'sine', 990, 1320, 0.14, 0.075, now + 0.05);
+          break;
+        case 'bossPhase':
+          // Deep dramatic boss phase-shift horn + rising core power sweep
+          this.tone(ctx, 'sawtooth', 76, 52, 0.48, 0.14, now);
+          this.noiseBurst(ctx, 0.22, 720, 0.11, now + 0.04);
+          this.tone(ctx, 'triangle', 220, 580, 0.34, 0.095, now + 0.12);
+          break;
+        case 'shieldOverload':
+          // Shimmering crystalline hex-barrier overload pulse
+          this.tone(ctx, 'sine', 360, 720, 0.22, 0.095, now);
+          this.tone(ctx, 'triangle', 720, 1080, 0.2, 0.07, now + 0.05);
+          break;
+        case 'empDisrupt':
+          // Descending dissonant electromagnetic disruption buzz
+          this.tone(ctx, 'sawtooth', 880, 140, 0.24, 0.1, now);
+          this.noiseBurst(ctx, 0.18, 1280, 0.09, now + 0.02);
+          break;
       }
     } catch {
       // Never allow audio failures to break gameplay
@@ -253,14 +282,30 @@ export class SoundEngine {
     if (this.bgmTimer !== null) return;
     const baseNotes = [130.81, 164.81, 196.0, 146.83, 130.81, 196.0, 220.0, 164.81];
     const expNotes = [110.0, 110.0, 130.81, 146.83, 110.0, 164.81, 146.83, 130.81];
+    const bossBass = [73.42, 73.42, 77.78, 73.42, 87.31, 73.42, 69.3, 65.41];
+    const bossArp = [293.66, 311.13, 349.23, 415.3, 440.0, 349.23, 311.13, 277.18];
 
-    const stepMs = this.currentTrack === 'base' ? 1400 : 750;
+    const stepMs =
+      this.currentTrack === 'base' ? 1400 : this.currentTrack === 'boss' ? 420 : 750;
     this.bgmTimer = window.setInterval(() => {
       if (this.bgmMuted || !this.ctx || this.ctx.state !== 'running') return;
-      const notes = this.currentTrack === 'base' ? baseNotes : expNotes;
-      const freq = notes[this.bgmStep % notes.length];
+      const stepIdx = this.bgmStep;
       this.bgmStep += 1;
       const now = this.ctx.currentTime;
+
+      if (this.currentTrack === 'boss') {
+        const bassFreq = bossBass[stepIdx % bossBass.length];
+        const arpFreq = bossArp[stepIdx % bossArp.length];
+        this.tone(this.ctx, 'sawtooth', bassFreq, bassFreq * 0.985, 0.34, 0.024, now);
+        if (stepIdx % 4 === 0) {
+          this.tone(this.ctx, 'sine', bassFreq * 0.5, bassFreq * 0.5, 0.38, 0.022, now);
+        }
+        this.tone(this.ctx, 'triangle', arpFreq, arpFreq, 0.22, 0.015, now + 0.16);
+        return;
+      }
+
+      const notes = this.currentTrack === 'base' ? baseNotes : expNotes;
+      const freq = notes[stepIdx % notes.length];
       const dur = this.currentTrack === 'base' ? 1.3 : 0.65;
       this.tone(
         this.ctx,

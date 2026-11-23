@@ -10,7 +10,7 @@ import {
   type V2Rotation,
   type V2ShapeId,
 } from '../data/shapes';
-import { V2_SHIPS, isCellDisabledForShip } from '../data/ships';
+import { V2_SHIPS, isCellDisabledForShip, isCellPowerCellForShip } from '../data/ships';
 import { calculateV2BuildStats, type V2AdjacencyLink } from '../domain/buildStatsV2';
 import {
   discardV2Item,
@@ -44,6 +44,8 @@ export interface CargoGridV2Callbacks {
     item: V2ItemInstance,
     zone: 'grid' | 'staging'
   ) => V2TacticalDelta | null;
+  /** Optional external container for mounting the selected-item inspector (e.g. desktop left panel in ARRANGE) */
+  readonly getInspectorHost?: () => HTMLElement | null;
 }
 
 interface SelectedRef {
@@ -133,6 +135,12 @@ function computeSynergyColor(sourceKind: V2AdjacencyLink['sourceKind']): string 
       return '#7AE582';
     case 'shield':
       return '#C084FC';
+    case 'overdrive_core':
+      return '#FB7185';
+    case 'coolant_vent':
+      return '#7DD3FC';
+    case 'cargo_amp':
+      return '#FBBF24';
     default:
       return '#62D6DF';
   }
@@ -163,6 +171,7 @@ export class CargoGridV2Component {
   private invalidToastTimer: number | null = null;
   private prevLinkCount = 0;
   private boardEl: HTMLElement | null = null;
+  private lastExternalInspectorHost: HTMLElement | null = null;
 
   constructor(root: HTMLElement, callbacks: CargoGridV2Callbacks) {
     this.root = root;
@@ -179,6 +188,10 @@ export class CargoGridV2Component {
     window.removeEventListener('pointercancel', this.handleWindowPointerCancel);
     window.removeEventListener('keydown', this.handleKeyDown);
     this.clearDragGhost();
+    if (this.lastExternalInspectorHost) {
+      this.lastExternalInspectorHost.innerHTML = '';
+      this.lastExternalInspectorHost = null;
+    }
     if (this.invalidToastTimer !== null) {
       window.clearTimeout(this.invalidToastTimer);
       this.invalidToastTimer = null;
@@ -244,13 +257,24 @@ export class CargoGridV2Component {
       stats.hangars.length > 0
         ? `无人机 ${stats.hangars.reduce((s, h) => s + h.maxDrones, 0)}上限`
         : '';
+    const salvoSummary =
+      stats.salvos.length > 0
+        ? `导弹 ${stats.salvos.reduce((s, sv) => s + sv.missiles, 0)}发`
+        : '';
+    const empSummary =
+      stats.empJammers.length > 0
+        ? `EMP削盾${stats.empJammers.reduce((s, e) => s + e.shieldShred, 0)}`
+        : '';
     const flakSummary =
       stats.flaks.length > 0
         ? `近防 ${stats.flaks.reduce((s, f) => s + f.damagePerEnemy, 0)}×2`
         : '';
-    const attackSubParts = [heavySummary, hangarSummary, flakSummary].filter(Boolean);
+    const attackSubParts = [heavySummary, salvoSummary, hangarSummary, empSummary, flakSummary].filter(Boolean);
     const regularDps =
-      stats.coreAttack + stats.lasers.reduce((sum, l) => sum + l.totalDamage, 0);
+      stats.coreAttack +
+      stats.lasers.reduce((sum, l) => sum + l.totalDamage, 0) +
+      stats.empJammers.reduce((sum, e) => sum + e.damage, 0) +
+      stats.salvageGrapples.reduce((sum, g) => sum + g.damage, 0);
 
     const statsStrip = document.createElement('div');
     statsStrip.className = 'stats-strip v2-stats-strip';
@@ -266,6 +290,8 @@ export class CargoGridV2Component {
         <span class="sub ${stats.shieldCapped ? 'cap' : ''}">${
       stats.bestActiveCounter
         ? `反击 ${Math.round(stats.bestActiveCounter.ratio * 100)}%`
+        : stats.endOfRoundShieldRegen > 0
+        ? `每轮回盾 +${stats.endOfRoundShieldRegen}`
         : stats.shieldCapped
         ? `已达上限 ${V2_MAX_BATTLE_SHIELD}`
         : `上限 ${V2_MAX_BATTLE_SHIELD}`
@@ -279,10 +305,14 @@ export class CargoGridV2Component {
     }</span>
       </div>
       <div class="stat-chip">
-        <span class="k">舱格/舱值</span>
+        <span class="k">舱格/供能</span>
         <span class="v num">${occ.occupiedCells}/${occ.totalCells}</span>
         <span class="sub">${
-      stats.links.length > 0 ? `联动 ×${stats.links.length}` : `可售 ${stats.nonLoanBayValue}¤`
+      stats.powerCellBoostedIds.length > 0
+        ? `⚡供能×${stats.powerCellBoostedIds.length}${stats.links.length > 0 ? ` · 链×${stats.links.length}` : ''}`
+        : stats.links.length > 0
+        ? `联动 ×${stats.links.length}`
+        : `可售 ${stats.nonLoanBayValue}¤`
     }</span>
       </div>
     `;
@@ -340,12 +370,17 @@ export class CargoGridV2Component {
       for (let x = 0; x < ship.cols; x++) {
         const cellEl = document.createElement('div');
         const disabled = isCellDisabledForShip(bay.shipId, x, y);
+        const isPowerCell = !disabled && isCellPowerCellForShip(bay.shipId, x, y);
         const isRecommended = !disabled && !preview && recommendedCellSet.has(`${x},${y}`);
         cellEl.className = `cargo-cell${disabled ? ' v2-cell-disabled' : ''}${
-          isRecommended ? ' cell-recommended' : ''
-        }`;
+          isPowerCell ? ' v3-power-cell' : ''
+        }${isRecommended ? ' cell-recommended' : ''}`;
         cellEl.dataset.cx = String(x);
         cellEl.dataset.cy = String(y);
+        if (isPowerCell) {
+          cellEl.dataset.powerCell = 'true';
+          cellEl.title = '船体供能格：装备覆盖此格即可获得超导强化';
+        }
         cellEl.setAttribute('role', 'gridcell');
         if (disabled) {
           cellEl.setAttribute('aria-disabled', 'true');
@@ -362,11 +397,15 @@ export class CargoGridV2Component {
           ? '不可用舱壁格'
           : occupant
           ? getAnyV2ItemDef(occupant.item.definitionId)?.name ?? occupant.item.definitionId
+          : isPowerCell
+          ? '空位（供能格）'
           : '空位';
         cellEl.setAttribute('aria-label', `第${y + 1}行第${x + 1}列 ${occName}`);
 
         if (disabled) {
           cellEl.innerHTML = `<span class="v2-bulkhead-mark" aria-hidden="true">✕</span>`;
+        } else if (isPowerCell) {
+          cellEl.innerHTML = `<span class="v3-power-cell-mark" aria-hidden="true">⚡</span>`;
         }
 
         cellEl.addEventListener('focus', () => {
@@ -414,6 +453,7 @@ export class CargoGridV2Component {
       boostedIds.add(lnk.sourceInstanceId);
       boostedIds.add(lnk.targetInstanceId);
     }
+    const powerBoostedSet = new Set(stats.powerCellBoostedIds);
 
     for (const placed of bay.placed) {
       const def = getAnyV2ItemDef(placed.item.definitionId);
@@ -426,6 +466,7 @@ export class CargoGridV2Component {
         this.drag.zone === 'grid' &&
         this.drag.item.instanceId === placed.item.instanceId;
       const isBoosted = boostedIds.has(placed.item.instanceId);
+      const isPowerBoosted = powerBoostedSet.has(placed.item.instanceId);
 
       const tile = document.createElement('div');
       tile.className = `placed-item v2-placed-item origin-${placed.item.origin} ${
@@ -435,10 +476,15 @@ export class CargoGridV2Component {
             : 'quality-common'
           : placed.item.category === 'mission'
           ? 'cat-mission'
+          : placed.item.category === 'gadget'
+          ? 'cat-gadget'
           : 'cat-cargo'
       } ${isSelected ? 'selected' : ''} ${isDraggingThis ? 'dragging-source' : ''} ${
         this.lastSnappedId === placed.item.instanceId ? 'just-snapped' : ''
-      } ${isBoosted ? 'synergy-active' : ''}`;
+      } ${isBoosted ? 'synergy-active' : ''} ${isPowerBoosted ? 'power-cell-boosted' : ''}`;
+      if (isPowerBoosted) {
+        tile.dataset.powerBoosted = 'true';
+      }
 
       tile.style.left = `${(placed.x / ship.cols) * 100}%`;
       tile.style.top = `${(placed.y / ship.rows) * 100}%`;
@@ -485,14 +531,23 @@ export class CargoGridV2Component {
       originPill.title = originFullLabel(placed.item.origin);
       tile.appendChild(originPill);
 
-      // Quality notch badge top-right for equipment (良 / 普)
+      // Quality notch badge top-right for equipment (良 / 普) or consumable gadget (耗)
       if (placed.item.category === 'equipment') {
         const qPill = document.createElement('span');
         qPill.className = `v2-quality-notch ${
           placed.item.quality === 'improved' ? 'improved' : 'common'
         }`;
-        qPill.textContent = placed.item.quality === 'improved' ? '良' : '普';
+        qPill.textContent = isPowerBoosted
+          ? `⚡${placed.item.quality === 'improved' ? '良' : '普'}`
+          : placed.item.quality === 'improved'
+          ? '良'
+          : '普';
         tile.appendChild(qPill);
+      } else if (placed.item.category === 'gadget') {
+        const gPill = document.createElement('span');
+        gPill.className = 'v2-quality-notch gadget';
+        gPill.textContent = '耗';
+        tile.appendChild(gPill);
       }
 
       // Compact name / synergy badge bottom
@@ -503,6 +558,8 @@ export class CargoGridV2Component {
           ? `${placed.item.fixedValue}¤`
           : placed.item.category === 'mission'
           ? '任务'
+          : placed.item.category === 'gadget'
+          ? def.shortName
           : def.name.slice(0, 4);
       tile.appendChild(labelEl);
 
@@ -796,6 +853,20 @@ export class CargoGridV2Component {
     }
   }
 
+  private mountInspectorBox(box: HTMLElement): void {
+    const externalHost = this.callbacks.getInspectorHost?.() ?? null;
+    if (this.lastExternalInspectorHost && this.lastExternalInspectorHost !== externalHost) {
+      this.lastExternalInspectorHost.innerHTML = '';
+    }
+    this.lastExternalInspectorHost = externalHost;
+    if (externalHost) {
+      externalHost.innerHTML = '';
+      externalHost.appendChild(box);
+    } else {
+      this.root.appendChild(box);
+    }
+  }
+
   private renderSelectedInspector(editable: boolean, delta: V2TacticalDelta | null): void {
     const sel = this.getSelectedItemInfo();
     const box = document.createElement('div');
@@ -809,16 +880,25 @@ export class CargoGridV2Component {
             : '点选或拖拽整理船舱（快捷键：方向键移格 · 回车拿放 · R 旋转 · Del 舍弃）。'
           : '点击任意已装设备查看联动与战力变化。'
       }</div>`;
-      this.root.appendChild(box);
+      this.mountInspectorBox(box);
       return;
     }
 
     const def = getAnyV2ItemDef(sel.item.definitionId);
-    if (!def) return;
+    if (!def) {
+      if (this.lastExternalInspectorHost) {
+        this.lastExternalInspectorHost.innerHTML = '';
+      }
+      return;
+    }
     const eqDef = sel.item.category === 'equipment' ? V2_EQUIPMENT_DEFS[sel.item.definitionId] : undefined;
+    const isSelectedPowerBoosted =
+      sel.zone === 'grid' &&
+      this.bay !== null &&
+      calculateV2BuildStats(this.bay).powerCellBoostedIds.includes(sel.item.instanceId);
 
     const deltaHtml = delta
-      ? `<div class="v2-delta-strip ${delta.positiveImpact ? 'positive' : ''}">
+      ? `<div class="v2-delta-strip ${delta.positiveImpact ? 'positive' : ''}" data-testid="tactical-delta">
           <div class="v2-delta-row"><span class="v2-delta-k">联动</span><span>${delta.synergyLine}</span></div>
           <div class="v2-delta-row"><span class="v2-delta-k">收益</span><strong>${delta.combatDeltaLine}</strong></div>
           <div class="v2-delta-row"><span class="v2-delta-k">舱位</span><span>${delta.spaceLine}</span></div>
@@ -839,6 +919,13 @@ export class CargoGridV2Component {
                 ? `<span class="v2-quality-chip ${eqDef.quality}">${
                     eqDef.quality === 'improved' ? '优良' : '普通'
                   }</span>`
+                : sel.item.category === 'gadget'
+                ? `<span class="v2-quality-chip common">一次性装置</span>`
+                : ''
+            }
+            ${
+              isSelectedPowerBoosted
+                ? `<span class="v3-power-boost-chip">⚡ 供能格强化</span>`
                 : ''
             }
           </div>
@@ -857,7 +944,7 @@ export class CargoGridV2Component {
                   : this.prepareMode
                   ? this.callbacks.onPrepareRemoveItem
                     ? `<button type="button" class="btn btn-sm btn-danger" id="btn-v2-prep-remove">✕ 移出配装</button>`
-                    : `<span class="v2-origin-chip origin-loan" style="align-self:center;">试航整套锁定 · 可拖动/旋转</span>`
+                    : `<span class="v2-origin-chip origin-loan" style="align-self:center;">全息模板锁定 · 可拖动/旋转</span>`
                   : `<button type="button" class="btn btn-sm btn-ghost" id="btn-v2-to-staging">↑ 移至暂存</button>`
               }
               ${
@@ -916,7 +1003,7 @@ export class CargoGridV2Component {
       });
     }
 
-    this.root.appendChild(box);
+    this.mountInspectorBox(box);
   }
 
   private getSelectedItemInfo(): {
@@ -1053,6 +1140,7 @@ export class CargoGridV2Component {
       cellEl.classList.toggle('kb-focused', isRoving && this.gridHasFocus);
       cellEl.classList.remove('preview-valid', 'preview-invalid');
       const disabled = isCellDisabledForShip(this.bay!.shipId, cx, cy);
+      const isPowerCell = !disabled && isCellPowerCellForShip(this.bay!.shipId, cx, cy);
       if (preview) {
         const inCells = preview.cells.some((c) => c.x === cx && c.y === cy);
         const inConf = preview.conflictCells.some((c) => c.x === cx && c.y === cy);
@@ -1063,7 +1151,7 @@ export class CargoGridV2Component {
         }
       }
       if (!disabled && !cellEl.classList.contains('preview-valid') && !cellEl.classList.contains('preview-invalid')) {
-        cellEl.innerHTML = '';
+        cellEl.innerHTML = isPowerCell ? `<span class="v3-power-cell-mark" aria-hidden="true">⚡</span>` : '';
       }
     });
   }

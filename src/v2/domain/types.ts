@@ -1,7 +1,12 @@
 import type { RngCursor } from '../../domain/rng';
 import type { GameSettings, RelicProgress } from '../../domain/progression';
 import type { SectorBgIndex } from '../../data/nodes';
-import type { V2ContractTier, V2ContractType } from '../data/contracts';
+import type { V3EnemyIntent, V3EnemyIntentKind } from '../data/bosses';
+import type {
+  V2ContractTier,
+  V2ContractType,
+  V2FormalContractType,
+} from '../data/contracts';
 import type { V2CrewId } from '../data/crew';
 import type { V2EncounterKind, V2EnemyUnitSpec } from '../data/enemies';
 import type {
@@ -11,13 +16,29 @@ import type {
   V2UnlockFamilyId,
 } from '../data/equipment';
 import type { V2FacilityId } from '../data/facilities';
+import type { SectorEnvModifierId } from '../data/sectors';
 import type { V2Rotation } from '../data/shapes';
-import type { V2ShipId } from '../data/ships';
+import type { V2ShipId, V2ShipSignatureCommandId } from '../data/ships';
 
-export const V2_SCHEMA_VERSION = 2;
-export const V2_RULES_VERSION = '2.0.0';
+/** V2/V3 settings extending shared GameSettings without touching legacy V1 progression.ts */
+export interface V2GameSettings extends GameSettings {
+  /** false / undefined => Default-ON Active Tactical Commands; true => Pure-Auto combat */
+  readonly pureAutoCombat?: boolean;
+}
+
+export function isPureAutoCombat(
+  settings?: { readonly pureAutoCombat?: boolean } | null
+): boolean {
+  return Boolean(settings?.pureAutoCombat);
+}
+
+export const V2_SCHEMA_VERSION = 3;
+export const V2_RULES_VERSION = '3.0.0';
+export const V2_LEGACY_SCHEMA_VERSION = 2;
+export const V2_LEGACY_RULES_VERSION = '2.0.0';
 export const V2_SAVE_KEY = 'starline_save_v2';
 export const V2_BACKUP_KEY = 'starline_save_backup_v2';
+export const V3_BACKUP_KEY = 'starline_save_backup_v3';
 export const V2_TAB_LOCK_KEY = 'starline_active_tab_lock_v2';
 export const V2_TAB_CHANNEL = 'starline_tab_sync_v2';
 
@@ -32,7 +53,7 @@ export type V2ItemLocation = 'bay' | 'staging' | 'warehouse' | 'gift_queue';
 export interface V2ItemInstance {
   readonly instanceId: string;
   readonly definitionId: string;
-  readonly category: 'equipment' | 'cargo' | 'mission';
+  readonly category: 'equipment' | 'cargo' | 'mission' | 'gadget';
   readonly quality: V2Quality;
   readonly origin: V2ItemOrigin;
   readonly acquiredDepth: number;
@@ -74,7 +95,14 @@ export type V2NamedStreamKey = 'map' | 'enemies' | 'shop' | 'events' | 'rewards'
 
 export type V2RngStreams = Record<V2NamedStreamKey, RngCursor>;
 
-export type V2NodeType = 'combat' | 'elite' | 'wreck' | 'merchant' | 'anomaly' | 'distress';
+export type V2NodeType =
+  | 'combat'
+  | 'elite'
+  | 'boss'
+  | 'wreck'
+  | 'merchant'
+  | 'anomaly'
+  | 'distress';
 
 export interface V2ShopEquipmentOffer {
   readonly offerId: string;
@@ -84,6 +112,66 @@ export interface V2ShopEquipmentOffer {
 }
 
 export type V2WreckChoice = 'armory' | 'cargo' | 'reactor_fuel' | 'reactor_repair';
+
+export type V2WreckSpotId = 'armory' | 'cargo' | 'reactor';
+
+export interface V2WreckHotspot {
+  readonly spotId: V2WreckSpotId;
+  readonly label: string;
+  readonly cut: boolean;
+  readonly riskHullDamage: number;
+  readonly riskFuelCost: number;
+  readonly riskAmbush: boolean;
+  readonly rewardItem?: V2ItemInstance;
+  readonly rewardItems?: readonly V2ItemInstance[];
+  readonly rewardParts?: number;
+  readonly rewardCredits?: number;
+  readonly reactorFuelGain?: number;
+  readonly reactorRepairGain?: number;
+}
+
+export interface V2WreckState {
+  readonly nodeId: string;
+  readonly stability: number;
+  readonly maxStability: number;
+  readonly cutsMade: number;
+  readonly extracted: boolean;
+  readonly hotspots: readonly V2WreckHotspot[];
+  readonly lastCutSummary?: string;
+  readonly ambushTriggered?: boolean;
+  readonly stashedItems?: readonly V2ItemInstance[];
+  readonly stabilizerActive?: boolean;
+}
+
+export interface V2EventOptionState {
+  readonly index: number;
+  readonly label: string;
+  readonly costSummary: string;
+  readonly rewardSummary: string;
+  readonly requiredCrewId?: V2CrewId;
+  readonly fuelCost?: number;
+  readonly hpCost?: number;
+  readonly walletCost?: number;
+  readonly isFallback?: boolean;
+  readonly rewardCredits?: number;
+  readonly rewardParts?: number;
+  readonly rewardFuel?: number;
+  readonly rewardHp?: number;
+  readonly rewardFactionId?: FactionId;
+  readonly rewardFactionRep?: number;
+  readonly rewardItems?: readonly V2ItemInstance[];
+}
+
+export interface V2EventState {
+  readonly nodeId: string;
+  readonly eventId: string;
+  readonly title: string;
+  readonly description: string;
+  readonly resolved: boolean;
+  readonly chosenIndex: number | null;
+  readonly options: readonly V2EventOptionState[];
+  readonly flavorTag?: string;
+}
 
 export interface V2WreckPayload {
   readonly armoryItem: V2ItemInstance;
@@ -129,6 +217,7 @@ export interface V2CombatPayload {
   readonly bounty: number;
   readonly improvedProb: number;
   readonly guaranteedSupportKind?: V2EquipmentKind;
+  readonly bossId?: string;
 }
 
 export interface V2MapNode {
@@ -140,11 +229,16 @@ export interface V2MapNode {
   readonly nextNodeIds: readonly string[];
   readonly contractMarker: boolean;
   readonly hasSupportGuarantee?: boolean;
+  readonly bossId?: string;
+  readonly hasRelicSignal?: boolean;
+  readonly relicSignalDefId?: string;
+  readonly eventId?: string;
   readonly combat?: V2CombatPayload;
   readonly wreck?: V2WreckPayload;
   readonly merchant?: V2MerchantPayload;
   readonly anomaly?: V2AnomalyPayload;
   readonly distress?: V2DistressPayload;
+  readonly eventState?: V2EventState;
   readonly resolved: boolean;
   readonly abandoned?: boolean;
 }
@@ -166,16 +260,29 @@ export interface V2ContractInstance {
   readonly markedNodeIds: readonly string[];
   readonly requiredCompletions: number;
   readonly completedNodeIds: readonly string[];
-  readonly missionItemDefId?: 'mission.sealed_reactor' | 'mission.escape_pod';
+  readonly missionItemDefId?: 'mission.sealed_reactor' | 'mission.escape_pod' | 'mission.black_box';
   readonly missionItemCount: number;
   readonly surveyFuelCost: number;
+  readonly factionId?: FactionId;
+  readonly factionRepReward?: number;
+  readonly targetLayer?: number;
+  readonly bonusObjective?: V3RunBonusObjective;
   readonly status: 'active' | 'aborted' | 'completed' | 'failed';
   readonly rewardClaimed: boolean;
 }
 
 export type V2TargetPolicy = 'weakest' | 'highest_threat';
 
-export type V2AttackSourceKind = 'core' | 'laser' | 'heavy' | 'hangar' | 'flak' | 'counter';
+export type V2AttackSourceKind =
+  | 'core'
+  | 'laser'
+  | 'heavy'
+  | 'hangar'
+  | 'flak'
+  | 'counter'
+  | 'salvo'
+  | 'emp'
+  | 'grapple';
 
 export interface V2PlayerAttackEvent {
   readonly sourceKind: V2AttackSourceKind;
@@ -184,6 +291,7 @@ export interface V2PlayerAttackEvent {
   readonly rawDamage: number;
   readonly appliedDamage: number;
   readonly armorBlocked: number;
+  readonly shieldDamaged?: number;
   readonly targetHpAfter: number;
   readonly targetKilled: boolean;
 }
@@ -194,6 +302,8 @@ export interface V2EnemyAttackEvent {
   readonly pierceDamage: number;
   readonly shieldAbsorbed: number;
   readonly hullDamage: number;
+  readonly intentKind?: V3EnemyIntentKind;
+  readonly empShieldDrained?: number;
 }
 
 export interface V2CombatUnitSnapshot {
@@ -206,6 +316,18 @@ export interface V2CombatUnitSnapshot {
   readonly armor: number;
   readonly pierceRatio: number;
   readonly isBoss?: boolean;
+  readonly shield?: number;
+  readonly maxShield?: number;
+  readonly currentPhase?: number;
+  readonly totalPhases?: number;
+  readonly nextIntent?: V3EnemyIntent;
+}
+
+export interface V2BossPhaseTransitionEvent {
+  readonly enemyId: string;
+  readonly fromPhase: number;
+  readonly toPhase: number;
+  readonly label: string;
 }
 
 export interface V2CombatRoundLog {
@@ -219,16 +341,40 @@ export interface V2CombatRoundLog {
   readonly playerHpAfter: number;
   readonly playerShieldAfter: number;
   readonly enemiesAfter: readonly V2CombatUnitSnapshot[];
+  readonly envModifierEvent?: string;
+  readonly appliedTacticThisRound?: V2TacticalCommandId;
+  readonly enemyIntentsThisRound?: readonly {
+    readonly enemyId: string;
+    readonly intent: V3EnemyIntent;
+  }[];
+  readonly bossPhaseTransitions?: readonly V2BossPhaseTransitionEvent[];
+  readonly summonedEnemies?: readonly V2CombatUnitSnapshot[];
+  readonly enemySpecialNotes?: readonly string[];
 }
 
-export type V2EliteTacticChoice = 'normal' | 'overload' | 'emergency_defense';
+export type V2TacticalCommandId =
+  | 'normal'
+  | 'overload'
+  | 'emergency_shield'
+  | 'emergency_defense'
+  | 'focus_calibrate'
+  | V2ShipSignatureCommandId;
+
+export type V2EliteTacticChoice = V2TacticalCommandId;
+
+export interface V2AppliedTacticalCommand {
+  readonly decisionId: string;
+  readonly roundNumber: number;
+  readonly choice: V2TacticalCommandId;
+}
 
 export interface V2EliteTacticOptionPreview {
-  readonly choice: V2EliteTacticChoice;
+  readonly choice: V2TacticalCommandId;
   readonly label: string;
   readonly summary: string;
   readonly enabled: boolean;
   readonly disabledReason?: string;
+  readonly isSignature?: boolean;
   readonly predictedOutcome: 'victory' | 'defeat';
   readonly predictedFinalHp: number;
   readonly predictedRounds: number;
@@ -242,7 +388,11 @@ export interface V2EliteTacticDecision {
   readonly enemyThreatDamage: number;
   readonly enemiesAlive: number;
   readonly options: readonly V2EliteTacticOptionPreview[];
-  readonly chosen: V2EliteTacticChoice | null;
+  readonly chosen: V2TacticalCommandId | null;
+  readonly chargeIndex?: number;
+  readonly chargesRemaining?: number;
+  readonly chargesMax?: number;
+  readonly bossPhaseAtPause?: number;
 }
 
 export interface V2CombatSimulation {
@@ -258,7 +408,18 @@ export interface V2CombatSimulation {
   readonly finalPlayerHpAfterRepair: number;
   readonly initialEnemies: readonly V2CombatUnitSnapshot[];
   readonly rounds: readonly V2CombatRoundLog[];
-  readonly appliedTactic?: V2EliteTacticChoice;
+  readonly appliedTactic?: V2TacticalCommandId;
+  readonly appliedCommands?: readonly {
+    readonly roundNumber: number;
+    readonly choice: V2TacticalCommandId;
+  }[];
+  readonly sectorId?: SectorId;
+  readonly envModifierId?: SectorEnvModifierId;
+  readonly bossId?: string;
+  readonly overchargeApplied?: boolean;
+  readonly stargateRelayTier?: number;
+  readonly endlessThreat?: number;
+  readonly endlessMutatorIds?: readonly string[];
 }
 
 export interface V2CombatRewardBundle {
@@ -282,8 +443,14 @@ export interface V2ActiveCombatState {
   readonly startingHp: number;
   readonly targetPolicy: V2TargetPolicy;
   readonly simulation: V2CombatSimulation;
-  /** Optional Phase-D Round-2 Elite tactical decision (paused before Round 2) */
+  /** Active tactical command decision (paused before pendingDecision.roundNumber) */
   readonly pendingDecision?: V2EliteTacticDecision | null;
+  /** Ordered list of tactical commands already committed during this battle */
+  readonly committedCommands?: readonly V2AppliedTacticalCommand[];
+  /** 0-indexed round index where live playback resumes cleanly without replaying earlier rounds */
+  readonly resumeFromRound?: number;
+  /** Persisted decisionId once live playback has reached the pause boundary (reload-safe instant restore) */
+  readonly pausedAtDecisionId?: string | null;
 }
 
 export interface V2EngineerSwapOffer {
@@ -293,6 +460,62 @@ export interface V2EngineerSwapOffer {
 }
 
 export type V2TrialBuildId = 'trial_heavy' | 'trial_hangar' | 'trial_counter';
+
+export type CampaignActId = 'prologue' | 'act1' | 'act2' | 'act3' | 'endless';
+export type SectorId = 'near_orbit' | 'frozen_graveyard' | 'stargate_abyss';
+export type FactionId = 'starport_guild' | 'deep_institute' | 'free_salvagers';
+export type EndingId = 'stargate_reignited' | 'free_haven' | 'fleet_heir';
+
+export interface V3CampaignState {
+  readonly currentAct: CampaignActId;
+  readonly unlockedSectors: readonly SectorId[];
+  readonly completedMilestones: readonly string[];
+  readonly defeatedBossIds: readonly string[];
+  readonly readCommsIds: readonly string[];
+  readonly relicPityCounters: Record<string, number>;
+  readonly endingsUnlocked: readonly EndingId[];
+  readonly finalMissionUnlocked: boolean;
+  readonly endlessUnlocked: boolean;
+  readonly maxEndlessThreat: number; // 0..10
+}
+
+export interface V3CareerStats {
+  readonly totalWins: number;
+  readonly totalDefeats: number;
+  readonly totalSafeReturns: number;
+  readonly totalCreditsEarned: number;
+  readonly totalSalvagePartsEarned: number;
+  readonly totalBossesDefeated: number;
+  readonly totalWrecksDissected: number;
+  readonly totalItemsDismantled: number;
+  readonly deepestEndlessCleared: number;
+}
+
+export interface V3RunHistoryEntry {
+  readonly runId: string;
+  readonly finishedAt: string;
+  readonly sectorId: SectorId;
+  readonly contractTemplateId: string;
+  readonly contractName: string;
+  readonly shipId: V2ShipId;
+  readonly crewId: V2CrewId | null;
+  readonly outcome: 'safe_return' | 'defeat';
+  readonly contractCompleted: boolean;
+  readonly maxLayerReached: number;
+  readonly creditsEarned: number;
+  readonly salvagePartsEarned: number;
+  readonly endlessThreat: number;
+  readonly endlessMutatorIds?: readonly string[];
+  readonly seed?: number;
+  readonly isFinalCampaignRun?: boolean;
+}
+
+export interface V3RunBonusObjective {
+  readonly id: string;
+  readonly label: string;
+  readonly completed: boolean;
+  readonly rewardCredits: number;
+}
 
 export interface V2RunState {
   readonly runId: string;
@@ -327,6 +550,35 @@ export interface V2RunState {
   readonly activeEngineerOffer: V2EngineerSwapOffer | null;
   readonly navigatorFreeJumpUsed: boolean;
   readonly settlementReason: 'safe_return' | 'defeat' | null;
+  // V3 additive run fields
+  readonly sectorId: SectorId;
+  readonly endlessThreat?: number;
+  readonly endlessMutatorIds?: readonly string[];
+  readonly recentEquipmentKinds: readonly V2EquipmentKind[];
+  readonly usedEventIds: readonly string[];
+  readonly bonusObjective?: V3RunBonusObjective;
+  readonly tacticalChargesMax: number;
+  readonly tacticalChargesUsed: number;
+  readonly salvagePartsEarned: number;
+  readonly isFinalCampaignRun?: boolean;
+  /** Snapshotted crew mastery tier (0..2) at expedition launch for 100% reload-safe preview/combat parity */
+  readonly crewMasteryTier?: number;
+  /** Boss IDs defeated during this expedition (committed to profile.campaign.defeatedBossIds on settlement) */
+  readonly defeatedBossIdsThisRun?: readonly string[];
+  /** Encounter kinds defeated during this expedition (committed to profile.defeatedEnemyKinds on settlement) */
+  readonly defeatedEnemyKindsThisRun?: readonly string[];
+  /** Active multi-cut derelict dissection state while inside a wreck encounter (F11) */
+  readonly activeWreck?: V2WreckState | null;
+  /** Active sector narrative event state while inside an anomaly/distress encounter (F12) */
+  readonly activeEvent?: V2EventState | null;
+  /** Total items discarded across arrange phases during this run (for bonus_no_discard evaluation) */
+  readonly discardedCountThisRun?: number;
+  /** Total derelicts dissected during this run (committed to career.totalWrecksDissected) */
+  readonly wrecksDissectedThisRun?: number;
+  /** Faction reputation gained from narrative events during this run */
+  readonly factionRepEarnedThisRun?: Partial<Record<FactionId, number>>;
+  /** Armed by consumable gadget.overcharge_cell pre-combat; cleared upon combat completion or leaving node */
+  readonly overchargeCellActive?: boolean;
 }
 
 export interface V2PresetSlot {
@@ -357,6 +609,14 @@ export interface V2MigrationRecord {
   readonly legacyAbyssalUnlocked: boolean;
 }
 
+export type V3HullTuningTrack = 'hp' | 'salvage' | 'budget';
+
+export interface V3HullTuningState {
+  readonly hpLevel: number;
+  readonly salvageLevel: number;
+  readonly budgetLevel: number;
+}
+
 export interface V2ProfileState {
   readonly credits: number;
   readonly buildings: Record<V2FacilityId, boolean>;
@@ -370,7 +630,7 @@ export interface V2ProfileState {
   readonly discoveredItems: readonly string[];
   readonly seenItems: readonly string[];
   readonly loadoutPresets: readonly V2LoadoutPreset[];
-  readonly completedContractTypes: readonly ('transport' | 'rescue' | 'survey')[];
+  readonly completedContractTypes: readonly V2FormalContractType[];
   readonly completedContractIds: readonly string[];
   readonly deepestLayerReached: number;
   readonly totalRuns: number;
@@ -381,6 +641,18 @@ export interface V2ProfileState {
   readonly selectedCrewId: V2CrewId | null;
   readonly selectedArchetype: V2ArchetypeId;
   readonly migrationRecord: V2MigrationRecord | null;
+  // V3 additive profile fields
+  readonly salvageParts: number;
+  readonly facilityTiers: Record<string, number>;
+  readonly campaign: V3CampaignState;
+  readonly factionRep: Record<FactionId, number>;
+  readonly crewMastery: Record<V2CrewId, number>;
+  readonly achievementsUnlocked: readonly string[];
+  readonly achievementsClaimed?: readonly string[];
+  readonly defeatedEnemyKinds: readonly string[];
+  readonly runHistory: readonly V3RunHistoryEntry[];
+  readonly career: V3CareerStats;
+  readonly hullTuning?: Record<string, V3HullTuningState>;
 }
 
 export interface V2SaveData {
@@ -389,7 +661,13 @@ export interface V2SaveData {
   readonly savedAt: string;
   readonly profile: V2ProfileState;
   readonly activeRun: V2RunState | null;
-  readonly settings: GameSettings;
+  readonly settings: V2GameSettings;
 }
 
-export type V2SettlementDisposition = 'sell' | 'store' | 'keep_relic' | 'deliver' | 'return_loan';
+export type V2SettlementDisposition =
+  | 'sell'
+  | 'store'
+  | 'dismantle'
+  | 'keep_relic'
+  | 'deliver'
+  | 'return_loan';

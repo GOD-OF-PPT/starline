@@ -2,18 +2,21 @@ import Phaser from 'phaser';
 import { getBaseLayerImageUrl, getPlayerShipImageUrl } from '../assets/itemArt';
 import { BUILDINGS, RELICS, RELIC_ORDER, type BuildingId } from '../data/buildings';
 import {
+  DEFAULT_SETTINGS,
   canBuildFacility,
   getRelicCollectionSummary,
   type BaseProgression,
   type GameSettings,
 } from '../domain/progression';
+import type { V2ShipId } from '../v2/data/ships';
+import type { CampaignActId } from '../v2/domain/types';
 
 export interface BaseSceneState {
   readonly progression: BaseProgression;
   readonly settings: GameSettings;
   readonly recentlyBuiltId: BuildingId | null;
   readonly v2Override?: {
-    readonly shipId?: 'cannon_skiff' | 'shield_cruiser' | 'heavy_freighter';
+    readonly shipId?: V2ShipId;
     readonly wbText?: string;
     readonly dispText?: string;
     readonly dockText?: string;
@@ -21,6 +24,25 @@ export interface BaseSceneState {
     readonly workbenchWorking?: boolean;
     readonly showAllPins?: boolean;
   };
+}
+
+/** Interface Contract #4: Native V2 Orbital Station Diorama State (zero V1 adapter) */
+export interface V2BaseDioramaState {
+  readonly activeShipId: V2ShipId;
+  readonly facilityTiers: Readonly<Record<string, number>>;
+  readonly restoredRelicIds: readonly string[];
+  readonly campaignAct: CampaignActId;
+  readonly stargatePowered: boolean;
+  readonly settings?: GameSettings;
+  readonly recentlyBuiltId?: string | null;
+  readonly restorableRelicCount?: number;
+  readonly workbenchWorking?: boolean;
+  readonly blueprintsCount?: number;
+  readonly totalBlueprints?: number;
+  readonly warehouseCount?: number;
+  readonly warehouseCapacity?: number;
+  readonly unlockedShipsCount?: number;
+  readonly totalShips?: number;
 }
 
 export interface ReturnDockingPlayback {
@@ -36,20 +58,22 @@ const TEX_W = 1280;
 const TEX_H = 720;
 
 /**
- * Illustrated 2:1 Axonometric Orbital Salvage Station (v2.0).
- * Composites hand-painted same-camera quadrant overlays over station_worn.webp with zero jump,
- * enriched with real-time Phaser VFX (welding sparks, articulated unloading crane arm, berthed active ship,
- * active workbench overhead lamp, pulsing relic rings, blinking deck beacons, interactive diegetic pins,
- * and F11 return-to-port docking animation).
+ * Illustrated Axonometric Orbital Salvage Station (V1 + Full V2/V3 Diorama Parity).
+ * Preserves legacy V1 `setState()` / `setProgression()` 100% untouched for `?mode=v1`,
+ * while providing native `setV2StationState(V2BaseDioramaState)` for active 4-hull berthed ship,
+ * diegetic T1–T3 facility lighting, 4 orbiting restored relic halos, Act-aware space nebula,
+ * and Stargate Relay portal rings & beacon beam.
  */
 export class BaseScene extends Phaser.Scene {
   private currentState: BaseSceneState | null = null;
+  private v2State: V2BaseDioramaState | null = null;
   private onBuildingClick: ((id: BuildingId) => void) | null = null;
   private onBerthClick: (() => void) | null = null;
   private onAssetError: ((key: string) => void) | null = null;
 
   private bgGraphics!: Phaser.GameObjects.Graphics;
   private edgeMaskGraphics!: Phaser.GameObjects.Graphics;
+  private v2StaticGraphics!: Phaser.GameObjects.Graphics;
   private animGraphics!: Phaser.GameObjects.Graphics;
 
   private baseImage!: Phaser.GameObjects.Image;
@@ -66,11 +90,16 @@ export class BaseScene extends Phaser.Scene {
     badgeBg: Phaser.GameObjects.Graphics;
     label: Phaser.GameObjects.Text;
   }[] = [];
+  private stargatePin: {
+    zone: Phaser.GameObjects.Zone;
+    badgeBg: Phaser.GameObjects.Graphics;
+    label: Phaser.GameObjects.Text;
+  } | null = null;
   private berthZone: Phaser.GameObjects.Zone | null = null;
 
   private elapsed = 0;
   private buildCelebrateTimer = 0;
-  private celebrateBuilding: BuildingId | null = null;
+  private celebrateFacilityKey: string | null = null;
   private viewW = 390;
   private viewH = 340;
   private dpr = 1;
@@ -87,11 +116,18 @@ export class BaseScene extends Phaser.Scene {
 
   init(data?: {
     state?: BaseSceneState;
+    v2State?: V2BaseDioramaState;
     onBuildingClick?: (id: BuildingId) => void;
     onBerthClick?: () => void;
     onAssetError?: (key: string) => void;
   }): void {
-    if (data?.state) this.currentState = data.state;
+    if (data?.v2State) {
+      this.v2State = data.v2State;
+      this.currentState = null;
+    } else if (data?.state) {
+      this.currentState = data.state;
+      this.v2State = null;
+    }
     if (data?.onBuildingClick) this.onBuildingClick = data.onBuildingClick;
     if (data?.onBerthClick) this.onBerthClick = data.onBerthClick;
     if (data?.onAssetError) this.onAssetError = data.onAssetError;
@@ -110,6 +146,7 @@ export class BaseScene extends Phaser.Scene {
       ['ship.player.cannon_skiff', getPlayerShipImageUrl('cannon_skiff')],
       ['ship.player.shield_cruiser', getPlayerShipImageUrl('shield_cruiser')],
       ['ship.player.heavy_freighter', getPlayerShipImageUrl('heavy_freighter')],
+      ['ship.player.stargate_cruiser', getPlayerShipImageUrl('stargate_cruiser')],
     ];
     for (const [key, url] of queue) {
       if (!this.textures.exists(key)) {
@@ -120,8 +157,16 @@ export class BaseScene extends Phaser.Scene {
 
   create(): void {
     this.dpr = (this.game.registry.get('dpr') as number) || 1;
-    this.viewW = Math.round((this.scale.width || 390) / this.dpr);
-    this.viewH = Math.round((this.scale.height || 340) / this.dpr);
+    const parentRect = this.game.canvas?.parentElement?.getBoundingClientRect();
+    const liveW = parentRect && parentRect.width >= 16 ? Math.round(parentRect.width) : 0;
+    const liveH = parentRect && parentRect.height >= 16 ? Math.round(parentRect.height) : 0;
+    this.viewW = liveW || Math.round((this.scale.width || 390) / this.dpr);
+    this.viewH = liveH || Math.round((this.scale.height || 340) / this.dpr);
+    const expectedBw = Math.round(this.viewW * this.dpr);
+    const expectedBh = Math.round(this.viewH * this.dpr);
+    if (this.scale.width !== expectedBw || this.scale.height !== expectedBh) {
+      this.scale.resize(expectedBw, expectedBh);
+    }
     this.applyCameraViewport();
     this.cameras.main.setBackgroundColor('#0B1320');
 
@@ -134,8 +179,9 @@ export class BaseScene extends Phaser.Scene {
     this.dispRelicOverlay = this.add.image(0, 0, 'base.overlay.display_relic').setOrigin(0.5, 0.5).setDepth(3.2).setVisible(false);
     this.drydockOverlay = this.add.image(0, 0, 'base.overlay.drydock').setOrigin(0.5, 0.5).setDepth(3.3).setVisible(false);
     this.edgeMaskGraphics = this.add.graphics().setDepth(3.6);
+    this.v2StaticGraphics = this.add.graphics().setDepth(3.8);
 
-    // Berthed player ship resting on the landing pad (matches active selected ship!)
+    // Berthed player ship resting on the landing pad (actively displayed in V2 mode!)
     this.berthedShipSprite = this.add
       .image(0, 0, 'ship.player.cannon_skiff')
       .setOrigin(0.5, 0.5)
@@ -159,6 +205,7 @@ export class BaseScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.texturesReady = false;
       this.hitZones = [];
+      this.stargatePin = null;
       this.berthZone = null;
       this.scale.off('resize', this.handleResize, this);
     });
@@ -166,8 +213,8 @@ export class BaseScene extends Phaser.Scene {
 
   private applyCameraViewport(): void {
     if (!this.cameras?.main) return;
-    const bw = Math.round(this.viewW * this.dpr);
-    const bh = Math.round(this.viewH * this.dpr);
+    const bw = Math.max(1, Math.round(this.viewW * this.dpr));
+    const bh = Math.max(1, Math.round(this.viewH * this.dpr));
     this.cameras.main.setViewport(0, 0, bw, bh);
     this.cameras.main.setZoom(this.dpr);
     this.cameras.main.centerOn(this.viewW * 0.5, this.viewH * 0.5);
@@ -179,18 +226,43 @@ export class BaseScene extends Phaser.Scene {
     this.viewH = h;
     if (dpr !== undefined) this.dpr = dpr;
     this.applyCameraViewport();
+    if (this.sys?.isActive() && this.texturesReady) {
+      this.redrawStatic();
+    }
+  }
+
+  /** Legacy V1 BaseScene entry point — preserved 100% intact for ?mode=v1 */
+  setState(state: BaseSceneState): void {
+    const newlyBuilt = state.recentlyBuiltId;
+    if (newlyBuilt && newlyBuilt !== this.celebrateFacilityKey) {
+      this.celebrateFacilityKey = newlyBuilt;
+      this.buildCelebrateTimer = 1.6;
+    }
+    this.currentState = state;
+    this.v2State = null;
     if (this.scene.isActive() && this.texturesReady) {
       this.redrawStatic();
     }
   }
 
-  setState(state: BaseSceneState): void {
-    const newlyBuilt = state.recentlyBuiltId;
-    if (newlyBuilt && newlyBuilt !== this.celebrateBuilding) {
-      this.celebrateBuilding = newlyBuilt;
+  /** Legacy V1 compatibility helper */
+  setProgression(progression: BaseProgression, settings?: GameSettings): void {
+    this.setState({
+      progression,
+      settings: settings ?? this.currentState?.settings ?? DEFAULT_SETTINGS,
+      recentlyBuiltId: null,
+    });
+  }
+
+  /** Contract #4: Native V2/V3 Orbital Station Diorama state setter */
+  setV2StationState(state: V2BaseDioramaState): void {
+    const newlyBuilt = state.recentlyBuiltId ?? null;
+    if (newlyBuilt && newlyBuilt !== this.celebrateFacilityKey) {
+      this.celebrateFacilityKey = newlyBuilt;
       this.buildCelebrateTimer = 1.6;
     }
-    this.currentState = state;
+    this.v2State = state;
+    this.currentState = null;
     if (this.scene.isActive() && this.texturesReady) {
       this.redrawStatic();
     }
@@ -224,7 +296,7 @@ export class BaseScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
-    if (!this.currentState || !this.texturesReady) return;
+    if ((!this.currentState && !this.v2State) || !this.texturesReady) return;
     const dtMs = Math.min(delta, 50);
     const dt = dtMs / 1000;
     this.elapsed += dt;
@@ -249,29 +321,18 @@ export class BaseScene extends Phaser.Scene {
   }
 
   private handleResize(gameSize?: Phaser.Structs.Size): void {
-    if (!this.scene.isActive()) return;
+    if (!this.sys?.isActive()) return;
     const dpr = (this.game.registry.get('dpr') as number) || this.dpr || 1;
-    if (gameSize && gameSize.width > 0 && gameSize.height > 0) {
-      this.syncViewport(Math.round(gameSize.width / dpr), Math.round(gameSize.height / dpr), dpr);
-    } else {
-      this.syncViewport(
-        Math.round((this.scale.width || 390) / dpr),
-        Math.round((this.scale.height || 340) / dpr),
-        dpr
-      );
-    }
+    const bw = gameSize && gameSize.width > 0 ? gameSize.width : this.scale.width || 390;
+    const bh = gameSize && gameSize.height > 0 ? gameSize.height : this.scale.height || 340;
+    this.syncViewport(Math.round(bw / dpr), Math.round(bh / dpr), dpr);
   }
 
-  /**
-   * Computes exact image framing so the entire 4-quadrant station fills the viewport
-   * lushly on BOTH wide desktop 16:9 AND narrow mobile portrait!
-   */
   private getLayout() {
     const w = this.viewW || this.scale.width || 390;
     const h = this.viewH || this.scale.height || 340;
     const aspect = w / Math.max(1, h);
 
-    // Keep entire 4-quadrant station (from glass display roof to mooring bollard) completely uncropped
     const scale =
       aspect >= 1.55
         ? Math.min(w / TEX_W, h / (TEX_H * 0.94))
@@ -300,12 +361,14 @@ export class BaseScene extends Phaser.Scene {
       imgH,
       scale,
       pt,
-      // Exact visual landmarks on station_worn_master / station_upgraded_all
       workbench: pt(0.22, 0.43),
+      researchLab: pt(0.155, 0.345),
       workbenchSpark: pt(0.252, 0.455),
+      contractHub: pt(0.305, 0.615),
       display: pt(0.50, 0.20),
       displayRelic: pt(0.50, 0.175),
       drydock: pt(0.76, 0.41),
+      stargateRelay: pt(0.685, 0.225),
       padShip: pt(0.515, 0.715),
       approachStart: pt(0.06, 0.92),
     };
@@ -318,6 +381,12 @@ export class BaseScene extends Phaser.Scene {
       item.label.destroy();
     }
     this.hitZones = [];
+    if (this.stargatePin) {
+      this.stargatePin.zone.destroy();
+      this.stargatePin.badgeBg.destroy();
+      this.stargatePin.label.destroy();
+      this.stargatePin = null;
+    }
 
     const defs: { id: BuildingId }[] = [
       { id: 'workbench' },
@@ -345,6 +414,25 @@ export class BaseScene extends Phaser.Scene {
       this.hitZones.push({ id: d.id, zone, badgeBg, label });
     }
 
+    const sgZone = this.add.zone(0, 0, 110, 86).setInteractive({ useHandCursor: true }).setDepth(9).setVisible(false);
+    sgZone.on('pointerdown', () => {
+      this.onBuildingClick?.('drydock');
+    });
+    const sgBg = this.add.graphics().setDepth(7);
+    const sgLabel = this.add
+      .text(0, 0, '', {
+        fontFamily: '-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif',
+        fontSize: '11px',
+        fontStyle: 'bold',
+        color: '#F6B852',
+        padding: { x: 7, y: 3 },
+        resolution: 2,
+      })
+      .setOrigin(0.5, 0.5)
+      .setDepth(8)
+      .setVisible(false);
+    this.stargatePin = { zone: sgZone, badgeBg: sgBg, label: sgLabel };
+
     if (this.berthZone?.scene) this.berthZone.destroy();
     this.berthZone = this.add
       .zone(0, 0, 140, 88)
@@ -356,34 +444,82 @@ export class BaseScene extends Phaser.Scene {
   }
 
   private resolveActiveShipKey(): string {
+    if (this.v2State) {
+      const candidate = `ship.player.${this.v2State.activeShipId}`;
+      return this.textures.exists(candidate) ? candidate : 'ship.player.shield_cruiser';
+    }
     if (!this.currentState) return 'ship.player.cannon_skiff';
     const v2Ship = this.currentState.v2Override?.shipId;
-    if (v2Ship) return `ship.player.${v2Ship}`;
+    if (v2Ship) {
+      const candidate = `ship.player.${v2Ship}`;
+      return this.textures.exists(candidate) ? candidate : 'ship.player.shield_cruiser';
+    }
     const isShield =
       this.currentState.progression.selectedLoadout === 'shield_cruiser' &&
       this.currentState.progression.buildings.drydock;
     return isShield ? 'ship.player.shield_cruiser' : 'ship.player.cannon_skiff';
   }
 
-  private redrawStatic(): void {
-    if (!this.currentState || !this.texturesReady) return;
-    const { progression } = this.currentState;
-    const L = this.getLayout();
+  private getActiveSettings(): GameSettings {
+    return this.v2State?.settings ?? this.currentState?.settings ?? DEFAULT_SETTINGS;
+  }
 
-    // Seamless deep-space starfield behind station so wide widescreen margins blend organically
+  private getV2Tier(id: string): number {
+    if (!this.v2State) return 0;
+    const raw = Math.max(0, Math.min(3, Math.floor(this.v2State.facilityTiers[id] ?? 0)));
+    if (id === 'drydock') {
+      const d2 = Math.floor(this.v2State.facilityTiers.drydock_tier2 ?? 0);
+      return Math.max(raw, d2 >= 1 ? 2 : 0);
+    }
+    return raw;
+  }
+
+  private redrawStatic(): void {
+    if ((!this.currentState && !this.v2State) || !this.texturesReady) return;
+    if (this.v2State) {
+      this.redrawV2Static();
+      return;
+    }
+    this.redrawV1Static();
+  }
+
+  private drawSharedBackdropAndOverlays(L: ReturnType<BaseScene['getLayout']>, act?: CampaignActId, stargatePowered = false): void {
     this.bgGraphics.clear();
     this.bgGraphics.fillStyle(0x0b1320, 1);
     this.bgGraphics.fillRect(0, 0, L.w, L.h);
+
+    // Act-aware deep-space nebula wash (V2/V3)
+    if (act === 'act2') {
+      this.bgGraphics.fillStyle(0x163854, 0.28);
+      this.bgGraphics.fillEllipse(L.cx, L.top + L.imgH * 0.25, L.w * 0.85, L.h * 0.55);
+    } else if (act === 'act3' || act === 'endless') {
+      this.bgGraphics.fillStyle(0x281c4a, 0.34);
+      this.bgGraphics.fillEllipse(L.cx, L.top + L.imgH * 0.24, L.w * 0.9, L.h * 0.58);
+      if (stargatePowered) {
+        this.bgGraphics.fillStyle(0xf6b852, 0.1);
+        this.bgGraphics.fillEllipse(L.stargateRelay.x, L.stargateRelay.y - 30 * L.scale, L.w * 0.4, L.h * 0.36);
+      }
+    }
+
     for (let i = 0; i < 56; i++) {
-      const sx = ((i * 137 + 29) % 1000) / 1000 * L.w;
-      const sy = ((i * 89 + 41) % 1000) / 1000 * L.h;
+      const sx = (((i * 137 + 29) % 1000) / 1000) * L.w;
+      const sy = (((i * 89 + 41) % 1000) / 1000) * L.h;
       const sr = i % 6 === 0 ? 1.5 : 0.95;
       const sa = 0.22 + (i % 4) * 0.14;
-      this.bgGraphics.fillStyle(i % 7 === 0 ? 0x89d6e8 : 0xdbe8f8, sa);
+      const starCol =
+        act === 'act3' || act === 'endless'
+          ? i % 5 === 0
+            ? 0xf6b852
+            : i % 7 === 0
+            ? 0xc4b5fd
+            : 0xdbe8f8
+          : i % 7 === 0
+          ? 0x89d6e8
+          : 0xdbe8f8;
+      this.bgGraphics.fillStyle(starCol, sa);
       this.bgGraphics.fillCircle(sx, sy, sr);
     }
 
-    // Position all same-camera station layers identically (zero shift!)
     for (const img of [
       this.baseImage,
       this.wbOverlay,
@@ -394,7 +530,6 @@ export class BaseScene extends Phaser.Scene {
       img.setPosition(L.cx, L.cy).setScale(L.scale);
     }
 
-    // Soft feathered dissolve on exposed image edges so station diorama floats seamlessly in space
     this.edgeMaskGraphics.clear();
     const steps = 16;
     if (L.left > 1) {
@@ -419,6 +554,235 @@ export class BaseScene extends Phaser.Scene {
         this.edgeMaskGraphics.fillRect(0, L.top + L.imgH + 2 - (i + 1) * stepH, L.w, stepH + 1);
       }
     }
+  }
+
+  private redrawV2Static(): void {
+    const st = this.v2State;
+    if (!st || !this.texturesReady) return;
+    const L = this.getLayout();
+    const s = L.scale;
+
+    const wbTier = this.getV2Tier('workbench');
+    const hubTier = this.getV2Tier('contract_hub');
+    const labTier = this.getV2Tier('research_lab');
+    const dockTier = this.getV2Tier('drydock');
+    const dispTier = this.getV2Tier('display');
+    const relayTier = this.getV2Tier('stargate_relay');
+    const stargateOn = st.stargatePowered || relayTier >= 1;
+    const anyRelicRestored = st.restoredRelicIds.length > 0;
+
+    this.drawSharedBackdropAndOverlays(L, st.campaignAct, stargateOn);
+
+    // Same-camera quadrant WebP overlays
+    this.wbOverlay.setVisible(wbTier >= 1 || labTier >= 1);
+    this.dispEmptyOverlay.setVisible(dispTier >= 1 && !anyRelicRestored);
+    this.dispRelicOverlay.setVisible(dispTier >= 1 && anyRelicRestored);
+    this.drydockOverlay.setVisible(dockTier >= 1);
+
+    // Diegetic V2 architectural structures, T1-T3 tier lights & mooring pad
+    this.v2StaticGraphics.clear();
+
+    // A. Landing pad cradle cleanly masking painted hull so active berthed player ship shines
+    this.v2StaticGraphics.fillStyle(0x0b1524, 0.88);
+    this.v2StaticGraphics.fillEllipse(L.padShip.x, L.padShip.y + 4 * s, 146 * s, 64 * s);
+    this.v2StaticGraphics.lineStyle(Math.max(1.5, 2.2 * s), st.activeShipId === 'stargate_cruiser' ? 0xf6b852 : 0x62d6df, 0.72);
+    this.v2StaticGraphics.strokeEllipse(L.padShip.x, L.padShip.y + 4 * s, 146 * s, 64 * s);
+    // Illuminated mooring clamps
+    for (const dx of [-58, 58]) {
+      this.v2StaticGraphics.fillStyle(0x283a50, 0.95);
+      this.v2StaticGraphics.fillRoundedRect(L.padShip.x + dx * s - 8 * s, L.padShip.y - 6 * s, 16 * s, 20 * s, 3);
+      this.v2StaticGraphics.fillStyle(0xf6b852, 0.9);
+      this.v2StaticGraphics.fillCircle(L.padShip.x + dx * s, L.padShip.y + 4 * s, Math.max(2, 3 * s));
+    }
+
+    // B. Contract Hub (T1-T3) at L.contractHub
+    if (hubTier >= 1) {
+      const ch = L.contractHub;
+      this.v2StaticGraphics.fillStyle(0x1b2f47, 0.95);
+      this.v2StaticGraphics.fillRoundedRect(ch.x - 16 * s, ch.y - 10 * s, 32 * s, 20 * s, 4);
+      this.v2StaticGraphics.lineStyle(Math.max(1.5, 2 * s), 0x62d6df, 0.88);
+      this.v2StaticGraphics.lineBetween(ch.x, ch.y - 10 * s, ch.x, ch.y - (22 + hubTier * 6) * s);
+      this.v2StaticGraphics.strokeCircle(ch.x, ch.y - (22 + hubTier * 6) * s, (4 + hubTier * 2) * s);
+      if (hubTier >= 2) {
+        this.v2StaticGraphics.lineStyle(Math.max(1.2, 1.8 * s), 0xf6b852, 0.8);
+        this.v2StaticGraphics.lineBetween(ch.x + 12 * s, ch.y - 8 * s, ch.x + 18 * s, ch.y - 24 * s);
+      }
+    }
+
+    // C. Research Lab (T1-T3) at L.researchLab
+    if (labTier >= 1) {
+      const rl = L.researchLab;
+      this.v2StaticGraphics.fillStyle(0x102a42, 0.9);
+      this.v2StaticGraphics.fillCircle(rl.x, rl.y, (16 + labTier * 4) * s);
+      this.v2StaticGraphics.lineStyle(Math.max(1.4, 2 * s), 0x62d6df, 0.85);
+      this.v2StaticGraphics.strokeCircle(rl.x, rl.y, (16 + labTier * 4) * s);
+      if (labTier >= 2) {
+        this.v2StaticGraphics.lineStyle(Math.max(1.2, 1.8 * s), 0x7be8ff, 0.72);
+        this.v2StaticGraphics.lineBetween(rl.x + 14 * s, rl.y + 8 * s, L.workbench.x - 18 * s, L.workbench.y - 12 * s);
+      }
+    }
+
+    // D. Drydock T2/T3 Heavy Trusses & Flagship Frame at L.drydock
+    if (dockTier >= 2) {
+      const dd = L.drydock;
+      this.v2StaticGraphics.lineStyle(Math.max(1.8, 2.8 * s), dockTier >= 3 ? 0xf6b852 : 0x7b93ad, 0.85);
+      this.v2StaticGraphics.strokeRoundedRect(dd.x - 42 * s, dd.y - 30 * s, 84 * s, 56 * s, 8);
+      if (dockTier >= 3) {
+        this.v2StaticGraphics.lineStyle(Math.max(1.4, 2 * s), 0x62d6df, 0.8);
+        this.v2StaticGraphics.strokeRoundedRect(dd.x - 48 * s, dd.y - 36 * s, 96 * s, 68 * s, 10);
+      }
+    }
+
+    // E. Stargate Relay Pylon / Portal Frame at L.stargateRelay
+    const sg = L.stargateRelay;
+    this.v2StaticGraphics.fillStyle(0x142236, 0.94);
+    this.v2StaticGraphics.fillRoundedRect(sg.x - 14 * s, sg.y + 12 * s, 28 * s, 26 * s, 5);
+    if (stargateOn) {
+      this.v2StaticGraphics.lineStyle(Math.max(2, 3.2 * s), 0xf6b852, 0.92);
+      this.v2StaticGraphics.strokeCircle(sg.x, sg.y - 4 * s, 24 * s);
+      this.v2StaticGraphics.lineStyle(Math.max(1.4, 2.2 * s), 0x62d6df, 0.88);
+      this.v2StaticGraphics.strokeCircle(sg.x, sg.y - 4 * s, 17 * s);
+    } else {
+      this.v2StaticGraphics.lineStyle(Math.max(1.4, 2 * s), 0x4b6078, 0.65);
+      this.v2StaticGraphics.strokeCircle(sg.x, sg.y - 4 * s, 20 * s);
+    }
+
+    // F. Active Berthed Player Ship on landing pad (4 hulls!)
+    const shipKey = this.resolveActiveShipKey();
+    if (this.berthedShipSprite?.scene) {
+      if (this.berthedShipSprite.texture.key !== shipKey) {
+        this.berthedShipSprite.setTexture(shipKey);
+      }
+      const shipScale =
+        st.activeShipId === 'stargate_cruiser'
+          ? 0.285 * s
+          : st.activeShipId === 'heavy_freighter'
+          ? 0.275 * s
+          : st.activeShipId === 'shield_cruiser'
+          ? 0.26 * s
+          : 0.245 * s;
+      const shipAngle = st.activeShipId === 'heavy_freighter' ? -10 : -11;
+      this.berthedShipSprite
+        .setPosition(L.padShip.x, L.padShip.y - 4 * s)
+        .setScale(shipScale)
+        .setAngle(shipAngle)
+        .setVisible(!this.dockingPlayback);
+      if (st.activeShipId === 'stargate_cruiser') {
+        this.berthedShipSprite.setTint(0xfff1cc);
+      } else {
+        this.berthedShipSprite.clearTint();
+      }
+    }
+
+    if (this.berthZone?.scene) {
+      this.berthZone
+        .setPosition(L.padShip.x, L.padShip.y - 6 * s)
+        .setSize(Math.max(110, 190 * s), Math.max(70, 110 * s))
+        .setVisible(Boolean(this.onBerthClick));
+    }
+
+    // Update diegetic V2 station pins
+    const bpCount = st.blueprintsCount ?? 0;
+    const bpTotal = st.totalBlueprints ?? 16;
+    const shipsCount = st.unlockedShipsCount ?? 1;
+    const shipsTotal = st.totalShips ?? 4;
+    const restorable = st.restorableRelicCount ?? 0;
+    const restoredCount = st.restoredRelicIds.length;
+
+    const pinSpecs: Record<
+      BuildingId,
+      { pos: { x: number; y: number }; pinY: number; text: string; accent: number; textColor: string; visible: boolean }
+    > = {
+      workbench: {
+        pos: L.workbench,
+        pinY: Math.max(18, L.pt(0.20, 0.145).y),
+        text: wbTier >= 1 ? `工坊 T${wbTier} · 蓝图 ${bpCount}/${bpTotal}` : '工坊 · 首航修复',
+        accent: wbTier >= 2 ? 0xf6b852 : wbTier >= 1 ? 0x62d6df : 0x5d728a,
+        textColor: wbTier >= 2 ? '#F6B852' : wbTier >= 1 ? '#62D6DF' : '#D5E0EC',
+        visible: true,
+      },
+      display: {
+        pos: L.display,
+        pinY: Math.max(18, L.pt(0.50, 0.045).y),
+        text:
+          dispTier < 1
+            ? '收藏展台 · 未建'
+            : restorable > 0
+            ? `展台 T${dispTier} · 可修复(${restorable})`
+            : restoredCount >= 4
+            ? `藏品馆 T${dispTier} · 4/4 ★`
+            : `藏品馆 T${dispTier} · ${restoredCount}/4`,
+        accent: restorable > 0 || restoredCount >= 4 ? 0xf6b852 : dispTier >= 1 ? 0x62d6df : 0x5d728a,
+        textColor: restorable > 0 || restoredCount >= 4 ? '#F6B852' : dispTier >= 1 ? '#62D6DF' : '#D5E0EC',
+        visible: true,
+      },
+      drydock: {
+        pos: L.drydock,
+        pinY: Math.max(18, L.pt(0.77, 0.155).y),
+        text: dockTier >= 1 ? `船坞 T${dockTier} · ${shipsCount}/${shipsTotal} 舰` : `船坞 · ${shipsCount}/${shipsTotal} 舰`,
+        accent: dockTier >= 3 ? 0xf6b852 : dockTier >= 1 ? 0x62d6df : 0x5d728a,
+        textColor: dockTier >= 3 ? '#F6B852' : dockTier >= 1 ? '#62D6DF' : '#D5E0EC',
+        visible: true,
+      },
+    };
+
+    for (const item of this.hitZones) {
+      const spec = pinSpecs[item.id];
+      const zoneW = Math.max(88, 220 * s);
+      const zoneH = Math.max(76, 170 * s);
+      item.zone.setPosition(spec.pos.x, spec.pos.y).setSize(zoneW, zoneH).setVisible(spec.visible);
+      item.label.setVisible(spec.visible);
+      item.badgeBg.clear();
+      if (!spec.visible) continue;
+
+      const lx = Math.max(60, Math.min(L.w - 60, spec.pos.x));
+      const ly = spec.pinY;
+      item.label.setText(spec.text).setColor(spec.textColor).setPosition(lx, ly);
+
+      const bw = item.label.width + 6;
+      const bh = item.label.height + 2;
+      item.badgeBg.fillStyle(0x0d1726, 0.92);
+      item.badgeBg.fillRoundedRect(lx - bw * 0.5, ly - bh * 0.5, bw, bh, 7);
+      item.badgeBg.lineStyle(1.6, spec.accent, 0.95);
+      item.badgeBg.strokeRoundedRect(lx - bw * 0.5, ly - bh * 0.5, bw, bh, 7);
+    }
+
+    // Optional 4th Stargate Relay pin (visible when built or Act 3+)
+    if (this.stargatePin) {
+      const showSgPin = stargateOn || st.campaignAct === 'act3' || st.campaignAct === 'endless';
+      this.stargatePin.badgeBg.clear();
+      this.stargatePin.zone.setPosition(sg.x, sg.y).setSize(Math.max(80, 120 * s), Math.max(70, 100 * s)).setVisible(showSgPin);
+      this.stargatePin.label.setVisible(showSgPin);
+      if (showSgPin) {
+        const sgText = stargateOn ? `星门塔 T${Math.max(1, relayTier)} ★` : '星门塔 · 待建造';
+        const sgX = Math.max(60, Math.min(L.w - 60, sg.x));
+        const sgY = Math.max(20, sg.y - 36 * s);
+        this.stargatePin.label.setText(sgText).setColor(stargateOn ? '#F6B852' : '#AFBDCD').setPosition(sgX, sgY);
+        const bw = this.stargatePin.label.width + 6;
+        const bh = this.stargatePin.label.height + 2;
+        this.stargatePin.badgeBg.fillStyle(0x0d1726, 0.92);
+        this.stargatePin.badgeBg.fillRoundedRect(sgX - bw * 0.5, sgY - bh * 0.5, bw, bh, 6);
+        this.stargatePin.badgeBg.lineStyle(1.5, stargateOn ? 0xf6b852 : 0x5d728a, 0.95);
+        this.stargatePin.badgeBg.strokeRoundedRect(sgX - bw * 0.5, sgY - bh * 0.5, bw, bh, 6);
+      }
+    }
+
+    this.drawDynamicLayer();
+  }
+
+  private redrawV1Static(): void {
+    if (!this.currentState || !this.texturesReady) return;
+    const { progression } = this.currentState;
+    const L = this.getLayout();
+
+    this.v2StaticGraphics.clear();
+    if (this.stargatePin) {
+      this.stargatePin.badgeBg.clear();
+      this.stargatePin.zone.setVisible(false);
+      this.stargatePin.label.setVisible(false);
+    }
+
+    this.drawSharedBackdropAndOverlays(L);
 
     const wbBuilt = progression.buildings.workbench;
     const dispBuilt = progression.buildings.display;
@@ -431,7 +795,6 @@ export class BaseScene extends Phaser.Scene {
     this.dispRelicOverlay.setVisible(dispBuilt && anyRelicRestored);
     this.drydockOverlay.setVisible(dockBuilt);
 
-    // Clickable landing-pad berth zone over the painted isometric ship (launches Prepare cleanly!)
     if (this.berthedShipSprite?.scene) {
       this.berthedShipSprite.setVisible(false);
     }
@@ -442,7 +805,6 @@ export class BaseScene extends Phaser.Scene {
         .setVisible(Boolean(this.onBerthClick));
     }
 
-    // Update diegetic station pins directly above each facility!
     const pinSpecs: Record<
       BuildingId,
       { pos: { x: number; y: number }; pinY: number; text: string; accent: number; textColor: string; visible: boolean }
@@ -541,13 +903,20 @@ export class BaseScene extends Phaser.Scene {
 
   private drawDynamicLayer(): void {
     this.animGraphics.clear();
-    if (!this.currentState || !this.texturesReady) return;
-    const { progression, settings } = this.currentState;
+    if ((!this.currentState && !this.v2State) || !this.texturesReady) return;
+    const settings = this.getActiveSettings();
     const L = this.getLayout();
     const s = L.scale;
     const t = settings.reducedMotion ? 0 : this.elapsed;
 
-    // 0. Subtle landing-pad mooring readiness beacon ring around the painted isometric ship
+    if (this.v2State) {
+      this.drawV2DynamicLayer(L, s, t, settings);
+      return;
+    }
+
+    const { progression } = this.currentState!;
+
+    // 0. Subtle landing-pad mooring readiness beacon ring
     if (!this.dockingPlayback && !settings.reducedMotion) {
       const padPulse = 0.22 + 0.14 * Math.sin(t * 2.2);
       this.animGraphics.lineStyle(1.4, 0x62d6df, padPulse);
@@ -558,11 +927,7 @@ export class BaseScene extends Phaser.Scene {
     if (!settings.reducedMotion) {
       const blink = Math.sin(t * 3.1) > 0.35;
       if (blink) {
-        const corners = [
-          L.pt(0.068, 0.478),
-          L.pt(0.502, 0.905),
-          L.pt(0.935, 0.482),
-        ];
+        const corners = [L.pt(0.068, 0.478), L.pt(0.502, 0.905), L.pt(0.935, 0.482)];
         for (const c of corners) {
           this.animGraphics.fillStyle(0xf6b852, 0.85);
           this.animGraphics.fillCircle(c.x, c.y, Math.max(2, 3.2 * s));
@@ -570,84 +935,20 @@ export class BaseScene extends Phaser.Scene {
       }
     }
 
-    // 2. Repaired Workbench: active-working 3rd state (warm overhead lamp + welding sparks + deck crane)
-    const wbWorking = Boolean(this.currentState.v2Override?.workbenchWorking || this.dockingPlayback);
+    // 2. Repaired Workbench
+    const wbWorking = Boolean(this.currentState?.v2Override?.workbenchWorking || this.dockingPlayback);
     if (progression.buildings.workbench) {
-      if (wbWorking) {
-        const lamp = L.pt(0.22, 0.34);
-        const conePulse = settings.reducedMotion ? 0.16 : 0.13 + 0.05 * Math.sin(t * 4.2);
-        this.animGraphics.fillStyle(0xf6b852, conePulse);
-        this.animGraphics.fillTriangle(
-          lamp.x,
-          lamp.y,
-          L.workbench.x - 58 * s,
-          L.workbench.y + 42 * s,
-          L.workbench.x + 54 * s,
-          L.workbench.y + 34 * s
-        );
-        this.animGraphics.fillStyle(0x62d6df, 0.9);
-        this.animGraphics.fillCircle(L.pt(0.185, 0.39).x, L.pt(0.185, 0.39).y, Math.max(2, 3 * s));
-      }
-
-      if (!settings.reducedMotion && !settings.lowQuality) {
-        const sp = L.workbenchSpark;
-        const pulse = 0.55 + 0.45 * Math.sin(t * 14);
-        this.animGraphics.fillStyle(0xffe7a8, 0.72 * pulse);
-        this.animGraphics.fillCircle(sp.x, sp.y, Math.max(2.5, 6 * s * pulse));
-        for (let i = 0; i < 6; i++) {
-          const phase = (t * 2.4 + i * 0.17) % 1;
-          const ang = -Math.PI * 0.85 + i * 0.32;
-          const dist = phase * 26 * s;
-          const px = sp.x + Math.cos(ang) * dist;
-          const py = sp.y + Math.sin(ang) * dist + phase * phase * 18 * s;
-          this.animGraphics.fillStyle(i % 2 === 0 ? 0xf6b852 : 0xfff0c2, Math.max(0, 1 - phase));
-          this.animGraphics.fillCircle(px, py, Math.max(1.2, 2.2 * s * (1 - phase * 0.5)));
-        }
-
-        // Autonomous hovering cargo-tug drone gliding smoothly along central cross-walkway
-        const p = (Math.sin(t * 0.8) + 1) * 0.5;
-        const botX = Phaser.Math.Linear(L.pt(0.36, 0.55).x, L.pt(0.62, 0.39).x, p);
-        const botY = Phaser.Math.Linear(L.pt(0.36, 0.55).y, L.pt(0.62, 0.39).y, p) + Math.sin(t * 4) * 2 * s;
-        this.animGraphics.fillStyle(0x060b14, 0.42);
-        this.animGraphics.fillEllipse(botX, botY + 9 * s, 14 * s, 6 * s);
-        this.animGraphics.fillStyle(0x88a0b8, 1);
-        this.animGraphics.fillRoundedRect(botX - 7 * s, botY - 4 * s, 14 * s, 8 * s, 3);
-        this.animGraphics.fillStyle(0x62d6df, 1);
-        this.animGraphics.fillCircle(botX + 2 * s, botY, Math.max(1.5, 2.4 * s));
-      }
+      this.drawWorkbenchFx(L, s, t, settings, wbWorking, 1);
     }
 
-    // 3. Restored Museum Relics: multi-relic orbital halo + color-coded floating relic pips!
+    // 3. Restored Museum Relics
     const relicSum = getRelicCollectionSummary(progression);
     if (progression.buildings.display && relicSum.restoredCount > 0) {
-      const rp = L.displayRelic;
-      const pulse = 1 + Math.sin(t * 2.5) * 0.08;
-      const isComplete = relicSum.restoredCount >= relicSum.totalCount;
-      this.animGraphics.lineStyle(Math.max(1.2, 2.2 * s), isComplete ? 0xf6b852 : 0x62d6df, 0.78);
-      this.animGraphics.strokeCircle(rp.x, rp.y, 34 * s * pulse);
-      this.animGraphics.lineStyle(Math.max(1, 1.5 * s), isComplete ? 0x62d6df : 0xf6b852, 0.58);
-      this.animGraphics.strokeEllipse(rp.x, rp.y, 84 * s * pulse, 28 * s * pulse);
-      if (isComplete) {
-        this.animGraphics.lineStyle(Math.max(1, 1.4 * s), 0xf6b852, 0.42);
-        this.animGraphics.strokeEllipse(rp.x, rp.y, 108 * s * pulse, 42 * s * pulse);
-      }
-
-      // Orbiting color-coded holographic relic markers for each restored relic (1..4)
       const restoredIds = RELIC_ORDER.filter((id) => progression.relics[id]?.restored);
-      restoredIds.forEach((id, idx) => {
-        const def = RELICS[id];
-        const hex = Number.parseInt((def?.accentColor ?? '#62D6DF').replace('#', ''), 16);
-        const ang = t * 1.15 + (idx / restoredIds.length) * Math.PI * 2;
-        const ox = rp.x + Math.cos(ang) * 42 * s;
-        const oy = rp.y + Math.sin(ang) * 14 * s;
-        this.animGraphics.fillStyle(hex, 0.35);
-        this.animGraphics.fillCircle(ox, oy, Math.max(3.5, 7 * s));
-        this.animGraphics.fillStyle(hex, 0.96);
-        this.animGraphics.fillCircle(ox, oy, Math.max(2, 3.6 * s));
-      });
+      this.drawRelicHalos(L, s, t, restoredIds);
     }
 
-    // 4. Affordable facility / restorable relic pulse ring (diegetic visual callout!)
+    // 4. Affordable facility / restorable relic pulse ring
     if (!settings.reducedMotion) {
       const pulseR = (Math.sin(t * 3.5) + 1) * 0.5;
       if (!progression.buildings.workbench && canBuildFacility(progression, 'workbench').canBuild) {
@@ -660,7 +961,227 @@ export class BaseScene extends Phaser.Scene {
       }
     }
 
-    // 5. F11 Return-to-Port Docking & Articulated Mechanical Crane Unloading Sequence (<= 1.4s, pure presentation!)
+    this.drawDockingAndCelebration(L, s, settings);
+  }
+
+  private drawV2DynamicLayer(
+    L: ReturnType<BaseScene['getLayout']>,
+    s: number,
+    t: number,
+    settings: GameSettings
+  ): void {
+    const st = this.v2State!;
+    const wbTier = this.getV2Tier('workbench');
+    const hubTier = this.getV2Tier('contract_hub');
+    const labTier = this.getV2Tier('research_lab');
+    const dockTier = this.getV2Tier('drydock');
+    const dispTier = this.getV2Tier('display');
+    const relayTier = this.getV2Tier('stargate_relay');
+    const stargateOn = st.stargatePowered || relayTier >= 1;
+
+    // 0. Active berthed ship gentle hover + hull-specific deck lighting
+    if (this.berthedShipSprite?.scene) {
+      const showBerthed = !this.dockingPlayback;
+      this.berthedShipSprite.setVisible(showBerthed);
+      if (showBerthed) {
+        const hoverY = settings.reducedMotion ? 0 : Math.sin(t * 2.1) * 1.4 * s;
+        this.berthedShipSprite.setY(L.padShip.y - 4 * s + hoverY);
+
+        if (st.activeShipId === 'shield_cruiser') {
+          const shimmer = 0.25 + 0.14 * Math.sin(t * 2.6);
+          this.animGraphics.lineStyle(Math.max(1.4, 2 * s), 0x62d6df, shimmer);
+          this.animGraphics.strokeEllipse(L.padShip.x + 10 * s, L.padShip.y - 4 * s, 96 * s, 44 * s);
+        } else if (st.activeShipId === 'heavy_freighter') {
+          this.animGraphics.fillStyle(0xf6b852, 0.28 + 0.1 * Math.sin(t * 3));
+          this.animGraphics.fillCircle(L.padShip.x - 28 * s, L.padShip.y + 8 * s, 9 * s);
+          this.animGraphics.fillCircle(L.padShip.x + 28 * s, L.padShip.y + 8 * s, 9 * s);
+        } else if (st.activeShipId === 'stargate_cruiser') {
+          const haloPulse = 1 + Math.sin(t * 2.4) * 0.05;
+          this.animGraphics.lineStyle(Math.max(1.6, 2.4 * s), 0xf6b852, 0.72);
+          this.animGraphics.strokeEllipse(L.padShip.x, L.padShip.y - 2 * s, 134 * s * haloPulse, 56 * s * haloPulse);
+          this.animGraphics.lineStyle(Math.max(1.2, 1.8 * s), 0x62d6df, 0.56);
+          this.animGraphics.strokeEllipse(L.padShip.x, L.padShip.y - 2 * s, 114 * s / haloPulse, 44 * s / haloPulse);
+        } else if (!settings.reducedMotion) {
+          const padPulse = 0.22 + 0.14 * Math.sin(t * 2.2);
+          this.animGraphics.lineStyle(1.4, 0x62d6df, padPulse);
+          this.animGraphics.strokeEllipse(L.padShip.x, L.padShip.y + 6 * s, 118 * s, 54 * s);
+        }
+      }
+    }
+
+    // 1. Corner aviation beacons
+    if (!settings.reducedMotion) {
+      const blink = Math.sin(t * 3.1) > 0.35;
+      if (blink) {
+        for (const c of [L.pt(0.068, 0.478), L.pt(0.502, 0.905), L.pt(0.935, 0.482)]) {
+          this.animGraphics.fillStyle(0xf6b852, 0.85);
+          this.animGraphics.fillCircle(c.x, c.y, Math.max(2, 3.2 * s));
+        }
+      }
+    }
+
+    // 2. Workbench (T1-T3)
+    if (wbTier >= 1) {
+      this.drawWorkbenchFx(L, s, t, settings, Boolean(st.workbenchWorking || this.dockingPlayback || wbTier >= 2), wbTier);
+    }
+
+    // 3. Research Lab (T1-T3) holo scan ring
+    if (labTier >= 1 && !settings.reducedMotion) {
+      const rl = L.researchLab;
+      const pulse = 0.45 + 0.35 * Math.sin(t * 3.1);
+      this.animGraphics.lineStyle(Math.max(1.2, 1.8 * s), 0x62d6df, pulse);
+      this.animGraphics.strokeCircle(rl.x, rl.y, (10 + labTier * 5 + Math.sin(t * 2) * 3) * s);
+      if (labTier >= 3) {
+        this.animGraphics.lineStyle(Math.max(1.2, 1.6 * s), 0xf6b852, 0.65);
+        this.animGraphics.strokeEllipse(rl.x, rl.y, 44 * s, 18 * s);
+      }
+    }
+
+    // 4. Contract Hub (T1-T3) uplink wave
+    if (hubTier >= 1 && !settings.reducedMotion) {
+      const ch = L.contractHub;
+      const topY = ch.y - (22 + hubTier * 6) * s;
+      const wave = (t * 1.1) % 1;
+      this.animGraphics.lineStyle(Math.max(1.2, 1.6 * s), hubTier >= 3 ? 0xf6b852 : 0x62d6df, (1 - wave) * 0.78);
+      this.animGraphics.strokeCircle(ch.x, topY, (6 + wave * (14 + hubTier * 6)) * s);
+    }
+
+    // 5. Drydock (T1-T3) deck beacons
+    if (dockTier >= 1 && !settings.reducedMotion) {
+      const dd = L.drydock;
+      const glow = 0.55 + 0.4 * Math.sin(t * 2.8);
+      this.animGraphics.fillStyle(dockTier >= 3 ? 0xf6b852 : 0x62d6df, glow);
+      this.animGraphics.fillCircle(dd.x - 36 * s, dd.y - 24 * s, Math.max(2.2, 3.6 * s));
+      this.animGraphics.fillCircle(dd.x + 36 * s, dd.y - 24 * s, Math.max(2.2, 3.6 * s));
+    }
+
+    // 6. Restored Relics Aura (4 color-coded orbiting markers)
+    if (dispTier >= 1 && st.restoredRelicIds.length > 0) {
+      this.drawRelicHalos(L, s, t, st.restoredRelicIds);
+    }
+
+    // 7. Restorable relic pulse callout
+    if (!settings.reducedMotion && dispTier >= 1 && (st.restorableRelicCount ?? 0) > 0) {
+      const pulseR = (Math.sin(t * 3.5) + 1) * 0.5;
+      this.animGraphics.lineStyle(2, 0xf6b852, 0.45 + pulseR * 0.45);
+      this.animGraphics.strokeCircle(L.display.x, L.display.y, (32 + pulseR * 16) * s);
+    }
+
+    // 8. Stargate Relay illuminated portal rings & vertical beacon beam!
+    if (stargateOn) {
+      const sg = L.stargateRelay;
+      const pulse = settings.reducedMotion ? 1 : 0.94 + 0.1 * Math.sin(t * 3.4);
+      const beamW = (relayTier >= 3 ? 20 : relayTier >= 2 ? 14 : 10) * s;
+      // Vertical zenith beacon beam ascending into space
+      this.animGraphics.fillStyle(0x62d6df, 0.2);
+      this.animGraphics.fillRect(sg.x - beamW * 0.5, 0, beamW, sg.y - 4 * s);
+      this.animGraphics.fillStyle(0xf6b852, 0.34);
+      this.animGraphics.fillRect(sg.x - beamW * 0.22, 0, beamW * 0.44, sg.y - 4 * s);
+
+      // Glowing portal core + concentric stargate rings
+      this.animGraphics.fillStyle(0x62d6df, 0.35);
+      this.animGraphics.fillCircle(sg.x, sg.y - 4 * s, 14 * s * pulse);
+      this.animGraphics.lineStyle(Math.max(1.6, 2.4 * s), 0xf6b852, 0.9);
+      this.animGraphics.strokeCircle(sg.x, sg.y - 4 * s, 26 * s * pulse);
+      if (relayTier >= 2) {
+        this.animGraphics.lineStyle(Math.max(1.2, 1.8 * s), 0x7be8ff, 0.72);
+        this.animGraphics.strokeEllipse(sg.x, sg.y - 4 * s, 64 * s * pulse, 22 * s * pulse);
+        // Energy resonance arc linking Stargate Relay to Display Relic Dome
+        this.animGraphics.lineStyle(Math.max(1.2, 1.8 * s), 0xf6b852, 0.42 + 0.2 * Math.sin(t * 4));
+        this.animGraphics.lineBetween(sg.x - 18 * s, sg.y - 6 * s, L.displayRelic.x + 28 * s, L.displayRelic.y);
+      }
+    }
+
+    this.drawDockingAndCelebration(L, s, settings);
+  }
+
+  private drawWorkbenchFx(
+    L: ReturnType<BaseScene['getLayout']>,
+    s: number,
+    t: number,
+    settings: GameSettings,
+    wbWorking: boolean,
+    tier: number
+  ): void {
+    if (wbWorking) {
+      const lamp = L.pt(0.22, 0.34);
+      const conePulse = settings.reducedMotion ? 0.16 : 0.13 + 0.05 * Math.sin(t * 4.2);
+      this.animGraphics.fillStyle(tier >= 3 ? 0xffe49e : 0xf6b852, conePulse);
+      this.animGraphics.fillTriangle(
+        lamp.x,
+        lamp.y,
+        L.workbench.x - 58 * s,
+        L.workbench.y + 42 * s,
+        L.workbench.x + 54 * s,
+        L.workbench.y + 34 * s
+      );
+      this.animGraphics.fillStyle(0x62d6df, 0.9);
+      this.animGraphics.fillCircle(L.pt(0.185, 0.39).x, L.pt(0.185, 0.39).y, Math.max(2, 3 * s));
+    }
+
+    if (!settings.reducedMotion && !settings.lowQuality) {
+      const sp = L.workbenchSpark;
+      const pulse = 0.55 + 0.45 * Math.sin(t * 14);
+      this.animGraphics.fillStyle(0xffe7a8, 0.72 * pulse);
+      this.animGraphics.fillCircle(sp.x, sp.y, Math.max(2.5, 6 * s * pulse));
+      for (let i = 0; i < 6; i++) {
+        const phase = (t * 2.4 + i * 0.17) % 1;
+        const ang = -Math.PI * 0.85 + i * 0.32;
+        const dist = phase * 26 * s;
+        const px = sp.x + Math.cos(ang) * dist;
+        const py = sp.y + Math.sin(ang) * dist + phase * phase * 18 * s;
+        this.animGraphics.fillStyle(i % 2 === 0 ? 0xf6b852 : 0xfff0c2, Math.max(0, 1 - phase));
+        this.animGraphics.fillCircle(px, py, Math.max(1.2, 2.2 * s * (1 - phase * 0.5)));
+      }
+
+      const p = (Math.sin(t * 0.8) + 1) * 0.5;
+      const botX = Phaser.Math.Linear(L.pt(0.36, 0.55).x, L.pt(0.62, 0.39).x, p);
+      const botY = Phaser.Math.Linear(L.pt(0.36, 0.55).y, L.pt(0.62, 0.39).y, p) + Math.sin(t * 4) * 2 * s;
+      this.animGraphics.fillStyle(0x060b14, 0.42);
+      this.animGraphics.fillEllipse(botX, botY + 9 * s, 14 * s, 6 * s);
+      this.animGraphics.fillStyle(0x88a0b8, 1);
+      this.animGraphics.fillRoundedRect(botX - 7 * s, botY - 4 * s, 14 * s, 8 * s, 3);
+      this.animGraphics.fillStyle(0x62d6df, 1);
+      this.animGraphics.fillCircle(botX + 2 * s, botY, Math.max(1.5, 2.4 * s));
+    }
+  }
+
+  private drawRelicHalos(
+    L: ReturnType<BaseScene['getLayout']>,
+    s: number,
+    t: number,
+    restoredIds: readonly string[]
+  ): void {
+    const rp = L.displayRelic;
+    const pulse = 1 + Math.sin(t * 2.5) * 0.08;
+    const isComplete = restoredIds.length >= RELIC_ORDER.length;
+    this.animGraphics.lineStyle(Math.max(1.2, 2.2 * s), isComplete ? 0xf6b852 : 0x62d6df, 0.78);
+    this.animGraphics.strokeCircle(rp.x, rp.y, 34 * s * pulse);
+    this.animGraphics.lineStyle(Math.max(1, 1.5 * s), isComplete ? 0x62d6df : 0xf6b852, 0.58);
+    this.animGraphics.strokeEllipse(rp.x, rp.y, 84 * s * pulse, 28 * s * pulse);
+    if (isComplete) {
+      this.animGraphics.lineStyle(Math.max(1, 1.4 * s), 0xf6b852, 0.42);
+      this.animGraphics.strokeEllipse(rp.x, rp.y, 108 * s * pulse, 42 * s * pulse);
+    }
+
+    restoredIds.forEach((id, idx) => {
+      const def = RELICS[id];
+      const hex = Number.parseInt((def?.accentColor ?? '#62D6DF').replace('#', ''), 16);
+      const ang = t * 1.15 + (idx / Math.max(1, restoredIds.length)) * Math.PI * 2;
+      const ox = rp.x + Math.cos(ang) * 42 * s;
+      const oy = rp.y + Math.sin(ang) * 14 * s;
+      this.animGraphics.fillStyle(hex, 0.35);
+      this.animGraphics.fillCircle(ox, oy, Math.max(3.5, 7 * s));
+      this.animGraphics.fillStyle(hex, 0.96);
+      this.animGraphics.fillCircle(ox, oy, Math.max(2, 3.6 * s));
+    });
+  }
+
+  private drawDockingAndCelebration(
+    L: ReturnType<BaseScene['getLayout']>,
+    s: number,
+    settings: GameSettings
+  ): void {
     if (this.dockingPlayback) {
       const p = Math.min(1, this.dockingElapsedMs / this.dockingDurationMs);
       const dockPhase = Math.min(1, p / 0.48);
@@ -673,7 +1194,7 @@ export class BaseScene extends Phaser.Scene {
 
       const curX = Phaser.Math.Linear(L.approachStart.x, L.padShip.x, easeOut);
       const curY = Phaser.Math.Linear(L.approachStart.y, L.padShip.y - 8 * s, easeOut);
-      const shipScale = Phaser.Math.Linear(0.36, 0.245, easeOut) * s;
+      const shipScale = Phaser.Math.Linear(0.36, 0.25, easeOut) * s;
 
       this.arrivalShipSprite
         .setVisible(p < 0.95)
@@ -681,8 +1202,12 @@ export class BaseScene extends Phaser.Scene {
         .setScale(shipScale)
         .setAngle(Phaser.Math.Linear(-22, -12, easeOut))
         .setAlpha(this.dockingPlayback.wasDefeat ? 0.85 : 1);
+      if (this.v2State?.activeShipId === 'stargate_cruiser') {
+        this.arrivalShipSprite.setTint(0xfff1cc);
+      } else {
+        this.arrivalShipSprite.clearTint();
+      }
 
-      // Braking retro-thruster plume or amber escort tug
       if (dockPhase < 0.94) {
         if (this.dockingPlayback.wasDefeat) {
           const tugX = curX + 46 * s;
@@ -697,7 +1222,6 @@ export class BaseScene extends Phaser.Scene {
         }
       }
 
-      // Articulated 2-segment mechanical gantry crane physically carrying crates from ship to Workbench/Display!
       if (p >= 0.44 && p <= 0.96) {
         const unloadP = (p - 0.44) / 0.52;
         const crates = Math.min(5, Math.max(2, this.dockingPlayback.crateCount));
@@ -728,22 +1252,18 @@ export class BaseScene extends Phaser.Scene {
         if (leadGripX !== null && leadGripY !== null) {
           const elbowX = (craneBase.x + leadGripX) * 0.5 - 12 * s;
           const elbowY = Math.min(craneBase.y, leadGripY) - 44 * s;
-          // Heavy gantry pedestal
           this.animGraphics.fillStyle(0x2d3f54, 1);
           this.animGraphics.fillCircle(craneBase.x, craneBase.y, Math.max(4, 7 * s));
-          // Upper boom & forearm articulated steel struts
           this.animGraphics.lineStyle(Math.max(2.5, 4.4 * s), 0x7b93ad, 0.95);
           this.animGraphics.lineBetween(craneBase.x, craneBase.y, elbowX, elbowY);
           this.animGraphics.lineStyle(Math.max(2, 3.4 * s), 0xa8bfd6, 0.95);
           this.animGraphics.lineBetween(elbowX, elbowY, leadGripX, leadGripY - 6 * s);
-          // Hydraulic joint & amber magnetic grapple head
           this.animGraphics.fillStyle(0xf6b852, 1);
           this.animGraphics.fillCircle(elbowX, elbowY, Math.max(2.5, 4 * s));
           this.animGraphics.fillCircle(leadGripX, leadGripY - 6 * s, Math.max(2.5, 4.2 * s));
         }
       }
 
-      // Crisp pad lock pulse ring
       if (p > 0.75) {
         const ringP = (p - 0.75) / 0.25;
         this.animGraphics.lineStyle(2.5, 0xf6b852, Math.max(0, 1 - ringP));
@@ -753,9 +1273,19 @@ export class BaseScene extends Phaser.Scene {
       this.arrivalShipSprite.setVisible(false);
     }
 
-    // 6. Fresh construction completion burst (capped <= 16 sparks, disabled in reducedMotion)
-    if (this.buildCelebrateTimer > 0 && this.celebrateBuilding && !settings.reducedMotion) {
-      const target = L[this.celebrateBuilding];
+    if (this.buildCelebrateTimer > 0 && this.celebrateFacilityKey && !settings.reducedMotion) {
+      const target =
+        this.celebrateFacilityKey === 'stargate_relay'
+          ? L.stargateRelay
+          : this.celebrateFacilityKey === 'contract_hub'
+          ? L.contractHub
+          : this.celebrateFacilityKey === 'research_lab'
+          ? L.researchLab
+          : this.celebrateFacilityKey === 'display'
+          ? L.display
+          : this.celebrateFacilityKey === 'drydock' || this.celebrateFacilityKey === 'drydock_tier2'
+          ? L.drydock
+          : L.workbench;
       const progress = 1 - this.buildCelebrateTimer / 1.6;
       const count = settings.lowQuality ? 6 : 16;
       for (let i = 0; i < count; i++) {
@@ -769,3 +1299,4 @@ export class BaseScene extends Phaser.Scene {
     }
   }
 }
+

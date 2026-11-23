@@ -330,5 +330,14 @@ export function createV2TutorialRun(runId: string): V2RunState {
     activeEngineerOffer: null,
     navigatorFreeJumpUsed: false,
     settlementReason: null,
+    sectorId: 'near_orbit',
+    endlessThreat: 0,
+    endlessMutatorIds: [],
+    recentEquipmentKinds: [],
+    usedEventIds: [],
+    tacticalChargesMax: 1,
+    tacticalChargesUsed: 0,
+    salvagePartsEarned: 0,
+    isFinalCampaignRun: false,
   };
 }
