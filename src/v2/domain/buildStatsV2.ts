@@ -12,14 +12,133 @@ import {
   areV2PlacedItemsAdjacent,
   doesV2PlacedItemTouchPowerCell,
 } from './inventoryV2';
-import type { V2CargoBayState, V2PlacedItem } from './types';
+import type { V2CargoBayState, V2PlacedItem, V2ProfileState } from './types';
+
+export type V2SynergyTypeId =
+  | 'battery_laser'
+  | 'coolant_heavy'
+  | 'capacitor_heavy'
+  | 'relay_hangar'
+  | 'shield_counter'
+  | 'coolant_vent_heavy'
+  | 'coolant_vent_salvo'
+  | 'support_salvo'
+  | 'overdrive_weapon'
+  | 'cargo_amp_cargo';
+
+export interface V2SynergyCatalogEntry {
+  readonly id: V2SynergyTypeId;
+  readonly name: string;
+  readonly pairLabel: string;
+  readonly effectSummary: string;
+  readonly isCrossCategory?: boolean;
+}
+
+export const V2_SYNERGY_ORDER: readonly V2SynergyTypeId[] = [
+  'battery_laser',
+  'coolant_heavy',
+  'capacitor_heavy',
+  'relay_hangar',
+  'shield_counter',
+  'coolant_vent_heavy',
+  'coolant_vent_salvo',
+  'support_salvo',
+  'overdrive_weapon',
+  'cargo_amp_cargo',
+];
+
+export const V2_SYNERGY_CATALOG: Readonly<Record<V2SynergyTypeId, V2SynergyCatalogEntry>> = {
+  battery_laser: {
+    id: 'battery_laser',
+    name: '高能供能回路',
+    pairLabel: '能量电池 ↔ 激光炮',
+    effectSummary: '普通电池供能至多 1 门激光炮 (+2 伤)，优良电池供能至多 2 门 (+3 伤)',
+  },
+  coolant_heavy: {
+    id: 'coolant_heavy',
+    name: '跨类液冷炮管',
+    pairLabel: '冷却罐货品 ↔ 重炮',
+    effectSummary: '货物冷却罐正交贴邻重炮时为其提供额外 +4 伤（与排热阀可叠加）',
+    isCrossCategory: true,
+  },
+  capacitor_heavy: {
+    id: 'capacitor_heavy',
+    name: '先手电容直驱',
+    pairLabel: '蓄能器 ↔ 重炮',
+    effectSummary: '重炮改为第 1、3、5…轮先手开火（优良蓄能器首轮额外 +3 伤）',
+  },
+  relay_hangar: {
+    id: 'relay_hangar',
+    name: '编队扩展链路',
+    pairLabel: '编队中继 ↔ 无人机库',
+    effectSummary: '无人机库上限 3→4 架（优良中继首轮额外出动 1 架）',
+  },
+  shield_counter: {
+    id: 'shield_counter',
+    name: '偏导反击共振',
+    pairLabel: '护盾板 ↔ 反击器',
+    effectSummary: '激活反击器，每轮按护盾实际吸收量触发 50%/75% 反击',
+  },
+  coolant_vent_heavy: {
+    id: 'coolant_vent_heavy',
+    name: '排热重炮增压',
+    pairLabel: '冷却排热阀 ↔ 重炮',
+    effectSummary: '排热阀正交贴邻重炮时每次开火 +2/+3 伤',
+  },
+  coolant_vent_salvo: {
+    id: 'coolant_vent_salvo',
+    name: '排热齐射冷却',
+    pairLabel: '冷却排热阀 ↔ 齐射导弹舱',
+    effectSummary: '排热阀正交贴邻导弹舱时每轮首枚导弹 +2/+3 伤',
+  },
+  support_salvo: {
+    id: 'support_salvo',
+    name: '火控装填扩展',
+    pairLabel: '蓄能器/编队中继 ↔ 齐射导弹舱',
+    effectSummary: '导弹舱每轮发射数量 +1 枚',
+  },
+  overdrive_weapon: {
+    id: 'overdrive_weapon',
+    name: '超频核心增幅',
+    pairLabel: '超频核心 ↔ 武器模块',
+    effectSummary: '正交贴邻武器获得超频增伤（直击 +2/+3，多段每发 +1/+2）',
+  },
+  cargo_amp_cargo: {
+    id: 'cargo_amp_cargo',
+    name: '跨类货舱谐振',
+    pairLabel: '货舱谐振仪 ↔ 货物/任务物',
+    effectSummary: '每贴邻 1 件货物或任务物，提升舰核火力与护盾',
+    isCrossCategory: true,
+  },
+};
+
+const VALID_SYNERGY_ID_SET: ReadonlySet<string> = new Set(V2_SYNERGY_ORDER);
+
+export function isV2SynergyTypeId(id: string): id is V2SynergyTypeId {
+  return VALID_SYNERGY_ID_SET.has(id);
+}
+
+export function getBatterySupplyCapacity(quality: V2Quality): number {
+  return quality === 'improved' ? 2 : 1;
+}
 
 export interface V2AdjacencyLink {
   readonly sourceInstanceId: string;
-  readonly sourceKind: V2EquipmentKind;
+  readonly sourceKind: V2EquipmentKind | 'cargo';
   readonly targetInstanceId: string;
   readonly targetKind: V2EquipmentKind | 'cargo';
   readonly label: string;
+  readonly synergyId?: V2SynergyTypeId;
+  readonly status?: 'active' | 'capped';
+}
+
+export interface V2BatterySupplySummary {
+  readonly instanceId: string;
+  readonly quality: V2Quality;
+  readonly capacity: number;
+  readonly suppliedLaserIds: readonly string[];
+  readonly adjacentLaserIds: readonly string[];
+  readonly cappedLaserIds: readonly string[];
 }
 
 export interface V2LaserComputed {
@@ -27,6 +146,8 @@ export interface V2LaserComputed {
   readonly quality: V2Quality;
   readonly baseDamage: number;
   readonly batteryBonus: number;
+  readonly batterySourceId?: string | null;
+  readonly batteryCapped?: boolean;
   readonly overdriveBonus: number;
   readonly powerCellBonus: number;
   readonly totalDamage: number;
@@ -41,6 +162,8 @@ export interface V2HeavyComputed {
   readonly firesOnOddRounds: boolean;
   readonly firstShotBonus: number;
   readonly coolantBonus: number;
+  readonly coolantTankBonus: number;
+  readonly coolantTankLinked: boolean;
   readonly overdriveBonus: number;
   readonly powerCellBonus: number;
 }
@@ -151,11 +274,61 @@ export interface V2BuildStats {
   readonly bonusSalvagePartsPerWin: number;
   readonly bonusSalvagePartsPerCut: number;
   readonly powerCellBoostedIds: readonly string[];
+  /** Active adjacency links ONLY (never includes capped/starved battery links) */
   readonly links: readonly V2AdjacencyLink[];
+  /** Capped/starved battery links rendered with distinct visual cue (D03) */
+  readonly cappedLinks: readonly V2AdjacencyLink[];
+  /** Per-battery supply allocation summary (common cap=1, improved cap=2) */
+  readonly batterySupplies: readonly V2BatterySupplySummary[];
   /** Estimated steady per-round single-target summary for quick HUD readout */
   readonly nominalRound1SingleDmg: number;
   readonly totalPlacedBudget: number;
   readonly nonLoanBayValue: number;
+}
+
+/**
+ * Pure helper detecting active synergy types in `stats.links` that have not yet been discovered.
+ */
+export function detectNewlyActivatedSynergies(
+  stats: Pick<V2BuildStats, 'links'>,
+  discoveredSynergies?: readonly string[]
+): readonly V2SynergyCatalogEntry[] {
+  const known = new Set(discoveredSynergies ?? []);
+  const activeIds = new Set<V2SynergyTypeId>();
+  for (const lnk of stats.links) {
+    if (lnk.status === 'capped') continue;
+    if (lnk.synergyId && isV2SynergyTypeId(lnk.synergyId) && !known.has(lnk.synergyId)) {
+      activeIds.add(lnk.synergyId);
+    }
+  }
+  if (activeIds.size === 0) return [];
+  return V2_SYNERGY_ORDER.filter((id) => activeIds.has(id)).map((id) => V2_SYNERGY_CATALOG[id]);
+}
+
+/**
+ * Immutably records newly discovered synergy IDs onto `profile.discoveredSynergies`.
+ * Returns exact same `profile` reference if nothing new was added.
+ */
+export function recordV2DiscoveredSynergies(
+  profile: V2ProfileState,
+  synergyIds: readonly string[]
+): V2ProfileState {
+  if (synergyIds.length === 0) return profile;
+  const existing = profile.discoveredSynergies ?? [];
+  const nextSet = new Set<string>(existing);
+  let changed = false;
+  for (const id of synergyIds) {
+    if (isV2SynergyTypeId(id) && !nextSet.has(id)) {
+      nextSet.add(id);
+      changed = true;
+    }
+  }
+  if (!changed) return profile;
+  const ordered = V2_SYNERGY_ORDER.filter((id) => nextSet.has(id));
+  return {
+    ...profile,
+    discoveredSynergies: ordered,
+  };
 }
 
 function compareQuality(a: V2Quality | null, b: V2Quality): V2Quality {
@@ -216,6 +389,7 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
   const salvoRaw = eqItems.filter((e) => e.kind === 'salvo_pod');
 
   const links: V2AdjacencyLink[] = [];
+  const cappedLinks: V2AdjacencyLink[] = [];
 
   // Helper: best adjacent overdrive_core for a given weapon
   const findBestOverdrive = (
@@ -248,6 +422,8 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
         targetInstanceId: targetPlaced.item.instanceId,
         targetKind,
         label: mode === 'direct' ? `超频+${bestBonus}` : `超频+${bestBonus}/发`,
+        synergyId: 'overdrive_weapon',
+        status: 'active',
       });
     }
     return bestBonus;
@@ -276,6 +452,8 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
         targetInstanceId: targetPlaced.item.instanceId,
         targetKind,
         label: `排热+${bestBonus}`,
+        synergyId: targetKind === 'salvo_pod' ? 'coolant_vent_salvo' : 'coolant_vent_heavy',
+        status: 'active',
       });
     }
     return bestBonus;
@@ -312,6 +490,8 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
           targetInstanceId: cg.item.instanceId,
           targetKind: 'cargo',
           label: ca.quality === 'improved' ? '谐振+2' : '谐振+1',
+          synergyId: 'cargo_amp_cargo',
+          status: 'active',
         });
       }
     }
@@ -338,20 +518,106 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
     }
   }
 
-  // 1. Lasers + best adjacent battery + overdrive + power cell
-  const lasers: V2LaserComputed[] = [];
-  for (const l of eqItems.filter((e) => e.kind === 'laser')) {
-    let bestBonus = 0;
-    let bestBatId: string | null = null;
-    for (const b of batteries) {
-      if (areV2PlacedItemsAdjacent(l.placed, b.placed)) {
-        const bonus = b.quality === 'improved' ? 3 : 2;
-        if (bonus > bestBonus) {
-          bestBonus = bonus;
-          bestBatId = b.placed.item.instanceId;
-        }
+  // 1. Lasers + capacity-capped battery supply (D03: common cap=1 / improved cap=2, optimal 2-phase Kuhn matching)
+  const comparePriority = (
+    a: { placed: V2PlacedItem; quality: V2Quality },
+    b: { placed: V2PlacedItem; quality: V2Quality }
+  ): number => {
+    if (a.quality !== b.quality) return a.quality === 'improved' ? -1 : 1;
+    if (a.placed.y !== b.placed.y) return a.placed.y - b.placed.y;
+    if (a.placed.x !== b.placed.x) return a.placed.x - b.placed.x;
+    return a.placed.item.instanceId.localeCompare(b.placed.item.instanceId);
+  };
+
+  const laserRaw = eqItems.filter((e) => e.kind === 'laser');
+  const lasersByPriority = [...laserRaw].sort(comparePriority);
+  const batteriesByPriority = [...batteries].sort(comparePriority);
+
+  interface BatterySlot {
+    readonly batteryIdx: number;
+    readonly quality: V2Quality;
+    readonly bonus: number;
+  }
+  const batterySlots: BatterySlot[] = [];
+  for (let bi = 0; bi < batteriesByPriority.length; bi++) {
+    const bat = batteriesByPriority[bi];
+    const cap = getBatterySupplyCapacity(bat.quality);
+    const bonus = bat.quality === 'improved' ? 3 : 2;
+    for (let s = 0; s < cap; s++) {
+      batterySlots.push({ batteryIdx: bi, quality: bat.quality, bonus });
+    }
+  }
+
+  // Adjacency lists from laser priority index -> adjacent battery slot indices (improved slots first)
+  const laserAdjSlots: number[][] = lasersByPriority.map((laser) => {
+    const slots: number[] = [];
+    for (let si = 0; si < batterySlots.length; si++) {
+      const bat = batteriesByPriority[batterySlots[si].batteryIdx];
+      if (areV2PlacedItemsAdjacent(laser.placed, bat.placed)) {
+        slots.push(si);
       }
     }
+    return slots;
+  });
+
+  const slotOwner: number[] = new Array(batterySlots.length).fill(-1);
+  const laserMatchedSlot: number[] = new Array(lasersByPriority.length).fill(-1);
+
+  const tryAugmentLaser = (laserIdx: number, visitedSlots: Uint8Array, improvedOnly: boolean): boolean => {
+    for (const si of laserAdjSlots[laserIdx]) {
+      if (improvedOnly && batterySlots[si].quality !== 'improved') continue;
+      if (visitedSlots[si]) continue;
+      visitedSlots[si] = 1;
+      const curOwner = slotOwner[si];
+      if (curOwner === -1 || tryAugmentLaser(curOwner, visitedSlots, improvedOnly)) {
+        slotOwner[si] = laserIdx;
+        laserMatchedSlot[laserIdx] = si;
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Phase 1: Maximize improved (+3) battery slot matches in laser priority order
+  for (let li = 0; li < lasersByPriority.length; li++) {
+    const visited = new Uint8Array(batterySlots.length);
+    tryAugmentLaser(li, visited, true);
+  }
+  // Phase 2: Maximize remaining common (+2) battery slot matches via augmenting paths (preserving Phase-1 optimality)
+  for (let li = 0; li < lasersByPriority.length; li++) {
+    if (laserMatchedSlot[li] !== -1) continue;
+    const visited = new Uint8Array(batterySlots.length);
+    tryAugmentLaser(li, visited, false);
+  }
+
+  const assignedBatteryByLaserId = new Map<string, { readonly batteryId: string; readonly bonus: number }>();
+  const suppliedLasersByBatteryId = new Map<string, string[]>();
+  for (const bat of batteriesByPriority) {
+    suppliedLasersByBatteryId.set(bat.placed.item.instanceId, []);
+  }
+  for (let li = 0; li < lasersByPriority.length; li++) {
+    const si = laserMatchedSlot[li];
+    if (si === -1) continue;
+    const slot = batterySlots[si];
+    const bat = batteriesByPriority[slot.batteryIdx];
+    const laser = lasersByPriority[li];
+    assignedBatteryByLaserId.set(laser.placed.item.instanceId, {
+      batteryId: bat.placed.item.instanceId,
+      bonus: slot.bonus,
+    });
+    suppliedLasersByBatteryId.get(bat.placed.item.instanceId)!.push(laser.placed.item.instanceId);
+  }
+
+  const lasers: V2LaserComputed[] = [];
+  const starvedLaserIds = new Set<string>();
+  for (const l of laserRaw) {
+    const assigned = assignedBatteryByLaserId.get(l.placed.item.instanceId);
+    const bestBonus = assigned?.bonus ?? 0;
+    const bestBatId = assigned?.batteryId ?? null;
+    const adjBatteries = batteriesByPriority.filter((b) =>
+      areV2PlacedItemsAdjacent(l.placed, b.placed)
+    );
+    const isCapped = !bestBatId && adjBatteries.length > 0;
     if (bestBatId) {
       links.push({
         sourceInstanceId: bestBatId,
@@ -359,7 +625,22 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
         targetInstanceId: l.placed.item.instanceId,
         targetKind: 'laser',
         label: `+${bestBonus}`,
+        synergyId: 'battery_laser',
+        status: 'active',
       });
+    } else if (isCapped) {
+      starvedLaserIds.add(l.placed.item.instanceId);
+      for (const b of adjBatteries) {
+        cappedLinks.push({
+          sourceInstanceId: b.placed.item.instanceId,
+          sourceKind: 'battery',
+          targetInstanceId: l.placed.item.instanceId,
+          targetKind: 'laser',
+          label: '✕ 上限',
+          synergyId: 'battery_laser',
+          status: 'capped',
+        });
+      }
     }
     const overdriveBonus = findBestOverdrive(l.placed, 'laser', 'direct');
     const powerCellBonus = l.powerBoosted ? 1 : 0;
@@ -369,13 +650,39 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
       quality: l.quality,
       baseDamage,
       batteryBonus: bestBonus,
+      batterySourceId: bestBatId,
+      batteryCapped: isCapped,
       overdriveBonus,
       powerCellBonus,
       totalDamage: baseDamage + bestBonus + overdriveBonus + powerCellBonus,
     });
   }
 
-  // 2. Heavy cannons + highest quality adjacent capacitor + coolant + overdrive + power cell
+  const batterySupplies: V2BatterySupplySummary[] = batteries.map((b) => {
+    const adjLaserIds = laserRaw
+      .filter((l) => areV2PlacedItemsAdjacent(l.placed, b.placed))
+      .map((l) => l.placed.item.instanceId);
+    const suppliedLaserIds = suppliedLasersByBatteryId.get(b.placed.item.instanceId) ?? [];
+    const cappedLaserIds = adjLaserIds.filter((id) => starvedLaserIds.has(id));
+    return {
+      instanceId: b.placed.item.instanceId,
+      quality: b.quality,
+      capacity: getBatterySupplyCapacity(b.quality),
+      suppliedLaserIds,
+      adjacentLaserIds: adjLaserIds,
+      cappedLaserIds,
+    };
+  });
+
+  // 2. Heavy cannons + highest quality adjacent capacitor + coolant_vent + cargo.coolant_tank (D03 cross-category +4) + overdrive + power cell
+  const coolantTanks = cargoItems
+    .filter((cg) => cg.item.definitionId === 'cargo.coolant_tank')
+    .sort((a, b) => {
+      if (a.y !== b.y) return a.y - b.y;
+      if (a.x !== b.x) return a.x - b.x;
+      return a.item.instanceId.localeCompare(b.item.instanceId);
+    });
+
   const heavies: V2HeavyComputed[] = [];
   for (const h of eqItems.filter((e) => e.kind === 'heavy')) {
     let bestCapQ: V2Quality | null = null;
@@ -396,19 +703,42 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
         targetInstanceId: h.placed.item.instanceId,
         targetKind: 'heavy',
         label: bestCapQ === 'improved' ? '先手+3' : '先手',
+        synergyId: 'capacitor_heavy',
+        status: 'active',
       });
     }
     const coolantBonus = findBestCoolantBonus(h.placed, 'heavy');
+    const adjCoolantTank = coolantTanks.find((ct) => areV2PlacedItemsAdjacent(h.placed, ct));
+    const coolantTankBonus = adjCoolantTank ? 4 : 0;
+    const coolantTankLinked = Boolean(adjCoolantTank);
+    if (adjCoolantTank) {
+      links.push({
+        sourceInstanceId: adjCoolantTank.item.instanceId,
+        sourceKind: 'cargo',
+        targetInstanceId: h.placed.item.instanceId,
+        targetKind: 'heavy',
+        label: '液冷+4',
+        synergyId: 'coolant_heavy',
+        status: 'active',
+      });
+    }
     const overdriveBonus = findBestOverdrive(h.placed, 'heavy', 'direct');
     const powerCellBonus = h.powerBoosted ? 3 : 0;
     heavies.push({
       instanceId: h.placed.item.instanceId,
       quality: h.quality,
-      baseDamage: (h.quality === 'improved' ? 15 : 12) + coolantBonus + overdriveBonus + powerCellBonus,
+      baseDamage:
+        (h.quality === 'improved' ? 15 : 12) +
+        coolantBonus +
+        coolantTankBonus +
+        overdriveBonus +
+        powerCellBonus,
       capacitorQuality: bestCapQ,
       firesOnOddRounds: bestCapQ !== null,
       firstShotBonus: bestCapQ === 'improved' ? 3 : 0,
       coolantBonus,
+      coolantTankBonus,
+      coolantTankLinked,
       overdriveBonus,
       powerCellBonus,
     });
@@ -435,6 +765,8 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
         targetInstanceId: hg.placed.item.instanceId,
         targetKind: 'hangar',
         label: bestRelQ === 'improved' ? '上限4/首+1' : '上限4',
+        synergyId: 'relay_hangar',
+        status: 'active',
       });
     }
     const overdriveBonus = findBestOverdrive(hg.placed, 'hangar', 'multi');
@@ -476,6 +808,8 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
           targetInstanceId: sv.placed.item.instanceId,
           targetKind: 'salvo_pod',
           label: '导弹+1枚',
+          synergyId: 'support_salvo',
+          status: 'active',
         });
         break;
       }
@@ -587,6 +921,8 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
         targetInstanceId: ct.placed.item.instanceId,
         targetKind: 'counter',
         label: ct.quality === 'improved' ? '反75%' : '反50%',
+        synergyId: 'shield_counter',
+        status: 'active',
       });
       activeCounters.push({
         instanceId: ct.placed.item.instanceId,
@@ -663,6 +999,8 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
     bonusSalvagePartsPerCut,
     powerCellBoostedIds,
     links,
+    cappedLinks,
+    batterySupplies,
     nominalRound1SingleDmg,
     totalPlacedBudget,
     nonLoanBayValue,

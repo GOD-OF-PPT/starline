@@ -33,12 +33,14 @@ export function isPureAutoCombat(
 }
 
 export const V2_SCHEMA_VERSION = 3;
-export const V2_RULES_VERSION = '3.0.0';
+export const V2_RULES_VERSION = '3.1.0';
+export const V3_0_RULES_VERSION = '3.0.0';
 export const V2_LEGACY_SCHEMA_VERSION = 2;
 export const V2_LEGACY_RULES_VERSION = '2.0.0';
 export const V2_SAVE_KEY = 'starline_save_v2';
 export const V2_BACKUP_KEY = 'starline_save_backup_v2';
 export const V3_BACKUP_KEY = 'starline_save_backup_v3';
+export const V3_0_BACKUP_KEY = 'starline_save_backup_v3_0';
 export const V2_TAB_LOCK_KEY = 'starline_active_tab_lock_v2';
 export const V2_TAB_CHANNEL = 'starline_tab_sync_v2';
 
@@ -294,6 +296,7 @@ export interface V2PlayerAttackEvent {
   readonly shieldDamaged?: number;
   readonly targetHpAfter: number;
   readonly targetKilled: boolean;
+  readonly isOverload?: boolean;
 }
 
 export interface V2EnemyAttackEvent {
@@ -350,6 +353,8 @@ export interface V2CombatRoundLog {
   readonly bossPhaseTransitions?: readonly V2BossPhaseTransitionEvent[];
   readonly summonedEnemies?: readonly V2CombatUnitSnapshot[];
   readonly enemySpecialNotes?: readonly string[];
+  readonly appliedInterventionsThisRound?: readonly V2CombatIntervention[];
+  readonly lockedEnemyIdUsed?: string | null;
 }
 
 export type V2TacticalCommandId =
@@ -366,6 +371,18 @@ export interface V2AppliedTacticalCommand {
   readonly decisionId: string;
   readonly roundNumber: number;
   readonly choice: V2TacticalCommandId;
+}
+
+export type V2InterventionKind = 'tactical_command' | 'overload_module' | 'target_lock';
+
+export interface V2CombatIntervention {
+  readonly interventionId: string;
+  readonly roundNumber: number;
+  readonly kind: V2InterventionKind;
+  readonly commandId?: V2TacticalCommandId;
+  readonly moduleInstanceId?: string;
+  readonly moduleKind?: V2EquipmentKind;
+  readonly targetEnemyId?: string | null;
 }
 
 export interface V2EliteTacticOptionPreview {
@@ -420,6 +437,8 @@ export interface V2CombatSimulation {
   readonly stargateRelayTier?: number;
   readonly endlessThreat?: number;
   readonly endlessMutatorIds?: readonly string[];
+  readonly lockedEnemyId?: string | null;
+  readonly appliedInterventions?: readonly V2CombatIntervention[];
 }
 
 export interface V2CombatRewardBundle {
@@ -451,6 +470,10 @@ export interface V2ActiveCombatState {
   readonly resumeFromRound?: number;
   /** Persisted decisionId once live playback has reached the pause boundary (reload-safe instant restore) */
   readonly pausedAtDecisionId?: string | null;
+  /** Immutable opening Round-1 locked enemy target (mid-combat changes append target_lock interventions) */
+  readonly lockedEnemyId?: string | null;
+  /** Ordered replayable intervention log (tactical commands, module overloads, mid-combat target locks) */
+  readonly interventions?: readonly V2CombatIntervention[];
 }
 
 export interface V2EngineerSwapOffer {
@@ -583,6 +606,8 @@ export interface V2RunState {
   readonly factionRepEarnedThisRun?: Partial<Record<FactionId, number>>;
   /** Armed by consumable gadget.overcharge_cell pre-combat; cleared upon combat completion or leaving node */
   readonly overchargeCellActive?: boolean;
+  /** Active target-lock enemyId for current combat node (cleared upon leaving node or completing combat) */
+  readonly lockedEnemyId?: string | null;
 }
 
 export interface V2PresetSlot {
@@ -657,6 +682,8 @@ export interface V2ProfileState {
   readonly runHistory: readonly V3RunHistoryEntry[];
   readonly career: V3CareerStats;
   readonly hullTuning?: Record<string, V3HullTuningState>;
+  /** Discovered synergy types recorded permanently into the Codex (D03) */
+  readonly discoveredSynergies?: readonly string[];
 }
 
 export interface V2SaveData {

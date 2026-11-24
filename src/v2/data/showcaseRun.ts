@@ -437,5 +437,6 @@ export function createV2ShowcaseRun(
     tacticalChargesUsed: 0,
     salvagePartsEarned: 0,
     isFinalCampaignRun: false,
+    lockedEnemyId: null,
   };
 }

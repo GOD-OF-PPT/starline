@@ -10,9 +10,11 @@ import {
 import { CombatScene, type CombatScenePlayback } from './CombatScene';
 import {
   V2CombatScene,
+  type V2StageOverloadModuleSpec,
   type V2StagePlayback,
   type WreckCompartmentVisualState,
 } from '../v2/scenes/V2CombatScene';
+import type { V2CombatSimulation } from '../v2/domain/types';
 
 export type ActiveSceneMode = 'base' | 'combat' | 'v2_stage';
 
@@ -371,9 +373,19 @@ export class PhaserHost {
         shipVisualSpec: playback.shipVisualSpec ?? null,
         settings: playback.settings,
         playbackKey: nextStaticKey,
+        lockedEnemyId: playback.lockedEnemyId ?? null,
+        overloadableModules: playback.overloadableModules,
+        canOverloadModules: playback.canOverloadModules,
+        onEnemyLock: playback.onEnemyLock ?? this.pendingV2Stage?.onEnemyLock,
+        onModuleOverload: playback.onModuleOverload ?? this.pendingV2Stage?.onModuleOverload,
       };
       this.updateV2ShipVisualSpec(playback.shipVisualSpec ?? null);
       this.updateCombatSettings(playback.settings);
+      this.updateV2LockedEnemy(playback.lockedEnemyId ?? null);
+      this.setV2StageCallbacks({
+        onEnemyLock: playback.onEnemyLock,
+        onModuleOverload: playback.onModuleOverload,
+      });
       return;
     }
 
@@ -457,6 +469,77 @@ export class PhaserHost {
     }
     if (this.currentMode === 'v2_stage') {
       this.v2CombatScene.updateShipVisualSpec(spec);
+    }
+  }
+
+  updateV2LockedEnemy(enemyId: string | null): void {
+    if (this.pendingV2Stage) {
+      this.pendingV2Stage = { ...this.pendingV2Stage, lockedEnemyId: enemyId };
+    }
+    if (this.currentMode === 'v2_stage') {
+      this.v2CombatScene.updateLockedEnemy(enemyId);
+    }
+  }
+
+  setV2StageCallbacks(callbacks: {
+    readonly onEnemyLock?: (enemyId: string) => void;
+    readonly onModuleOverload?: (instanceId: string) => void;
+  }): void {
+    if (this.pendingV2Stage) {
+      this.pendingV2Stage = {
+        ...this.pendingV2Stage,
+        ...(callbacks.onEnemyLock !== undefined ? { onEnemyLock: callbacks.onEnemyLock } : {}),
+        ...(callbacks.onModuleOverload !== undefined
+          ? { onModuleOverload: callbacks.onModuleOverload }
+          : {}),
+      };
+    }
+    if (this.currentMode === 'v2_stage') {
+      this.v2CombatScene.setInteractionCallbacks(callbacks);
+    }
+  }
+
+  updateV2OverloadInteraction(
+    canOverload: boolean,
+    modules?: readonly V2StageOverloadModuleSpec[]
+  ): void {
+    if (this.pendingV2Stage) {
+      this.pendingV2Stage = {
+        ...this.pendingV2Stage,
+        canOverloadModules: canOverload,
+        ...(modules !== undefined ? { overloadableModules: modules } : {}),
+      };
+    }
+    if (this.currentMode === 'v2_stage') {
+      this.v2CombatScene.updateOverloadInteraction(canOverload, modules);
+    }
+  }
+
+  patchV2LiveCombatSimulation(
+    simulation: V2CombatSimulation,
+    options?: {
+      readonly pauseAtRound?: number | null;
+      readonly lockedEnemyId?: string | null;
+      readonly canOverloadModules?: boolean;
+      readonly overloadableModules?: readonly V2StageOverloadModuleSpec[];
+    }
+  ): void {
+    if (this.pendingV2Stage) {
+      this.pendingV2Stage = {
+        ...this.pendingV2Stage,
+        simulation,
+        ...(options?.pauseAtRound !== undefined ? { pauseAtRound: options.pauseAtRound } : {}),
+        ...(options?.lockedEnemyId !== undefined ? { lockedEnemyId: options.lockedEnemyId } : {}),
+        ...(options?.canOverloadModules !== undefined
+          ? { canOverloadModules: options.canOverloadModules }
+          : {}),
+        ...(options?.overloadableModules !== undefined
+          ? { overloadableModules: options.overloadableModules }
+          : {}),
+      };
+    }
+    if (this.currentMode === 'v2_stage') {
+      this.v2CombatScene.patchLiveCombatSimulation(simulation, options);
     }
   }
 

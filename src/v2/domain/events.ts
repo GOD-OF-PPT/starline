@@ -78,6 +78,7 @@ export function resolvePostEncounterPhase(run: V2RunState): V2RunState {
       {
         ...run,
         hp: 0,
+        lockedEnemyId: null,
         phase: 'SETTLEMENT',
         settlementReason: 'defeat',
       },
@@ -86,7 +87,7 @@ export function resolvePostEncounterPhase(run: V2RunState): V2RunState {
   }
 
   if (!shouldAutoSkipArrange(run)) {
-    return { ...run, phase: 'ARRANGE' };
+    return { ...run, lockedEnemyId: null, phase: 'ARRANGE' };
   }
 
   const nextDiscardedCount =
@@ -102,6 +103,7 @@ export function resolvePostEncounterPhase(run: V2RunState): V2RunState {
         ...run,
         bay: cleanBay,
         discardedCountThisRun: nextDiscardedCount,
+        lockedEnemyId: null,
         phase: 'SETTLEMENT',
         settlementReason: 'safe_return',
       },
@@ -113,6 +115,7 @@ export function resolvePostEncounterPhase(run: V2RunState): V2RunState {
     ...run,
     bay: cleanBay,
     discardedCountThisRun: nextDiscardedCount,
+    lockedEnemyId: null,
     phase: 'MAP',
   };
 }

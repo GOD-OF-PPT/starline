@@ -32,6 +32,12 @@ import {
 import { V2_TUTORIAL_HINTS, createV2TutorialRun } from '../data/tutorialV2';
 import { claimV3Achievement } from '../domain/achievements';
 import {
+  calculateV2BuildStats,
+  detectNewlyActivatedSynergies,
+  recordV2DiscoveredSynergies,
+  type V2SynergyCatalogEntry,
+} from '../domain/buildStatsV2';
+import {
   getActiveCampaignObjective,
   getTriggeredCommForContext,
   isFinalCampaignMissionUnlocked,
@@ -41,9 +47,13 @@ import {
 } from '../domain/campaign';
 import {
   commitV2EliteTacticDecision,
+  commitV2ModuleOverload,
   completeV2CombatAtCurrentNode,
   getTacticalCommandLabel,
+  listV2OverloadableModules,
   markV2CombatDecisionPaused,
+  setV2LiveCombatLockedEnemy,
+  setV2PreCombatLockedEnemy,
   simulateV2Combat,
   startV2CombatAtCurrentNode,
 } from '../domain/combatV2';
@@ -201,6 +211,7 @@ import {
 } from './screens/SettlementView';
 import { ShopPhaseView } from './screens/ShopView';
 import { TitlePhaseView } from './screens/TitleView';
+import type { V2StageOverloadModuleSpec } from '../scenes/V2CombatScene';
 import {
   VFX_WRECK_CLAMP_POP_RATIO,
   VFX_WRECK_CUT_DURATION_MS,
@@ -307,6 +318,8 @@ export class V2AppController {
     readonly title: string;
     readonly text: string;
   } | null = null;
+  private activeSynergyToast: { readonly entries: readonly V2SynergyCatalogEntry[] } | null = null;
+  private synergyToastTimer: number | null = null;
 
   // Interactive focus states for unified Map & 3-hotspot Wreck
   private selectedMapNodeId: string | null = null;
@@ -451,10 +464,12 @@ export class V2AppController {
     this.titleEntered = this.readTitleSession();
 
     const loaded = loadV2SaveData(window.localStorage);
-    let migratedFromV2OnBoot = false;
+    let migratedOnBoot = false;
     if (loaded.status === 'loaded' || loaded.status === 'fresh') {
       this.save = loaded.data;
-      migratedFromV2OnBoot = loaded.status === 'loaded' && Boolean(loaded.migratedFromV2);
+      migratedOnBoot =
+        loaded.status === 'loaded' &&
+        Boolean(loaded.migratedFromV2 || loaded.migratedFromV3_0);
     } else if (loaded.status === 'corrupt_with_backup') {
       this.save = loaded.backup;
       this.titleEntered = true;
@@ -532,7 +547,7 @@ export class V2AppController {
     this.tabGuard.start();
     this.isReadOnlyTab = !this.tabGuard.canWrite();
 
-    if (migratedFromV2OnBoot && !this.isReadOnlyTab && this.tabGuard.canWrite()) {
+    if (migratedOnBoot && !this.isReadOnlyTab && this.tabGuard.canWrite()) {
       this.persist();
     }
 
@@ -604,6 +619,11 @@ export class V2AppController {
       window.clearTimeout(this.actionToastTimer);
       this.actionToastTimer = null;
     }
+    if (this.synergyToastTimer !== null) {
+      window.clearTimeout(this.synergyToastTimer);
+      this.synergyToastTimer = null;
+    }
+    this.activeSynergyToast = null;
     this.staticStageTracker.reset();
     this.activeCombatPlaybackKey = null;
     this.lastStaticOverlayKey = null;
@@ -690,6 +710,125 @@ export class V2AppController {
     soundEngine.play('chargeUp');
     this.syncAll();
     return true;
+  }
+
+  private buildStageOverloadSpecs(bay: V2CargoBayState): readonly V2StageOverloadModuleSpec[] {
+    return listV2OverloadableModules(bay).map((m) => ({
+      instanceId: m.instanceId,
+      kind: m.kind,
+      label: m.name,
+    }));
+  }
+
+  private computeLiveCombatPlaybackKey(run: V2RunState, nodeId: string): string {
+    const ac = run.activeCombat;
+    if (!ac) return 'none';
+    const pending = ac.pendingDecision;
+    const committedCount = ac.committedCommands?.length ?? 0;
+    const ivCount = ac.interventions?.length ?? 0;
+    return `${run.runId}_${nodeId}_${ac.simulation.resultId}_${pending?.decisionId ?? 'none'}_${
+      pending?.chosen ?? 'open'
+    }_${committedCount}_${ivCount}_${run.tacticalChargesUsed}`;
+  }
+
+  private handleToggleEnemyLock(enemyId: string): void {
+    if (!this.canMutate()) return;
+    const latest = this.getCurrentRun();
+    if (!latest || latest.phase !== 'ENCOUNTER' || !latest.currentNodeId) return;
+
+    if (!latest.activeCombat) {
+      this.preCombatAutoEngage.pause('policy');
+      const res = setV2PreCombatLockedEnemy(latest, enemyId);
+      if (!res.ok) return;
+      this.setCurrentRun(res.run);
+      soundEngine.play('tacticalOrder');
+      this.phaserHost?.updateV2LockedEnemy(res.run.lockedEnemyId ?? null);
+      this.renderEncounterPhase(res.run);
+      return;
+    }
+
+    const relayTier = getFacilityTier(this.save.profile, 'stargate_relay');
+    const res = setV2LiveCombatLockedEnemy(latest, enemyId, this.liveCombatRound, {
+      stargateRelayTier: relayTier,
+    });
+    if (!res.ok || !res.run.activeCombat) {
+      if (res.error) this.showToast(res.error);
+      return;
+    }
+    this.setCurrentRun(res.run);
+    soundEngine.play('tacticalOrder');
+    this.activeCombatPlaybackKey = this.computeLiveCombatPlaybackKey(
+      res.run,
+      res.run.currentNodeId!
+    );
+    const nextPending = res.run.activeCombat.pendingDecision;
+    const nextNeedsDecision = Boolean(nextPending && nextPending.chosen === null);
+    this.phaserHost?.patchV2LiveCombatSimulation(res.run.activeCombat.simulation, {
+      pauseAtRound: nextNeedsDecision && nextPending ? nextPending.roundNumber : null,
+      lockedEnemyId: res.run.lockedEnemyId ?? null,
+      canOverloadModules: this.awaitingEliteDecision && nextNeedsDecision && this.canMutate(),
+      overloadableModules: this.buildStageOverloadSpecs(res.run.bay),
+    });
+    this.renderCombatPlaybackOverlay(res.run);
+  }
+
+  private handleCommitModuleOverload(decisionId: string, moduleInstanceId: string): void {
+    if (!this.canMutate()) return;
+    const cur = this.getCurrentRun();
+    if (!cur) return;
+    const res = commitV2ModuleOverload(cur, decisionId, moduleInstanceId, {
+      stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
+    });
+    if (!res.ok) {
+      this.showToast(res.error ?? '部件过载不可用');
+      return;
+    }
+    this.awaitingEliteDecision = false;
+    this.activeCombatPlaybackKey = null;
+    this.livePhaseBannerText = null;
+    this.setCurrentRun(res.run);
+    const mk = res.moduleKind;
+    if (mk === 'battery') soundEngine.play('energyLink');
+    else if (mk === 'shield' || mk === 'counter' || mk === 'coolant_vent') soundEngine.play('shieldOverload');
+    else if (mk === 'repair') soundEngine.play('repairPulse');
+    else if (mk === 'heavy' || mk === 'capacitor') soundEngine.play('heavyBlast');
+    else soundEngine.play('tacticalOrder');
+    this.syncAll();
+  }
+
+  /**
+   * D03: Records first-time synergy discovery ONLY on player-initiated editable bay edits
+   * (strictly suppressed on boot/reload/demo/trial/showcase/readOnly) and renders a non-blocking
+   * `"新联动！"` banner without calling `syncAll()`.
+   */
+  private handlePlayerInitiatedBaySynergies(
+    bay: V2CargoBayState,
+    opts?: { readonly isTrialOrShowcase?: boolean }
+  ): void {
+    if (this.isReadOnlyTab || !this.tabGuard.canWrite() || this.showcaseRun || opts?.isTrialOrShowcase) {
+      return;
+    }
+    const stats = calculateV2BuildStats(bay);
+    const newly = detectNewlyActivatedSynergies(stats, this.save.profile.discoveredSynergies);
+    if (newly.length === 0) return;
+    const nextProfile = recordV2DiscoveredSynergies(
+      this.save.profile,
+      newly.map((e) => e.id)
+    );
+    if (nextProfile === this.save.profile) return;
+    this.save = { ...this.save, profile: nextProfile };
+    this.persist();
+    this.activeSynergyToast = { entries: newly };
+    if (this.synergyToastTimer !== null) {
+      window.clearTimeout(this.synergyToastTimer);
+    }
+    this.synergyToastTimer = window.setTimeout(() => {
+      if (this.destroyed) return;
+      this.activeSynergyToast = null;
+      this.synergyToastTimer = null;
+      this.renderBanners();
+    }, 4800);
+    this.renderBanners();
   }
 
   private handleWindowResize = (): void => {
@@ -1402,6 +1541,22 @@ export class V2AppController {
       `);
     }
 
+    if (this.activeSynergyToast && this.activeSynergyToast.entries.length > 0) {
+      const entries = this.activeSynergyToast.entries;
+      const summary = entries
+        .map((e) => `<strong>${e.name}</strong>（${e.pairLabel}）：${e.effectSummary}`)
+        .join(' · ');
+      items.push(`
+        <div class="system-banner v3-synergy-discovery-toast" data-testid="synergy-discovery-toast" data-synergy-ids="${entries
+          .map((e) => e.id)
+          .join(',')}" role="status">
+          <span class="v3-synergy-toast-badge">✦ 新联动！</span>
+          <span class="v3-synergy-toast-body">${summary}</span>
+          <button type="button" class="btn btn-sm btn-ghost" id="v3-synergy-toast-dismiss" aria-label="关闭联动提示">✕</button>
+        </div>
+      `);
+    }
+
     if (this.activeCommBanner) {
       const c = this.activeCommBanner;
       items.push(`
@@ -1440,6 +1595,15 @@ export class V2AppController {
     }
 
     this.bannersEl.innerHTML = items.join('');
+
+    this.bannersEl.querySelector('#v3-synergy-toast-dismiss')?.addEventListener('click', () => {
+      this.activeSynergyToast = null;
+      if (this.synergyToastTimer !== null) {
+        window.clearTimeout(this.synergyToastTimer);
+        this.synergyToastTimer = null;
+      }
+      this.renderBanners();
+    });
 
     this.bannersEl.querySelector('#v3-comm-open-archive')?.addEventListener('click', () => {
       const comm = this.activeCommBanner;
@@ -1699,10 +1863,8 @@ export class V2AppController {
           ? Math.max(0, pending.roundNumber - 1)
           : activeCombat.resumeFromRound ??
             (pending && pending.chosen !== null ? Math.max(0, pending.roundNumber - 1) : 0);
-      const committedCount = activeCombat.committedCommands?.length ?? 0;
-      const pbKey = `${run.runId}_${currentNode.nodeId}_${sim.resultId}_${
-        pending?.decisionId ?? 'none'
-      }_${pending?.chosen ?? 'open'}_${committedCount}_${run.tacticalChargesUsed}`;
+      const pbKey = this.computeLiveCombatPlaybackKey(run, currentNode.nodeId);
+      const overloadSpecs = this.buildStageOverloadSpecs(run.bay);
 
       if (this.activeCombatPlaybackKey !== pbKey) {
         this.activeCombatPlaybackKey = pbKey;
@@ -1713,10 +1875,17 @@ export class V2AppController {
           activeCombat.committedCommands && activeCombat.committedCommands.length > 0
             ? activeCombat.committedCommands[activeCombat.committedCommands.length - 1]
             : null;
-        const activeOrderChoice = latestCmd?.choice ?? (pending?.chosen && pending.chosen !== 'normal' ? pending.chosen : null);
-        this.liveCombatEventLine = activeOrderChoice
-          ? `指令生效：${getTacticalCommandLabel(activeOrderChoice, run.shipId)}`
-          : '';
+        const latestOv = [...(activeCombat.interventions ?? [])]
+          .reverse()
+          .find((iv) => iv.kind === 'overload_module');
+        const activeOrderChoice =
+          latestCmd?.choice ?? (pending?.chosen && pending.chosen !== 'normal' ? pending.chosen : null);
+        this.liveCombatEventLine =
+          latestOv && latestOv.moduleKind
+            ? `部件过载：${getV2EquipmentDefByKind(latestOv.moduleKind, 'common').name}`
+            : activeOrderChoice
+            ? `指令生效：${getTacticalCommandLabel(activeOrderChoice, run.shipId)}`
+            : '';
 
         const prevLog =
           resumeRound > 0 && sim.rounds.length > 0
@@ -1746,6 +1915,16 @@ export class V2AppController {
           settings: this.save.settings,
           pauseAtRound: needsDecision && pending ? pending.roundNumber : null,
           resumeFromRound: resumeRound,
+          lockedEnemyId: run.lockedEnemyId ?? null,
+          overloadableModules: overloadSpecs,
+          canOverloadModules: alreadyAtPause && needsDecision && this.canMutate(),
+          onEnemyLock: (enemyId) => this.handleToggleEnemyLock(enemyId),
+          onModuleOverload: (instanceId) => {
+            const curRun = this.getCurrentRun();
+            const curPending = curRun?.activeCombat?.pendingDecision;
+            if (!this.awaitingEliteDecision || !curPending || curPending.chosen !== null) return;
+            this.handleCommitModuleOverload(curPending.decisionId, instanceId);
+          },
           onPauseForDecision: () => {
             const curRun = this.getCurrentRun() ?? run;
             const curPending = curRun.activeCombat?.pendingDecision;
@@ -1759,6 +1938,10 @@ export class V2AppController {
                 }
               }
             }
+            this.phaserHost?.updateV2OverloadInteraction(
+              this.canMutate(),
+              this.buildStageOverloadSpecs(curRun.bay)
+            );
             if (!alreadyAtPause) {
               soundEngine.play('bossAlarm');
             }
@@ -1779,6 +1962,12 @@ export class V2AppController {
             const parts: string[] = [`第 ${log.round} 轮`];
             if (log.appliedTacticThisRound && log.appliedTacticThisRound !== 'normal') {
               parts.push(`指令·${getTacticalCommandLabel(log.appliedTacticThisRound, run.shipId)}`);
+            }
+            const ovRound = log.appliedInterventionsThisRound?.find(
+              (iv) => iv.kind === 'overload_module' && iv.moduleKind
+            );
+            if (ovRound?.moduleKind) {
+              parts.push(`过载·${getV2EquipmentDefByKind(ovRound.moduleKind, 'common').name}`);
             }
             if (dealt > 0) parts.push(`我方输出 ${dealt}`);
             if (log.heavyChargingIds.length > 0) parts.push('重炮蓄能');
@@ -1918,8 +2107,20 @@ export class V2AppController {
         units: previewUnits,
         simulation: null,
         settings: this.save.settings,
+        lockedEnemyId: stageMode === 'pre_combat' ? run.lockedEnemyId ?? null : null,
+        onEnemyLock:
+          stageMode === 'pre_combat' && previewUnits.length > 1
+            ? (enemyId) => this.handleToggleEnemyLock(enemyId)
+            : undefined,
       })
     );
+    if (stageMode === 'pre_combat') {
+      this.phaserHost.updateV2LockedEnemy(run.lockedEnemyId ?? null);
+      this.phaserHost.setV2StageCallbacks({
+        onEnemyLock:
+          previewUnits.length > 1 ? (enemyId) => this.handleToggleEnemyLock(enemyId) : undefined,
+      });
+    }
 
     const stageLabel =
       run.phase === 'MAP'
@@ -2060,6 +2261,7 @@ export class V2AppController {
 
   private renderCombatPlaybackOverlay(run: V2RunState): void {
     this.lastStaticOverlayKey = null;
+    const readOnly = this.isReadOnlyTab && !run.isShowcase;
     this.overlayViewSlot.sync(
       'COMBAT_LIVE',
       this.combatLivePhaseView,
@@ -2074,6 +2276,8 @@ export class V2AppController {
         livePhaseBannerText: this.livePhaseBannerText,
         awaitingEliteDecision: this.awaitingEliteDecision,
         combatSpeed: this.save.settings.combatSpeed,
+        readOnly,
+        stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
       },
       {
         onPeekBay: () => {
@@ -2117,6 +2321,12 @@ export class V2AppController {
           this.setCurrentRun(res.run);
           soundEngine.play('tacticalOrder');
           this.syncAll();
+        },
+        onOverloadModule: (decisionId, moduleInstanceId) => {
+          this.handleCommitModuleOverload(decisionId, moduleInstanceId);
+        },
+        onToggleLockEnemy: (enemyId) => {
+          this.handleToggleEnemyLock(enemyId);
         },
       }
     );
@@ -3116,6 +3326,9 @@ export class V2AppController {
             rotation: pl.rotation,
           };
         });
+        this.handlePlayerInitiatedBaySynergies(nextBay, {
+          isTrialOrShowcase: Boolean(draft.trialBuildId),
+        });
         this.syncPrepareLocal(draft, wasPlayingDemo);
       },
       onPrepareRemove: draft.trialBuildId
@@ -3301,6 +3514,9 @@ export class V2AppController {
         if (!this.canMutate()) return;
         const curRun = this.getCurrentRun();
         if (!curRun || curRun.phase !== 'MAP') return;
+        this.handlePlayerInitiatedBaySynergies(nextBay, {
+          isTrialOrShowcase: Boolean(curRun.isShowcase),
+        });
         this.syncMapLocal({ ...curRun, bay: nextBay });
       },
     });
@@ -3375,6 +3591,9 @@ export class V2AppController {
               soundEngine.play('click');
               this.refreshPreCombatAutoEngageUi();
             }
+          },
+          onToggleLockEnemy: (enemyId) => {
+            this.handleToggleEnemyLock(enemyId);
           },
           onStartCombat: () => {
             if (!this.canMutate()) return;
@@ -3672,6 +3891,9 @@ export class V2AppController {
         if (!this.canMutate()) return;
         const curRun = this.getCurrentRun();
         if (!curRun || curRun.phase !== 'SHOP') return;
+        this.handlePlayerInitiatedBaySynergies(nextBay, {
+          isTrialOrShowcase: Boolean(curRun.isShowcase),
+        });
         this.syncShopLocal({ ...curRun, bay: nextBay });
       },
     });
@@ -3803,6 +4025,9 @@ export class V2AppController {
         if (!this.canMutate()) return;
         const curRun = this.getCurrentRun();
         if (!curRun || curRun.phase !== 'ARRANGE') return;
+        this.handlePlayerInitiatedBaySynergies(nextBay, {
+          isTrialOrShowcase: Boolean(curRun.isShowcase),
+        });
         this.syncArrangeLocal({ ...curRun, bay: nextBay });
       },
     });

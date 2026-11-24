@@ -14,9 +14,11 @@ import {
   type V2EnemyUnitSpec,
 } from '../data/enemies';
 import {
+  V2_EQUIPMENT_DEFS,
   V2_MAX_BATTLE_SHIELD,
   V2_MAX_POST_WIN_REPAIR,
   type V2EquipmentKind,
+  type V2Quality,
   type V2UnlockFamilyId,
 } from '../data/equipment';
 import { aggregateEndlessMutatorEffects, getV3SectorDef } from '../data/sectors';
@@ -24,12 +26,14 @@ import { getShipSignatureCommand } from '../data/ships';
 import { calculateV2BuildStats, type V2BuildStats } from './buildStatsV2';
 import { freezeRunBonusObjectiveForSettlement } from './contracts';
 import { generateV2CombatRewardBundle } from './encounter';
+import { areV2PlacedItemsAdjacent } from './inventoryV2';
 import type {
   SectorId,
   V2ActiveCombatState,
   V2AppliedTacticalCommand,
   V2BossPhaseTransitionEvent,
   V2CargoBayState,
+  V2CombatIntervention,
   V2CombatRoundLog,
   V2CombatSimulation,
   V2CombatUnitSnapshot,
@@ -38,6 +42,7 @@ import type {
   V2EliteTacticOptionPreview,
   V2EnemyAttackEvent,
   V2MapNode,
+  V2PlacedItem,
   V2PlayerAttackEvent,
   V2RunState,
   V2TacticalCommandId,
@@ -165,6 +170,182 @@ function selectTargetByPolicy(
   return sorted[0];
 }
 
+function selectTarget(
+  candidates: readonly MutableUnit[],
+  policy: V2TargetPolicy,
+  lockedEnemyId?: string | null
+): MutableUnit | null {
+  if (lockedEnemyId) {
+    const locked = candidates.find((u) => u.enemyId === lockedEnemyId && u.hp > 0);
+    if (locked) return locked;
+  }
+  return selectTargetByPolicy(candidates, policy);
+}
+
+export interface V2OverloadableModuleSummary {
+  readonly instanceId: string;
+  readonly definitionId: string;
+  readonly kind: V2EquipmentKind;
+  readonly quality: V2Quality;
+  readonly name: string;
+  readonly overloadTitle: string;
+  readonly overloadSummary: string;
+  readonly adjacentPartnerCount: number;
+  readonly adjacentPartnerNames: readonly string[];
+}
+
+function findOrthogonallyAdjacentPlacedEquipment(
+  bay: V2CargoBayState,
+  sourcePlaced: V2PlacedItem
+): readonly { readonly placed: V2PlacedItem; readonly kind: V2EquipmentKind; readonly name: string; readonly quality: V2Quality }[] {
+  const result: { readonly placed: V2PlacedItem; readonly kind: V2EquipmentKind; readonly name: string; readonly quality: V2Quality }[] = [];
+  for (const other of bay.placed) {
+    if (other.item.instanceId === sourcePlaced.item.instanceId) continue;
+    const def = V2_EQUIPMENT_DEFS[other.item.definitionId];
+    if (!def) continue;
+    if (areV2PlacedItemsAdjacent(sourcePlaced, other)) {
+      result.push({ placed: other, kind: def.kind, name: def.name, quality: def.quality });
+    }
+  }
+  result.sort((a, b) => a.placed.item.instanceId.localeCompare(b.placed.item.instanceId));
+  return result;
+}
+
+/**
+ * Pure single source of truth describing all mounted combat modules eligible for D01 component overload.
+ */
+export function listV2OverloadableModules(
+  bay: V2CargoBayState,
+  precomputedStats?: V2BuildStats
+): readonly V2OverloadableModuleSummary[] {
+  const stats = precomputedStats ?? calculateV2BuildStats(bay);
+  const items: V2OverloadableModuleSummary[] = [];
+  const placedSorted = [...bay.placed].sort((a, b) => {
+    if (a.y !== b.y) return a.y - b.y;
+    if (a.x !== b.x) return a.x - b.x;
+    return a.item.instanceId.localeCompare(b.item.instanceId);
+  });
+
+  for (const placed of placedSorted) {
+    const def = V2_EQUIPMENT_DEFS[placed.item.definitionId];
+    if (!def) continue;
+    const adjacent =
+      def.kind === 'battery' ? findOrthogonallyAdjacentPlacedEquipment(bay, placed) : [];
+    const adjacentNames = adjacent.map((a) => a.name);
+
+    let overloadTitle: string;
+    let overloadSummary: string;
+    switch (def.kind) {
+      case 'laser': {
+        const lStat = stats.lasers.find((l) => l.instanceId === placed.item.instanceId);
+        const burstDmg = (lStat?.totalDamage ?? (def.quality === 'improved' ? 4 : 3)) + 4;
+        overloadTitle = '激光连射';
+        overloadSummary = `本轮主射 +2 伤，并追加 1 发 ${burstDmg} 伤过载连射`;
+        break;
+      }
+      case 'heavy': {
+        overloadTitle = '重炮急射';
+        overloadSummary = '蓄能轮立刻破甲开火（+4 伤）；开火轮转为 +8 伤破甲重炮齐射';
+        break;
+      }
+      case 'shield': {
+        const gain = def.quality === 'improved' ? 10 : 8;
+        overloadTitle = '护盾爆发';
+        overloadSummary = `立刻 +${gain} 护盾（上限 ${V2_MAX_BATTLE_SHIELD}），且本轮敌方穿盾减半`;
+        break;
+      }
+      case 'repair': {
+        const heal = def.quality === 'improved' ? 9 : 7;
+        overloadTitle = '应急抢修';
+        overloadSummary = `立刻紧急抢修 +${heal} 耐久并补充 +3 护盾`;
+        break;
+      }
+      case 'battery': {
+        overloadTitle = '相邻超载供能';
+        overloadSummary =
+          adjacent.length > 0
+            ? `同时增幅 ${adjacent.length} 件正交相邻模块（${adjacentNames.join('、')}）本轮爆发`
+            : '无相邻模块：释放 +6 破甲电弧并补充 +2 护盾';
+        break;
+      }
+      case 'salvo_pod': {
+        overloadTitle = '导弹过载齐射';
+        overloadSummary = '本轮额外发射 +3 枚增压导弹（每发 +1 伤并自动切换击杀目标）';
+        break;
+      }
+      case 'hangar': {
+        overloadTitle = '编队紧急出击';
+        overloadSummary = '本轮额外出动 +3 架过载无人机（每架 +1 伤）';
+        break;
+      }
+      case 'flak': {
+        overloadTitle = '全向弹幕过载';
+        overloadSummary = '对全体敌舰追加 1 轮破甲全向弹幕（每目标额外 +3 伤）';
+        break;
+      }
+      case 'emp_jammer': {
+        overloadTitle = '高能 EMP 爆震';
+        overloadSummary = '击碎目标 8 点护盾、追加破甲电磁击、本轮免疫 EMP 并削弱敌火';
+        break;
+      }
+      case 'counter': {
+        overloadTitle = '反击场超频';
+        overloadSummary = '立刻 +5 护盾并提升本轮反击伤害与上限 +4';
+        break;
+      }
+      case 'coolant_vent': {
+        overloadTitle = '紧急冷排过载';
+        overloadSummary = '立刻 +6 护盾、本轮穿盾减半并令重炮/导弹本轮 +3 伤';
+        break;
+      }
+      case 'overdrive_core': {
+        overloadTitle = '核心超频脉冲';
+        overloadSummary = '本轮全直击破甲 +3 伤，并追加 5 伤核心过载束';
+        break;
+      }
+      case 'capacitor': {
+        overloadTitle = '电容紧急放电';
+        overloadSummary = '触发全部重炮立刻破甲开火（无重炮时发射 +5 破甲电弧）';
+        break;
+      }
+      case 'relay': {
+        overloadTitle = '编队中继超频';
+        overloadSummary = '全部机库/导弹舱本轮额外 +2 无人机/导弹（否则 +6 精准打击）';
+        break;
+      }
+      case 'cargo_amp': {
+        overloadTitle = '货舱谐振爆发';
+        overloadSummary = '立刻 +4 护盾并按邻近货物释放破甲谐振冲击';
+        break;
+      }
+      case 'salvage_grapple': {
+        overloadTitle = '磁爪过载重击';
+        overloadSummary = '释放 +6 额外伤破甲磁爪猛击并补充 +3 护盾';
+        break;
+      }
+      default: {
+        overloadTitle = '模块过载';
+        overloadSummary = '释放过载能量冲击';
+        break;
+      }
+    }
+
+    items.push({
+      instanceId: placed.item.instanceId,
+      definitionId: placed.item.definitionId,
+      kind: def.kind,
+      quality: def.quality,
+      name: def.name,
+      overloadTitle,
+      overloadSummary,
+      adjacentPartnerCount: adjacent.length,
+      adjacentPartnerNames: adjacentNames,
+    });
+  }
+
+  return items;
+}
+
 function applyEnemyPierceBonus(basePierce: number, enemyPierceBonus: number): number {
   const clampedBase = Math.max(0, Math.min(1, basePierce));
   if (enemyPierceBonus <= 0) return clampedBase;
@@ -231,7 +412,8 @@ function applyHitToUnit(
   sourceKind: V2PlayerAttackEvent['sourceKind'],
   sourceInstanceId: string,
   rawDamage: number,
-  ignoreArmor = false
+  ignoreArmor = false,
+  isOverload = false
 ): V2PlayerAttackEvent {
   const safeRaw = Math.max(1, rawDamage);
   const wasAlive = unit.hp > 0;
@@ -267,6 +449,7 @@ function applyHitToUnit(
     ...(shieldDamaged > 0 ? { shieldDamaged } : {}),
     targetHpAfter: unit.hp,
     targetKilled: wasAlive && unit.hp === 0,
+    ...(isOverload ? { isOverload: true } : {}),
   };
 }
 
@@ -413,6 +596,10 @@ export function simulateV2Combat(params: {
   readonly stargateRelayTier?: number;
   readonly endlessThreat?: number;
   readonly endlessMutatorIds?: readonly string[];
+  /** D02: Opening Round-1 specific-enemy target lock (auto-fallback to targetPolicy on death) */
+  readonly lockedEnemyId?: string | null;
+  /** D01/D02: Ordered deterministic mid-combat interventions (tactical commands, module overloads, target locks) */
+  readonly interventions?: readonly V2CombatIntervention[];
 }): V2CombatSimulation {
   const stats = params.precomputedStats ?? calculateV2BuildStats(params.bay);
   const sectorId: SectorId = params.sectorId ?? 'near_orbit';
@@ -439,6 +626,19 @@ export function simulateV2Combat(params: {
     }
   } else if (params.round2Tactic) {
     commandByRound.set(2, params.round2Tactic);
+  }
+
+  const interventionsByRound = new Map<number, V2CombatIntervention[]>();
+  if (params.interventions && params.interventions.length > 0) {
+    for (const iv of params.interventions) {
+      if (!Number.isInteger(iv.roundNumber) || iv.roundNumber < 1) continue;
+      if (iv.kind === 'tactical_command' && iv.commandId) {
+        commandByRound.set(iv.roundNumber, iv.commandId);
+      }
+      const list = interventionsByRound.get(iv.roundNumber);
+      if (list) list.push(iv);
+      else interventionsByRound.set(iv.roundNumber, [iv]);
+    }
   }
 
   const enemies: MutableUnit[] = params.units.map((u) => {
@@ -501,6 +701,8 @@ export function simulateV2Combat(params: {
   let stalemate = false;
   let appliedTactic: V2TacticalCommandId | undefined = undefined;
   const appliedCommandsList: { readonly roundNumber: number; readonly choice: V2TacticalCommandId }[] = [];
+  const appliedInterventionsList: V2CombatIntervention[] = [];
+  let activeLockedEnemyId: string | null = params.lockedEnemyId ?? null;
   let heavyStallApplied = false;
 
   for (let round = 1; round <= V2_MAX_COMBAT_ROUNDS; round++) {
@@ -511,6 +713,22 @@ export function simulateV2Combat(params: {
       break;
     }
 
+    const roundInterventions = interventionsByRound.get(round) ?? [];
+    const appliedInterventionsThisRound: V2CombatIntervention[] = [];
+
+    // Apply any mid-combat target_lock interventions scheduled for this round BEFORE target acquisition
+    let effectiveLockIntervention: V2CombatIntervention | null = null;
+    for (const iv of roundInterventions) {
+      if (iv.kind === 'target_lock') {
+        activeLockedEnemyId = iv.targetEnemyId ?? null;
+        effectiveLockIntervention = iv;
+      }
+    }
+    if (effectiveLockIntervention) {
+      appliedInterventionsThisRound.push(effectiveLockIntervention);
+      appliedInterventionsList.push(effectiveLockIntervention);
+    }
+
     const roundCmd = commandByRound.get(round);
     let suppressDirectWeaponsThisRound = false;
     let ignoreArmorDirectThisRound = false;
@@ -518,16 +736,39 @@ export function simulateV2Combat(params: {
     let pierceMitigationFactor = 1;
     let empImmuneThisRound = false;
     let counterBonusThisRound = 0;
+    let overloadEnemyWeakenExtra = 0;
     const tacticStrikes: {
+      readonly sourceKind?: V2PlayerAttackEvent['sourceKind'];
       readonly sourceInstanceId: string;
       readonly rawDamage: number;
       readonly ignoreArmor: boolean;
       readonly aoe?: boolean;
+      readonly isOverload?: boolean;
     }[] = [];
+
+    // Per-module D01 overload boost maps for this round
+    const laserDmgBonusById = new Map<string, number>();
+    const laserExtraBursts: { readonly instanceId: string; readonly rawDamage: number }[] = [];
+    const forcedHeavyFireIds = new Set<string>();
+    const heavyOverloadBonusById = new Map<string, number>();
+    const heavyOverloadPierceIds = new Set<string>();
+    const salvoExtraMissilesById = new Map<string, { readonly count: number; readonly dmgBonus: number }>();
+    const hangarExtraDronesById = new Map<string, { readonly count: number; readonly dmgBonus: number }>();
+    const flakExtraVolleys: { readonly instanceId: string; readonly rawDamage: number; readonly ignoreArmor: boolean }[] = [];
+    const empExtraBursts: { readonly instanceId: string; readonly rawDamage: number; readonly shieldShred: number }[] = [];
+    const grappleExtraBursts: { readonly instanceId: string; readonly rawDamage: number }[] = [];
+    let coolantOverloadHeavySalvoBonus = 0;
 
     if (roundCmd) {
       appliedTactic = roundCmd;
       appliedCommandsList.push({ roundNumber: round, choice: roundCmd });
+      const matchingCmdIv = roundInterventions.find(
+        (iv) => iv.kind === 'tactical_command' && iv.commandId === roundCmd
+      );
+      if (matchingCmdIv) {
+        appliedInterventionsThisRound.push(matchingCmdIv);
+        appliedInterventionsList.push(matchingCmdIv);
+      }
       if (
         roundCmd === 'overload' &&
         playerHp + playerShield > V2_ELITE_OVERLOAD_COST
@@ -594,23 +835,313 @@ export function simulateV2Combat(params: {
       }
     }
 
+    // D01: Apply per-module component overload interventions scheduled for this round
+    const addLaserBonus = (id: string, amt: number) => {
+      laserDmgBonusById.set(id, (laserDmgBonusById.get(id) ?? 0) + amt);
+    };
+    const addHeavyBonus = (id: string, amt: number, forceFire: boolean) => {
+      if (forceFire) forcedHeavyFireIds.add(id);
+      heavyOverloadPierceIds.add(id);
+      heavyOverloadBonusById.set(id, (heavyOverloadBonusById.get(id) ?? 0) + amt);
+    };
+    const addSalvoExtra = (id: string, count: number, dmgBonus: number) => {
+      const prev = salvoExtraMissilesById.get(id);
+      salvoExtraMissilesById.set(id, {
+        count: (prev?.count ?? 0) + count,
+        dmgBonus: Math.max(prev?.dmgBonus ?? 0, dmgBonus),
+      });
+    };
+    const addHangarExtra = (id: string, count: number, dmgBonus: number) => {
+      const prev = hangarExtraDronesById.get(id);
+      hangarExtraDronesById.set(id, {
+        count: (prev?.count ?? 0) + count,
+        dmgBonus: Math.max(prev?.dmgBonus ?? 0, dmgBonus),
+      });
+    };
+
+    for (const iv of roundInterventions) {
+      if (iv.kind !== 'overload_module' || !iv.moduleInstanceId) continue;
+      const placedMod = params.bay.placed.find((p) => p.item.instanceId === iv.moduleInstanceId);
+      if (!placedMod) continue;
+      const eqDef = V2_EQUIPMENT_DEFS[placedMod.item.definitionId];
+      if (!eqDef) continue;
+      if (iv.moduleKind && iv.moduleKind !== eqDef.kind) continue;
+
+      const resolvedIv: V2CombatIntervention = {
+        ...iv,
+        moduleKind: eqDef.kind,
+      };
+      appliedInterventionsThisRound.push(resolvedIv);
+      appliedInterventionsList.push(resolvedIv);
+
+      const modId = placedMod.item.instanceId;
+      switch (eqDef.kind) {
+        case 'laser': {
+          const lStat = stats.lasers.find((l) => l.instanceId === modId);
+          const burstBase = lStat?.totalDamage ?? (eqDef.quality === 'improved' ? 4 : 3);
+          addLaserBonus(modId, 2);
+          laserExtraBursts.push({ instanceId: `${modId}_ov`, rawDamage: burstBase + 4 });
+          break;
+        }
+        case 'heavy': {
+          const hStat = stats.heavies.find((h) => h.instanceId === modId);
+          const effHeavyRoundPreview = heavyStallApplied && round >= 2 ? round - 1 : round;
+          const naturallyFires = hStat
+            ? hStat.firesOnOddRounds
+              ? effHeavyRoundPreview % 2 === 1
+              : effHeavyRoundPreview % 2 === 0
+            : false;
+          if (naturallyFires) {
+            addHeavyBonus(modId, 8, true);
+          } else {
+            addHeavyBonus(modId, 4, true);
+          }
+          break;
+        }
+        case 'shield': {
+          const gain = (eqDef.quality === 'improved' ? 10 : 8) + (stats.bestActiveCounter ? 2 : 0);
+          playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + gain);
+          pierceMitigationFactor = Math.min(pierceMitigationFactor, 0.5);
+          if (stats.bestActiveCounter) {
+            counterBonusThisRound += 2;
+          }
+          break;
+        }
+        case 'repair': {
+          const healAmt = eqDef.quality === 'improved' ? 9 : 7;
+          playerHp = Math.min(params.maxHp, playerHp + healAmt);
+          playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + 3);
+          break;
+        }
+        case 'battery': {
+          // Boost ALL orthogonally adjacent equipment modules together for this round!
+          const adjModules = findOrthogonallyAdjacentPlacedEquipment(params.bay, placedMod);
+          const batQualityBonus = eqDef.quality === 'improved' ? 3 : 2;
+          if (adjModules.length === 0) {
+            playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + 2);
+            tacticStrikes.push({
+              sourceKind: 'core',
+              sourceInstanceId: `${modId}_ov_arc`,
+              rawDamage: 6,
+              ignoreArmor: true,
+              isOverload: true,
+            });
+          } else {
+            const effHeavyRoundPreview = heavyStallApplied && round >= 2 ? round - 1 : round;
+            for (const adj of adjModules) {
+              const adjId = adj.placed.item.instanceId;
+              switch (adj.kind) {
+                case 'laser': {
+                  const lStat = stats.lasers.find((l) => l.instanceId === adjId);
+                  const baseDmg = lStat?.totalDamage ?? (adj.quality === 'improved' ? 4 : 3);
+                  addLaserBonus(adjId, batQualityBonus + 2);
+                  laserExtraBursts.push({
+                    instanceId: `${adjId}_bat_ov`,
+                    rawDamage: baseDmg + batQualityBonus,
+                  });
+                  break;
+                }
+                case 'heavy': {
+                  const hStat = stats.heavies.find((h) => h.instanceId === adjId);
+                  const naturallyFires = hStat
+                    ? hStat.firesOnOddRounds
+                      ? effHeavyRoundPreview % 2 === 1
+                      : effHeavyRoundPreview % 2 === 0
+                    : false;
+                  addHeavyBonus(adjId, naturallyFires ? 6 + batQualityBonus - 2 : 3 + batQualityBonus - 2, true);
+                  break;
+                }
+                case 'salvo_pod': {
+                  addSalvoExtra(adjId, 2, 1);
+                  break;
+                }
+                case 'hangar': {
+                  addHangarExtra(adjId, 2, 1);
+                  break;
+                }
+                case 'flak': {
+                  const fStat = stats.flaks.find((f) => f.instanceId === adjId);
+                  flakExtraVolleys.push({
+                    instanceId: `${adjId}_bat_ov`,
+                    rawDamage: (fStat?.damagePerEnemy ?? 2) + batQualityBonus,
+                    ignoreArmor: true,
+                  });
+                  break;
+                }
+                case 'shield':
+                case 'counter':
+                case 'coolant_vent': {
+                  playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + 5);
+                  pierceMitigationFactor = Math.min(pierceMitigationFactor, 0.5);
+                  if (adj.kind === 'counter') counterBonusThisRound += 2;
+                  break;
+                }
+                case 'repair': {
+                  playerHp = Math.min(params.maxHp, playerHp + 4);
+                  break;
+                }
+                case 'emp_jammer': {
+                  const eStat = stats.empJammers.find((e) => e.instanceId === adjId);
+                  empExtraBursts.push({
+                    instanceId: `${adjId}_bat_ov`,
+                    rawDamage: (eStat?.damage ?? 2) + 3,
+                    shieldShred: 3,
+                  });
+                  break;
+                }
+                case 'salvage_grapple': {
+                  const gStat = stats.salvageGrapples.find((g) => g.instanceId === adjId);
+                  grappleExtraBursts.push({
+                    instanceId: `${adjId}_bat_ov`,
+                    rawDamage: (gStat?.damage ?? 2) + 3,
+                  });
+                  break;
+                }
+                default: {
+                  directWeaponDmgBonus += 2;
+                  break;
+                }
+              }
+            }
+          }
+          break;
+        }
+        case 'salvo_pod': {
+          addSalvoExtra(modId, 3, 1);
+          break;
+        }
+        case 'hangar': {
+          addHangarExtra(modId, 3, 1);
+          break;
+        }
+        case 'flak': {
+          const fStat = stats.flaks.find((f) => f.instanceId === modId);
+          flakExtraVolleys.push({
+            instanceId: `${modId}_ov`,
+            rawDamage: (fStat?.damagePerEnemy ?? (eqDef.quality === 'improved' ? 3 : 2)) + 3,
+            ignoreArmor: true,
+          });
+          break;
+        }
+        case 'emp_jammer': {
+          const eStat = stats.empJammers.find((e) => e.instanceId === modId);
+          empImmuneThisRound = true;
+          overloadEnemyWeakenExtra += 2;
+          empExtraBursts.push({
+            instanceId: `${modId}_ov`,
+            rawDamage: (eStat?.damage ?? 2) + 4,
+            shieldShred: 8,
+          });
+          break;
+        }
+        case 'counter': {
+          playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + 5);
+          counterBonusThisRound += 4;
+          break;
+        }
+        case 'coolant_vent': {
+          playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + 6);
+          pierceMitigationFactor = Math.min(pierceMitigationFactor, 0.5);
+          coolantOverloadHeavySalvoBonus += 3;
+          break;
+        }
+        case 'overdrive_core': {
+          ignoreArmorDirectThisRound = true;
+          directWeaponDmgBonus += 3;
+          tacticStrikes.push({
+            sourceKind: 'core',
+            sourceInstanceId: `${modId}_ov`,
+            rawDamage: 5,
+            ignoreArmor: true,
+            isOverload: true,
+          });
+          break;
+        }
+        case 'capacitor': {
+          if (stats.heavies.length > 0) {
+            for (const h of stats.heavies) {
+              addHeavyBonus(h.instanceId, 5, true);
+            }
+          } else {
+            tacticStrikes.push({
+              sourceKind: 'core',
+              sourceInstanceId: `${modId}_ov`,
+              rawDamage: 5,
+              ignoreArmor: true,
+              isOverload: true,
+            });
+          }
+          break;
+        }
+        case 'relay': {
+          let boostedAny = false;
+          for (const hg of stats.hangars) {
+            addHangarExtra(hg.instanceId, 2, 1);
+            boostedAny = true;
+          }
+          for (const sv of stats.salvos) {
+            addSalvoExtra(sv.instanceId, 2, 0);
+            boostedAny = true;
+          }
+          if (!boostedAny) {
+            tacticStrikes.push({
+              sourceKind: 'core',
+              sourceInstanceId: `${modId}_ov`,
+              rawDamage: 6,
+              ignoreArmor: true,
+              isOverload: true,
+            });
+          }
+          break;
+        }
+        case 'cargo_amp': {
+          const caStat = stats.cargoAmps.find((c) => c.instanceId === modId);
+          playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + 4);
+          tacticStrikes.push({
+            sourceKind: 'core',
+            sourceInstanceId: `${modId}_ov`,
+            rawDamage: 5 + (caStat?.adjacentCargoCount ?? 0) * 2,
+            ignoreArmor: true,
+            isOverload: true,
+          });
+          break;
+        }
+        case 'salvage_grapple': {
+          const gStat = stats.salvageGrapples.find((g) => g.instanceId === modId);
+          playerShield = Math.min(V2_MAX_BATTLE_SHIELD, playerShield + 3);
+          grappleExtraBursts.push({
+            instanceId: `${modId}_ov`,
+            rawDamage: (gStat?.damage ?? 2) + 6,
+          });
+          break;
+        }
+      }
+    }
+
     // Power diversion during legacy Emergency Defense stalls heavy railgun charge by 1 cycle
     const effectiveHeavyRound = heavyStallApplied && round >= 2 ? round - 1 : round;
 
     const droneCountsByHangar: Record<string, number> = {};
     for (const hg of stats.hangars) {
-      const count = Math.min(hg.maxDrones, round + hg.roundOneBonusDrones);
+      const extraDrones = hangarExtraDronesById.get(hg.instanceId)?.count ?? 0;
+      const count = Math.min(hg.maxDrones, round + hg.roundOneBonusDrones) + extraDrones;
       droneCountsByHangar[hg.instanceId] = count;
     }
 
     const heavyChargingIds: string[] = [];
     for (const h of stats.heavies) {
-      const fires = h.firesOnOddRounds ? effectiveHeavyRound % 2 === 1 : effectiveHeavyRound % 2 === 0;
+      const fires =
+        forcedHeavyFireIds.has(h.instanceId) ||
+        (h.firesOnOddRounds ? effectiveHeavyRound % 2 === 1 : effectiveHeavyRound % 2 === 0);
       if (!fires || suppressDirectWeaponsThisRound) heavyChargingIds.push(h.instanceId);
     }
 
-    // Step 2 & 3: Select single-target primary from start-of-round snapshot (overkill allowed & deterministic!)
-    const primaryTarget = selectTargetByPolicy(startLiving, params.targetPolicy)!;
+    // Step 2 & 3: Select single-target primary from start-of-round snapshot (honors lockedEnemyId with auto-fallback!)
+    const primaryTarget = selectTarget(startLiving, params.targetPolicy, activeLockedEnemyId)!;
+    const lockedEnemyIdUsed =
+      activeLockedEnemyId && startLiving.some((u) => u.enemyId === activeLockedEnemyId)
+        ? activeLockedEnemyId
+        : null;
     const playerAttacks: V2PlayerAttackEvent[] = [];
 
     // Overcharge Cell consumable gadget: Round 1 +6 armor-piercing burst!
@@ -649,8 +1180,9 @@ export function simulateV2Combat(params: {
       );
     }
 
-    // 2a-bis. Tactical command / hull signature strikes
+    // 2a-bis. Tactical command / hull signature / module-overload core strikes
     for (const strike of tacticStrikes) {
+      const sKind = strike.sourceKind ?? 'core';
       if (strike.aoe) {
         const livingSorted = enemies
           .filter((u) => u.hp > 0)
@@ -658,13 +1190,27 @@ export function simulateV2Combat(params: {
         const targets = livingSorted.length > 0 ? livingSorted : [primaryTarget];
         for (const t of targets) {
           playerAttacks.push(
-            applyHitToUnit(t, 'core', strike.sourceInstanceId, strike.rawDamage, strike.ignoreArmor)
+            applyHitToUnit(
+              t,
+              sKind,
+              strike.sourceInstanceId,
+              strike.rawDamage,
+              strike.ignoreArmor,
+              Boolean(strike.isOverload)
+            )
           );
         }
       } else {
-        const target = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
+        const target = selectTarget(enemies, params.targetPolicy, activeLockedEnemyId) ?? primaryTarget;
         playerAttacks.push(
-          applyHitToUnit(target, 'core', strike.sourceInstanceId, strike.rawDamage, strike.ignoreArmor)
+          applyHitToUnit(
+            target,
+            sKind,
+            strike.sourceInstanceId,
+            strike.rawDamage,
+            strike.ignoreArmor,
+            Boolean(strike.isOverload)
+          )
         );
       }
     }
@@ -672,31 +1218,58 @@ export function simulateV2Combat(params: {
     if (!suppressDirectWeaponsThisRound) {
       // 2b. Lasers (sorted by instanceId)
       for (const l of stats.lasers) {
+        const ovBonus = laserDmgBonusById.get(l.instanceId) ?? 0;
         playerAttacks.push(
           applyHitToUnit(
             primaryTarget,
             'laser',
             l.instanceId,
-            l.totalDamage + directWeaponDmgBonus + consumeFirstHitBonus(),
-            ignoreArmorDirectThisRound
+            l.totalDamage + ovBonus + directWeaponDmgBonus + consumeFirstHitBonus(),
+            ignoreArmorDirectThisRound,
+            ovBonus > 0
+          )
+        );
+      }
+      for (const lb of laserExtraBursts) {
+        const burstTarget = selectTarget(enemies, params.targetPolicy, activeLockedEnemyId) ?? primaryTarget;
+        playerAttacks.push(
+          applyHitToUnit(
+            burstTarget,
+            'laser',
+            lb.instanceId,
+            lb.rawDamage + directWeaponDmgBonus,
+            ignoreArmorDirectThisRound,
+            true
           )
         );
       }
 
       // 2c. Heavy cannons firing this round (sorted by instanceId)
       for (const h of stats.heavies) {
-        const fires = h.firesOnOddRounds
-          ? effectiveHeavyRound % 2 === 1
-          : effectiveHeavyRound % 2 === 0;
+        const isForced = forcedHeavyFireIds.has(h.instanceId);
+        const fires =
+          isForced ||
+          (h.firesOnOddRounds ? effectiveHeavyRound % 2 === 1 : effectiveHeavyRound % 2 === 0);
         if (fires) {
           const bonus = round === 1 ? h.firstShotBonus : 0;
+          const ovBonus = heavyOverloadBonusById.get(h.instanceId) ?? 0;
+          const isHeavyOv = isForced || ovBonus > 0;
+          const heavyTarget = isHeavyOv
+            ? selectTarget(enemies, params.targetPolicy, activeLockedEnemyId) ?? primaryTarget
+            : primaryTarget;
           playerAttacks.push(
             applyHitToUnit(
-              primaryTarget,
+              heavyTarget,
               'heavy',
               h.instanceId,
-              h.baseDamage + bonus + directWeaponDmgBonus + consumeFirstHitBonus(),
-              ignoreArmorDirectThisRound
+              h.baseDamage +
+                bonus +
+                ovBonus +
+                coolantOverloadHeavySalvoBonus +
+                directWeaponDmgBonus +
+                consumeFirstHitBonus(),
+              ignoreArmorDirectThisRound || heavyOverloadPierceIds.has(h.instanceId),
+              isHeavyOv
             )
           );
         }
@@ -704,16 +1277,20 @@ export function simulateV2Combat(params: {
 
       // 2d. Hangar drones: each active drone acquires a living enemy independently
       for (const hg of stats.hangars) {
-        const drones = droneCountsByHangar[hg.instanceId] ?? 0;
-        for (let d = 0; d < drones; d++) {
-          const droneTarget = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
+        const baseDrones = Math.min(hg.maxDrones, round + hg.roundOneBonusDrones);
+        const extraSpec = hangarExtraDronesById.get(hg.instanceId);
+        const totalDrones = baseDrones + (extraSpec?.count ?? 0);
+        for (let d = 0; d < totalDrones; d++) {
+          const isOvDrone = d >= baseDrones;
+          const droneTarget = selectTarget(enemies, params.targetPolicy, activeLockedEnemyId) ?? primaryTarget;
           playerAttacks.push(
             applyHitToUnit(
               droneTarget,
               'hangar',
               `${hg.instanceId}_d${d + 1}`,
-              hg.damagePerDrone + consumeFirstHitBonus(),
-              ignoreArmorDirectThisRound
+              hg.damagePerDrone + (isOvDrone ? extraSpec?.dmgBonus ?? 0 : 0) + consumeFirstHitBonus(),
+              ignoreArmorDirectThisRound,
+              isOvDrone
             )
           );
         }
@@ -721,16 +1298,24 @@ export function simulateV2Combat(params: {
 
       // 2d-bis. Salvo Pods: multi-missile volley with independent retargeting on kill
       for (const sv of stats.salvos) {
-        for (let m = 0; m < sv.missiles; m++) {
-          const salvoTarget = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
-          const coolantExtra = m === 0 ? sv.coolantBonus : 0;
+        const extraSpec = salvoExtraMissilesById.get(sv.instanceId);
+        const totalMissiles = sv.missiles + (extraSpec?.count ?? 0);
+        for (let m = 0; m < totalMissiles; m++) {
+          const isOvMissile = m >= sv.missiles;
+          const salvoTarget = selectTarget(enemies, params.targetPolicy, activeLockedEnemyId) ?? primaryTarget;
+          const coolantExtra = m === 0 ? sv.coolantBonus + coolantOverloadHeavySalvoBonus : 0;
           playerAttacks.push(
             applyHitToUnit(
               salvoTarget,
               'salvo',
               `${sv.instanceId}_m${m + 1}`,
-              sv.damagePerMissile + coolantExtra + directWeaponDmgBonus + consumeFirstHitBonus(),
-              ignoreArmorDirectThisRound
+              sv.damagePerMissile +
+                (isOvMissile ? extraSpec?.dmgBonus ?? 0 : 0) +
+                coolantExtra +
+                directWeaponDmgBonus +
+                consumeFirstHitBonus(),
+              ignoreArmorDirectThisRound,
+              isOvMissile
             )
           );
         }
@@ -738,7 +1323,7 @@ export function simulateV2Combat(params: {
 
       // 2d-ter. EMP Jammers: strip enemy shield before dealing direct EMP pulse damage
       for (const ej of stats.empJammers) {
-        const empTarget = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
+        const empTarget = selectTarget(enemies, params.targetPolicy, activeLockedEnemyId) ?? primaryTarget;
         const preShred = Math.min(empTarget.shield, ej.shieldShred);
         if (preShred > 0) {
           empTarget.shield -= preShred;
@@ -760,10 +1345,25 @@ export function simulateV2Combat(params: {
             : hit
         );
       }
+      for (const eb of empExtraBursts) {
+        const empTarget = selectTarget(enemies, params.targetPolicy, activeLockedEnemyId) ?? primaryTarget;
+        const preShred = Math.min(empTarget.shield, eb.shieldShred);
+        if (preShred > 0) empTarget.shield -= preShred;
+        const hit = applyHitToUnit(empTarget, 'emp', eb.instanceId, eb.rawDamage, true, true);
+        playerAttacks.push(
+          preShred > 0
+            ? {
+                ...hit,
+                appliedDamage: hit.appliedDamage + preShred,
+                shieldDamaged: (hit.shieldDamaged ?? 0) + preShred,
+              }
+            : hit
+        );
+      }
 
       // 2d-quater. Salvage Grapples: magnetic clamp strike
       for (const gr of stats.salvageGrapples) {
-        const grappleTarget = selectTargetByPolicy(enemies, params.targetPolicy) ?? primaryTarget;
+        const grappleTarget = selectTarget(enemies, params.targetPolicy, activeLockedEnemyId) ?? primaryTarget;
         playerAttacks.push(
           applyHitToUnit(
             grappleTarget,
@@ -772,6 +1372,12 @@ export function simulateV2Combat(params: {
             gr.damage + directWeaponDmgBonus + consumeFirstHitBonus(),
             ignoreArmorDirectThisRound
           )
+        );
+      }
+      for (const gb of grappleExtraBursts) {
+        const grappleTarget = selectTarget(enemies, params.targetPolicy, activeLockedEnemyId) ?? primaryTarget;
+        playerAttacks.push(
+          applyHitToUnit(grappleTarget, 'grapple', gb.instanceId, gb.rawDamage, true, true)
         );
       }
 
@@ -789,6 +1395,17 @@ export function simulateV2Combat(params: {
               fl.damagePerEnemy + consumeFirstHitBonus(),
               ignoreArmorDirectThisRound
             )
+          );
+        }
+      }
+      for (const fv of flakExtraVolleys) {
+        const livingForOvFlak = enemies
+          .filter((u) => u.hp > 0)
+          .sort((a, b) => a.enemyId.localeCompare(b.enemyId));
+        const targets = livingForOvFlak.length > 0 ? livingForOvFlak : startLivingSortedForFlak;
+        for (const target of targets) {
+          playerAttacks.push(
+            applyHitToUnit(target, 'flak', fv.instanceId, fv.rawDamage, fv.ignoreArmor, true)
           );
         }
       }
@@ -855,6 +1472,9 @@ export function simulateV2Combat(params: {
           rawDamage = Math.max(1, rawDamage - stats.enemyWeakenAmount);
           empWeakenApplied = true;
         }
+        if (overloadEnemyWeakenExtra > 0) {
+          rawDamage = Math.max(1, rawDamage - overloadEnemyWeakenExtra);
+        }
         const effectivePierceRatio = mutatorPierce * pierceMitigationFactor;
         pierceDamage = effectivePierceRatio > 0 ? Math.floor(rawDamage * effectivePierceRatio) : 0;
         const normalDamage = rawDamage - pierceDamage;
@@ -891,7 +1511,7 @@ export function simulateV2Combat(params: {
         });
       }
 
-      // Self-buffs & summons only execute if the unit survived player fire
+      // Self-buffs, ally shield projection & summons only execute if the unit survived player fire
       if (enemy.hp > 0 && intent.shieldGain && intent.shieldGain > 0) {
         const cap = Math.max(enemy.maxShield, intent.shieldGain, 6);
         enemy.maxShield = cap;
@@ -900,6 +1520,25 @@ export function simulateV2Combat(params: {
         const gained = enemy.shield - before;
         if (gained > 0) {
           enemySpecialNotes.push(`${enemy.name} 护盾充能 +${gained}`);
+        }
+      }
+
+      if (enemy.hp > 0 && intent.allyShieldGain && intent.allyShieldGain > 0) {
+        const livingAllies = enemies
+          .filter((e) => e.hp > 0 && e.enemyId !== enemy.enemyId)
+          .sort((a, b) => {
+            if (b.damagePerRound !== a.damagePerRound) return b.damagePerRound - a.damagePerRound;
+            if (b.maxHp !== a.maxHp) return b.maxHp - a.maxHp;
+            return a.enemyId.localeCompare(b.enemyId);
+          });
+        const recipient = livingAllies[0] ?? enemy;
+        const cap = Math.max(recipient.maxShield, intent.allyShieldGain, 8);
+        recipient.maxShield = cap;
+        const before = recipient.shield;
+        recipient.shield = Math.min(cap, recipient.shield + intent.allyShieldGain);
+        const gained = recipient.shield - before;
+        if (gained > 0) {
+          enemySpecialNotes.push(`${enemy.name} 为 ${recipient.name} 投影护盾 +${gained}`);
         }
       }
 
@@ -959,7 +1598,7 @@ export function simulateV2Combat(params: {
       );
       if (rawCounter > 0) {
         const postMainLiving = enemies.filter((u) => u.hp > 0);
-        const counterTarget = selectTargetByPolicy(postMainLiving, params.targetPolicy);
+        const counterTarget = selectTarget(postMainLiving, params.targetPolicy, activeLockedEnemyId);
         if (counterTarget) {
           counterAttack = applyHitToUnit(
             counterTarget,
@@ -1045,6 +1684,8 @@ export function simulateV2Combat(params: {
       ...(bossPhaseTransitions.length > 0 ? { bossPhaseTransitions } : {}),
       ...(summonedEnemies.length > 0 ? { summonedEnemies } : {}),
       ...(enemySpecialNotes.length > 0 ? { enemySpecialNotes } : {}),
+      ...(appliedInterventionsThisRound.length > 0 ? { appliedInterventionsThisRound } : {}),
+      ...(lockedEnemyIdUsed ? { lockedEnemyIdUsed } : {}),
     });
 
     // Step 6: Win/loss check — player HP <= 0 ALWAYS loses first (including mutual destruction via counter! AC09)
@@ -1098,21 +1739,35 @@ export function simulateV2Combat(params: {
     ...(relayTier > 0 ? { stargateRelayTier: relayTier } : {}),
     ...(endlessThreat > 0 ? { endlessThreat } : {}),
     ...(mutatorEffects.activeIds.length > 0 ? { endlessMutatorIds: mutatorEffects.activeIds } : {}),
+    ...(params.lockedEnemyId !== undefined ? { lockedEnemyId: params.lockedEnemyId } : {}),
+    ...(appliedInterventionsList.length > 0 ? { appliedInterventions: appliedInterventionsList } : {}),
   };
 }
 
 /**
  * Previews an upcoming combat node using the exact same deterministic engine.
+ * S06 guarantee: always runs un-intervened baseline (`interventions: []`).
+ * Node-isolation guard: inherits `run.lockedEnemyId` ONLY for `run.currentNodeId` unless explicitly overridden.
  */
 export function previewV2CombatNode(
   run: V2RunState,
   nodeId: string,
   policyOverride?: V2TargetPolicy,
-  options?: { readonly stargateRelayTier?: number }
+  options?: { readonly stargateRelayTier?: number; readonly lockedEnemyId?: string | null }
 ): V2CombatSimulation | null {
   const node = run.graph.nodes[nodeId];
   if (!node || !node.combat) return null;
   const isCurrentNode = run.currentNodeId === nodeId;
+  const effectiveLock =
+    options?.lockedEnemyId !== undefined
+      ? options.lockedEnemyId
+      : isCurrentNode
+      ? run.lockedEnemyId ?? null
+      : null;
+  const validLock =
+    effectiveLock && node.combat.units.some((u) => u.enemyId === effectiveLock)
+      ? effectiveLock
+      : null;
   return simulateV2Combat({
     resultId: `preview_${run.runId}_${nodeId}`,
     bay: run.bay,
@@ -1129,6 +1784,8 @@ export function previewV2CombatNode(
     stargateRelayTier: options?.stargateRelayTier ?? 0,
     endlessThreat: run.endlessThreat,
     endlessMutatorIds: run.endlessMutatorIds,
+    lockedEnemyId: validLock,
+    interventions: [],
   });
 }
 
@@ -1140,6 +1797,8 @@ function buildTacticalDecisionAtRound(params: {
   readonly baselineSim: V2CombatSimulation;
   readonly pauseRound: number;
   readonly priorCommands: readonly V2AppliedTacticalCommand[];
+  readonly priorInterventions?: readonly V2CombatIntervention[];
+  readonly openingLockedEnemyId?: string | null;
   readonly chargeIndex: number;
   readonly chargesMax: number;
   readonly stargateRelayTier?: number;
@@ -1152,6 +1811,8 @@ function buildTacticalDecisionAtRound(params: {
     baselineSim,
     pauseRound,
     priorCommands,
+    priorInterventions = [],
+    openingLockedEnemyId = null,
     chargeIndex,
     chargesMax,
     stargateRelayTier,
@@ -1178,6 +1839,8 @@ function buildTacticalDecisionAtRound(params: {
       units: node.combat!.units,
       targetPolicy,
       tacticalCommands: [...priorScheduled, { roundNumber: pauseRound, choice }],
+      interventions: priorInterventions,
+      lockedEnemyId: openingLockedEnemyId,
       sectorId: run.sectorId,
       crewId: run.crewId,
       crewMasteryTier: run.crewMasteryTier ?? 0,
@@ -1374,6 +2037,10 @@ export function startV2CombatAtCurrentNode(
   const bossId = resolveNodeBossId(node, run);
   const tacticalChargesMax = computeCombatTacticalChargesMax(node, run, options?.bonusBossCharges ?? 0);
   const tacticalChargesUsed = 0;
+  const openingLockedEnemyId =
+    run.lockedEnemyId && node.combat.units.some((u) => u.enemyId === run.lockedEnemyId)
+      ? run.lockedEnemyId
+      : null;
 
   const simulation = simulateV2Combat({
     resultId: `cmb_${run.runId}_${node.nodeId}`,
@@ -1382,6 +2049,8 @@ export function startV2CombatAtCurrentNode(
     maxHp: run.maxHp,
     units: node.combat.units,
     targetPolicy,
+    lockedEnemyId: openingLockedEnemyId,
+    interventions: [],
     sectorId: run.sectorId,
     crewId: run.crewId,
     crewMasteryTier: run.crewMasteryTier ?? 0,
@@ -1409,6 +2078,8 @@ export function startV2CombatAtCurrentNode(
           baselineSim: simulation,
           pauseRound: 2,
           priorCommands: [],
+          priorInterventions: [],
+          openingLockedEnemyId,
           chargeIndex: 1,
           chargesMax: tacticalChargesMax,
           stargateRelayTier: options?.stargateRelayTier ?? 0,
@@ -1424,6 +2095,8 @@ export function startV2CombatAtCurrentNode(
     committedCommands: [],
     resumeFromRound: 0,
     pausedAtDecisionId: null,
+    lockedEnemyId: openingLockedEnemyId,
+    interventions: [],
   };
 
   return {
@@ -1431,6 +2104,7 @@ export function startV2CombatAtCurrentNode(
     run: {
       ...run,
       targetPolicy,
+      lockedEnemyId: openingLockedEnemyId,
       tacticalChargesMax,
       tacticalChargesUsed,
       activeCombat,
@@ -1511,12 +2185,25 @@ export function commitV2EliteTacticDecision(
         { decisionId, roundNumber: pending.roundNumber, choice },
       ]
     : [...prevCommitted];
+  const prevInterventions = run.activeCombat.interventions ?? [];
+  const nextInterventions: readonly V2CombatIntervention[] = consumesCharge
+    ? [
+        ...prevInterventions,
+        {
+          interventionId: decisionId,
+          roundNumber: pending.roundNumber,
+          kind: 'tactical_command',
+          commandId: choice,
+        },
+      ]
+    : [...prevInterventions];
   const nextChargesUsed = consumesCharge
     ? Math.min(run.tacticalChargesMax, run.tacticalChargesUsed + 1)
     : run.tacticalChargesUsed;
 
   const bossId = resolveNodeBossId(node, run);
   const relayTier = options?.stargateRelayTier ?? run.activeCombat.simulation.stargateRelayTier ?? 0;
+  const openingLockedEnemyId = run.activeCombat.lockedEnemyId ?? null;
   const scheduledCommands: readonly V2ScheduledTacticalCommand[] = nextCommitted.map((c) => ({
     roundNumber: c.roundNumber,
     choice: c.choice,
@@ -1529,10 +2216,12 @@ export function commitV2EliteTacticDecision(
     maxHp: run.maxHp,
     units: node.combat.units,
     targetPolicy: run.activeCombat.targetPolicy,
+    lockedEnemyId: openingLockedEnemyId,
     tacticalCommands:
       scheduledCommands.length > 0
         ? scheduledCommands
         : [{ roundNumber: pending.roundNumber, choice }],
+    interventions: nextInterventions,
     sectorId: run.sectorId,
     crewId: run.crewId,
     crewMasteryTier: run.crewMasteryTier ?? 0,
@@ -1562,6 +2251,8 @@ export function commitV2EliteTacticDecision(
         baselineSim: nextSimulation,
         pauseRound: nextPauseRound,
         priorCommands: nextCommitted,
+        priorInterventions: nextInterventions,
+        openingLockedEnemyId,
         chargeIndex: nextChargesUsed + 1,
         chargesMax: run.tacticalChargesMax,
         stargateRelayTier: relayTier,
@@ -1582,10 +2273,346 @@ export function commitV2EliteTacticDecision(
         simulation: nextSimulation,
         pendingDecision: nextPendingDecision,
         committedCommands: nextCommitted,
+        interventions: nextInterventions,
         resumeFromRound: Math.max(0, pending.roundNumber - 1),
         pausedAtDecisionId: null,
       },
       claimedEventIds: [...run.claimedEventIds, claimKey],
+    },
+  };
+}
+
+/**
+ * Pure preview for overloading a specific mounted module during an active pause decision window.
+ */
+export function previewV2ModuleOverload(
+  run: V2RunState,
+  decisionId: string,
+  moduleInstanceId: string,
+  options?: { readonly stargateRelayTier?: number }
+): V2CombatSimulation | null {
+  if (run.phase !== 'ENCOUNTER' || !run.activeCombat || !run.currentNodeId) return null;
+  const pending = run.activeCombat.pendingDecision;
+  if (!pending || pending.decisionId !== decisionId || pending.chosen !== null) return null;
+  const node = run.graph.nodes[run.currentNodeId];
+  if (!node || !node.combat) return null;
+  const placed = run.bay.placed.find((p) => p.item.instanceId === moduleInstanceId);
+  if (!placed) return null;
+  const eqDef = V2_EQUIPMENT_DEFS[placed.item.definitionId];
+  if (!eqDef) return null;
+
+  const bossId = resolveNodeBossId(node, run);
+  const relayTier = options?.stargateRelayTier ?? run.activeCombat.simulation.stargateRelayTier ?? 0;
+  const prevCommitted = run.activeCombat.committedCommands ?? [];
+  const prevInterventions = run.activeCombat.interventions ?? [];
+  const nextInterventions: readonly V2CombatIntervention[] = [
+    ...prevInterventions,
+    {
+      interventionId: decisionId,
+      roundNumber: pending.roundNumber,
+      kind: 'overload_module',
+      moduleInstanceId,
+      moduleKind: eqDef.kind,
+    },
+  ];
+  return simulateV2Combat({
+    resultId: `prev_ov_${moduleInstanceId}_${run.runId}_${node.nodeId}_r${pending.roundNumber}`,
+    bay: run.bay,
+    startingHp: run.activeCombat.startingHp,
+    maxHp: run.maxHp,
+    units: node.combat.units,
+    targetPolicy: run.activeCombat.targetPolicy,
+    lockedEnemyId: run.activeCombat.lockedEnemyId ?? null,
+    tacticalCommands: prevCommitted.map((c) => ({ roundNumber: c.roundNumber, choice: c.choice })),
+    interventions: nextInterventions,
+    sectorId: run.sectorId,
+    crewId: run.crewId,
+    crewMasteryTier: run.crewMasteryTier ?? 0,
+    encounterKind: node.combat.encounterKind,
+    bossId,
+    overchargeCellActive: Boolean(
+      run.overchargeCellActive || run.activeCombat.simulation.overchargeApplied
+    ),
+    stargateRelayTier: relayTier,
+    endlessThreat: run.endlessThreat ?? run.activeCombat.simulation.endlessThreat,
+    endlessMutatorIds: run.endlessMutatorIds ?? run.activeCombat.simulation.endlessMutatorIds,
+  });
+}
+
+/**
+ * D01: Commits a per-module component overload during a tactical decision window.
+ * - Shares charge pool & idempotency claim key (`tactic_commit_${decisionId}`) with Active Tactical Commands.
+ * - NEVER writes `'overload_module'` into `pendingDecision.chosen`; instead advances `pendingDecision` to `nextChained ?? null`.
+ * - Persists the intervention in `activeCombat.interventions` for bit-for-bit reload replay.
+ */
+export function commitV2ModuleOverload(
+  run: V2RunState,
+  decisionId: string,
+  moduleInstanceId: string,
+  options?: { readonly stargateRelayTier?: number }
+): {
+  readonly ok: boolean;
+  readonly run: V2RunState;
+  readonly moduleKind?: V2EquipmentKind;
+  readonly error?: string;
+} {
+  if (run.phase !== 'ENCOUNTER' || !run.activeCombat || !run.currentNodeId) {
+    return { ok: false, run, error: '当前没有等待战术抉择的战斗' };
+  }
+  const pending = run.activeCombat.pendingDecision;
+  if (!pending || pending.decisionId !== decisionId) {
+    return { ok: false, run, error: '战术抉择编号无效或已过期' };
+  }
+  const claimKey = `tactic_commit_${decisionId}`;
+  if (pending.chosen !== null || run.claimedEventIds.includes(claimKey)) {
+    return { ok: false, run, error: '该回合战术抉择已完成，禁止重复触发' };
+  }
+  if (run.tacticalChargesUsed >= run.tacticalChargesMax) {
+    return { ok: false, run, error: '本场战斗指令充能已耗尽' };
+  }
+
+  const node = run.graph.nodes[run.currentNodeId];
+  if (!node || !node.combat) {
+    return { ok: false, run, error: '当前战斗节点数据异常' };
+  }
+  const placed = run.bay.placed.find((p) => p.item.instanceId === moduleInstanceId);
+  if (!placed) {
+    return { ok: false, run, error: '未找到指定舱内部件' };
+  }
+  const eqDef = V2_EQUIPMENT_DEFS[placed.item.definitionId];
+  if (!eqDef) {
+    return { ok: false, run, error: '仅装备模块支持战中过载' };
+  }
+
+  const nextChargesUsed = Math.min(run.tacticalChargesMax, run.tacticalChargesUsed + 1);
+  const prevCommitted = run.activeCombat.committedCommands ?? [];
+  const prevInterventions = run.activeCombat.interventions ?? [];
+  const overloadIv: V2CombatIntervention = {
+    interventionId: decisionId,
+    roundNumber: pending.roundNumber,
+    kind: 'overload_module',
+    moduleInstanceId,
+    moduleKind: eqDef.kind,
+  };
+  const nextInterventions: readonly V2CombatIntervention[] = [...prevInterventions, overloadIv];
+
+  const bossId = resolveNodeBossId(node, run);
+  const relayTier = options?.stargateRelayTier ?? run.activeCombat.simulation.stargateRelayTier ?? 0;
+  const openingLockedEnemyId = run.activeCombat.lockedEnemyId ?? null;
+
+  const nextSimulation = simulateV2Combat({
+    resultId: `cmb_${run.runId}_${node.nodeId}_r${pending.roundNumber}_ov_${eqDef.kind}_c${nextChargesUsed}`,
+    bay: run.bay,
+    startingHp: run.activeCombat.startingHp,
+    maxHp: run.maxHp,
+    units: node.combat.units,
+    targetPolicy: run.activeCombat.targetPolicy,
+    lockedEnemyId: openingLockedEnemyId,
+    tacticalCommands: prevCommitted.map((c) => ({ roundNumber: c.roundNumber, choice: c.choice })),
+    interventions: nextInterventions,
+    sectorId: run.sectorId,
+    crewId: run.crewId,
+    crewMasteryTier: run.crewMasteryTier ?? 0,
+    encounterKind: node.combat.encounterKind,
+    bossId,
+    overchargeCellActive: Boolean(
+      run.overchargeCellActive || run.activeCombat.simulation.overchargeApplied
+    ),
+    stargateRelayTier: relayTier,
+    endlessThreat: run.endlessThreat ?? run.activeCombat.simulation.endlessThreat,
+    endlessMutatorIds: run.endlessMutatorIds ?? run.activeCombat.simulation.endlessMutatorIds,
+  });
+
+  // Never stuff 'overload_module' into pendingDecision.chosen — advance to next pause or null!
+  let nextPendingDecision: V2EliteTacticDecision | null = null;
+  if (nextChargesUsed < run.tacticalChargesMax) {
+    const nextPauseRound = findNextPauseRoundAfterCommit(nextSimulation, pending.roundNumber);
+    if (nextPauseRound !== null) {
+      nextPendingDecision = buildTacticalDecisionAtRound({
+        run,
+        node,
+        targetPolicy: run.activeCombat.targetPolicy,
+        startingHp: run.activeCombat.startingHp,
+        baselineSim: nextSimulation,
+        pauseRound: nextPauseRound,
+        priorCommands: prevCommitted,
+        priorInterventions: nextInterventions,
+        openingLockedEnemyId,
+        chargeIndex: nextChargesUsed + 1,
+        chargesMax: run.tacticalChargesMax,
+        stargateRelayTier: relayTier,
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    moduleKind: eqDef.kind,
+    run: {
+      ...run,
+      tacticalChargesUsed: nextChargesUsed,
+      activeCombat: {
+        ...run.activeCombat,
+        simulation: nextSimulation,
+        pendingDecision: nextPendingDecision,
+        committedCommands: prevCommitted,
+        interventions: nextInterventions,
+        resumeFromRound: Math.max(0, pending.roundNumber - 1),
+        pausedAtDecisionId: null,
+      },
+      claimedEventIds: [...run.claimedEventIds, claimKey],
+    },
+  };
+}
+
+/**
+ * D02: Toggles or clears pre-combat target lock on the current combat node (before combat starts).
+ */
+export function setV2PreCombatLockedEnemy(
+  run: V2RunState,
+  enemyId: string | null
+): { readonly ok: boolean; readonly run: V2RunState; readonly error?: string } {
+  if (run.phase !== 'ENCOUNTER' || !run.currentNodeId || run.activeCombat) {
+    return { ok: false, run, error: '当前不在战前集火准备阶段' };
+  }
+  const node = run.graph.nodes[run.currentNodeId];
+  if (!node || !node.combat) {
+    return { ok: false, run, error: '当前节点不是战斗遭遇' };
+  }
+  if (enemyId === null || run.lockedEnemyId === enemyId) {
+    return {
+      ok: true,
+      run: {
+        ...run,
+        lockedEnemyId: null,
+      },
+    };
+  }
+  if (!node.combat.units.some((u) => u.enemyId === enemyId)) {
+    return { ok: false, run, error: '目标敌舰不存在于当前遭遇中' };
+  }
+  return {
+    ok: true,
+    run: {
+      ...run,
+      lockedEnemyId: enemyId,
+    },
+  };
+}
+
+/**
+ * D02: Toggles or clears target lock mid-combat WITHOUT retroactively mutating Round 1!
+ * - Preserves immutable opening Round-1 lock on `activeCombat.lockedEnemyId`.
+ * - Records Round-2+ target lock strictly in `activeCombat.interventions` (`kind: 'target_lock'`).
+ * - Immediately rebuilds open `pendingDecision` previews so tactical options reflect the new lock.
+ */
+export function setV2LiveCombatLockedEnemy(
+  run: V2RunState,
+  enemyId: string | null,
+  currentRound?: number,
+  options?: { readonly stargateRelayTier?: number }
+): { readonly ok: boolean; readonly run: V2RunState; readonly error?: string } {
+  if (run.phase !== 'ENCOUNTER' || !run.activeCombat || !run.currentNodeId) {
+    return { ok: false, run, error: '当前不在进行中的战斗内' };
+  }
+  const node = run.graph.nodes[run.currentNodeId];
+  if (!node || !node.combat) {
+    return { ok: false, run, error: '当前战斗节点数据异常' };
+  }
+
+  const ac = run.activeCombat;
+  const nextLock: string | null = enemyId === null || run.lockedEnemyId === enemyId ? null : enemyId;
+
+  const pending = ac.pendingDecision;
+  const openPending = Boolean(pending && pending.chosen === null);
+  const applyRound =
+    openPending && pending
+      ? Math.max(2, pending.roundNumber)
+      : Math.max(2, (currentRound ?? (ac.resumeFromRound ?? 0) + 1) + 1);
+
+  // Validate target exists and is still alive before applyRound (refuse locking a destroyed enemy)
+  if (nextLock !== null) {
+    const prevIdx = Math.min(Math.max(0, applyRound - 2), ac.simulation.rounds.length - 1);
+    const snapPool =
+      applyRound >= 2 && ac.simulation.rounds.length > 0
+        ? ac.simulation.rounds[prevIdx].enemiesAfter
+        : ac.simulation.initialEnemies;
+    const livingSnap = snapPool.find((e) => e.enemyId === nextLock);
+    if (!livingSnap || livingSnap.hp <= 0) {
+      return { ok: false, run, error: '该目标已被击毁，无法锁定' };
+    }
+  }
+
+  const prevInterventions = ac.interventions ?? [];
+  const filteredInterventions = prevInterventions.filter(
+    (iv) => !(iv.kind === 'target_lock' && iv.roundNumber === applyRound)
+  );
+  const lockIv: V2CombatIntervention = {
+    interventionId: `lock_${run.runId}_${node.nodeId}_r${applyRound}`,
+    roundNumber: applyRound,
+    kind: 'target_lock',
+    targetEnemyId: nextLock,
+  };
+  const nextInterventions: readonly V2CombatIntervention[] = [...filteredInterventions, lockIv];
+
+  const bossId = resolveNodeBossId(node, run);
+  const relayTier = options?.stargateRelayTier ?? ac.simulation.stargateRelayTier ?? 0;
+  const prevCommitted = ac.committedCommands ?? [];
+  const openingLockedEnemyId = ac.lockedEnemyId ?? null;
+
+  const nextSimulation = simulateV2Combat({
+    resultId: `cmb_${run.runId}_${node.nodeId}_lock_r${applyRound}_${nextLock ?? 'none'}`,
+    bay: run.bay,
+    startingHp: ac.startingHp,
+    maxHp: run.maxHp,
+    units: node.combat.units,
+    targetPolicy: ac.targetPolicy,
+    lockedEnemyId: openingLockedEnemyId,
+    tacticalCommands: prevCommitted.map((c) => ({ roundNumber: c.roundNumber, choice: c.choice })),
+    interventions: nextInterventions,
+    sectorId: run.sectorId,
+    crewId: run.crewId,
+    crewMasteryTier: run.crewMasteryTier ?? 0,
+    encounterKind: node.combat.encounterKind,
+    bossId,
+    overchargeCellActive: Boolean(run.overchargeCellActive || ac.simulation.overchargeApplied),
+    stargateRelayTier: relayTier,
+    endlessThreat: run.endlessThreat ?? ac.simulation.endlessThreat,
+    endlessMutatorIds: run.endlessMutatorIds ?? ac.simulation.endlessMutatorIds,
+  });
+
+  let nextPendingDecision = pending ?? null;
+  if (openPending && pending) {
+    const rebuilt = buildTacticalDecisionAtRound({
+      run,
+      node,
+      targetPolicy: ac.targetPolicy,
+      startingHp: ac.startingHp,
+      baselineSim: nextSimulation,
+      pauseRound: pending.roundNumber,
+      priorCommands: prevCommitted,
+      priorInterventions: nextInterventions,
+      openingLockedEnemyId,
+      chargeIndex: pending.chargeIndex ?? 1,
+      chargesMax: pending.chargesMax ?? run.tacticalChargesMax,
+      stargateRelayTier: relayTier,
+    });
+    if (rebuilt) {
+      nextPendingDecision = { ...rebuilt, decisionId: pending.decisionId };
+    }
+  }
+
+  return {
+    ok: true,
+    run: {
+      ...run,
+      lockedEnemyId: nextLock,
+      activeCombat: {
+        ...ac,
+        simulation: nextSimulation,
+        pendingDecision: nextPendingDecision,
+        interventions: nextInterventions,
+      },
     },
   };
 }
@@ -1624,6 +2651,7 @@ export function completeV2CombatAtCurrentNode(
         ...run,
         hp: 0,
         activeCombat: null,
+        lockedEnemyId: null,
         overchargeCellActive: false,
         phase: 'SETTLEMENT',
         settlementReason: 'defeat',
@@ -1674,6 +2702,7 @@ export function completeV2CombatAtCurrentNode(
           nodes: resolvedNodes,
         },
         activeCombat: null,
+        lockedEnemyId: null,
         overchargeCellActive: false,
         pendingReward: null,
         phase: 'SETTLEMENT',
@@ -1717,6 +2746,7 @@ export function completeV2CombatAtCurrentNode(
       salvagePartsEarned: (run.salvagePartsEarned ?? 0) + totalWinParts,
       rngStreams: nextStreams,
       activeCombat: null,
+      lockedEnemyId: null,
       overchargeCellActive: false,
       pendingReward: bundle,
       phase: 'REWARD',

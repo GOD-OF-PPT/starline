@@ -362,5 +362,6 @@ export function createV2TutorialRun(runId: string): V2RunState {
     tacticalChargesUsed: 0,
     salvagePartsEarned: 0,
     isFinalCampaignRun: false,
+    lockedEnemyId: null,
   };
 }

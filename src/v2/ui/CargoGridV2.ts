@@ -182,6 +182,8 @@ function computeSynergyColor(sourceKind: V2AdjacencyLink['sourceKind']): string 
       return '#7DD3FC';
     case 'cargo_amp':
       return '#FBBF24';
+    case 'cargo':
+      return '#38BDF8';
     default:
       return '#62D6DF';
   }
@@ -934,6 +936,9 @@ export class CargoGridV2Component {
       boostedIds.add(lnk.targetInstanceId);
     }
     const powerBoostedSet = new Set(stats.powerCellBoostedIds);
+    const batteryCappedSet = new Set(
+      stats.lasers.filter((l) => l.batteryCapped).map((l) => l.instanceId)
+    );
 
     for (const placed of bay.placed) {
       const def = getAnyV2ItemDef(placed.item.definitionId);
@@ -947,6 +952,7 @@ export class CargoGridV2Component {
         this.drag.item.instanceId === placed.item.instanceId;
       const isBoosted = boostedIds.has(placed.item.instanceId);
       const isPowerBoosted = powerBoostedSet.has(placed.item.instanceId);
+      const isBatteryCapped = batteryCappedSet.has(placed.item.instanceId);
 
       const tile = document.createElement('div');
       tile.dataset.instanceId = placed.item.instanceId;
@@ -962,9 +968,14 @@ export class CargoGridV2Component {
           : 'cat-cargo'
       } ${isSelected ? 'selected' : ''} ${isDraggingThis ? 'dragging-source' : ''} ${
         this.lastSnappedId === placed.item.instanceId ? 'just-snapped' : ''
-      } ${isBoosted ? 'synergy-active' : ''} ${isPowerBoosted ? 'power-cell-boosted' : ''}`;
+      } ${isBoosted ? 'synergy-active' : ''} ${isPowerBoosted ? 'power-cell-boosted' : ''} ${
+        isBatteryCapped ? 'battery-capped' : ''
+      }`;
       if (isPowerBoosted) {
         tile.dataset.powerBoosted = 'true';
+      }
+      if (isBatteryCapped) {
+        tile.dataset.batteryCapped = 'true';
       }
 
       tile.style.left = `${(placed.x / ship.cols) * 100}%`;
@@ -1141,7 +1152,7 @@ export class CargoGridV2Component {
       tile.classList.toggle('synergy-preview-partner', this.previewPartnerIds.has(instanceId));
     });
 
-    if (effectiveStats.links.length === 0) {
+    if (effectiveStats.links.length === 0 && effectiveStats.cappedLinks.length === 0) {
       if (this.lastSynergyRenderKey !== 'empty') {
         svg.innerHTML = '';
         svg.style.display = 'none';
@@ -1158,7 +1169,7 @@ export class CargoGridV2Component {
 
     const renderKey = `${this.lastBayCombatHash}|${prospective?.hoverKey ?? 'base'}|${[...focusIds]
       .sort()
-      .join(',')}|${effectiveStats.links.length}`;
+      .join(',')}|${effectiveStats.links.length}|${effectiveStats.cappedLinks.length}`;
     if (renderKey === this.lastSynergyRenderKey) return;
     this.lastSynergyRenderKey = renderKey;
 
@@ -1219,6 +1230,10 @@ export class CargoGridV2Component {
 
         const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
         line.setAttribute('class', isPreviewLink ? 'energy-link-line is-preview' : 'energy-link-line');
+        line.setAttribute('data-link-status', 'active');
+        if (lnk.synergyId) {
+          line.setAttribute('data-synergy-id', lnk.synergyId);
+        }
         if (isPreviewLink) {
           line.setAttribute('data-link-preview', 'true');
         }
@@ -1250,6 +1265,10 @@ export class CargoGridV2Component {
         pill.setAttribute('fill', '#0D1726');
         pill.setAttribute('stroke', col);
         pill.setAttribute('stroke-width', '2.5');
+        pill.setAttribute('data-link-status', 'active');
+        if (lnk.synergyId) {
+          pill.setAttribute('data-synergy-id', lnk.synergyId);
+        }
         if (isPreviewLink) {
           pill.setAttribute('data-link-preview', 'true');
         }
@@ -1280,8 +1299,73 @@ export class CargoGridV2Component {
         pin.setAttribute('fill', col);
         pin.setAttribute('stroke', '#0D1726');
         pin.setAttribute('stroke-width', '2.2');
+        pin.setAttribute('data-link-status', 'active');
+        if (lnk.synergyId) {
+          pin.setAttribute('data-synergy-id', lnk.synergyId);
+        }
         svg.appendChild(pin);
       }
+    }
+
+    // D03: Colorblind-safe distinct rendering for capped/starved battery links (dashed amber + ✕ 上限 badge)
+    for (const capLnk of effectiveStats.cappedLinks) {
+      const p1 = centerOf(capLnk.sourceInstanceId);
+      const p2 = centerOf(capLnk.targetInstanceId);
+      const seam = seamMidpointOf(capLnk.sourceInstanceId, capLnk.targetInstanceId);
+      if (!p1 || !p2) continue;
+      const capCol = '#F59E0B';
+      const isPreviewCap =
+        previewItemId !== null &&
+        (capLnk.sourceInstanceId === previewItemId || capLnk.targetInstanceId === previewItemId);
+
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('class', isPreviewCap ? 'energy-link-capped is-preview' : 'energy-link-capped');
+      line.setAttribute('data-link-status', 'capped');
+      if (capLnk.synergyId) {
+        line.setAttribute('data-synergy-id', capLnk.synergyId);
+      }
+      if (isPreviewCap) {
+        line.setAttribute('data-link-preview', 'true');
+      }
+      line.setAttribute('x1', String(p1.x));
+      line.setAttribute('y1', String(p1.y));
+      line.setAttribute('x2', String(p2.x));
+      line.setAttribute('y2', String(p2.y));
+      line.setAttribute('stroke', capCol);
+      line.setAttribute('stroke-width', '3.5');
+      line.setAttribute('stroke-linecap', 'butt');
+      line.setAttribute('stroke-dasharray', '4 6');
+      line.setAttribute('opacity', '0.88');
+      svg.appendChild(line);
+
+      const midX = seam ? seam.x : (p1.x + p2.x) * 0.5;
+      const midY = seam ? seam.y : (p1.y + p2.y) * 0.5;
+      const pill = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      const pillW = Math.max(58, capLnk.label.length * 14 + 16);
+      pill.setAttribute('x', String(midX - pillW * 0.5));
+      pill.setAttribute('y', String(midY - 13));
+      pill.setAttribute('width', String(pillW));
+      pill.setAttribute('height', '26');
+      pill.setAttribute('rx', '2');
+      pill.setAttribute('fill', '#1C1917');
+      pill.setAttribute('stroke', capCol);
+      pill.setAttribute('stroke-width', '2');
+      pill.setAttribute('stroke-dasharray', '4 3');
+      pill.setAttribute('data-link-status', 'capped');
+      if (capLnk.synergyId) {
+        pill.setAttribute('data-synergy-id', capLnk.synergyId);
+      }
+      svg.appendChild(pill);
+
+      const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      txt.setAttribute('x', String(midX));
+      txt.setAttribute('y', String(midY + 5));
+      txt.setAttribute('text-anchor', 'middle');
+      txt.setAttribute('fill', '#FDE68A');
+      txt.setAttribute('font-size', '14');
+      txt.setAttribute('font-weight', '700');
+      txt.textContent = capLnk.label;
+      svg.appendChild(txt);
     }
   }
 
