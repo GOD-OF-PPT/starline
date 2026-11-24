@@ -23,6 +23,18 @@ import type {
 } from '../../domain/types';
 import { crewPortraitSvg, svgIcon, type V2IconName } from '../icons';
 
+/**
+ * Stateful PhaseView lifecycle contract (PROJECT.md § Interface Contracts #6).
+ * - `mount(host)` creates persistent DOM skeleton and binds delegated/static listeners once.
+ * - `update(props, actions)` reconciles dynamic text, attributes, classes, and keyed children in-place.
+ * - `unmount()` removes all event listeners, detaches DOM cleanly, and releases references.
+ */
+export interface PhaseView<P, A> {
+  mount(host: HTMLElement): void;
+  update(props: P, actions: A): void;
+  unmount(): void;
+}
+
 export interface V2PrepareDraft {
   contractTemplateId: string;
   sectorId: SectorId;

@@ -162,18 +162,19 @@ import {
 } from './inspectSnapshot';
 import { openV3CampaignModal, type CampaignModalTab } from './modals/CampaignModal';
 import { openV3CareerModal, type CareerModalTab } from './modals/CareerModal';
-import { renderArrangeView } from './screens/ArrangeView';
+import { ArrangePhaseView } from './screens/ArrangeView';
 import { renderBaseHeroView, updateBaseDockingNotice } from './screens/BaseView';
 import { renderCombatLiveOverlay, renderCombatPreView } from './screens/CombatView';
 import { renderEndingView } from './screens/EndingView';
 import { renderEventView } from './screens/EventView';
-import { renderMapView } from './screens/MapView';
+import { MapPhaseView } from './screens/MapView';
 import { renderPrepareView } from './screens/PrepareView';
 import { renderRewardView } from './screens/RewardView';
 import {
   NODE_TYPE_META,
   V2StaticStageSyncTracker,
   type NextBaseGoal,
+  type PhaseView,
   type V2PrepareDraft,
   type V2ReturnDockingNotice,
   type V2StaticStageMode,
@@ -222,6 +223,10 @@ export class V2AppController {
   private cargoHeaderTitleEl: HTMLElement | null = null;
   private cargoHeaderSubEl: HTMLElement | null = null;
   private cargoMountEl: HTMLElement | null = null;
+  private activeLeftPhaseKey: 'MAP' | 'ARRANGE' | null = null;
+  private activeLeftPhaseView: PhaseView<unknown, unknown> | null = null;
+  private readonly mapPhaseView = new MapPhaseView();
+  private readonly arrangePhaseView = new ArrangePhaseView();
   private tabGuard: MultiTabGuard;
 
   private sessionLaunchIndex = 0;
@@ -461,6 +466,7 @@ export class V2AppController {
     }
     this.staticStageTracker.reset();
     this.activeCombatPlaybackKey = null;
+    this.unmountActiveLeftPhaseView();
     this.teardownCargoBay();
     this.tabGuard.destroy();
     this.phaserHost?.destroy();
@@ -1780,12 +1786,38 @@ export class V2AppController {
     );
   }
 
+  private unmountActiveLeftPhaseView(): void {
+    if (this.activeLeftPhaseView) {
+      this.activeLeftPhaseView.unmount();
+      this.activeLeftPhaseView = null;
+      this.activeLeftPhaseKey = null;
+    }
+  }
+
+  private updateManagedLeftPhaseView<P, A>(
+    key: 'MAP' | 'ARRANGE',
+    view: PhaseView<P, A>,
+    props: P,
+    actions: A
+  ): void {
+    const erasedView = view as PhaseView<unknown, unknown>;
+    if (this.activeLeftPhaseKey !== key || this.activeLeftPhaseView !== erasedView) {
+      this.unmountActiveLeftPhaseView();
+      this.leftPanelEl.innerHTML = '';
+      view.mount(this.leftPanelEl);
+      this.activeLeftPhaseKey = key;
+      this.activeLeftPhaseView = erasedView;
+    }
+    view.update(props, actions);
+  }
+
   private renderPanels(): void {
     const run = this.getCurrentRun();
     if (!run) {
       if (this.prepareDraft) {
         this.renderPreparePanels();
       } else {
+        this.unmountActiveLeftPhaseView();
         this.teardownCargoBay();
         this.leftPanelEl.innerHTML = '';
         this.rightPanelEl.innerHTML = '';
@@ -1986,6 +2018,7 @@ export class V2AppController {
   private renderPreparePanels(): void {
     const draft = this.prepareDraft;
     if (!draft) return;
+    this.unmountActiveLeftPhaseView();
     const p = this.save.profile;
     const readOnly = this.isReadOnlyTab;
     const validation = validateV2PrepareLoadout(
@@ -2380,8 +2413,9 @@ export class V2AppController {
   private renderMapPhase(run: V2RunState): void {
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const relicPassives = getActiveRelicPassives(this.save.profile);
-    renderMapView(
-      this.leftPanelEl,
+    this.updateManagedLeftPhaseView(
+      'MAP',
+      this.mapPhaseView,
       {
         run,
         readOnly,
@@ -2397,16 +2431,24 @@ export class V2AppController {
         onToggleMobileMap: () => {
           this.mobileMapShowFull = !this.mobileMapShowFull;
           soundEngine.play('click');
-          this.renderMapPhase(run);
+          const latest = this.getCurrentRun();
+          if (latest && latest.phase === 'MAP') {
+            this.renderMapPhase(latest);
+          }
         },
         onSelectNode: (nid) => {
           this.selectedMapNodeId = nid;
           soundEngine.play('click');
-          this.renderMapPhase(run);
+          const latest = this.getCurrentRun();
+          if (latest && latest.phase === 'MAP') {
+            this.renderMapPhase(latest);
+          }
         },
         onJumpNode: (nid) => {
           if (!this.canMutate()) return;
-          const res = selectV2MapNode(run, nid, {
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'MAP') return;
+          const res = selectV2MapNode(latest, nid, {
             bonusBossCharges: this.getBonusBossCharges(),
             profile: this.save.profile,
           });
@@ -2425,10 +2467,16 @@ export class V2AppController {
           soundEngine.play('warpJump');
           this.syncAll();
         },
-        onUseGadget: (instanceId) => this.handleUseGadget(run, instanceId),
+        onUseGadget: (instanceId) => {
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'MAP') return;
+          this.handleUseGadget(latest, instanceId);
+        },
         onSafeReturn: () => {
           if (!this.canMutate()) return;
-          const res = initiateV2SafeReturnFromMap(run);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'MAP') return;
+          const res = initiateV2SafeReturnFromMap(latest);
           if (!res.ok) return this.showToast(res.error ?? '当前无法返航');
           this.settlementDispositions = {};
           this.setCurrentRun(res.run);
@@ -2437,11 +2485,13 @@ export class V2AppController {
         },
         onAbortContract: () => {
           if (!this.canMutate()) return;
-          const nextRun = abortActiveV2Contract(run);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'MAP') return;
+          const nextRun = abortActiveV2Contract(latest);
           this.setCurrentRun(nextRun);
           soundEngine.play('click');
           this.showToast(
-            run.contract.type === 'rescue'
+            latest.contract.type === 'rescue'
               ? '已放弃救援委托：救生舱已由信标移交，释放船舱空位与额外油耗。'
               : '已放弃当前委托，可继续自由探索或免费返航。'
           );
@@ -2457,6 +2507,7 @@ export class V2AppController {
   }
 
   private renderEncounterPhase(run: V2RunState): void {
+    this.unmountActiveLeftPhaseView();
     const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
     if (!node) return;
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
@@ -2656,6 +2707,7 @@ export class V2AppController {
   }
 
   private renderShopPhase(run: V2RunState): void {
+    this.unmountActiveLeftPhaseView();
     const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
     if (!node || !node.merchant) return;
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
@@ -2738,6 +2790,7 @@ export class V2AppController {
   }
 
   private renderRewardPhase(run: V2RunState): void {
+    this.unmountActiveLeftPhaseView();
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     renderRewardView(
       this.leftPanelEl,
@@ -2765,29 +2818,42 @@ export class V2AppController {
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const collapsed = this.isArrangeSceneCollapsed();
 
-    renderArrangeView(
-      this.leftPanelEl,
+    this.updateManagedLeftPhaseView(
+      'ARRANGE',
+      this.arrangePhaseView,
       { run, readOnly, sceneCollapsed: collapsed },
       {
         onToggleShipPreview: () => {
-          this.sceneCollapseOverride = !collapsed;
+          this.sceneCollapseOverride = !this.isArrangeSceneCollapsed();
           soundEngine.play('click');
           this.syncAll();
         },
-        onEngineerSwap: (kind) => this.handleEngineerSwap(run, kind),
+        onEngineerSwap: (kind) => {
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ARRANGE') return;
+          this.handleEngineerSwap(latest, kind);
+        },
         onSurveyScan: () => {
           if (!this.canMutate()) return;
-          const res = performSurveyAtCurrentNode(run);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ARRANGE') return;
+          const res = performSurveyAtCurrentNode(latest);
           if (!res.ok) return this.showToast(res.reason ?? '无法执行勘测');
           this.setCurrentRun(res.run);
           soundEngine.play('energyLink');
           this.showToast('航迹勘测完成！');
           this.syncAll();
         },
-        onUseGadget: (instanceId) => this.handleUseGadget(run, instanceId),
+        onUseGadget: (instanceId) => {
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ARRANGE') return;
+          this.handleUseGadget(latest, instanceId);
+        },
         onAbortContract: () => {
           if (!this.canMutate()) return;
-          const nextRun = abortActiveV2Contract(run);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ARRANGE') return;
+          const nextRun = abortActiveV2Contract(latest);
           this.setCurrentRun(nextRun);
           soundEngine.play('click');
           this.showToast('已放弃当前委托。');
@@ -2795,8 +2861,12 @@ export class V2AppController {
         },
         onLeaveArrange: (terminal) => {
           if (!this.canMutate()) return;
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ARRANGE') return;
           const proceed = () => {
-            const res = finishV2ArrangeAndProceed(run, terminal ? 'safe_return' : 'map');
+            const cur = this.getCurrentRun();
+            if (!cur || cur.phase !== 'ARRANGE') return;
+            const res = finishV2ArrangeAndProceed(cur, terminal ? 'safe_return' : 'map');
             if (!res.ok) return this.showToast(res.error ?? '当前无法离开整理');
             if (res.run.phase === 'SETTLEMENT') {
               this.settlementDispositions = {};
@@ -2805,8 +2875,8 @@ export class V2AppController {
             soundEngine.play('click');
             this.syncAll();
           };
-          if (run.bay.discardedThisArrange.length > 0) {
-            openV2DiscardConfirmModal(this.modalHostEl, run.bay.discardedThisArrange, proceed);
+          if (latest.bay.discardedThisArrange.length > 0) {
+            openV2DiscardConfirmModal(this.modalHostEl, latest.bay.discardedThisArrange, proceed);
           } else {
             proceed();
           }
@@ -2819,7 +2889,8 @@ export class V2AppController {
       statusBadge: '可调整',
       getInspectorHost: () =>
         window.innerWidth >= 860
-          ? this.leftPanelEl.querySelector<HTMLElement>('#v3-arrange-inspector-slot')
+          ? this.arrangePhaseView.getInspectorSlot() ??
+            this.leftPanelEl.querySelector<HTMLElement>('#v3-arrange-inspector-slot')
           : null,
       getTacticalDelta: (item, zone) =>
         computeV2PlacementTacticalDelta({
@@ -2842,6 +2913,7 @@ export class V2AppController {
   }
 
   private renderSettlementPhase(run: V2RunState): void {
+    this.unmountActiveLeftPhaseView();
     const p = this.save.profile;
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const summary = calculateV2Settlement(run, p, this.settlementDispositions);
