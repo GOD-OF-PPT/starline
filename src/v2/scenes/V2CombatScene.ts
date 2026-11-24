@@ -21,6 +21,16 @@ import type {
   V2CombatSimulation,
   V2CombatUnitSnapshot,
 } from '../domain/types';
+import {
+  VFX_HIT_MILD_TINT,
+  VFX_IMPACT_GLOW_MAX_RADIUS,
+  buildRoundBeatSchedule,
+  clampCameraShakeMs,
+  computeCameraShakeMagnitudePx,
+  resolveHitFlashDecision,
+} from './v2CombatVfx';
+
+export * from './v2CombatVfx';
 
 export interface V2StagePlayback {
   readonly playbackKey?: string;
@@ -93,6 +103,23 @@ interface MountedModuleEntry {
   muzzleOffsetY: number;
 }
 
+interface ImpactGlowFx {
+  x: number;
+  y: number;
+  maxR: number;
+  color: number;
+  kind: 'hull' | 'shield' | 'heavy' | 'emp';
+  life: number;
+  maxLife: number;
+}
+
+interface InFlightRoundState {
+  readonly roundIdx: number;
+  readonly log: V2CombatRoundLog;
+  visualsCommitted: boolean;
+  stepReported: boolean;
+}
+
 interface EnemyVisualEntry {
   readonly enemyId: string;
   readonly spec: V2EnemyUnitSpec;
@@ -108,6 +135,7 @@ interface EnemyVisualEntry {
   isCharging: boolean;
   baseTint: number | null;
   flashMs: number;
+  shieldArcLife: number;
   recoilX: number;
   dead: boolean;
 }
@@ -132,6 +160,7 @@ export class V2CombatScene extends Phaser.Scene {
   private bgImage: Phaser.GameObjects.Image | null = null;
   private bgGraphics!: Phaser.GameObjects.Graphics;
   private fxGraphics!: Phaser.GameObjects.Graphics;
+  private addFxGraphics!: Phaser.GameObjects.Graphics;
   private playerSprite: Phaser.GameObjects.Image | null = null;
   private moduleSprites: MountedModuleEntry[] = [];
   private enemies: EnemyVisualEntry[] = [];
@@ -139,6 +168,7 @@ export class V2CombatScene extends Phaser.Scene {
   private stars: { nx: number; ny: number; speed: number; r: number; a: number }[] = [];
   private beams: BeamFx[] = [];
   private rings: RingFx[] = [];
+  private impactGlows: ImpactGlowFx[] = [];
   private smokes: SmokePuff[] = [];
   private popups: PopupFx[] = [];
 
@@ -153,6 +183,11 @@ export class V2CombatScene extends Phaser.Scene {
 
   private playerBaseX = 95;
   private playerBaseY = 120;
+  private playerBaseTint: number | null = null;
+  private playerCurrentTint: number | null = null;
+  private playerHp = 0;
+  private playerMaxHp = 0;
+  private playerShield = 0;
   private playerRecoilX = 0;
   private playerFlashMs = 0;
   private shieldArcLife = 0;
@@ -172,6 +207,9 @@ export class V2CombatScene extends Phaser.Scene {
   private playbackActive = false;
   private waitingCompletion = false;
   private completionDelayMs = 0;
+  private roundTimers: Phaser.Time.TimerEvent[] = [];
+  private roundEpoch = 0;
+  private inFlightRound: InFlightRoundState | null = null;
 
   constructor() {
     super({ key: 'V2CombatScene' });
@@ -179,6 +217,12 @@ export class V2CombatScene extends Phaser.Scene {
 
   setPaused(paused: boolean): void {
     this.externalPaused = paused;
+    if (paused) {
+      this.flushInFlightRound(true);
+    }
+    if (this.time) {
+      this.time.paused = paused || this.decisionPaused;
+    }
   }
 
   setAssetErrorHandler(handler: (key: string) => void): void {
@@ -278,19 +322,29 @@ export class V2CombatScene extends Phaser.Scene {
     this.bgImage = this.add.image(0, 0, 'bg.sector.1').setOrigin(0.5, 0.5).setDepth(0);
     this.bgGraphics = this.add.graphics().setDepth(1);
     this.fxGraphics = this.add.graphics().setDepth(7);
+    this.addFxGraphics = this.add.graphics().setDepth(8);
+    const addBlendMode = Phaser.BlendModes?.ADD ?? 1;
+    if (typeof this.addFxGraphics.setBlendMode === 'function') {
+      this.addFxGraphics.setBlendMode(addBlendMode);
+    }
     this.playerSprite = null;
     this.moduleSprites = [];
     this.enemies = [];
     this.popups = [];
     this.beams = [];
     this.rings = [];
+    this.impactGlows = [];
     this.smokes = [];
+    this.roundTimers = [];
+    this.inFlightRound = null;
     this.texturesReady = true;
 
     this.applyPlayback();
 
     this.scale.on('resize', this.handleResize, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.cancelRoundTimers();
+      this.inFlightRound = null;
       this.texturesReady = false;
       this.appliedPlaybackKey = null;
       this.playbackActive = false;
@@ -299,6 +353,7 @@ export class V2CombatScene extends Phaser.Scene {
       this.nextRoundIdx = 0;
       this.beams = [];
       this.rings = [];
+      this.impactGlows = [];
       this.smokes = [];
       this.clearPopups();
       this.destroyModuleSprites();
@@ -372,6 +427,20 @@ export class V2CombatScene extends Phaser.Scene {
     readonly enemyCount: number;
     readonly moduleCount: number;
     readonly playerVisible: boolean;
+    readonly activeImpactGlows: number;
+    readonly pendingTimers: number;
+    readonly playerTint: number | null;
+    readonly playerHp: number;
+    readonly playerMaxHp: number;
+    readonly playerShield: number;
+    readonly enemiesState: readonly {
+      readonly enemyId: string;
+      readonly hp: number;
+      readonly shield: number;
+      readonly dead: boolean;
+      readonly flashMs: number;
+      readonly shieldArcLife: number;
+    }[];
   } {
     return {
       appliedPlaybackKey: this.appliedPlaybackKey,
@@ -382,6 +451,20 @@ export class V2CombatScene extends Phaser.Scene {
       enemyCount: this.enemies.length,
       moduleCount: this.moduleSprites.length,
       playerVisible: Boolean(this.playerSprite?.visible),
+      activeImpactGlows: this.impactGlows.length,
+      pendingTimers: this.roundTimers.length,
+      playerTint: this.playerCurrentTint,
+      playerHp: this.playerHp,
+      playerMaxHp: this.playerMaxHp,
+      playerShield: this.playerShield,
+      enemiesState: this.enemies.map((e) => ({
+        enemyId: e.enemyId,
+        hp: e.hp,
+        shield: e.shield,
+        dead: e.dead,
+        flashMs: e.flashMs,
+        shieldArcLife: e.shieldArcLife,
+      })),
     };
   }
 
@@ -394,7 +477,79 @@ export class V2CombatScene extends Phaser.Scene {
     const y = this.viewH * normY;
     this.rings.push({ x, y, maxR: 38, color: 0xf6b852, life: 0.36, maxLife: 0.36 });
     this.rings.push({ x, y, maxR: 22, color: 0x62d6df, life: 0.28, maxLife: 0.28 });
-    soundEngine.play('place');
+    this.spawnImpactGlow(x, y, 0xf6b852, 'heavy', 16);
+    soundEngine.play('wreckCut');
+  }
+
+  private cancelRoundTimers(): void {
+    this.roundEpoch += 1;
+    for (const timer of this.roundTimers) {
+      this.time?.removeEvent?.(timer);
+      timer?.remove?.(false);
+    }
+    this.roundTimers = [];
+  }
+
+  private scheduleRoundTimer(delayMs: number, epoch: number, callback: () => void): void {
+    if (this.time && typeof this.time.delayedCall === 'function') {
+      let handle: Phaser.Time.TimerEvent | null = null;
+      handle = this.time.delayedCall(Math.max(0, delayMs), () => {
+        if (handle) {
+          this.roundTimers = this.roundTimers.filter((t) => t !== handle);
+        }
+        if (epoch !== this.roundEpoch || !this.texturesReady) return;
+        callback();
+      });
+      if (handle) {
+        this.roundTimers.push(handle);
+      }
+    } else if (epoch === this.roundEpoch && this.texturesReady) {
+      callback();
+    }
+  }
+
+  private flushInFlightRound(reportStep: boolean): void {
+    this.cancelRoundTimers();
+    const pending = this.inFlightRound;
+    this.inFlightRound = null;
+    if (!pending) return;
+    if (!pending.visualsCommitted) {
+      pending.visualsCommitted = true;
+      this.syncUnitStatesToRound(pending.log);
+      this.playerHp = pending.log.playerHpAfter;
+      this.playerShield = pending.log.playerShieldAfter;
+    }
+    if (reportStep && !pending.stepReported) {
+      pending.stepReported = true;
+      this.playback?.onRoundStep?.(pending.roundIdx, pending.log);
+    }
+  }
+
+  private spawnImpactGlow(
+    x: number,
+    y: number,
+    color: number,
+    kind: ImpactGlowFx['kind'],
+    maxR = VFX_IMPACT_GLOW_MAX_RADIUS
+  ): void {
+    const clampedR = Math.min(VFX_IMPACT_GLOW_MAX_RADIUS, Math.max(6, maxR));
+    const duration = kind === 'heavy' ? 0.22 : kind === 'shield' ? 0.24 : 0.16;
+    this.impactGlows.push({
+      x,
+      y,
+      maxR: clampedR,
+      color,
+      kind,
+      life: duration,
+      maxLife: duration,
+    });
+  }
+
+  private triggerShake(durationMs: number, reduced: boolean): void {
+    const clamped = clampCameraShakeMs(durationMs, reduced);
+    if (clamped > 0) {
+      this.shakeTimerMs = Math.min(clampCameraShakeMs(120, false), Math.max(this.shakeTimerMs, clamped));
+    }
   }
 
   skipPlayback(): void {
@@ -403,10 +558,14 @@ export class V2CombatScene extends Phaser.Scene {
     const sim = this.playback.simulation;
     const pauseAt = this.playback.pauseAtRound ?? null;
 
+    // Cleanly cancel pending beat timers and commit any in-flight round ONCE without double-applying
+    this.flushInFlightRound(true);
+
     // Guard before loop as well (e.g. Round-1 seeded pause with empty rounds array)
     if (pauseAt !== null && this.nextRoundIdx + 1 === pauseAt) {
       this.playbackActive = false;
       this.decisionPaused = true;
+      if (this.time) this.time.paused = true;
       this.playback.onPauseForDecision?.();
       return;
     }
@@ -416,11 +575,14 @@ export class V2CombatScene extends Phaser.Scene {
       if (pauseAt !== null && this.nextRoundIdx + 1 === pauseAt) {
         this.playbackActive = false;
         this.decisionPaused = true;
+        if (this.time) this.time.paused = true;
         this.playback.onPauseForDecision?.();
         return;
       }
       const log = sim.rounds[this.nextRoundIdx];
       this.syncUnitStatesToRound(log);
+      this.playerHp = log.playerHpAfter;
+      this.playerShield = log.playerShieldAfter;
       this.playback.onRoundStep?.(this.nextRoundIdx, log);
       this.nextRoundIdx += 1;
     }
@@ -528,6 +690,7 @@ export class V2CombatScene extends Phaser.Scene {
       isCharging: tag.isCharging,
       baseTint,
       flashMs: 0,
+      shieldArcLife: 0,
       recoilX: 0,
       dead: (initialSnap ? initialSnap.hp : unit.maxHp) <= 0,
     };
@@ -600,6 +763,8 @@ export class V2CombatScene extends Phaser.Scene {
   private syncUnitStatesToRound(log: V2CombatRoundLog): void {
     this.activeDronesCount = Object.values(log.droneCountsByHangar).reduce((a, b) => a + b, 0);
     this.heavyChargingCount = log.heavyChargingIds.length;
+    this.playerHp = log.playerHpAfter;
+    this.playerShield = log.playerShieldAfter;
     this.syncEnemyRosterFromSnapshots(log.enemiesAfter, false);
   }
 
@@ -770,7 +935,7 @@ export class V2CombatScene extends Phaser.Scene {
         m.badgeText.setPosition(mx - m.sprite.displayWidth * 0.25, my - m.sprite.displayHeight * 0.48);
       }
       if (this.playerFlashMs > 0) {
-        m.sprite.setTintFill(0xffffff);
+        m.sprite.setTint(VFX_HIT_MILD_TINT);
       } else {
         m.sprite.clearTint();
       }
@@ -787,8 +952,11 @@ export class V2CombatScene extends Phaser.Scene {
   }
 
   private applyPlayback(): void {
+    this.cancelRoundTimers();
+    this.inFlightRound = null;
     this.beams = [];
     this.rings = [];
+    this.impactGlows = [];
     this.smokes = [];
     this.clearPopups();
     this.destroyModuleSprites();
@@ -811,13 +979,24 @@ export class V2CombatScene extends Phaser.Scene {
     this.heavyChargingCount = 0;
     this.enemyChargeMs = 0;
     this.shakeTimerMs = 0;
+    if (this.time) {
+      this.time.paused = this.externalPaused;
+    }
 
     const pb = this.playback;
     if (!pb) {
       this.appliedPlaybackKey = null;
+      this.playerBaseTint = null;
+      this.playerCurrentTint = null;
+      this.playerHp = 0;
+      this.playerMaxHp = 0;
+      this.playerShield = 0;
       return;
     }
     this.appliedPlaybackKey = !pb.simulation ? (pb.playbackKey ?? null) : null;
+    this.playerHp = pb.simulation?.startingPlayerHp ?? 0;
+    this.playerMaxHp = Math.max(this.playerHp, pb.simulation?.startingPlayerHp ?? 0);
+    this.playerShield = pb.simulation?.startingPlayerShield ?? 0;
 
     // Backdrop: event scene or sector deep-space
     const bgKey = pb.eventBackdrop
@@ -851,8 +1030,10 @@ export class V2CombatScene extends Phaser.Scene {
       this.playerSprite.setTexture(pKey);
     }
     this.playerSprite.setVisible(showPlayerShip).setAlpha(1);
-    if (pb.shipId === 'stargate_cruiser') {
-      this.playerSprite.setTint(0xe6f8ff);
+    this.playerBaseTint = pb.shipId === 'stargate_cruiser' ? 0xe6f8ff : null;
+    this.playerCurrentTint = this.playerBaseTint;
+    if (this.playerBaseTint !== null) {
+      this.playerSprite.setTint(this.playerBaseTint);
     } else {
       this.playerSprite.clearTint();
     }
@@ -1038,428 +1219,566 @@ export class V2CombatScene extends Phaser.Scene {
   private executeRoundVisual(roundIdx: number, log: V2CombatRoundLog): void {
     const pb = this.playback;
     if (!pb || !this.playerSprite) return;
+
+    // Flush any previous in-flight round cleanly before starting the next round
+    this.flushInFlightRound(true);
+
     const reduced = pb.settings.reducedMotion;
+    const speed = pb.settings.combatSpeed ?? 1;
     const vSpec = pb.shipVisualSpec;
 
-    const pHp = getShipHardpoints(`ship.player.${pb.shipId}`);
-    const pMuzzle = this.getSpritePoint(this.playerSprite, pHp.muzzle);
-    const pHit = this.getSpritePoint(this.playerSprite, pHp.hit);
-    const heavyMuzzle = this.getModuleMuzzle('heavy') ?? pMuzzle;
-    const laserMuzzle = this.getModuleMuzzle('laser') ?? pMuzzle;
-    const droneMuzzle = this.getModuleMuzzle('drone_bay') ?? { x: this.playerBaseX + 24, y: this.playerBaseY + 18 };
-    const counterMuzzle = this.getModuleMuzzle('counter_ring') ?? { x: this.playerBaseX + 24, y: this.playerBaseY - 12 };
+    const roundState: InFlightRoundState = {
+      roundIdx,
+      log,
+      visualsCommitted: false,
+      stepReported: false,
+    };
+    this.inFlightRound = roundState;
+    const epoch = this.roundEpoch;
 
-    // Update countable drone & heavy charging telemetry + ventral hangar bay hatch launch cue
-    this.prevDronesCount = this.activeDronesCount;
-    this.activeDronesCount = Object.values(log.droneCountsByHangar).reduce((a, b) => a + b, 0);
-    if (this.activeDronesCount > this.prevDronesCount) {
-      this.hangarDoorLife = 0.44;
-      this.rings.push({ x: droneMuzzle.x, y: droneMuzzle.y, maxR: 20, color: 0x7be8ff, life: 0.28, maxLife: 0.28 });
-    }
-    this.heavyChargingCount = log.heavyChargingIds.length;
-    if (this.heavyChargingCount > 0) {
-      soundEngine.play('chargeUp');
-      this.spawnPopup(heavyMuzzle.x - 10, heavyMuzzle.y - 20, '重炮蓄能', '#F6B852');
-    }
-
-    // Tactical command & hull signature activation cues
-    if (log.appliedTacticThisRound && log.appliedTacticThisRound !== 'normal') {
-      const cmd = log.appliedTacticThisRound;
-      const cmdLabel = getTacticalCommandLabel(cmd, pb.shipId);
-      if (cmd === 'emergency_shield' || cmd === 'emergency_defense') {
-        this.shieldArcLife = 0.58;
-        soundEngine.play('shieldOverload');
-        this.rings.push({ x: this.playerBaseX + 18, y: this.playerBaseY, maxR: 48, color: 0x62d6df, life: 0.42, maxLife: 0.42 });
-        this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 36, `${cmdLabel}！`, '#62D6DF');
-      } else if (cmd === 'focus_calibrate') {
-        soundEngine.play('tacticalOrder');
-        this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 36, '聚焦校准！', '#7AE582');
-      } else if (cmd === 'signature_heavy_freighter') {
-        this.shieldArcLife = 0.52;
-        soundEngine.play('repairPulse');
-        this.rings.push({ x: this.playerBaseX, y: this.playerBaseY, maxR: 46, color: 0x7ae582, life: 0.44, maxLife: 0.44 });
-        this.spawnPopup(this.playerBaseX + 12, this.playerBaseY - 36, `${cmdLabel} +5HP/+4盾`, '#7AE582');
-      } else if (cmd === 'signature_shield_cruiser') {
-        this.shieldArcLife = 0.56;
-        soundEngine.play('shieldOverload');
-        this.rings.push({ x: this.playerBaseX + 16, y: this.playerBaseY, maxR: 54, color: 0x62d6df, life: 0.46, maxLife: 0.46 });
-        this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 36, `${cmdLabel}！`, '#62D6DF');
-      } else if (cmd === 'signature_cannon_skiff' || cmd === 'signature_stargate_cruiser') {
-        soundEngine.play('tacticalOrder');
-        this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 36, `${cmdLabel}！`, '#F6B852');
-      }
-    }
-
-    let playedLaser = false;
-    let playedHeavy = false;
-    let playedDrone = false;
-    let playedFlak = false;
-    let shownSynergyTag = false;
-
-    const dmgByEnemy = new Map<string, number>();
-
-    for (const atk of log.playerAttacks) {
-      const target = this.enemies.find((e) => e.enemyId === atk.targetEnemyId);
-      if (!target) continue;
-      dmgByEnemy.set(target.enemyId, (dmgByEnemy.get(target.enemyId) ?? 0) + atk.appliedDamage);
-
-      const eKey = `ship.enemy.${target.spec.spriteArchetype}`;
-      const ePt = this.getSpritePoint(target.sprite, getShipHardpoints(eKey).hit);
-      target.flashMs = 110;
-      target.recoilX = 6;
-
-      if (atk.shieldDamaged && atk.shieldDamaged > 0) {
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 26, color: 0x62d6df, life: 0.28, maxLife: 0.28 });
-      }
-
-      if (atk.sourceKind === 'heavy') {
-        if (!playedHeavy) {
-          soundEngine.play('heavyBlast');
-          playedHeavy = true;
-          if (vSpec?.heavyBoosted && !shownSynergyTag) {
-            this.synergyPulseLife = 0.42;
-            this.synergyTargetKind = 'heavy';
-            this.spawnPopup(heavyMuzzle.x - 8, heavyMuzzle.y - 26, '联动·先手', '#F6B852');
-            shownSynergyTag = true;
-          }
-        }
-        this.playerRecoilX = -10;
-        const hm = this.moduleSprites.find((m) => m.kind === 'heavy');
-        if (hm) hm.recoilX = -12;
-        if (!reduced) this.shakeTimerMs = 120;
-        this.beams.push({
-          x1: heavyMuzzle.x,
-          y1: heavyMuzzle.y,
-          x2: ePt.x,
-          y2: ePt.y,
-          color: 0xf6b852,
-          thickness: 6.5,
-          life: 0.38,
-          maxLife: 0.38,
-        });
-        this.rings.push({ x: heavyMuzzle.x, y: heavyMuzzle.y, maxR: 18, color: 0xffe4a3, life: 0.2, maxLife: 0.2 });
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 36, color: 0xf6b852, life: 0.36, maxLife: 0.36 });
-      } else if (atk.sourceKind === 'hangar') {
-        if (!playedDrone) {
-          soundEngine.play('droneLaunch');
-          playedDrone = true;
-          if (vSpec?.hangarBoosted && !shownSynergyTag) {
-            this.synergyPulseLife = 0.42;
-            this.synergyTargetKind = 'drone_bay';
-            this.spawnPopup(droneMuzzle.x, droneMuzzle.y + 20, '联动·编队', '#62D6DF');
-            shownSynergyTag = true;
-          }
-        }
-        const laneOffset = ((this.beams.length % 4) - 1.5) * 14;
-        this.beams.push({
-          x1: droneMuzzle.x + 26,
-          y1: this.playerBaseY + laneOffset,
-          x2: ePt.x,
-          y2: ePt.y,
-          color: 0x7be8ff,
-          thickness: 2.2,
-          life: 0.25,
-          maxLife: 0.25,
-        });
-      } else if (atk.sourceKind === 'salvo') {
-        if (!playedDrone) {
-          soundEngine.play('droneLaunch');
-          playedDrone = true;
-        }
-        const laneOffset = ((this.beams.length % 5) - 2) * 10;
-        this.beams.push({
-          x1: heavyMuzzle.x,
-          y1: heavyMuzzle.y + laneOffset,
-          x2: ePt.x,
-          y2: ePt.y,
-          color: 0xf97316,
-          thickness: 3.0,
-          life: 0.28,
-          maxLife: 0.28,
-        });
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 22, color: 0xfb923c, life: 0.24, maxLife: 0.24 });
-      } else if (atk.sourceKind === 'emp') {
-        if (!playedLaser) {
-          soundEngine.play('laserFire');
-          playedLaser = true;
-        }
-        this.beams.push({
-          x1: counterMuzzle.x,
-          y1: counterMuzzle.y,
-          x2: ePt.x,
-          y2: ePt.y,
-          color: 0xa78bfa,
-          thickness: 3.8,
-          life: 0.3,
-          maxLife: 0.3,
-        });
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 32, color: 0xa78bfa, life: 0.34, maxLife: 0.34 });
-      } else if (atk.sourceKind === 'grapple') {
-        this.beams.push({
-          x1: pMuzzle.x,
-          y1: pMuzzle.y + 6,
-          x2: ePt.x,
-          y2: ePt.y,
-          color: 0x34d399,
-          thickness: 2.8,
-          life: 0.26,
-          maxLife: 0.26,
-        });
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 18, color: 0x34d399, life: 0.22, maxLife: 0.22 });
-      } else if (atk.sourceInstanceId === 'gadget_overcharge_cell') {
-        soundEngine.play('heavyBlast');
-        this.beams.push({
-          x1: pMuzzle.x,
-          y1: pMuzzle.y,
-          x2: ePt.x,
-          y2: ePt.y,
-          color: 0xfacc15,
-          thickness: 5.5,
-          life: 0.36,
-          maxLife: 0.36,
-        });
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 34, color: 0xfacc15, life: 0.34, maxLife: 0.34 });
-        this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 38, '过载电池爆发！', '#FACC15');
-      } else if (atk.sourceKind === 'flak') {
-        if (!playedFlak) {
-          soundEngine.play('laserFire');
-          playedFlak = true;
-        }
-        this.beams.push({
-          x1: laserMuzzle.x,
-          y1: laserMuzzle.y - 4,
-          x2: ePt.x,
-          y2: ePt.y,
-          color: 0xffd27d,
-          thickness: 2.4,
-          life: 0.22,
-          maxLife: 0.22,
-        });
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 20, color: 0xffd27d, life: 0.24, maxLife: 0.24 });
-      } else if (atk.sourceInstanceId === 'tactic_overload') {
-        soundEngine.play('heavyBlast');
-        this.playerRecoilX = -8;
-        this.beams.push({
-          x1: pMuzzle.x,
-          y1: pMuzzle.y,
-          x2: ePt.x,
-          y2: ePt.y,
-          color: 0xff9f43,
-          thickness: 5,
-          life: 0.34,
-          maxLife: 0.34,
-        });
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 30, color: 0xff9f43, life: 0.3, maxLife: 0.3 });
-        this.spawnPopup(this.playerBaseX + 12, this.playerBaseY - 36, '火力过载！', '#FF9F43');
-      } else if (atk.sourceInstanceId === 'tactic_focus_calibrate') {
-        this.beams.push({
-          x1: pMuzzle.x,
-          y1: pMuzzle.y,
-          x2: ePt.x,
-          y2: ePt.y,
-          color: 0x7ae582,
-          thickness: 4,
-          life: 0.32,
-          maxLife: 0.32,
-        });
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 34, color: 0x7ae582, life: 0.36, maxLife: 0.36 });
-      } else if (atk.sourceInstanceId.startsWith('tactic_sig_')) {
-        const isWave = atk.sourceInstanceId.includes('shield_cruiser') || atk.sourceInstanceId.includes('stargate');
-        const sigColor = atk.sourceInstanceId.includes('shield_cruiser')
-          ? 0x62d6df
-          : atk.sourceInstanceId.includes('stargate')
-          ? 0xc9a0ff
-          : 0xf6b852;
-        this.beams.push({
-          x1: pMuzzle.x,
-          y1: pMuzzle.y,
-          x2: ePt.x,
-          y2: ePt.y,
-          color: sigColor,
-          thickness: isWave ? 4.4 : 3.8,
-          jagged: isWave,
-          life: 0.34,
-          maxLife: 0.34,
-        });
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 34, color: sigColor, life: 0.34, maxLife: 0.34 });
-      } else {
-        if (!playedLaser) {
-          soundEngine.play('laserFire');
-          playedLaser = true;
-          if (atk.sourceKind === 'laser' && vSpec?.laserBoosted && !shownSynergyTag) {
-            this.synergyPulseLife = 0.42;
-            this.synergyTargetKind = 'laser';
-            this.spawnPopup(laserMuzzle.x - 6, laserMuzzle.y - 22, '联动·充能', '#62D6DF');
-            shownSynergyTag = true;
-          }
-        }
-        this.playerRecoilX = Math.min(this.playerRecoilX, -4);
-        const lm = this.moduleSprites.find((m) => m.kind === 'laser');
-        if (lm && atk.sourceKind === 'laser') lm.recoilX = -6;
-        const srcPt = atk.sourceKind === 'laser' ? laserMuzzle : pMuzzle;
-        this.beams.push({
-          x1: srcPt.x,
-          y1: srcPt.y,
-          x2: ePt.x,
-          y2: ePt.y,
-          color: 0x62d6df,
-          thickness: 3,
-          life: 0.26,
-          maxLife: 0.26,
-        });
-      }
-    }
-
-    for (const [eid, total] of dmgByEnemy.entries()) {
-      const target = this.enemies.find((e) => e.enemyId === eid);
-      if (target && total > 0) {
-        this.spawnPopup(target.baseX, target.baseY - 22, `-${total}`, '#F6B852');
-      }
-    }
-
-    // Boss Multi-Phase Transition VFX & SFX
-    if (log.bossPhaseTransitions && log.bossPhaseTransitions.length > 0) {
-      soundEngine.play('bossPhase');
-      if (!reduced) this.shakeTimerMs = Math.max(this.shakeTimerMs, 180);
-      for (const tr of log.bossPhaseTransitions) {
-        const bEntry = this.enemies.find((e) => e.enemyId === tr.enemyId);
-        if (bEntry) {
-          bEntry.phase = tr.toPhase;
-          this.rings.push({ x: bEntry.baseX, y: bEntry.baseY, maxR: 76, color: 0xf6b852, life: 0.56, maxLife: 0.56 });
-          this.rings.push({ x: bEntry.baseX, y: bEntry.baseY, maxR: 54, color: 0xff5c7a, life: 0.48, maxLife: 0.48 });
-          this.spawnPopup(bEntry.baseX, bEntry.baseY - 40, `阶段 P${tr.toPhase}！`, '#FFD791');
-        }
-      }
-    }
-
-    // Enemy shield regen / charge non-attack visual cues
-    if (log.enemyIntentsThisRound) {
-      let playedRegenSfx = false;
-      for (const item of log.enemyIntentsThisRound) {
-        const src = this.enemies.find((e) => e.enemyId === item.enemyId);
-        const afterSnap = log.enemiesAfter.find((e) => e.enemyId === item.enemyId);
-        if (!src || src.dead || !afterSnap || afterSnap.hp <= 0) continue;
-        if (item.intent.shieldGain && item.intent.shieldGain > 0) {
-          if (!playedRegenSfx) {
-            soundEngine.play('shieldOverload');
-            playedRegenSfx = true;
-          }
-          this.rings.push({ x: src.baseX, y: src.baseY, maxR: 34, color: 0x62d6df, life: 0.36, maxLife: 0.36 });
-          this.spawnPopup(src.baseX, src.baseY - 34, `敌盾 +${item.intent.shieldGain}`, '#62D6DF');
-        } else if (item.intent.kind === 'charge') {
-          this.rings.push({ x: src.baseX, y: src.baseY, maxR: 30, color: 0xf6b852, life: 0.38, maxLife: 0.38 });
-          this.spawnPopup(src.baseX, src.baseY - 34, item.intent.shortLabel, '#F6B852');
-        }
-      }
-    }
-
-    // Enemy attacks -> player shield/hull + distinct beam/EMP/ram VFX
-    let totalHullDmg = 0;
-    let totalPierce = 0;
-    let totalEmpDrained = 0;
-    if (log.enemyAttacks.length > 0) {
-      this.enemyChargeMs = 240;
-    }
-    for (const ea of log.enemyAttacks) {
-      const src = this.enemies.find((e) => e.enemyId === ea.enemyId);
-      if (src) {
-        const eKey = `ship.enemy.${src.spec.spriteArchetype}`;
-        const eMuz = this.getSpritePoint(src.sprite, getShipHardpoints(eKey).muzzle);
-        src.recoilX = ea.intentKind === 'ram' ? -16 : 5;
-        const isHeavyBeam = ea.intentKind === 'pierce_beam' || ea.intentKind === 'heavy_volley';
-        const isEmp = ea.intentKind === 'emp' || (ea.empShieldDrained ?? 0) > 0;
-        this.beams.push({
-          x1: eMuz.x,
-          y1: eMuz.y,
-          x2: pHit.x,
-          y2: pHit.y,
-          color: isEmp ? 0xc9a0ff : isHeavyBeam ? 0xff4d6d : ea.pierceDamage > 0 ? 0xff7096 : 0xf27564,
-          thickness: isHeavyBeam ? 5.8 : isEmp ? 3.8 : ea.pierceDamage > 0 ? 3.5 : 2.5,
-          jagged: isEmp,
-          life: isHeavyBeam ? 0.38 : 0.28,
-          maxLife: isHeavyBeam ? 0.38 : 0.28,
-        });
-        if (isHeavyBeam) {
-          this.rings.push({ x: pHit.x, y: pHit.y, maxR: 40, color: 0xff4d6d, life: 0.36, maxLife: 0.36 });
-          if (!reduced) this.shakeTimerMs = Math.max(this.shakeTimerMs, 140);
-        }
-      }
-      totalHullDmg += ea.hullDamage;
-      totalPierce += ea.pierceDamage;
-      totalEmpDrained += ea.empShieldDrained ?? 0;
-    }
-
-    if (totalEmpDrained > 0) {
-      soundEngine.play('empDisrupt');
-      this.rings.push({ x: this.playerBaseX + 18, y: this.playerBaseY, maxR: 42, color: 0xc9a0ff, life: 0.38, maxLife: 0.38 });
-      this.spawnPopup(this.playerBaseX + 18, this.playerBaseY + 20, `EMP -${totalEmpDrained}盾`, '#D6B8FF');
-    }
-
-    if (log.shieldAbsorbedTotal > 0) {
-      this.shieldArcLife = 0.36;
-      soundEngine.play('shieldHit');
-      this.spawnPopup(this.playerBaseX + 26, this.playerBaseY - 24, `盾吸 ${log.shieldAbsorbedTotal}`, '#62D6DF');
-    }
-    if (totalHullDmg > 0) {
-      this.playerFlashMs = 110;
-      if (!reduced) this.shakeTimerMs = Math.max(this.shakeTimerMs, 85);
-      soundEngine.play('hullHit');
-      this.spawnPopup(
-        this.playerBaseX - 8,
-        this.playerBaseY - 12,
-        totalPierce > 0 ? `穿盾 -${totalHullDmg}` : `-${totalHullDmg}`,
-        '#F27564'
-      );
-    }
-
-    // Reactive Shield Counter: energy backflow into Counter Ring -> jagged cyan arc discharge!
-    if (log.counterAttack) {
-      const cTarget = this.enemies.find((e) => e.enemyId === log.counterAttack!.targetEnemyId);
-      if (cTarget) {
-        soundEngine.play('counterZap');
-        this.counterBackflowLife = 0.34;
-        const ePt = this.getSpritePoint(
-          cTarget.sprite,
-          getShipHardpoints(`ship.enemy.${cTarget.spec.spriteArchetype}`).hit
-        );
-        this.beams.push({
-          x1: counterMuzzle.x,
-          y1: counterMuzzle.y,
-          x2: ePt.x,
-          y2: ePt.y,
-          color: 0x62d6df,
-          thickness: 4.2,
-          jagged: true,
-          life: 0.38,
-          maxLife: 0.38,
-        });
-        this.rings.push({ x: counterMuzzle.x, y: counterMuzzle.y, maxR: 22, color: 0x62d6df, life: 0.26, maxLife: 0.26 });
-        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 28, color: 0x62d6df, life: 0.32, maxLife: 0.32 });
-        this.spawnPopup(cTarget.baseX, cTarget.baseY - 38, `反击 -${log.counterAttack.appliedDamage}`, '#62D6DF');
-      }
-    }
-
-    // Sync live enemy HP, shields, dynamic intent pills, mid-combat summons & death shockwaves
     const prevAliveIds = new Set(this.enemies.filter((e) => !e.dead).map((e) => e.enemyId));
-    this.syncEnemyRosterFromSnapshots(log.enemiesAfter, true);
-    for (const snap of log.enemiesAfter) {
-      if (snap.hp <= 0 && prevAliveIds.has(snap.enemyId)) {
-        const entry = this.enemies.find((e) => e.enemyId === snap.enemyId);
-        if (entry) {
-          soundEngine.play('enemyDestroy');
-          this.rings.push({
-            x: entry.baseX,
-            y: entry.baseY,
-            maxR: entry.spec.isBoss ? 64 : 36,
+    const enemiesFiringThisRound = new Set(log.enemyAttacks.map((ea) => ea.enemyId));
+    const killedVisualIds = new Set<string>();
+
+    const getPlayerPoints = () => {
+      const sprite = this.playerSprite;
+      const pHp = getShipHardpoints(`ship.player.${pb.shipId}`);
+      const pMuzzle = sprite ? this.getSpritePoint(sprite, pHp.muzzle) : { x: this.playerBaseX + 26, y: this.playerBaseY };
+      const pHit = sprite ? this.getSpritePoint(sprite, pHp.hit) : { x: this.playerBaseX, y: this.playerBaseY };
+      const pShield = sprite ? this.getSpritePoint(sprite, pHp.shieldCenter) : { x: this.playerBaseX + 24, y: this.playerBaseY };
+      const heavyMuzzle = this.getModuleMuzzle('heavy') ?? pMuzzle;
+      const laserMuzzle = this.getModuleMuzzle('laser') ?? pMuzzle;
+      const droneMuzzle = this.getModuleMuzzle('drone_bay') ?? { x: this.playerBaseX + 24, y: this.playerBaseY + 18 };
+      const counterMuzzle = this.getModuleMuzzle('counter_ring') ?? { x: this.playerBaseX + 24, y: this.playerBaseY - 12 };
+      return { pMuzzle, pHit, pShield, heavyMuzzle, laserMuzzle, droneMuzzle, counterMuzzle };
+    };
+
+    const runChargeBeat = () => {
+      const { heavyMuzzle, droneMuzzle } = getPlayerPoints();
+      this.prevDronesCount = this.activeDronesCount;
+      this.activeDronesCount = Object.values(log.droneCountsByHangar).reduce((a, b) => a + b, 0);
+      if (this.activeDronesCount > this.prevDronesCount) {
+        this.hangarDoorLife = 0.44;
+        this.rings.push({ x: droneMuzzle.x, y: droneMuzzle.y, maxR: 20, color: 0x7be8ff, life: 0.28, maxLife: 0.28 });
+      }
+      this.heavyChargingCount = log.heavyChargingIds.length;
+      if (this.heavyChargingCount > 0) {
+        soundEngine.play('chargeUp');
+        this.spawnPopup(heavyMuzzle.x - 10, heavyMuzzle.y - 20, '重炮蓄能', '#F6B852');
+      }
+
+      if (log.appliedTacticThisRound && log.appliedTacticThisRound !== 'normal') {
+        const cmd = log.appliedTacticThisRound;
+        const cmdLabel = getTacticalCommandLabel(cmd, pb.shipId);
+        if (cmd === 'emergency_shield' || cmd === 'emergency_defense') {
+          this.shieldArcLife = 0.58;
+          soundEngine.play('shieldOverload');
+          this.rings.push({ x: this.playerBaseX + 18, y: this.playerBaseY, maxR: 48, color: 0x62d6df, life: 0.42, maxLife: 0.42 });
+          this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 36, `${cmdLabel}！`, '#62D6DF');
+        } else if (cmd === 'focus_calibrate') {
+          soundEngine.play('tacticalOrder');
+          this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 36, '聚焦校准！', '#7AE582');
+        } else if (cmd === 'signature_heavy_freighter') {
+          this.shieldArcLife = 0.52;
+          soundEngine.play('repairPulse');
+          this.rings.push({ x: this.playerBaseX, y: this.playerBaseY, maxR: 46, color: 0x7ae582, life: 0.44, maxLife: 0.44 });
+          this.spawnPopup(this.playerBaseX + 12, this.playerBaseY - 36, `${cmdLabel} +5HP/+4盾`, '#7AE582');
+        } else if (cmd === 'signature_shield_cruiser') {
+          this.shieldArcLife = 0.56;
+          soundEngine.play('shieldOverload');
+          this.rings.push({ x: this.playerBaseX + 16, y: this.playerBaseY, maxR: 54, color: 0x62d6df, life: 0.46, maxLife: 0.46 });
+          this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 36, `${cmdLabel}！`, '#62D6DF');
+        } else if (cmd === 'signature_cannon_skiff' || cmd === 'signature_stargate_cruiser') {
+          soundEngine.play('tacticalOrder');
+          this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 36, `${cmdLabel}！`, '#F6B852');
+        }
+      }
+
+      if (log.enemyIntentsThisRound) {
+        let playedRegenSfx = false;
+        for (const item of log.enemyIntentsThisRound) {
+          const src = this.enemies.find((e) => e.enemyId === item.enemyId);
+          const afterSnap = log.enemiesAfter.find((e) => e.enemyId === item.enemyId);
+          if (!src || src.dead || !afterSnap || afterSnap.hp <= 0) continue;
+          if (item.intent.shieldGain && item.intent.shieldGain > 0) {
+            if (!playedRegenSfx) {
+              soundEngine.play('shieldOverload');
+              playedRegenSfx = true;
+            }
+            src.shieldArcLife = Math.max(src.shieldArcLife, 0.36);
+            this.rings.push({ x: src.baseX, y: src.baseY, maxR: 34, color: 0x62d6df, life: 0.36, maxLife: 0.36 });
+            this.spawnPopup(src.baseX, src.baseY - 34, `敌盾 +${item.intent.shieldGain}`, '#62D6DF');
+          } else if (item.intent.kind === 'charge') {
+            this.rings.push({ x: src.baseX, y: src.baseY, maxR: 30, color: 0xf6b852, life: 0.38, maxLife: 0.38 });
+            this.spawnPopup(src.baseX, src.baseY - 34, item.intent.shortLabel, '#F6B852');
+          }
+        }
+      }
+    };
+
+    const runPlayerFireBeat = () => {
+      const { pMuzzle, heavyMuzzle, laserMuzzle, droneMuzzle, counterMuzzle } = getPlayerPoints();
+      let playedLaser = false;
+      let playedHeavy = false;
+      let playedDrone = false;
+      let playedFlak = false;
+      let shownSynergyTag = false;
+
+      for (const atk of log.playerAttacks) {
+        const target = this.enemies.find((e) => e.enemyId === atk.targetEnemyId);
+        if (!target) continue;
+        const eKey = `ship.enemy.${target.spec.spriteArchetype}`;
+        const ePt = this.getSpritePoint(target.sprite, getShipHardpoints(eKey).hit);
+
+        if (atk.sourceKind === 'heavy') {
+          if (!playedHeavy) {
+            soundEngine.play('heavyBlast');
+            playedHeavy = true;
+            if (vSpec?.heavyBoosted && !shownSynergyTag) {
+              this.synergyPulseLife = 0.42;
+              this.synergyTargetKind = 'heavy';
+              this.spawnPopup(heavyMuzzle.x - 8, heavyMuzzle.y - 26, '联动·先手', '#F6B852');
+              shownSynergyTag = true;
+            }
+          }
+          this.playerRecoilX = -10;
+          const hm = this.moduleSprites.find((m) => m.kind === 'heavy');
+          if (hm) hm.recoilX = -12;
+          this.beams.push({
+            x1: heavyMuzzle.x,
+            y1: heavyMuzzle.y,
+            x2: ePt.x,
+            y2: ePt.y,
             color: 0xf6b852,
-            life: 0.45,
-            maxLife: 0.45,
+            thickness: 6.5,
+            life: 0.38,
+            maxLife: 0.38,
+          });
+          this.rings.push({ x: heavyMuzzle.x, y: heavyMuzzle.y, maxR: 18, color: 0xffe4a3, life: 0.2, maxLife: 0.2 });
+        } else if (atk.sourceKind === 'hangar') {
+          if (!playedDrone) {
+            soundEngine.play('droneLaunch');
+            playedDrone = true;
+            if (vSpec?.hangarBoosted && !shownSynergyTag) {
+              this.synergyPulseLife = 0.42;
+              this.synergyTargetKind = 'drone_bay';
+              this.spawnPopup(droneMuzzle.x, droneMuzzle.y + 20, '联动·编队', '#62D6DF');
+              shownSynergyTag = true;
+            }
+          }
+          const laneOffset = ((this.beams.length % 4) - 1.5) * 14;
+          this.beams.push({
+            x1: droneMuzzle.x + 26,
+            y1: this.playerBaseY + laneOffset,
+            x2: ePt.x,
+            y2: ePt.y,
+            color: 0x7be8ff,
+            thickness: 2.2,
+            life: 0.25,
+            maxLife: 0.25,
+          });
+        } else if (atk.sourceKind === 'salvo') {
+          if (!playedDrone) {
+            soundEngine.play('droneLaunch');
+            playedDrone = true;
+          }
+          const laneOffset = ((this.beams.length % 5) - 2) * 10;
+          this.beams.push({
+            x1: heavyMuzzle.x,
+            y1: heavyMuzzle.y + laneOffset,
+            x2: ePt.x,
+            y2: ePt.y,
+            color: 0xf97316,
+            thickness: 3.0,
+            life: 0.28,
+            maxLife: 0.28,
+          });
+        } else if (atk.sourceKind === 'emp') {
+          if (!playedLaser) {
+            soundEngine.play('laserFire');
+            playedLaser = true;
+          }
+          this.beams.push({
+            x1: counterMuzzle.x,
+            y1: counterMuzzle.y,
+            x2: ePt.x,
+            y2: ePt.y,
+            color: 0xa78bfa,
+            thickness: 3.8,
+            life: 0.3,
+            maxLife: 0.3,
+          });
+        } else if (atk.sourceKind === 'grapple') {
+          this.beams.push({
+            x1: pMuzzle.x,
+            y1: pMuzzle.y + 6,
+            x2: ePt.x,
+            y2: ePt.y,
+            color: 0x34d399,
+            thickness: 2.8,
+            life: 0.26,
+            maxLife: 0.26,
+          });
+        } else if (atk.sourceInstanceId === 'gadget_overcharge_cell') {
+          soundEngine.play('heavyBlast');
+          this.beams.push({
+            x1: pMuzzle.x,
+            y1: pMuzzle.y,
+            x2: ePt.x,
+            y2: ePt.y,
+            color: 0xfacc15,
+            thickness: 5.5,
+            life: 0.36,
+            maxLife: 0.36,
+          });
+          this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 38, '过载电池爆发！', '#FACC15');
+        } else if (atk.sourceKind === 'flak') {
+          if (!playedFlak) {
+            soundEngine.play('laserFire');
+            playedFlak = true;
+          }
+          this.beams.push({
+            x1: laserMuzzle.x,
+            y1: laserMuzzle.y - 4,
+            x2: ePt.x,
+            y2: ePt.y,
+            color: 0xffd27d,
+            thickness: 2.4,
+            life: 0.22,
+            maxLife: 0.22,
+          });
+        } else if (atk.sourceInstanceId === 'tactic_overload') {
+          soundEngine.play('heavyBlast');
+          this.playerRecoilX = -8;
+          this.beams.push({
+            x1: pMuzzle.x,
+            y1: pMuzzle.y,
+            x2: ePt.x,
+            y2: ePt.y,
+            color: 0xff9f43,
+            thickness: 5,
+            life: 0.34,
+            maxLife: 0.34,
+          });
+          this.spawnPopup(this.playerBaseX + 12, this.playerBaseY - 36, '火力过载！', '#FF9F43');
+        } else if (atk.sourceInstanceId === 'tactic_focus_calibrate') {
+          this.beams.push({
+            x1: pMuzzle.x,
+            y1: pMuzzle.y,
+            x2: ePt.x,
+            y2: ePt.y,
+            color: 0x7ae582,
+            thickness: 4,
+            life: 0.32,
+            maxLife: 0.32,
+          });
+        } else if (atk.sourceInstanceId.startsWith('tactic_sig_')) {
+          const isWave = atk.sourceInstanceId.includes('shield_cruiser') || atk.sourceInstanceId.includes('stargate');
+          const sigColor = atk.sourceInstanceId.includes('shield_cruiser')
+            ? 0x62d6df
+            : atk.sourceInstanceId.includes('stargate')
+            ? 0xc9a0ff
+            : 0xf6b852;
+          this.beams.push({
+            x1: pMuzzle.x,
+            y1: pMuzzle.y,
+            x2: ePt.x,
+            y2: ePt.y,
+            color: sigColor,
+            thickness: isWave ? 4.4 : 3.8,
+            jagged: isWave,
+            life: 0.34,
+            maxLife: 0.34,
+          });
+        } else {
+          if (!playedLaser) {
+            soundEngine.play('laserFire');
+            playedLaser = true;
+            if (atk.sourceKind === 'laser' && vSpec?.laserBoosted && !shownSynergyTag) {
+              this.synergyPulseLife = 0.42;
+              this.synergyTargetKind = 'laser';
+              this.spawnPopup(laserMuzzle.x - 6, laserMuzzle.y - 22, '联动·充能', '#62D6DF');
+              shownSynergyTag = true;
+            }
+          }
+          this.playerRecoilX = Math.min(this.playerRecoilX, -4);
+          const lm = this.moduleSprites.find((m) => m.kind === 'laser');
+          if (lm && atk.sourceKind === 'laser') lm.recoilX = -6;
+          const srcPt = atk.sourceKind === 'laser' ? laserMuzzle : pMuzzle;
+          this.beams.push({
+            x1: srcPt.x,
+            y1: srcPt.y,
+            x2: ePt.x,
+            y2: ePt.y,
+            color: 0x62d6df,
+            thickness: 3,
+            life: 0.26,
+            maxLife: 0.26,
           });
         }
       }
-    }
+    };
 
-    pb.onRoundStep?.(roundIdx, log);
+    const runPlayerImpactBeat = () => {
+      const dmgByEnemy = new Map<string, number>();
+
+      for (const atk of log.playerAttacks) {
+        const target = this.enemies.find((e) => e.enemyId === atk.targetEnemyId);
+        if (!target) continue;
+        dmgByEnemy.set(target.enemyId, (dmgByEnemy.get(target.enemyId) ?? 0) + atk.appliedDamage);
+
+        const eKey = `ship.enemy.${target.spec.spriteArchetype}`;
+        const eHp = getShipHardpoints(eKey);
+        const ePt = this.getSpritePoint(target.sprite, eHp.hit);
+        const shieldDamaged = atk.shieldDamaged ?? 0;
+        const hullDmg = Math.max(0, atk.appliedDamage - shieldDamaged);
+        const flashDecision = resolveHitFlashDecision({
+          shieldAbsorbed: shieldDamaged,
+          hullDamage: hullDmg,
+          reducedMotion: reduced,
+        });
+
+        target.hp = Math.min(target.hp, atk.targetHpAfter);
+        if (shieldDamaged > 0) {
+          target.shield = Math.max(0, target.shield - shieldDamaged);
+          target.shieldArcLife = 0.36;
+          this.rings.push({ x: ePt.x, y: ePt.y, maxR: 26, color: 0x62d6df, life: 0.28, maxLife: 0.28 });
+          this.spawnImpactGlow(ePt.x, ePt.y, 0x62d6df, 'shield', 15);
+        }
+
+        if (flashDecision.applyHullWarmTint) {
+          target.flashMs = Math.max(target.flashMs, flashDecision.hullTintDurationMs);
+        }
+
+        if (hullDmg > 0) {
+          target.recoilX = 6;
+          const isHeavy = atk.sourceKind === 'heavy' || atk.sourceInstanceId === 'gadget_overcharge_cell' || atk.sourceInstanceId === 'tactic_overload';
+          const glowColor = isHeavy ? 0xf6b852 : atk.sourceKind === 'emp' ? 0xa78bfa : 0xffe4a3;
+          this.spawnImpactGlow(ePt.x, ePt.y, glowColor, isHeavy ? 'heavy' : 'hull', isHeavy ? 18 : 14);
+          if (isHeavy) {
+            this.triggerShake(110, reduced);
+            this.rings.push({ x: ePt.x, y: ePt.y, maxR: 36, color: 0xf6b852, life: 0.36, maxLife: 0.36 });
+          } else if (atk.sourceKind === 'salvo') {
+            this.rings.push({ x: ePt.x, y: ePt.y, maxR: 22, color: 0xfb923c, life: 0.24, maxLife: 0.24 });
+          } else if (atk.sourceKind === 'emp') {
+            this.rings.push({ x: ePt.x, y: ePt.y, maxR: 32, color: 0xa78bfa, life: 0.34, maxLife: 0.34 });
+          } else if (atk.sourceKind === 'grapple') {
+            this.rings.push({ x: ePt.x, y: ePt.y, maxR: 18, color: 0x34d399, life: 0.22, maxLife: 0.22 });
+          } else if (atk.sourceKind === 'flak') {
+            this.rings.push({ x: ePt.x, y: ePt.y, maxR: 20, color: 0xffd27d, life: 0.24, maxLife: 0.24 });
+          }
+        }
+
+        if (atk.targetKilled && !enemiesFiringThisRound.has(target.enemyId) && prevAliveIds.has(target.enemyId) && !killedVisualIds.has(target.enemyId)) {
+          killedVisualIds.add(target.enemyId);
+          this.triggerEnemyDeathVisual(target);
+        }
+      }
+
+      for (const [eid, total] of dmgByEnemy.entries()) {
+        const target = this.enemies.find((e) => e.enemyId === eid);
+        if (target && total > 0) {
+          this.spawnPopup(target.baseX, target.baseY - 22, `-${total}`, '#F6B852');
+        }
+      }
+
+      if (log.bossPhaseTransitions && log.bossPhaseTransitions.length > 0) {
+        soundEngine.play('bossPhase');
+        this.triggerShake(120, reduced);
+        for (const tr of log.bossPhaseTransitions) {
+          const bEntry = this.enemies.find((e) => e.enemyId === tr.enemyId);
+          if (bEntry) {
+            bEntry.phase = tr.toPhase;
+            this.rings.push({ x: bEntry.baseX, y: bEntry.baseY, maxR: 76, color: 0xf6b852, life: 0.56, maxLife: 0.56 });
+            this.rings.push({ x: bEntry.baseX, y: bEntry.baseY, maxR: 54, color: 0xff5c7a, life: 0.48, maxLife: 0.48 });
+            this.spawnPopup(bEntry.baseX, bEntry.baseY - 40, `阶段 P${tr.toPhase}！`, '#FFD791');
+          }
+        }
+      }
+    };
+
+    const runEnemyFireBeat = () => {
+      const { pHit } = getPlayerPoints();
+      if (log.enemyAttacks.length > 0) {
+        this.enemyChargeMs = 240;
+        soundEngine.play('enemyFire');
+      }
+      for (const ea of log.enemyAttacks) {
+        const src = this.enemies.find((e) => e.enemyId === ea.enemyId);
+        if (src) {
+          const eKey = `ship.enemy.${src.spec.spriteArchetype}`;
+          const eMuz = this.getSpritePoint(src.sprite, getShipHardpoints(eKey).muzzle);
+          src.recoilX = ea.intentKind === 'ram' ? -16 : 5;
+          const isHeavyBeam = ea.intentKind === 'pierce_beam' || ea.intentKind === 'heavy_volley';
+          const isEmp = ea.intentKind === 'emp' || (ea.empShieldDrained ?? 0) > 0;
+          this.beams.push({
+            x1: eMuz.x,
+            y1: eMuz.y,
+            x2: pHit.x,
+            y2: pHit.y,
+            color: isEmp ? 0xc9a0ff : isHeavyBeam ? 0xff4d6d : ea.pierceDamage > 0 ? 0xff7096 : 0xf27564,
+            thickness: isHeavyBeam ? 5.8 : isEmp ? 3.8 : ea.pierceDamage > 0 ? 3.5 : 2.5,
+            jagged: isEmp,
+            life: isHeavyBeam ? 0.38 : 0.28,
+            maxLife: isHeavyBeam ? 0.38 : 0.28,
+          });
+        }
+      }
+    };
+
+    const runEnemyImpactBeat = () => {
+      const { pHit, pShield, counterMuzzle } = getPlayerPoints();
+      let totalHullDmg = 0;
+      let totalPierce = 0;
+      let totalEmpDrained = 0;
+      let hasHeavyEnemyHit = false;
+      for (const ea of log.enemyAttacks) {
+        totalHullDmg += ea.hullDamage;
+        totalPierce += ea.pierceDamage;
+        totalEmpDrained += ea.empShieldDrained ?? 0;
+        if (ea.intentKind === 'pierce_beam' || ea.intentKind === 'heavy_volley') {
+          hasHeavyEnemyHit = true;
+        }
+      }
+
+      if (hasHeavyEnemyHit) {
+        this.rings.push({ x: pHit.x, y: pHit.y, maxR: 40, color: 0xff4d6d, life: 0.36, maxLife: 0.36 });
+        this.triggerShake(120, reduced);
+      }
+
+      if (totalEmpDrained > 0) {
+        soundEngine.play('empDisrupt');
+        this.rings.push({ x: this.playerBaseX + 18, y: this.playerBaseY, maxR: 42, color: 0xc9a0ff, life: 0.38, maxLife: 0.38 });
+        this.spawnImpactGlow(pShield.x, pShield.y, 0xc9a0ff, 'emp', 16);
+        this.spawnPopup(this.playerBaseX + 18, this.playerBaseY + 20, `EMP -${totalEmpDrained}盾`, '#D6B8FF');
+      }
+
+      const playerFlashDecision = resolveHitFlashDecision({
+        shieldAbsorbed: log.shieldAbsorbedTotal,
+        hullDamage: totalHullDmg,
+        reducedMotion: reduced,
+      });
+
+      if (log.shieldAbsorbedTotal > 0) {
+        this.shieldArcLife = 0.36;
+        soundEngine.play('shieldHit');
+        this.spawnImpactGlow(pShield.x + 12, pShield.y, 0x62d6df, 'shield', 16);
+        this.spawnPopup(this.playerBaseX + 26, this.playerBaseY - 24, `盾吸 ${log.shieldAbsorbedTotal}`, '#62D6DF');
+      }
+
+      if (totalHullDmg > 0) {
+        if (playerFlashDecision.applyHullWarmTint) {
+          this.playerFlashMs = playerFlashDecision.hullTintDurationMs;
+        }
+        this.spawnImpactGlow(pHit.x, pHit.y, hasHeavyEnemyHit ? 0xff4d6d : 0xf6b852, hasHeavyEnemyHit ? 'heavy' : 'hull', hasHeavyEnemyHit ? 18 : 15);
+        this.triggerShake(85, reduced);
+        soundEngine.play('hullHit');
+        this.spawnPopup(
+          this.playerBaseX - 8,
+          this.playerBaseY - 12,
+          totalPierce > 0 ? `穿盾 -${totalHullDmg}` : `-${totalHullDmg}`,
+          '#F27564'
+        );
+      }
+
+      this.playerHp = log.playerHpAfter;
+      this.playerShield = log.playerShieldAfter;
+
+      if (log.counterAttack) {
+        const cTarget = this.enemies.find((e) => e.enemyId === log.counterAttack!.targetEnemyId);
+        if (cTarget) {
+          soundEngine.play('counterZap');
+          this.counterBackflowLife = 0.34;
+          const eKey = `ship.enemy.${cTarget.spec.spriteArchetype}`;
+          const ePt = this.getSpritePoint(cTarget.sprite, getShipHardpoints(eKey).hit);
+          const cShield = log.counterAttack.shieldDamaged ?? 0;
+          const cHull = Math.max(0, log.counterAttack.appliedDamage - cShield);
+          const cDecision = resolveHitFlashDecision({
+            shieldAbsorbed: cShield,
+            hullDamage: cHull,
+            reducedMotion: reduced,
+          });
+          if (cShield > 0) cTarget.shieldArcLife = 0.34;
+          if (cDecision.applyHullWarmTint) {
+            cTarget.flashMs = Math.max(cTarget.flashMs, cDecision.hullTintDurationMs);
+          }
+          this.spawnImpactGlow(ePt.x, ePt.y, 0x62d6df, cHull > 0 ? 'hull' : 'shield', 15);
+          this.beams.push({
+            x1: counterMuzzle.x,
+            y1: counterMuzzle.y,
+            x2: ePt.x,
+            y2: ePt.y,
+            color: 0x62d6df,
+            thickness: 4.2,
+            jagged: true,
+            life: 0.38,
+            maxLife: 0.38,
+          });
+          this.rings.push({ x: counterMuzzle.x, y: counterMuzzle.y, maxR: 22, color: 0x62d6df, life: 0.26, maxLife: 0.26 });
+          this.rings.push({ x: ePt.x, y: ePt.y, maxR: 28, color: 0x62d6df, life: 0.32, maxLife: 0.32 });
+          this.spawnPopup(cTarget.baseX, cTarget.baseY - 38, `反击 -${log.counterAttack.appliedDamage}`, '#62D6DF');
+        }
+      }
+    };
+
+    const runResolveBeat = () => {
+      if (this.inFlightRound === roundState) {
+        this.inFlightRound = null;
+      }
+      if (!roundState.visualsCommitted) {
+        roundState.visualsCommitted = true;
+        this.playerHp = log.playerHpAfter;
+        this.playerShield = log.playerShieldAfter;
+        this.syncEnemyRosterFromSnapshots(log.enemiesAfter, true);
+        for (const snap of log.enemiesAfter) {
+          if (snap.hp <= 0 && prevAliveIds.has(snap.enemyId) && !killedVisualIds.has(snap.enemyId)) {
+            const entry = this.enemies.find((e) => e.enemyId === snap.enemyId);
+            if (entry) {
+              killedVisualIds.add(snap.enemyId);
+              this.triggerEnemyDeathVisual(entry);
+            }
+          }
+        }
+      }
+      if (!roundState.stepReported) {
+        roundState.stepReported = true;
+        pb.onRoundStep?.(roundIdx, log);
+      }
+    };
+
+    const schedule = buildRoundBeatSchedule(log, speed, reduced);
+    for (const beat of schedule) {
+      const handler =
+        beat.kind === 'charge'
+          ? runChargeBeat
+          : beat.kind === 'player_fire'
+          ? runPlayerFireBeat
+          : beat.kind === 'player_impact'
+          ? runPlayerImpactBeat
+          : beat.kind === 'enemy_fire'
+          ? runEnemyFireBeat
+          : beat.kind === 'enemy_impact'
+          ? runEnemyImpactBeat
+          : runResolveBeat;
+      this.scheduleRoundTimer(beat.delayMs, epoch, handler);
+    }
+  }
+
+  private triggerEnemyDeathVisual(entry: EnemyVisualEntry): void {
+    entry.dead = true;
+    entry.isCharging = false;
+    entry.sprite.setAlpha(0.18).setTint(0x4b5563);
+    entry.intentTag?.setVisible(false);
+    soundEngine.play('enemyDestroy');
+    this.rings.push({
+      x: entry.baseX,
+      y: entry.baseY,
+      maxR: entry.spec.isBoss ? 64 : 36,
+      color: 0xf6b852,
+      life: 0.45,
+      maxLife: 0.45,
+    });
+    this.spawnImpactGlow(entry.baseX, entry.baseY, 0xf6b852, 'heavy', 18);
   }
 
   update(_time: number, delta: number): void {
@@ -1491,10 +1810,12 @@ export class V2CombatScene extends Phaser.Scene {
       if (this.playbackActive) {
         this.roundTimerMs -= stepDeltaMs;
         if (this.roundTimerMs <= 0) {
+          this.flushInFlightRound(true);
           const pauseAt = pb.pauseAtRound ?? null;
           if (pauseAt !== null && this.nextRoundIdx + 1 === pauseAt) {
             this.playbackActive = false;
             this.decisionPaused = true;
+            if (this.time) this.time.paused = true;
             pb.onPauseForDecision?.();
           } else if (this.nextRoundIdx < pb.simulation.rounds.length) {
             this.executeRoundVisual(this.nextRoundIdx, pb.simulation.rounds[this.nextRoundIdx]);
@@ -1518,25 +1839,26 @@ export class V2CombatScene extends Phaser.Scene {
       } else if (this.waitingCompletion) {
         this.completionDelayMs -= stepDeltaMs;
         if (this.completionDelayMs <= 0) {
+          this.flushInFlightRound(true);
           this.waitingCompletion = false;
           pb.onComplete?.();
         }
       }
     }
 
-    // Camera micro-shake (DPR-safe via centerOn so zoomed world stays 100% full-bleed!)
+    // Camera micro-shake (DPR-safe via centerOn; clamped <= 120ms & <= 3 CSS px per Art Spec §10)
     if (this.shakeTimerMs > 0 && !reduced) {
       this.shakeTimerMs = Math.max(0, this.shakeTimerMs - fxDeltaMs);
-      const mag = (this.shakeTimerMs / 120) * 3.2;
+      const mag = computeCameraShakeMagnitudePx(this.shakeTimerMs, reduced);
       this.cameras.main.centerOn(
-        this.viewW * 0.5 + (Math.random() - 0.5) * mag * 2,
-        this.viewH * 0.5 + (Math.random() - 0.5) * mag * 2
+        this.viewW * 0.5 + (Math.random() * 2 - 1) * mag,
+        this.viewH * 0.5 + (Math.random() * 2 - 1) * mag
       );
     } else {
       this.cameras.main.centerOn(this.viewW * 0.5, this.viewH * 0.5);
     }
 
-    // Ship subtle motion + recoil + modular hardpoints sync
+    // Ship subtle motion + recoil + modular hardpoints sync (A01: mild warm tint <= 40ms, no full-hull white flash)
     const bobP = reduced ? 0 : Math.sin(this.elapsed * 2.5) * 3;
     this.playerRecoilX *= Math.pow(0.05, dt);
     for (const m of this.moduleSprites) {
@@ -1544,16 +1866,23 @@ export class V2CombatScene extends Phaser.Scene {
     }
     if (this.playerSprite && this.playerSprite.scene) {
       this.playerSprite.setPosition(this.playerBaseX + this.playerRecoilX, this.playerBaseY + bobP);
-      if (this.playerFlashMs > 0) {
-        this.playerFlashMs -= fxDeltaMs;
-        this.playerSprite.setTintFill(0xffffff);
+      if (this.playerFlashMs > 0 && !reduced) {
+        this.playerFlashMs = Math.max(0, this.playerFlashMs - fxDeltaMs);
+        this.playerSprite.setTint(VFX_HIT_MILD_TINT);
+        this.playerCurrentTint = VFX_HIT_MILD_TINT;
       } else {
-        this.playerSprite.clearTint();
+        this.playerFlashMs = 0;
+        this.playerCurrentTint = this.playerBaseTint;
+        if (this.playerBaseTint !== null) {
+          this.playerSprite.setTint(this.playerBaseTint);
+        } else {
+          this.playerSprite.clearTint();
+        }
       }
       this.layoutModules(bobP);
     }
 
-    // Enemy bobbing + 3-state visual (Normal / Armored Charge / Damaged Smoke & Dimmed Flicker)
+    // Enemy bobbing + 3-state visual (A01: mild warm tint <= 40ms, no full-hull white flash)
     this.smokeAccumMs += fxDeltaMs;
     const emitSmoke = !reduced && !lowQuality && this.smokeAccumMs >= 160;
     if (emitSmoke) this.smokeAccumMs = 0;
@@ -1570,16 +1899,19 @@ export class V2CombatScene extends Phaser.Scene {
         e.intentTag.setPosition(e.baseX + e.recoilX, e.baseY + bobE - yOff);
       }
       const isDamaged = e.hp > 0 && e.hp <= e.maxHp * 0.5;
-      if (e.flashMs > 0) {
-        e.flashMs -= fxDeltaMs;
-        e.sprite.setTintFill(0xffffff);
-      } else if (isDamaged) {
-        const flicker = !reduced && Math.sin(this.elapsed * 18 + i * 3) > 0.72;
-        e.sprite.setTint(flicker ? 0x8fa1b8 : 0xb6c0cf);
-      } else if (e.baseTint !== null) {
-        e.sprite.setTint(e.baseTint);
+      if (e.flashMs > 0 && !reduced) {
+        e.flashMs = Math.max(0, e.flashMs - fxDeltaMs);
+        e.sprite.setTint(VFX_HIT_MILD_TINT);
       } else {
-        e.sprite.clearTint();
+        e.flashMs = 0;
+        if (isDamaged) {
+          const flicker = !reduced && Math.sin(this.elapsed * 18 + i * 3) > 0.72;
+          e.sprite.setTint(flicker ? 0x8fa1b8 : 0xb6c0cf);
+        } else if (e.baseTint !== null) {
+          e.sprite.setTint(e.baseTint);
+        } else {
+          e.sprite.clearTint();
+        }
       }
       if (emitSmoke && isDamaged) {
         this.smokes.push({
@@ -1615,6 +1947,7 @@ export class V2CombatScene extends Phaser.Scene {
     }
 
     this.fxGraphics.clear();
+    this.addFxGraphics.clear();
 
     // Synergy Power Conduit Pulse (Origin: Hull Core -> Process: Illuminated Conduit -> Result: Energized Mount!)
     if (this.synergyPulseLife > 0 && this.synergyTargetKind && this.playerSprite?.visible) {
@@ -1699,7 +2032,7 @@ export class V2CombatScene extends Phaser.Scene {
       }
     }
 
-    // Localized curved hexagonal shield deflection ripple + energy backflow to counter ring
+    // Localized curved hexagonal shield deflection ripple (player & enemies) + ADD energy glow
     if (this.shieldArcLife > 0) {
       this.shieldArcLife = Math.max(0, this.shieldArcLife - dt);
       const a = Math.min(1, this.shieldArcLife / 0.36);
@@ -1709,10 +2042,30 @@ export class V2CombatScene extends Phaser.Scene {
       this.fxGraphics.beginPath();
       this.fxGraphics.arc(sx, sy, 36, -Math.PI * 0.42, Math.PI * 0.42);
       this.fxGraphics.strokePath();
-      this.fxGraphics.lineStyle(1.5, 0xb8f3ff, a * 0.65);
+      this.addFxGraphics.lineStyle(5.2, 0x62d6df, a * 0.42);
+      this.addFxGraphics.beginPath();
+      this.addFxGraphics.arc(sx, sy, 37, -Math.PI * 0.44, Math.PI * 0.44);
+      this.addFxGraphics.strokePath();
+      this.addFxGraphics.lineStyle(1.6, 0xb8f3ff, a * 0.75);
+      this.addFxGraphics.beginPath();
+      this.addFxGraphics.arc(sx - 4, sy, 29, -Math.PI * 0.34, Math.PI * 0.34);
+      this.addFxGraphics.strokePath();
+    }
+    for (const e of this.enemies) {
+      if (e.shieldArcLife <= 0) continue;
+      e.shieldArcLife = Math.max(0, e.shieldArcLife - dt);
+      const a = Math.min(1, e.shieldArcLife / 0.36);
+      const eHp = getShipHardpoints(`ship.enemy.${e.spec.spriteArchetype}`);
+      const sc = this.getSpritePoint(e.sprite, eHp.shieldCenter);
+      const rad = Math.max(22, Math.min(44, e.sprite.displayHeight * 0.44));
+      this.fxGraphics.lineStyle(3.0, 0x62d6df, a * 0.9);
       this.fxGraphics.beginPath();
-      this.fxGraphics.arc(sx - 4, sy, 29, -Math.PI * 0.34, Math.PI * 0.34);
+      this.fxGraphics.arc(sc.x - 10, sc.y, rad, Math.PI * 0.58, Math.PI * 1.42);
       this.fxGraphics.strokePath();
+      this.addFxGraphics.lineStyle(4.8, 0x62d6df, a * 0.42);
+      this.addFxGraphics.beginPath();
+      this.addFxGraphics.arc(sc.x - 10, sc.y, rad + 1, Math.PI * 0.56, Math.PI * 1.44);
+      this.addFxGraphics.strokePath();
     }
     if (this.counterBackflowLife > 0) {
       this.counterBackflowLife = Math.max(0, this.counterBackflowLife - dt);
@@ -1726,6 +2079,21 @@ export class V2CombatScene extends Phaser.Scene {
         this.fxGraphics.strokePath();
       }
     }
+
+    // A01 Localized ADD-blend impact glows at exact hit coordinates
+    this.impactGlows = this.impactGlows.filter((g) => {
+      g.life -= dt;
+      if (g.life <= 0) return false;
+      const t = Math.max(0, g.life / g.maxLife);
+      const rad = g.maxR * (0.55 + 0.45 * (1 - t));
+      const outerAlpha = reduced ? t * 0.42 : t * 0.62;
+      const coreAlpha = reduced ? t * 0.55 : t * 0.88;
+      this.addFxGraphics.fillStyle(g.color, outerAlpha);
+      this.addFxGraphics.fillCircle(g.x, g.y, rad);
+      this.addFxGraphics.fillStyle(g.kind === 'shield' ? 0xd8f8ff : 0xfff4d6, coreAlpha);
+      this.addFxGraphics.fillCircle(g.x, g.y, Math.max(3, rad * 0.42));
+      return true;
+    });
 
     // Damaged hull smoke puffs
     this.smokes = this.smokes.filter((s) => {
