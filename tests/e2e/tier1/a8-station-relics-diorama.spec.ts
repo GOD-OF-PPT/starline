@@ -111,7 +111,9 @@ test.describe('Tier 1 · A8: Station Upgrades (T1-T3), Stargate Relay, Relic Pas
     await app.boot({ seed: 8002, enterStation: true });
 
     const modal = await app.openBaseModal(TEST_IDS.BTN_OPEN_FACILITIES);
-    const relayCard = modal.locator('[data-facility-id="stargate_relay"], :has-text("星门通讯塔")').first();
+    const relayCard = modal
+      .locator('[data-facility-id="stargate_relay"], .v2-facility-card:has-text("星门通讯塔")')
+      .first();
     await expect(relayCard).toBeVisible();
 
     const buildRelayBtn = relayCard.getByRole('button', { name: /建造|启用|升级/ }).first();
