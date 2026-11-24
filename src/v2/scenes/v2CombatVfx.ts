@@ -44,8 +44,8 @@ export interface HitFlashDecision {
 }
 
 export function resolveHitFlashDecision(input: HitFlashInput): HitFlashDecision {
-  const shieldAbsorbed = Math.max(0, input.shieldAbsorbed);
-  const hullDamage = Math.max(0, input.hullDamage);
+  const shieldAbsorbed = Number.isFinite(input.shieldAbsorbed) ? Math.max(0, input.shieldAbsorbed) : 0;
+  const hullDamage = Number.isFinite(input.hullDamage) ? Math.max(0, input.hullDamage) : 0;
 
   if (hullDamage > 0) {
     return {
@@ -119,12 +119,16 @@ export const VFX_BEAT_TIMINGS_MS = {
   resolveFast: 300,
 } as const;
 
+export function sanitizeCombatSpeed(combatSpeed: number): number {
+  return Number.isFinite(combatSpeed) && combatSpeed > 0 ? Math.max(0.5, combatSpeed) : 1;
+}
+
 export function buildRoundBeatSchedule(
   log: Pick<V2CombatRoundLog, 'playerAttacks' | 'enemyAttacks' | 'counterAttack'>,
   combatSpeed: number,
   _reducedMotion = false
 ): readonly RoundBeatSpec[] {
-  const safeSpeed = Number.isFinite(combatSpeed) && combatSpeed > 0 ? Math.max(0.5, combatSpeed) : 1;
+  const safeSpeed = sanitizeCombatSpeed(combatSpeed);
   const scale = (baseDelayMs: number): number => Math.round(baseDelayMs / safeSpeed);
 
   const hasEnemyRetaliation = log.enemyAttacks.length > 0 || log.counterAttack !== null;
@@ -195,17 +199,18 @@ export function computeThreeLayerBeamStrokes(
   color: number,
   alpha: number
 ): ThreeLayerBeamStrokes {
-  const safeThick = Math.max(1, thickness);
-  const safeAlpha = Math.max(0, Math.min(1, alpha));
+  const safeThick = Number.isFinite(thickness) ? Math.max(1, thickness) : 3;
+  const safeColor = Number.isFinite(color) ? color : 0xffffff;
+  const safeAlpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1;
   return {
     outerGlow: {
       width: safeThick * 2.5,
-      color,
+      color: safeColor,
       alpha: safeAlpha * 0.34,
     },
     coloredCore: {
       width: safeThick,
-      color,
+      color: safeColor,
       alpha: safeAlpha * 0.92,
     },
     whiteCenter: {
@@ -279,7 +284,9 @@ export class VfxParticlePool {
   private seed = 0x9e3779b9;
 
   constructor(capacity = VFX_MAX_ACTIVE_PARTICLES) {
-    this.capacity = Math.max(1, Math.min(VFX_MAX_ACTIVE_PARTICLES, Math.floor(capacity)));
+    this.capacity = Number.isFinite(capacity)
+      ? Math.max(0, Math.min(VFX_MAX_ACTIVE_PARTICLES, Math.floor(capacity)))
+      : VFX_MAX_ACTIVE_PARTICLES;
     this.slots = Array.from({ length: this.capacity }, () => ({
       active: false,
       kind: 'spark' as VfxParticleKind,
@@ -306,19 +313,47 @@ export class VfxParticlePool {
       this.lastBurstSpawned = 0;
       return 0;
     }
-    const requested = Math.min(VFX_MAX_PARTICLES_PER_BURST, Math.max(0, Math.floor(opts.count)));
-    if (requested === 0) {
+    const safeCount = Number.isFinite(opts.count) ? opts.count : 0;
+    const requested = Math.min(VFX_MAX_PARTICLES_PER_BURST, Math.max(0, Math.floor(safeCount)));
+    if (requested === 0 || this.capacity === 0) {
       this.lastBurstSpawned = 0;
       return 0;
     }
 
-    const speedMin = opts.speedMin ?? (opts.kind === 'debris' ? 30 : 75);
-    const speedMax = opts.speedMax ?? (opts.kind === 'debris' ? 95 : 190);
-    const baseAngle = opts.baseAngleRad ?? 0;
-    const spread = opts.spreadRad ?? Math.PI * 2;
-    const sizeMin = opts.sizeMin ?? (opts.kind === 'debris' ? 3 : 2);
-    const sizeMax = opts.sizeMax ?? (opts.kind === 'debris' ? 6 : 4.2);
-    const baseLife = opts.lifeSec ?? (opts.kind === 'debris' ? 0.72 : 0.34);
+    const originX = Number.isFinite(opts.x) ? opts.x : 0;
+    const originY = Number.isFinite(opts.y) ? opts.y : 0;
+    const defaultSpeedMin = opts.kind === 'debris' ? 30 : 75;
+    const defaultSpeedMax = opts.kind === 'debris' ? 95 : 190;
+    const speedMin =
+      opts.speedMin !== undefined && Number.isFinite(opts.speedMin) && opts.speedMin >= 0
+        ? opts.speedMin
+        : defaultSpeedMin;
+    const speedMax =
+      opts.speedMax !== undefined && Number.isFinite(opts.speedMax) && opts.speedMax >= 0
+        ? Math.max(speedMin, opts.speedMax)
+        : Math.max(speedMin, defaultSpeedMax);
+    const baseAngle =
+      opts.baseAngleRad !== undefined && Number.isFinite(opts.baseAngleRad) ? opts.baseAngleRad : 0;
+    const spread =
+      opts.spreadRad !== undefined && Number.isFinite(opts.spreadRad)
+        ? Math.max(0, opts.spreadRad)
+        : Math.PI * 2;
+    const defaultSizeMin = opts.kind === 'debris' ? 3 : 2;
+    const defaultSizeMax = opts.kind === 'debris' ? 6 : 4.2;
+    const sizeMin =
+      opts.sizeMin !== undefined && Number.isFinite(opts.sizeMin) && opts.sizeMin > 0
+        ? opts.sizeMin
+        : defaultSizeMin;
+    const sizeMax =
+      opts.sizeMax !== undefined && Number.isFinite(opts.sizeMax) && opts.sizeMax > 0
+        ? Math.max(sizeMin, opts.sizeMax)
+        : Math.max(sizeMin, defaultSizeMax);
+    const defaultLife = opts.kind === 'debris' ? 0.72 : 0.35;
+    const baseLife =
+      opts.lifeSec !== undefined && Number.isFinite(opts.lifeSec) && opts.lifeSec > 0
+        ? opts.lifeSec
+        : defaultLife;
+    const safeColor = Number.isFinite(opts.color) ? opts.color : 0xffffff;
 
     let spawned = 0;
     for (let i = 0; i < this.capacity && spawned < requested; i++) {
@@ -334,12 +369,12 @@ export class VfxParticlePool {
 
       slot.active = true;
       slot.kind = opts.kind;
-      slot.x = opts.x;
-      slot.y = opts.y;
+      slot.x = originX;
+      slot.y = originY;
       slot.vx = Math.cos(ang) * spd;
       slot.vy = Math.sin(ang) * spd;
       slot.size = sz;
-      slot.color = opts.color;
+      slot.color = safeColor;
       slot.life = life;
       slot.maxLife = life;
       slot.angleRad = ang;
@@ -354,13 +389,14 @@ export class VfxParticlePool {
   }
 
   step(dtSec: number): void {
-    if (dtSec <= 0 || this.activeCount === 0) return;
+    if (!Number.isFinite(dtSec) || dtSec <= 0 || this.activeCount === 0) return;
     const drag = Math.pow(0.18, dtSec);
+    const debrisDrag = Math.pow(0.55, dtSec);
     for (let i = 0; i < this.capacity; i++) {
       const p = this.slots[i];
       if (!p.active) continue;
       p.life -= dtSec;
-      if (p.life <= 0) {
+      if (!Number.isFinite(p.life) || p.life <= 0) {
         p.active = false;
         p.life = 0;
         this.activeCount = Math.max(0, this.activeCount - 1);
@@ -372,8 +408,8 @@ export class VfxParticlePool {
         p.vx *= drag;
         p.vy *= drag;
       } else {
-        p.vx *= Math.pow(0.55, dtSec);
-        p.vy *= Math.pow(0.55, dtSec);
+        p.vx *= debrisDrag;
+        p.vy *= debrisDrag;
       }
       p.angleRad += p.vAngleRad * dtSec;
     }
@@ -423,14 +459,21 @@ export function applyHpChangeToTrail(
   nextHp: number,
   reducedMotion: boolean
 ): void {
+  if (!Number.isFinite(nextHp)) return;
   const clamped = Math.max(0, nextHp);
-  if (clamped < state.hp && !reducedMotion) {
-    state.trailHp = Math.max(state.trailHp, state.hp);
-    state.holdMs = VFX_HP_TRAIL_HOLD_MS;
-  } else {
+  if (reducedMotion) {
     state.trailHp = clamped;
     state.holdMs = 0;
+  } else if (clamped < state.hp) {
+    state.trailHp = Math.max(Number.isFinite(state.trailHp) ? state.trailHp : state.hp, state.hp);
+    state.holdMs = VFX_HP_TRAIL_HOLD_MS;
+  } else if (clamped > state.hp) {
+    if (!Number.isFinite(state.trailHp) || clamped >= state.trailHp) {
+      state.trailHp = clamped;
+      state.holdMs = 0;
+    }
   }
+  // When clamped === state.hp && !reducedMotion: preserve active trailHp and holdMs untouched!
   state.hp = clamped;
 }
 
@@ -439,21 +482,30 @@ export function stepHpTrailState(
   dtMs: number,
   reducedMotion: boolean
 ): void {
+  if (!Number.isFinite(state.hp)) return;
+  if (!Number.isFinite(state.trailHp)) {
+    state.trailHp = state.hp;
+  }
+  if (!Number.isFinite(state.holdMs)) {
+    state.holdMs = 0;
+  }
   if (reducedMotion || state.trailHp <= state.hp) {
     state.trailHp = state.hp;
     state.holdMs = 0;
     return;
   }
-  if (dtMs <= 0) return;
+  if (!Number.isFinite(dtMs) || dtMs <= 0) return;
   if (state.holdMs > 0) {
     state.holdMs = Math.max(0, state.holdMs - dtMs);
     return;
   }
-  const drainPerSec = Math.max(state.maxHp * 0.55, 10);
+  const safeMaxHp = Number.isFinite(state.maxHp) && state.maxHp > 0 ? state.maxHp : Math.max(1, state.hp);
+  const drainPerSec = Math.max(safeMaxHp * 0.55, 10);
   state.trailHp = Math.max(state.hp, state.trailHp - (drainPerSec * dtMs) / 1000);
 }
 
 export function computeHpBarTickRatios(maxHp: number): readonly number[] {
+  if (!Number.isFinite(maxHp) || maxHp <= 0) return [];
   const safeMax = Math.max(1, Math.floor(maxHp));
   const step = safeMax <= 30 ? 5 : safeMax <= 80 ? 10 : safeMax <= 180 ? 20 : Math.ceil(safeMax / 8);
   const ratios: number[] = [];
@@ -562,13 +614,19 @@ export interface PopupPositionInput {
 }
 
 export function allocateNonOverlappingPopupPos(input: PopupPositionInput): { readonly x: number; readonly y: number } {
-  const minDx = input.minDx ?? 42;
-  const minDy = input.minDy ?? 18;
+  const minDx =
+    input.minDx !== undefined && Number.isFinite(input.minDx) && input.minDx > 0 ? input.minDx : 42;
+  const minDy =
+    input.minDy !== undefined && Number.isFinite(input.minDy) && input.minDy > 0 ? input.minDy : 18;
+  const viewW = Number.isFinite(input.viewW) && input.viewW > 0 ? input.viewW : 390;
+  const viewH = Number.isFinite(input.viewH) && input.viewH > 0 ? input.viewH : 240;
   const marginX = 28;
   const marginY = 16;
-  const maxX = Math.max(marginX, input.viewW - marginX);
-  const maxY = Math.max(marginY, input.viewH - marginY);
+  const maxX = Math.max(marginX, viewW - marginX);
+  const maxY = Math.max(marginY, viewH - marginY);
   const clamp = (val: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, val));
+  const desiredX = Number.isFinite(input.desiredX) ? input.desiredX : viewW * 0.5;
+  const desiredY = Number.isFinite(input.desiredY) ? input.desiredY : viewH * 0.5;
 
   const offsets: readonly [number, number][] = [
     [0, 0],
@@ -593,17 +651,83 @@ export function allocateNonOverlappingPopupPos(input: PopupPositionInput): { rea
     input.existing.some((p) => Math.abs(x - p.x) < minDx && Math.abs(y - p.y) < minDy);
 
   for (const [ox, oy] of offsets) {
-    const cx = clamp(input.desiredX + ox, marginX, maxX);
-    const cy = clamp(input.desiredY + oy, marginY, maxY);
+    const cx = clamp(desiredX + ox, marginX, maxX);
+    const cy = clamp(desiredY + oy, marginY, maxY);
     if (!overlaps(cx, cy)) {
       return { x: cx, y: cy };
     }
   }
 
-  // Fallback: stack below/above last existing popup cleanly
+  // Deterministic viewport-inward grid search across [marginX..maxX] x [marginY..maxY]
+  // anchored on clamped (desiredX, desiredY) so corner/edge clusters expand inward with 0 overlaps.
+  const anchorX = clamp(desiredX, marginX, maxX);
+  const anchorY = clamp(desiredY, marginY, maxY);
+  const stepX = minDx + 2;
+  const stepY = minDy + 2;
+
+  const collectAxisCoords = (anchor: number, lo: number, hi: number, step: number, phaseOffset: number): number[] => {
+    const coords: number[] = [];
+    const seen = new Set<number>();
+    const add = (v: number) => {
+      if (v < lo - 1e-6 || v > hi + 1e-6) return;
+      const clamped = clamp(v, lo, hi);
+      const key = Math.round(clamped * 100);
+      if (!seen.has(key)) {
+        seen.add(key);
+        coords.push(clamped);
+      }
+    };
+    const start = anchor + phaseOffset;
+    const maxSteps = Math.min(48, Math.ceil((hi - lo) / step) + 2);
+    add(start);
+    for (let k = 1; k <= maxSteps; k++) {
+      add(start + k * step);
+      add(start - k * step);
+    }
+    if (phaseOffset !== 0) {
+      add(lo);
+      add(hi);
+    }
+    return coords;
+  };
+
+  const searchGrid = (phaseX: number, phaseY: number): { readonly x: number; readonly y: number } | null => {
+    const xs = collectAxisCoords(anchorX, marginX, maxX, stepX, phaseX);
+    const ys = collectAxisCoords(anchorY, marginY, maxY, stepY, phaseY);
+    let best: { x: number; y: number } | null = null;
+    let bestDistSq = Number.POSITIVE_INFINITY;
+    for (const cy of ys) {
+      for (const cx of xs) {
+        if (overlaps(cx, cy)) continue;
+        const dx = cx - anchorX;
+        const dy = cy - anchorY;
+        const distSq = dx * dx + dy * dy;
+        if (
+          distSq < bestDistSq - 1e-6 ||
+          (Math.abs(distSq - bestDistSq) <= 1e-6 &&
+            best !== null &&
+            (cy < best.y || (cy === best.y && cx < best.x)))
+        ) {
+          bestDistSq = distSq;
+          best = { x: cx, y: cy };
+        }
+      }
+    }
+    return best;
+  };
+
+  const primaryHit = searchGrid(0, 0);
+  if (primaryHit) return primaryHit;
+
+  const halfStepHit = searchGrid(stepX * 0.5, stepY * 0.5);
+  if (halfStepHit) return halfStepHit;
+
+  // Final fallback if viewport is physically packed full beyond cell capacity
   const stackIdx = input.existing.length;
-  const fallbackX = clamp(input.desiredX + ((stackIdx % 3) - 1) * (minDx + 2), marginX, maxX);
-  const fallbackY = clamp(input.desiredY - (Math.floor(stackIdx / 3) + 1) * (minDy + 2), marginY, maxY);
+  const cols = Math.max(1, Math.floor((maxX - marginX) / stepX) + 1);
+  const rows = Math.max(1, Math.floor((maxY - marginY) / stepY) + 1);
+  const fallbackX = clamp(marginX + (stackIdx % cols) * stepX, marginX, maxX);
+  const fallbackY = clamp(marginY + (Math.floor(stackIdx / cols) % rows) * stepY, marginY, maxY);
   return { x: fallbackX, y: fallbackY };
 }
 
@@ -646,10 +770,17 @@ export function computeSplitHullHalvesSpec(input: {
   readonly isBoss: boolean;
   readonly hasDedicatedPlates: boolean;
 }): SplitHullChoreoSpec {
-  const ratio = Math.max(0.25, Math.min(0.75, input.splitRatioX));
-  const splitPx = Math.round(input.texWidth * ratio);
-  const dw = Math.max(24, input.displayWidth);
-  const dh = Math.max(16, input.displayHeight);
+  const safeTexW = Number.isFinite(input.texWidth) && input.texWidth > 0 ? input.texWidth : 512;
+  const safeTexH = Number.isFinite(input.texHeight) && input.texHeight > 0 ? input.texHeight : 256;
+  const rawRatio = Number.isFinite(input.splitRatioX) ? input.splitRatioX : 0.5;
+  const ratio = Math.max(0.25, Math.min(0.75, rawRatio));
+  const splitPx = Math.max(1, Math.round(safeTexW * ratio));
+  const safeBaseX = Number.isFinite(input.baseX) ? input.baseX : 0;
+  const safeBaseY = Number.isFinite(input.baseY) ? input.baseY : 0;
+  const safeDisplayW = Number.isFinite(input.displayWidth) ? input.displayWidth : 128;
+  const safeDisplayH = Number.isFinite(input.displayHeight) ? input.displayHeight : 64;
+  const dw = Math.max(24, safeDisplayW);
+  const dh = Math.max(16, safeDisplayH);
   const speedScale = input.isBoss ? 1.15 : 1.0;
 
   const fore: SplitHullHalfSpec = {
@@ -657,9 +788,9 @@ export function computeSplitHullHalvesSpec(input: {
     cropX: 0,
     cropY: 0,
     cropW: Math.max(1, splitPx),
-    cropH: Math.max(1, input.texHeight),
-    startX: input.baseX - 2,
-    startY: input.baseY - 1,
+    cropH: Math.max(1, safeTexH),
+    startX: safeBaseX - 2,
+    startY: safeBaseY - 1,
     vx: -26 * speedScale,
     vy: -14 * speedScale,
     vAngleDeg: -26 * speedScale,
@@ -669,10 +800,10 @@ export function computeSplitHullHalvesSpec(input: {
     useCrop: !input.hasDedicatedPlates,
     cropX: splitPx,
     cropY: 0,
-    cropW: Math.max(1, input.texWidth - splitPx),
-    cropH: Math.max(1, input.texHeight),
-    startX: input.baseX + 2,
-    startY: input.baseY + 1,
+    cropW: Math.max(1, safeTexW - splitPx),
+    cropH: Math.max(1, safeTexH),
+    startX: safeBaseX + 2,
+    startY: safeBaseY + 1,
     vx: 30 * speedScale,
     vy: 15 * speedScale,
     vAngleDeg: 22 * speedScale,
@@ -731,17 +862,23 @@ export function computeEnginePlumeGeometry(input: {
   readonly isDanger?: boolean;
 }): EnginePlumeGeometry {
   const staticMode = input.reducedMotion || input.lowQuality;
-  const flicker = staticMode ? 0.72 : 0.78 + Math.sin(input.elapsed * 24 + input.phaseOffset) * 0.22;
-  const boost = staticMode ? 0 : Math.min(0.35, Math.max(0, input.recoilBoost ?? 0));
+  const safeElapsed = Number.isFinite(input.elapsed) ? input.elapsed : 0;
+  const safePhase = Number.isFinite(input.phaseOffset) ? input.phaseOffset : 0;
+  const safeRecoil =
+    input.recoilBoost !== undefined && Number.isFinite(input.recoilBoost) ? input.recoilBoost : 0;
+  const flicker = staticMode ? 0.72 : 0.78 + Math.sin(safeElapsed * 24 + safePhase) * 0.22;
+  const boost = staticMode ? 0 : Math.min(0.35, Math.max(0, safeRecoil));
 
   const dir = input.facing === 'right' ? -1 : 1; // exhaust shoots aft (opposite facing)
   const lenFactor = input.facing === 'right' ? 0.145 : 0.135;
   const radFactor = input.facing === 'right' ? 0.13 : 0.12;
-  const len = Math.max(12, input.displayWidth * lenFactor) * (flicker + boost);
-  const rad = Math.max(4.5, input.displayHeight * radFactor);
+  const safeW = Number.isFinite(input.displayWidth) ? input.displayWidth : 128;
+  const safeH = Number.isFinite(input.displayHeight) ? input.displayHeight : 64;
+  const len = Math.max(12, safeW * lenFactor) * (flicker + boost);
+  const rad = Math.max(4.5, safeH * radFactor);
 
-  const ex = input.engineX;
-  const ey = input.engineY;
+  const ex = Number.isFinite(input.engineX) ? input.engineX : 0;
+  const ey = Number.isFinite(input.engineY) ? input.engineY : 0;
 
   const outerColor =
     input.facing === 'right' ? 0x62d6df : input.isBoss || input.isDanger ? 0xf27564 : 0xf6b852;
@@ -771,8 +908,10 @@ export function computeIdleMicroTiltDeg(input: {
   readonly isBoss?: boolean;
 }): number {
   if (input.reducedMotion || input.lowQuality) return 0;
+  const safeElapsed = Number.isFinite(input.elapsed) ? input.elapsed : 0;
+  const safePhase = Number.isFinite(input.phaseOffset) ? input.phaseOffset : 0;
   const amp = input.isBoss ? 0.9 : 1.45;
-  return Math.sin(input.elapsed * 1.9 + input.phaseOffset) * amp;
+  return Math.sin(safeElapsed * 1.9 + safePhase) * amp;
 }
 
 /** Pure JS linear interpolation (zero Phaser.Math dependency) */

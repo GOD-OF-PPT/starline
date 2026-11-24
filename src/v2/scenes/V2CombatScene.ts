@@ -43,6 +43,7 @@ import {
   getDamagePopupStyle,
   lerpNumber,
   resolveHitFlashDecision,
+  sanitizeCombatSpeed,
   stepHpTrailState,
 } from './v2CombatVfx';
 
@@ -204,6 +205,7 @@ interface EnemyVisualEntry {
   recoilX: number;
   angleDeg: number;
   dead: boolean;
+  brokenApart: boolean;
 }
 
 const SHIP_TEX_W = 512;
@@ -480,6 +482,7 @@ export class V2CombatScene extends Phaser.Scene {
         playbackKey: nextStaticKey,
       };
       this.updateShipVisualSpec(playback.shipVisualSpec ?? null);
+      this.updateSettings(playback.settings);
       return;
     }
     this.playback = playback;
@@ -505,6 +508,9 @@ export class V2CombatScene extends Phaser.Scene {
     if (settings.reducedMotion) {
       this.hitstopRemainingMs = 0;
       this.shakeTimerMs = 0;
+      if (this.deathChoreos.length > 0) {
+        this.clearDeathChoreos();
+      }
       this.playerHpState.trailHp = this.playerHpState.hp;
       this.playerHpState.holdMs = 0;
       for (const e of this.enemies) {
@@ -640,7 +646,9 @@ export class V2CombatScene extends Phaser.Scene {
 
   private applyPlayerHpUpdate(nextHp: number, nextShield: number, snap = false): void {
     const reduced = snap || (this.playback?.settings.reducedMotion ?? false);
-    this.playerHpState.maxHp = Math.max(this.playerHpState.maxHp, nextHp);
+    if (Number.isFinite(nextHp)) {
+      this.playerHpState.maxHp = Math.max(this.playerHpState.maxHp, nextHp);
+    }
     applyHpChangeToTrail(this.playerHpState, nextHp, reduced);
     this.playerShield = nextShield;
     this.playerMaxShield = Math.max(this.playerMaxShield, nextShield);
@@ -654,7 +662,6 @@ export class V2CombatScene extends Phaser.Scene {
     if (!pending.visualsCommitted) {
       pending.visualsCommitted = true;
       this.syncUnitStatesToRound(pending.log, snapTrails);
-      this.applyPlayerHpUpdate(pending.log.playerHpAfter, pending.log.playerShieldAfter, snapTrails);
     }
     if (reportStep && !pending.stepReported) {
       pending.stepReported = true;
@@ -768,7 +775,6 @@ export class V2CombatScene extends Phaser.Scene {
       }
       const log = sim.rounds[this.nextRoundIdx];
       this.syncUnitStatesToRound(log, true);
-      this.applyPlayerHpUpdate(log.playerHpAfter, log.playerShieldAfter, true);
       this.playback.onRoundStep?.(this.nextRoundIdx, log);
       this.nextRoundIdx += 1;
     }
@@ -884,6 +890,7 @@ export class V2CombatScene extends Phaser.Scene {
       recoilX: 0,
       angleDeg: 0,
       dead: initHp <= 0,
+      brokenApart: false,
     };
     this.enemies.push(entry);
     return entry;
@@ -938,8 +945,10 @@ export class V2CombatScene extends Phaser.Scene {
         const hasActiveChoreo = this.deathChoreos.some((dc) => dc.enemyId === entry!.enemyId);
         entry.dead = true;
         entry.isCharging = false;
-        if (!hasActiveChoreo) {
+        if (!hasActiveChoreo && !entry.brokenApart) {
           entry.sprite.setVisible(true).setAlpha(0.18).setTint(0x4b5563);
+        } else if (entry.brokenApart) {
+          entry.sprite.setVisible(false);
         }
         entry.intentTag?.setVisible(false);
       } else {
@@ -1276,7 +1285,7 @@ export class V2CombatScene extends Phaser.Scene {
     if (pb.simulation && this.nextRoundIdx > 0 && pb.simulation.rounds.length > 0) {
       const targetIdx = Math.min(this.nextRoundIdx - 1, pb.simulation.rounds.length - 1);
       for (let idx = 0; idx <= targetIdx; idx++) {
-        this.syncUnitStatesToRound(pb.simulation.rounds[idx]);
+        this.syncUnitStatesToRound(pb.simulation.rounds[idx], true);
       }
     }
 
@@ -1471,7 +1480,7 @@ export class V2CombatScene extends Phaser.Scene {
     this.flushInFlightRound(true);
 
     const reduced = pb.settings.reducedMotion;
-    const speed = pb.settings.combatSpeed ?? 1;
+    const speed = sanitizeCombatSpeed(pb.settings.combatSpeed ?? 1);
     const vSpec = pb.shipVisualSpec;
 
     const roundState: InFlightRoundState = {
@@ -2125,7 +2134,11 @@ export class V2CombatScene extends Phaser.Scene {
             hullDamage: cHull,
             reducedMotion: reduced,
           });
-          if (cShield > 0) cTarget.shieldArcLife = 0.34;
+          this.applyEnemyHpUpdate(cTarget, Math.min(cTarget.hp, log.counterAttack.targetHpAfter), false);
+          if (cShield > 0) {
+            cTarget.shield = Math.max(0, cTarget.shield - cShield);
+            cTarget.shieldArcLife = 0.34;
+          }
           if (cDecision.applyHullWarmTint) {
             cTarget.flashMs = Math.max(cTarget.flashMs, cDecision.hullTintDurationMs);
           }
@@ -2275,6 +2288,7 @@ export class V2CombatScene extends Phaser.Scene {
       hasDedicatedPlates,
     });
 
+    entry.brokenApart = true;
     entry.sprite.setVisible(false);
 
     const foreSprite = this.add
@@ -2368,7 +2382,7 @@ export class V2CombatScene extends Phaser.Scene {
     const pb = this.playback;
     const reduced = pb?.settings.reducedMotion ?? false;
     const lowQuality = pb?.settings.lowQuality ?? false;
-    const speed = pb?.settings.combatSpeed ?? 1;
+    const speed = sanitizeCombatSpeed(pb?.settings.combatSpeed ?? 1);
 
     if (!this.externalPaused) {
       this.elapsed += dt;
