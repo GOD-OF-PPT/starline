@@ -316,10 +316,10 @@ export class V2CombatScene extends Phaser.Scene {
   }
 
   syncViewport(w: number, h: number, dpr?: number): void {
-    if (w < 16 || h < 16) return;
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w < 16 || h < 16) return;
     this.viewW = w;
     this.viewH = h;
-    if (dpr !== undefined) this.dpr = dpr;
+    if (dpr !== undefined && Number.isFinite(dpr) && dpr > 0) this.dpr = dpr;
     this.applyCameraViewport();
     if (this.scene?.isActive() && this.texturesReady) {
       this.layoutAll();
@@ -935,7 +935,7 @@ export class V2CombatScene extends Phaser.Scene {
         newlyAdded.push(entry);
       }
       if (!entry) continue;
-      this.applyEnemyHpUpdate(entry, snap.hp, snapTrails || !animated);
+      this.applyEnemyHpUpdate(entry, snap.hp, snapTrails);
       entry.shield = snap.shield ?? 0;
       entry.maxShield = Math.max(entry.maxShield, snap.maxShield ?? entry.shield);
       if (snap.currentPhase !== undefined) {

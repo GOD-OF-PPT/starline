@@ -2767,6 +2767,9 @@ describe('Iteration 2 Regressions — HP Trails, Breakup Permanence, Real simula
 
     // Round 2 executes and resolves -> e1Sprite MUST remain invisible (NEVER resurrected as 0.18 ghost!)
     access.time.advance(600);
+    const afterR2 = scene.getStagePresentationSnapshot();
+    expect(afterR2.playerHp).toBe(22);
+    expect(afterR2.enemiesState.find((e) => e.enemyId === 'e_r2_live')?.hp).toBe(20);
     expect(e1Sprite.visible).toBe(false);
 
     // Mid-death reducedMotion toggle immediately clears active death choreos & destroys half sprites
@@ -3231,4 +3234,540 @@ describe('Iteration 2 Regressions — HP Trails, Breakup Permanence, Real simula
     engine.dispose();
   });
 });
+
+// ===========================================================================
+// 9. Iteration 3 Surgical Remediation Regressions
+// ===========================================================================
+describe('Iteration 3 Regressions — Crane IK Continuity, Re-Entrant Docking, Flushed Enemy HP Trails & Tiny-Viewport Clamps', () => {
+  it('A08-code: guarantees smooth elbow continuity (<10px/step) across live idle patrol & docking arcs, plus exact lengths & overhead arch on steep downward & full-range targets', () => {
+    const TEX_W = 1280;
+    const TEX_H = 720;
+    const w = 1280;
+    const h = 720;
+    const s = Math.min(w / TEX_W, h / (TEX_H * 0.94));
+    const cx = w * 0.5;
+    const cy = h * 0.51;
+    const imgW = TEX_W * s;
+    const imgH = TEX_H * s;
+    const left = cx - imgW * 0.5;
+    const top = cy - imgH * 0.5;
+    const pt = (nx: number, ny: number) => ({ x: left + nx * imgW, y: top + ny * imgH });
+    const lerpNum = (a: number, b: number, t: number) => a + (b - a) * t;
+
+    const craneBase = pt(0.34, 0.57);
+    const leftPt = pt(0.285, 0.5);
+    const rightPt = pt(0.455, 0.625);
+    const parkPt = pt(0.39, 0.56);
+    const pickPt = pt(0.505, 0.695);
+    const padShip = pt(0.515, 0.715);
+    const workbench = pt(0.22, 0.43);
+    const display = pt(0.5, 0.2);
+
+    const verifyPoseInvariants = (pose: ReturnType<typeof solveArticulatedCranePose>) => {
+      for (const v of [pose.turntable, pose.shoulder, pose.elbow, pose.trolley, pose.hook]) {
+        expect(Number.isFinite(v.x)).toBe(true);
+        expect(Number.isFinite(v.y)).toBe(true);
+      }
+      expect(pose.lowerBoomLength).toBeGreaterThan(0);
+      expect(pose.upperJibLength).toBeGreaterThan(0);
+      expect(Math.abs(pose.lowerBoomLength - pose.upperJibLength)).toBeLessThanOrEqual(1e-9);
+      const actualBoom = Math.hypot(pose.elbow.x - pose.shoulder.x, pose.elbow.y - pose.shoulder.y);
+      const actualJib = Math.hypot(pose.trolley.x - pose.elbow.x, pose.trolley.y - pose.elbow.y);
+      expect(Math.abs(actualBoom - pose.lowerBoomLength)).toBeLessThanOrEqual(1e-3);
+      expect(Math.abs(actualJib - pose.upperJibLength)).toBeLessThanOrEqual(1e-3);
+      const chordMidY = (pose.shoulder.y + pose.trolley.y) * 0.5;
+      expect(pose.elbow.y).toBeLessThanOrEqual(chordMidY + 1e-3);
+      expect(pose.elbow.y).toBeLessThanOrEqual(Math.max(pose.shoulder.y, pose.trolley.y) + 1e-3);
+    };
+
+    // 1. Live BaseScene idle patrol sweep (leftPt -> rightPt, 100 steps) — ZERO 36px/47px/113px/293px elbow teleports!
+    let prevIdleElbow: { x: number; y: number } | null = null;
+    let maxIdleStep = 0;
+    for (let i = 0; i <= 100; i++) {
+      const f = i / 100;
+      const pose = solveArticulatedCranePose({
+        base: craneBase,
+        target: { x: lerpNum(leftPt.x, rightPt.x, f), y: lerpNum(leftPt.y, rightPt.y, f) },
+        scale: s,
+        cableDrop: 24 * s,
+        mode: 'idle',
+      });
+      verifyPoseInvariants(pose);
+      if (prevIdleElbow) {
+        maxIdleStep = Math.max(maxIdleStep, Math.hypot(pose.elbow.x - prevIdleElbow.x, pose.elbow.y - prevIdleElbow.y));
+      }
+      prevIdleElbow = pose.elbow;
+    }
+    expect(maxIdleStep).toBeLessThan(10);
+
+    // 2. Live BaseScene mounted idle sweep at 1280x720 across half-period (~6.5s in 100 frames)
+    const { scene: idleScene } = mountBaseScene({
+      v2State: {
+        activeShipId: 'cannon_skiff',
+        facilityTiers: { workbench: 1, display: 0, drydock: 0, stargate_relay: 0 },
+        restoredRelicIds: [],
+        campaignAct: 'act1',
+        stargatePowered: false,
+        settings: makeSettings({ reducedMotion: false }),
+      },
+    });
+    idleScene.syncViewport(1280, 720, 1);
+    let prevLiveElbow: { x: number; y: number } | null = null;
+    let maxLiveIdleStep = 0;
+    for (let i = 0; i < 140; i++) {
+      idleScene.update(i * 50, 50);
+      const livePose = idleScene.getLastCranePose()!;
+      expect(livePose).not.toBeNull();
+      verifyPoseInvariants(livePose);
+      if (prevLiveElbow) {
+        maxLiveIdleStep = Math.max(
+          maxLiveIdleStep,
+          Math.hypot(livePose.elbow.x - prevLiveElbow.x, livePose.elbow.y - prevLiveElbow.y)
+        );
+      }
+      prevLiveElbow = livePose.elbow;
+    }
+    expect(maxLiveIdleStep).toBeLessThan(10);
+
+    // 3. Full docking arcs (approach park->pick, crate hoist pad->workbench, relic hoist pad->display, 100 steps each)
+    const dockingArcs: ((p: number) => { x: number; y: number })[] = [
+      (p) => {
+        const ease = p * p * (3 - 2 * p);
+        return { x: lerpNum(parkPt.x, pickPt.x, ease), y: lerpNum(parkPt.y, pickPt.y, ease) };
+      },
+      (p) => ({
+        x: lerpNum(padShip.x, workbench.x, p),
+        y: lerpNum(padShip.y - 12 * s, workbench.y, p) - Math.sin(p * Math.PI) * 52 * s - 6 * s,
+      }),
+      (p) => ({
+        x: lerpNum(padShip.x, display.x, p),
+        y: lerpNum(padShip.y - 12 * s, display.y, p) - Math.sin(p * Math.PI) * 52 * s - 6 * s,
+      }),
+    ];
+    for (const arcFn of dockingArcs) {
+      let prevArcElbow: { x: number; y: number } | null = null;
+      let maxArcStep = 0;
+      for (let i = 0; i <= 100; i++) {
+        const p = i / 100;
+        const pose = solveArticulatedCranePose({
+          base: craneBase,
+          target: arcFn(p),
+          scale: s,
+          cableDrop: 24 * s,
+          mode: 'docking',
+        });
+        verifyPoseInvariants(pose);
+        if (prevArcElbow) {
+          maxArcStep = Math.max(maxArcStep, Math.hypot(pose.elbow.x - prevArcElbow.x, pose.elbow.y - prevArcElbow.y));
+        }
+        prevArcElbow = pose.elbow;
+      }
+      expect(maxArcStep).toBeLessThan(10);
+    }
+
+    // 4. Radial telescoping boundary continuity crossing dist = maxReach (2 * 148 * 0.94 = 278.24)
+    let prevRadElbow: { x: number; y: number } | null = null;
+    let maxRadStep = 0;
+    for (let r = 200; r <= 360; r += 2) {
+      const pose = solveArticulatedCranePose({
+        base: { x: 435, y: 410 },
+        target: { x: 435 + r * 0.8, y: 410 - r * 0.6 },
+        scale: 1,
+        cableDrop: 26,
+        mode: 'docking',
+      });
+      verifyPoseInvariants(pose);
+      if (prevRadElbow) {
+        maxRadStep = Math.max(maxRadStep, Math.hypot(pose.elbow.x - prevRadElbow.x, pose.elbow.y - prevRadElbow.y));
+      }
+      prevRadElbow = pose.elbow;
+    }
+    expect(maxRadStep).toBeLessThan(10);
+
+    // 5. Steep downward targets (dx = 0, dy = 64 * s & ±0.5) + 512 randomized full-range targets [1e-4, 300]
+    for (const scaleVal of [0.5, 1, 1.5]) {
+      const base = { x: 435, y: 410 };
+      const drop = 26 * scaleVal;
+      for (const dxOff of [-0.5, 0, 0.5]) {
+        const pose = solveArticulatedCranePose({
+          base,
+          target: { x: base.x + dxOff, y: base.y - 26 * scaleVal + 64 * scaleVal + drop },
+          scale: scaleVal,
+          cableDrop: drop,
+          mode: 'idle',
+        });
+        verifyPoseInvariants(pose);
+      }
+    }
+
+    let seed = 0x51a7b3c9;
+    const rand = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 0x100000000;
+    };
+    for (let i = 0; i < 512; i++) {
+      const scaleVal = 0.4 + rand() * 1.8;
+      const dist = 1e-4 + rand() * 300 * scaleVal;
+      const ang = rand() * Math.PI * 2;
+      const base = { x: 435, y: 410 };
+      const drop = 26 * scaleVal;
+      const pose = solveArticulatedCranePose({
+        base,
+        target: { x: base.x + Math.cos(ang) * dist, y: base.y - 26 * scaleVal + Math.sin(ang) * dist + drop },
+        scale: scaleVal,
+        cableDrop: drop,
+        mode: i % 3 === 0 ? 'stowed' : i % 3 === 1 ? 'idle' : 'docking',
+      });
+      verifyPoseInvariants(pose);
+    }
+  });
+
+  it('A08-code: handles re-entrant skipReturnDocking() & startReturnDocking(next) inside onProgress(1) and midway cleanly (exact once-per-docking callbacks, 0 post-skip servos)', () => {
+    const baseV2: V2BaseDioramaState = {
+      activeShipId: 'cannon_skiff',
+      facilityTiers: { workbench: 1, display: 1, drydock: 0, stargate_relay: 0 },
+      restoredRelicIds: [],
+      campaignAct: 'act1',
+      stargatePowered: false,
+      settings: makeSettings({ reducedMotion: false }),
+    };
+
+    // (a) skipReturnDocking() inside onProgress(1) -> onProgress(1) ONCE, onFinish ONCE, 0 throws, 0 post-skip servos
+    {
+      const playSpy = vi.spyOn(soundEngine, 'play');
+      const { scene } = mountBaseScene({ v2State: baseV2 });
+      const progressCalls: number[] = [];
+      const onFinish = vi.fn();
+      let servosAfterSkip = 0;
+      let skipped = false;
+      playSpy.mockImplementation((kind) => {
+        if (skipped && kind === 'craneServo') servosAfterSkip += 1;
+      });
+
+      scene.startReturnDocking({
+        earnedCredits: 120,
+        crateCount: 3,
+        hasKeptRelic: false,
+        wasDefeat: false,
+        onProgress: (p) => {
+          progressCalls.push(p);
+          if (p >= 1) {
+            skipped = true;
+            scene.skipReturnDocking();
+          }
+        },
+        onFinish,
+      });
+
+      expect(() => {
+        scene.update(0, 500);
+        scene.update(500, 500);
+        scene.update(1000, 500);
+        scene.update(1500, 500);
+      }).not.toThrow();
+
+      expect(progressCalls.filter((v) => v >= 1)).toHaveLength(1);
+      expect(onFinish).toHaveBeenCalledTimes(1);
+      expect(servosAfterSkip).toBe(0);
+      playSpy.mockRestore();
+    }
+
+    // (b) startReturnDocking(next) inside first.onProgress(1) -> BOTH first.onFinish(1) AND next.onFinish(1)!
+    {
+      const { scene } = mountBaseScene({ v2State: baseV2 });
+      const firstFinish = vi.fn();
+      const nextFinish = vi.fn();
+      const nextProgress: number[] = [];
+
+      scene.startReturnDocking({
+        earnedCredits: 100,
+        crateCount: 2,
+        hasKeptRelic: false,
+        wasDefeat: false,
+        onProgress: (p) => {
+          if (p >= 1) {
+            scene.startReturnDocking({
+              earnedCredits: 250,
+              crateCount: 3,
+              hasKeptRelic: true,
+              wasDefeat: false,
+              onProgress: (np) => nextProgress.push(np),
+              onFinish: nextFinish,
+            });
+          }
+        },
+        onFinish: firstFinish,
+      });
+
+      // Finish first docking (1400ms total)
+      scene.update(0, 500);
+      scene.update(500, 500);
+      scene.update(1000, 500);
+      expect(firstFinish).toHaveBeenCalledTimes(1);
+      expect(nextFinish).toHaveBeenCalledTimes(0);
+
+      // Advance through chained next docking
+      scene.update(1500, 500);
+      scene.update(2000, 500);
+      scene.update(2500, 500);
+      expect(firstFinish).toHaveBeenCalledTimes(1);
+      expect(nextFinish).toHaveBeenCalledTimes(1);
+      expect(nextProgress.filter((v) => v >= 1)).toHaveLength(1);
+    }
+
+    // (c) Mid-way skipReturnDocking() at p = 0.5 < 1 -> onProgress(1) once, onFinish once, 0 post-skip servos
+    {
+      const playSpy = vi.spyOn(soundEngine, 'play');
+      const { scene } = mountBaseScene({ v2State: baseV2 });
+      const progressCalls: number[] = [];
+      const onFinish = vi.fn();
+      let servosAfterSkip = 0;
+      let skipped = false;
+      playSpy.mockImplementation((kind) => {
+        if (skipped && kind === 'craneServo') servosAfterSkip += 1;
+      });
+
+      scene.startReturnDocking({
+        earnedCredits: 90,
+        crateCount: 4,
+        hasKeptRelic: true,
+        wasDefeat: false,
+        onProgress: (p) => {
+          progressCalls.push(p);
+          if (p >= 0.45 && p < 1 && !skipped) {
+            skipped = true;
+            scene.skipReturnDocking();
+          }
+        },
+        onFinish,
+      });
+
+      for (let i = 0; i < 14; i++) {
+        scene.update(i * 100, 100);
+      }
+      expect(skipped).toBe(true);
+      expect(progressCalls.filter((v) => v >= 1)).toHaveLength(1);
+      expect(onFinish).toHaveBeenCalledTimes(1);
+      expect(servosAfterSkip).toBe(0);
+      playSpy.mockRestore();
+    }
+  });
+
+  it('A04: preserves BOTH player & enemy HP trails on mid-round setPaused(true) & SwiftShader low-FPS flushInFlightRound(true), snaps on skipPlayback/resume, guards syncViewport NaN, and handles applyHpChangeToTrail heals & NaN self-heal', () => {
+    const enemy = makeEnemyUnit({ enemyId: 'e_flush_1', maxHp: 30, armor: 0, spriteArchetype: 'frigate' });
+    const round1: V2CombatRoundLog = {
+      round: 1,
+      droneCountsByHangar: {},
+      heavyChargingIds: [],
+      playerAttacks: [
+        {
+          sourceKind: 'laser',
+          sourceInstanceId: 'l1',
+          targetEnemyId: 'e_flush_1',
+          rawDamage: 10,
+          appliedDamage: 10,
+          armorBlocked: 0,
+          targetHpAfter: 20,
+          targetKilled: false,
+        },
+      ],
+      enemyAttacks: [
+        { enemyId: 'e_flush_1', rawDamage: 5, pierceDamage: 0, shieldAbsorbed: 0, hullDamage: 5 },
+      ],
+      counterAttack: null,
+      shieldAbsorbedTotal: 0,
+      playerHpAfter: 25,
+      playerShieldAfter: 0,
+      enemiesAfter: [
+        { enemyId: 'e_flush_1', name: enemy.name, spriteArchetype: 'frigate', hp: 20, maxHp: 30, damagePerRound: 5, armor: 0, pierceRatio: 0 },
+      ],
+    };
+    const round2: V2CombatRoundLog = {
+      round: 2,
+      droneCountsByHangar: {},
+      heavyChargingIds: [],
+      playerAttacks: [
+        {
+          sourceKind: 'laser',
+          sourceInstanceId: 'l1',
+          targetEnemyId: 'e_flush_1',
+          rawDamage: 20,
+          appliedDamage: 20,
+          armorBlocked: 0,
+          targetHpAfter: 0,
+          targetKilled: true,
+        },
+      ],
+      enemyAttacks: [],
+      counterAttack: null,
+      shieldAbsorbedTotal: 0,
+      playerHpAfter: 25,
+      playerShieldAfter: 0,
+      enemiesAfter: [
+        { enemyId: 'e_flush_1', name: enemy.name, spriteArchetype: 'frigate', hp: 0, maxHp: 30, damagePerRound: 5, armor: 0, pierceRatio: 0 },
+      ],
+    };
+    const sim = makeSimulation([enemy], [round1, round2], { startingPlayerHp: 30, startingPlayerShield: 0 });
+
+    // (a) Mid-round setPaused(true) -> flushInFlightRound(true) preserves BOTH player AND enemy HP trails!
+    {
+      const { scene, access } = mountCombatScene({
+        shipId: 'cannon_skiff',
+        sectorIndex: 1,
+        eventBackdrop: null,
+        units: [enemy],
+        simulation: sim,
+        settings: makeSettings({ reducedMotion: false, combatSpeed: 1 }),
+      });
+      scene.update(0, 260); // start Round 1
+      access.time.advance(200); // past Beat 3 (enemy 30 -> 20), before Beat 4/5
+      scene.setPaused(true);
+
+      const snap = scene.getStagePresentationSnapshot();
+      expect(snap.playerHp).toBe(25);
+      expect(snap.playerTrailHp).toBeGreaterThan(25);
+      expect(snap.enemiesState[0].hp).toBe(20);
+      expect(snap.enemiesState[0].trailHp).toBeGreaterThan(20);
+    }
+
+    // (b) SwiftShader low-FPS (rawDelta=350ms, delta=80ms) -> update() flushes round 1 before Beat 5 while preserving BOTH trails!
+    {
+      const { scene, game, access } = mountCombatScene({
+        shipId: 'cannon_skiff',
+        sectorIndex: 1,
+        eventBackdrop: null,
+        units: [enemy],
+        simulation: sim,
+        settings: makeSettings({ reducedMotion: false, combatSpeed: 1 }),
+      });
+      game.loop.rawDelta = 350;
+      scene.update(0, 80); // kicks off Round 1 (roundTimerMs = 950)
+      access.time.advance(80);
+      scene.update(350, 80); // roundTimerMs = 600
+      access.time.advance(80);
+      scene.update(700, 80); // roundTimerMs = 250
+      access.time.advance(80); // clock = 240ms (< Beat 5 @ 590ms), Beat 3 fired
+      scene.update(1050, 80); // roundTimerMs <= 0 -> flushInFlightRound(true) BEFORE Beat 5!
+
+      const snap = scene.getStagePresentationSnapshot();
+      expect(snap.playerHp).toBe(25);
+      expect(snap.playerTrailHp).toBeGreaterThan(25);
+      expect(snap.enemiesState[0].hp).toBe(20);
+      expect(snap.enemiesState[0].trailHp).toBeGreaterThan(20);
+    }
+
+    // (c) skipPlayback() and resumeFromRound > 0 still snap BOTH player & enemy trails immediately
+    {
+      const { scene: skipScene, access: skipAccess } = mountCombatScene({
+        shipId: 'cannon_skiff',
+        sectorIndex: 1,
+        eventBackdrop: null,
+        units: [enemy],
+        simulation: sim,
+        settings: makeSettings({ reducedMotion: false }),
+      });
+      skipScene.update(0, 260);
+      skipAccess.time.advance(200);
+      skipScene.skipPlayback();
+      const skipSnap = skipScene.getStagePresentationSnapshot();
+      expect(skipSnap.playerHp).toBe(25);
+      expect(skipSnap.playerTrailHp).toBe(25);
+      expect(skipSnap.enemiesState[0].hp).toBe(0);
+      expect(skipSnap.enemiesState[0].trailHp).toBe(0);
+
+      const { scene: resumeScene } = mountCombatScene({
+        shipId: 'cannon_skiff',
+        sectorIndex: 1,
+        eventBackdrop: null,
+        units: [enemy],
+        simulation: sim,
+        resumeFromRound: 1,
+        settings: makeSettings({ reducedMotion: false }),
+      });
+      const resSnap = resumeScene.getStagePresentationSnapshot();
+      expect(resSnap.playerHp).toBe(25);
+      expect(resSnap.playerTrailHp).toBe(25);
+      expect(resSnap.enemiesState[0].hp).toBe(20);
+      expect(resSnap.enemiesState[0].trailHp).toBe(20);
+
+      // syncViewport NaN guard (must ignore non-finite width/height/dpr without corrupting camera)
+      resumeScene.syncViewport(390, 240, 2);
+      resumeScene.syncViewport(Number.NaN, 240, 1);
+      resumeScene.syncViewport(390, Number.POSITIVE_INFINITY, 1);
+      resumeScene.syncViewport(390, 240, Number.NaN);
+      expect(() => resumeScene.update(100, 16)).not.toThrow();
+      const vpInternals = resumeScene as unknown as { viewW: number; viewH: number; dpr: number };
+      expect(vpInternals.viewW).toBe(390);
+      expect(vpInternals.viewH).toBe(240);
+      expect(vpInternals.dpr).toBe(2);
+    }
+
+    // (d) Pure applyHpChangeToTrail: partial heal (< trailHp), overtaking heal (>= trailHp), and pre-corrupted state.hp = NaN self-heal
+    const partialHealState = { hp: 15, maxHp: 40, trailHp: 30, holdMs: 120 };
+    applyHpChangeToTrail(partialHealState, 22, false);
+    expect(partialHealState).toEqual({ hp: 22, maxHp: 40, trailHp: 30, holdMs: 120 });
+
+    const overtakeHealState = { hp: 15, maxHp: 40, trailHp: 30, holdMs: 120 };
+    applyHpChangeToTrail(overtakeHealState, 32, false);
+    expect(overtakeHealState).toEqual({ hp: 32, maxHp: 40, trailHp: 32, holdMs: 0 });
+
+    const corruptedState = { hp: Number.NaN, maxHp: 40, trailHp: Number.NaN, holdMs: Number.NaN };
+    applyHpChangeToTrail(corruptedState, 18, false);
+    expect(corruptedState).toEqual({ hp: 18, maxHp: 40, trailHp: 18, holdMs: 0 });
+
+    const corruptedTrailSameHp = { hp: 20, maxHp: 40, trailHp: Number.NaN, holdMs: Number.NaN };
+    applyHpChangeToTrail(corruptedTrailSameHp, 20, false);
+    expect(corruptedTrailSameHp).toEqual({ hp: 20, maxHp: 40, trailHp: 20, holdMs: 0 });
+  });
+
+  it('A04: clamps allocateNonOverlappingPopupPos strictly inside [0, viewW] x [0, viewH] on tiny viewports (16x16, 20x10, 40x24) with 0 NaN', () => {
+    const tinyViewports = [
+      { w: 16, h: 16 },
+      { w: 20, h: 10 },
+      { w: 40, h: 24 },
+    ] as const;
+
+    for (const vp of tinyViewports) {
+      const anchors = [
+        { x: 0, y: 0 },
+        { x: vp.w, y: 0 },
+        { x: 0, y: vp.h },
+        { x: vp.w, y: vp.h },
+        { x: vp.w * 0.5, y: vp.h * 0.5 },
+        { x: -50, y: 999 },
+        { x: Number.NaN, y: Number.POSITIVE_INFINITY },
+      ];
+      for (const anchor of anchors) {
+        const placed: { x: number; y: number }[] = [];
+        for (let i = 0; i < 12; i++) {
+          const pos = allocateNonOverlappingPopupPos({
+            desiredX: anchor.x,
+            desiredY: anchor.y,
+            existing: placed,
+            viewW: vp.w,
+            viewH: vp.h,
+          });
+          expect(Number.isFinite(pos.x)).toBe(true);
+          expect(Number.isFinite(pos.y)).toBe(true);
+          expect(pos.x).toBeGreaterThanOrEqual(0);
+          expect(pos.x).toBeLessThanOrEqual(vp.w);
+          expect(pos.y).toBeGreaterThanOrEqual(0);
+          expect(pos.y).toBeLessThanOrEqual(vp.h);
+          placed.push(pos);
+        }
+      }
+    }
+
+    // 40x24 (< 56x32) centers cleanly at (20, 12) instead of pinning off-center at (28, 16)
+    const centered = allocateNonOverlappingPopupPos({
+      desiredX: 20,
+      desiredY: 12,
+      existing: [],
+      viewW: 40,
+      viewH: 24,
+    });
+    expect(centered).toEqual({ x: 20, y: 12 });
+  });
+});
+
 

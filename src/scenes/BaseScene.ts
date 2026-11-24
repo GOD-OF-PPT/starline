@@ -215,32 +215,26 @@ export function solveArticulatedCranePose(input: ArticulatedCraneInput): Articul
     y: targetY,
   };
 
-  let lowerBoomLength = 152 * s;
-  let upperJibLength = 138 * s;
-
+  const nominal = (mode === 'stowed' ? 54 : 148) * s;
   const dx = trolley.x - shoulder.x;
   const dy = trolley.y - shoulder.y;
   const dist = Math.hypot(dx, dy);
 
-  const maxReach = (lowerBoomLength + upperJibLength) * 0.94;
-  const minReach = Math.abs(lowerBoomLength - upperJibLength) + 8 * s;
-
-  if (dist > maxReach) {
-    // Telescope upper jib smoothly for distant targets (e.g., relic display dome) while keeping elbow arch
-    upperJibLength = dist - lowerBoomLength + 20 * s;
-  } else if (dist < minReach) {
-    // Retract stowed/close-range boom & equalize links so |lower - upper| === 0 <= dist < lower + upper ALWAYS holds
-    const ratio = Math.max(0.28, (dist + 24 * s) / (lowerBoomLength + upperJibLength));
-    const retracted = Math.max(lowerBoomLength * ratio, dist * 0.6 + 8 * s);
-    lowerBoomLength = retracted;
-    upperJibLength = retracted;
-  } else if (dy > 0 && lowerBoomLength * lowerBoomLength - upperJibLength * upperJibLength > dist * dist) {
-    // Prevent obtuse elbow overhang below trolley when reaching steeply downward at mid-short distance
-    upperJibLength = lowerBoomLength;
-  }
+  // Symmetric telescoping beyond 94% nominal reach (strictly C0 continuous at dist === maxReach)
+  const maxReach = nominal * 2 * 0.94;
+  const baseLength = dist > maxReach ? (dist / 0.94) * 0.5 : nominal;
+  const u = dist * 0.5;
+  const fullArch = Math.sqrt(Math.max(0, baseLength * baseLength - u * u));
+  // Smooth 3D turntable yaw foreshortening eliminates the planar 2-link elbow flip across dx = 0
+  // while keeping lowerBoomLength === upperJibLength and exact circle-intersection geometry everywhere.
+  const softYawRadius = 36 * s;
+  const signedYaw = dist < 1e-7 ? 0 : dx / Math.hypot(dx, dy, softYawRadius);
+  const arch = fullArch * Math.abs(signedYaw);
+  const lowerBoomLength = dist < 1e-7 ? Math.max(12 * s, nominal * 0.35) : Math.hypot(u, arch);
+  const upperJibLength = lowerBoomLength;
 
   let elbow: CranePoint2D;
-  if (dist < 1e-4) {
+  if (dist < 1e-7) {
     const ux = -0.4;
     const uy = -Math.sqrt(1 - ux * ux);
     elbow = {
@@ -248,26 +242,14 @@ export function solveArticulatedCranePose(input: ArticulatedCraneInput): Articul
       y: shoulder.y + lowerBoomLength * uy,
     };
   } else {
-    const a = lowerBoomLength;
-    const b = upperJibLength;
-    const u = clampVal((a * a - b * b + dist * dist) / (2 * dist), -a, a);
-    const hSq = Math.max(0, a * a - u * u);
-    const h = Math.sqrt(hSq);
-
-    const mx = shoulder.x + (u / dist) * dx;
-    const my = shoulder.y + (u / dist) * dy;
-    const px = -dy / dist;
-    const py = dx / dist;
-
-    const candA: CranePoint2D = { x: mx + h * px, y: my + h * py };
-    const candB: CranePoint2D = { x: mx - h * px, y: my - h * py };
-
-    // Always choose the overhead candidate (smaller Y in screen space; deterministic -X tie-breaker)
-    if (Math.abs(candA.y - candB.y) > 1e-4) {
-      elbow = candA.y < candB.y ? candA : candB;
-    } else {
-      elbow = candA.x <= candB.x ? candA : candB;
-    }
+    const mx = shoulder.x + 0.5 * dx;
+    const my = shoulder.y + 0.5 * dy;
+    // Closed-form overhead intersection (identical to min-Y circle candidate; C-infinity smooth across dx = 0):
+    // elbow.y = my - arch * (|dx| / dist) <= chordMidY <= max(shoulder.y, trolley.y) unconditionally.
+    elbow = {
+      x: mx + fullArch * signedYaw * (dy / dist),
+      y: my - fullArch * signedYaw * (dx / dist),
+    };
   }
 
   const segments: readonly [CraneSegment, CraneSegment, CraneSegment, CraneSegment] = [
@@ -655,11 +637,14 @@ export class BaseScene extends Phaser.Scene {
         this.dockingServoStage = 2;
         this.triggerCraneServo();
       }
-      pb.onProgress?.(p);
-      if (p >= 1 && this.dockingPlayback === pb) {
+      if (p >= 1) {
         this.dockingPlayback = null;
+        this.dockingElapsedMs = 0;
         this.dockingServoStage = 2;
         if (this.arrivalShipSprite) this.arrivalShipSprite.setVisible(false);
+      }
+      pb.onProgress?.(p);
+      if (p >= 1) {
         pb.onFinish?.();
       }
     }

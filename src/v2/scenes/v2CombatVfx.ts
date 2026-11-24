@@ -461,6 +461,15 @@ export function applyHpChangeToTrail(
 ): void {
   if (!Number.isFinite(nextHp)) return;
   const clamped = Math.max(0, nextHp);
+  if (!Number.isFinite(state.hp)) {
+    state.hp = clamped;
+    state.trailHp = clamped;
+    state.holdMs = 0;
+    return;
+  }
+  if (!Number.isFinite(state.holdMs)) {
+    state.holdMs = 0;
+  }
   if (reducedMotion) {
     state.trailHp = clamped;
     state.holdMs = 0;
@@ -472,8 +481,11 @@ export function applyHpChangeToTrail(
       state.trailHp = clamped;
       state.holdMs = 0;
     }
+  } else if (!Number.isFinite(state.trailHp)) {
+    state.trailHp = clamped;
+    state.holdMs = 0;
   }
-  // When clamped === state.hp && !reducedMotion: preserve active trailHp and holdMs untouched!
+  // When clamped === state.hp && !reducedMotion && finite trailHp: preserve active trailHp and holdMs untouched!
   state.hp = clamped;
 }
 
@@ -620,8 +632,8 @@ export function allocateNonOverlappingPopupPos(input: PopupPositionInput): { rea
     input.minDy !== undefined && Number.isFinite(input.minDy) && input.minDy > 0 ? input.minDy : 18;
   const viewW = Number.isFinite(input.viewW) && input.viewW > 0 ? input.viewW : 390;
   const viewH = Number.isFinite(input.viewH) && input.viewH > 0 ? input.viewH : 240;
-  const marginX = 28;
-  const marginY = 16;
+  const marginX = Math.min(28, viewW * 0.5);
+  const marginY = Math.min(16, viewH * 0.5);
   const maxX = Math.max(marginX, viewW - marginX);
   const maxY = Math.max(marginY, viewH - marginY);
   const clamp = (val: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, val));
