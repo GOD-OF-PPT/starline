@@ -2914,7 +2914,7 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       const board = mountEl.querySelector('.v2-cargo-board')!;
       const pt = cellCenterPoint(4, 4, 0, 0);
       board.dispatchEvent(new MiniEvent('pointerdown', { bubbles: true, clientX: pt.x, clientY: pt.y }));
-      board.dispatchEvent(new MiniEvent('pointerup', { bubbles: true, clientX: pt.x, clientY: pt.y }));
+      dom.window.dispatchEvent(new MiniEvent('pointerup', { bubbles: true, clientX: pt.x, clientY: pt.y }));
       const discardBtn = mountEl.querySelector('#btn-v2-discard');
       expect(discardBtn).not.toBeNull();
       discardBtn!.click();
@@ -2943,7 +2943,7 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
 
       // Re-select & discard, then confirm -> flushes and transitions to MAP
       board.dispatchEvent(new MiniEvent('pointerdown', { bubbles: true, clientX: pt.x, clientY: pt.y }));
-      board.dispatchEvent(new MiniEvent('pointerup', { bubbles: true, clientX: pt.x, clientY: pt.y }));
+      dom.window.dispatchEvent(new MiniEvent('pointerup', { bubbles: true, clientX: pt.x, clientY: pt.y }));
       mountEl.querySelector('#btn-v2-discard')!.click();
       mountEl.querySelector('#v2-shop-finish')!.click();
       const confirmBtn = mountEl.querySelector('#v2-discard-ok');
@@ -2977,7 +2977,7 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       await flushMicrotasks();
       const termBoard = mountElTerm.querySelector('.v2-cargo-board')!;
       termBoard.dispatchEvent(new MiniEvent('pointerdown', { bubbles: true, clientX: pt.x, clientY: pt.y }));
-      termBoard.dispatchEvent(new MiniEvent('pointerup', { bubbles: true, clientX: pt.x, clientY: pt.y }));
+      dom.window.dispatchEvent(new MiniEvent('pointerup', { bubbles: true, clientX: pt.x, clientY: pt.y }));
       mountElTerm.querySelector('#btn-v2-discard')!.click();
       mountElTerm.querySelector('#v2-shop-finish')!.click();
       const termOk = mountElTerm.querySelector('#v2-discard-ok');

@@ -494,7 +494,7 @@ import {
   launchV2Expedition,
   validateV2PrepareLoadout,
 } from '../src/v2/domain/loadout';
-import { createFreshV2SaveData, persistV2SaveData } from '../src/v2/domain/persistenceV2';
+import { createFreshV2SaveData, loadV2SaveData, persistV2SaveData } from '../src/v2/domain/persistenceV2';
 import { calculateV2Settlement } from '../src/v2/domain/settlementV2';
 import {
   classifyV2CombatDeltaTrend,
@@ -516,6 +516,7 @@ import {
 } from '../src/v2/ui/playtestTelemetry';
 import { SettlementBillRollupController, renderSettlementView } from '../src/v2/ui/screens/SettlementView';
 import { V2AppController } from '../src/v2/ui/V2AppController';
+import { openV2HelpModal } from '../src/v2/ui/V2Modals';
 
 // ---------------------------------------------------------------------------
 // Minimal Pure-JS Fake DOM for Node-environment Integration Testing
@@ -560,6 +561,9 @@ class MiniEvent {
     this.defaultPrevented = true;
   }
   stopPropagation(): void {
+    this.stopped = true;
+  }
+  stopImmediatePropagation(): void {
     this.stopped = true;
   }
   isStopped(): boolean {
@@ -1161,6 +1165,7 @@ class MiniWindow {
   devicePixelRatio = 1;
   __STARLINE_INSPECT__?: () => unknown;
   private readonly listeners = new Map<string, Set<(ev: MiniEvent) => void>>();
+  private readonly captureListeners = new Map<string, Set<(ev: MiniEvent) => void>>();
 
   constructor(doc: MiniDocument, search = '') {
     this.document = doc;
@@ -1178,27 +1183,52 @@ class MiniWindow {
     globalThis.setTimeout(() => fn(Date.now()), 16) as unknown as number;
   cancelAnimationFrame = (id: number) =>
     globalThis.clearTimeout(id as unknown as ReturnType<typeof setTimeout>);
-  addEventListener(type: string, fn: (ev: MiniEvent) => void): void {
-    let set = this.listeners.get(type);
-    if (!set) {
-      set = new Set();
-      this.listeners.set(type, set);
-    }
+  addEventListener(
+    type: string,
+    fn: (ev: MiniEvent) => void,
+    capture?: boolean | { capture?: boolean }
+  ): void {
+    const isCap = typeof capture === 'boolean' ? capture : Boolean(capture?.capture);
+    const map = isCap ? this.captureListeners : this.listeners;
+    const set = map.get(type) ?? new Set<(ev: MiniEvent) => void>();
+    map.set(type, set);
     set.add(fn);
   }
-  removeEventListener(type: string, fn: (ev: MiniEvent) => void): void {
-    this.listeners.get(type)?.delete(fn);
+  removeEventListener(
+    type: string,
+    fn: (ev: MiniEvent) => void,
+    capture?: boolean | { capture?: boolean }
+  ): void {
+    const isCap = typeof capture === 'boolean' ? capture : Boolean(capture?.capture);
+    (isCap ? this.captureListeners : this.listeners).get(type)?.delete(fn);
   }
   getListenerCount(type: string): number {
-    return this.listeners.get(type)?.size ?? 0;
+    return (this.captureListeners.get(type)?.size ?? 0) + (this.listeners.get(type)?.size ?? 0);
+  }
+  dispatchCapture(ev: MiniEvent): void {
+    for (const fn of [...(this.captureListeners.get(ev.type) ?? [])]) fn(ev);
+  }
+  dispatchBubble(ev: MiniEvent): void {
+    for (const fn of [...(this.listeners.get(ev.type) ?? [])]) fn(ev);
   }
   dispatchEvent(ev: MiniEvent): boolean {
-    const set = this.listeners.get(ev.type);
-    if (set) {
-      for (const fn of [...set]) fn(ev);
-    }
+    this.dispatchCapture(ev);
+    ev.isStopped() || this.dispatchBubble(ev);
     return !ev.defaultPrevented;
   }
+}
+
+function dispatchWindowCaptureAndBubble(win: MiniWindow, target: MiniNode, ev: MiniEvent): void {
+  ev.target = target;
+  win.dispatchCapture(ev);
+  ev.isStopped() || target.dispatchEvent(ev);
+  (!ev.bubbles || ev.isStopped()) || win.dispatchBubble(ev);
+}
+
+function readLoadedV2Save(storage: Storage): V2SaveData {
+  const res = loadV2SaveData(storage);
+  expect(res.status).toBe('loaded');
+  return (res as Extract<typeof res, { readonly status: 'loaded' }>).data;
 }
 
 function installMiniDom(search = ''): { readonly window: MiniWindow; readonly document: MiniDocument } {
@@ -3071,6 +3101,822 @@ describe('M1B Stage, Feel, Feedback & Telemetry Suite (S03, S06, S07, S08, S09, 
       expect(dom.window.getListenerCount('blur')).toBe(blurBefore);
       dom.window.dispatchEvent(new MiniEvent('blur'));
       expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+    });
+
+    it('blocks Finger-2 inspector buttons during pending touch drag (active === false) without breaking single-pointer controls (Iter-5 Fix 2)', () => {
+      const laserItem = createV2EquipmentInstance({
+        instanceId: 'eq_laser_p23',
+        kind: 'laser',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const batteryItem = createV2EquipmentInstance({
+        instanceId: 'eq_bat_p23',
+        kind: 'battery',
+        quality: 'common',
+        origin: 'loot',
+        acquiredDepth: 1,
+        location: 'bay',
+      });
+      const stItem = createV2EquipmentInstance({
+        instanceId: 'st_p23_1',
+        kind: 'shield',
+        quality: 'common',
+        origin: 'loot',
+        acquiredDepth: 1,
+        location: 'staging',
+      });
+
+      let bay: V2CargoBayState = {
+        shipId: 'cannon_skiff',
+        placed: [
+          { item: laserItem, x: 0, y: 0, rotation: 0 },
+          { item: batteryItem, x: 2, y: 0, rotation: 0 },
+        ],
+        staging: [{ item: stItem, rotation: 0 }],
+        discardedThisArrange: [],
+      };
+      const dragAttempts: Array<{
+        readonly zone: 'grid' | 'staging';
+        readonly itemDefId: string;
+        readonly success: boolean;
+        readonly reason?: string;
+      }> = [];
+      let prepRemovals = 0;
+
+      const mount = dom.document.createElement('div');
+      dom.document.body.appendChild(mount);
+      const grid = new CargoGridV2Component(mount as unknown as HTMLElement, {
+        onBayChange: (nextBay) => {
+          bay = nextBay;
+          grid.render(bay, true);
+        },
+        onPrepareRemoveItem: () => {
+          prepRemovals += 1;
+        },
+        onDragAttempt: (attempt) => {
+          dragAttempts.push(attempt);
+        },
+      });
+      grid.render(bay, true);
+
+      const board = mount.querySelector('.v2-cargo-board')!;
+      const p00 = cellCenter(4, 4, 0, 0);
+      const p20 = cellCenter(4, 4, 2, 0);
+      const p32 = cellCenter(4, 4, 3, 2);
+      const touchLiftY = 56;
+
+      // 1A: Finger 1 holds 1x2 laser at (0,0) motionless (active === false); Finger 2 taps #btn-v2-rotate -> ignored!
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: p00.x, clientY: p00.y })
+      );
+      mount.querySelector('#btn-v2-rotate')!.click();
+      expect(bay.placed.find((p) => p.item.instanceId === 'eq_laser_p23')!.rotation).toBe(0);
+
+      // Finger 1 drags to (3,2) where 1x2 rot=0 fits (3,2)+(3,3), while 2x1 rot=1 overflows -> ghost & drop succeed cleanly!
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', {
+          bubbles: true,
+          pointerId: 1,
+          pointerType: 'touch',
+          clientX: p32.x,
+          clientY: p32.y + touchLiftY,
+        })
+      );
+      const ghost = dom.document.querySelector('.v2-drag-ghost')!;
+      expect(ghost).not.toBeNull();
+      expect(ghost.dataset.rotation).toBe('0');
+      expect(ghost.dataset.valid).toBe('true');
+
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', {
+          bubbles: true,
+          pointerId: 1,
+          pointerType: 'touch',
+          clientX: p32.x,
+          clientY: p32.y + touchLiftY,
+        })
+      );
+      const laserMoved = bay.placed.find((p) => p.item.instanceId === 'eq_laser_p23')!;
+      expect({ x: laserMoved.x, y: laserMoved.y, rotation: laserMoved.rotation }).toEqual({ x: 3, y: 2, rotation: 0 });
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(dragAttempts).toEqual([
+        { zone: 'grid', itemDefId: 'equipment.laser.common', success: true, reason: undefined },
+      ]);
+
+      // 1B: Finger 1 holds placed battery (active === false) -> Finger 2 tapping #btn-v2-discard & #btn-v2-to-staging is ignored
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: p20.x, clientY: p20.y })
+      );
+      mount.querySelector('#btn-v2-discard')!.click();
+      mount.querySelector('#btn-v2-to-staging')!.click();
+      expect(bay.placed.some((p) => p.item.instanceId === 'eq_bat_p23')).toBe(true);
+      expect(bay.staging).toHaveLength(1);
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: p20.x, clientY: p20.y })
+      );
+
+      // 1C: Finger 1 holds staging chip (active === false) -> Finger 2 tapping #btn-v2-autoplace is ignored
+      const stChip = mount.querySelector('[data-staging-id="st_p23_1"]')!;
+      stChip.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: 20, clientY: 320 })
+      );
+      mount.querySelector('#btn-v2-autoplace')!.click();
+      expect(bay.staging.some((s) => s.item.instanceId === 'st_p23_1')).toBe(true);
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: 20, clientY: 320 })
+      );
+
+      // 1D: Prepare mode pending drag blocks #btn-v2-prep-remove; after pointerup, single-pointer click works cleanly
+      grid.render(bay, true, { prepareMode: true });
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: p20.x, clientY: p20.y })
+      );
+      mount.querySelector('#btn-v2-prep-remove')!.click();
+      expect(prepRemovals).toBe(0);
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: p20.x, clientY: p20.y })
+      );
+      mount.querySelector('#btn-v2-prep-remove')!.click();
+      expect(prepRemovals).toBe(1);
+
+      // Normal single-pointer #btn-v2-rotate after pointerdown + pointerup works cleanly
+      grid.render(bay, true, { prepareMode: false });
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 4, pointerType: 'mouse', clientX: p32.x, clientY: p32.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 4, pointerType: 'mouse', clientX: p32.x, clientY: p32.y })
+      );
+      mount.querySelector('#btn-v2-rotate')!.click();
+      expect(bay.placed.find((p) => p.item.instanceId === 'eq_laser_p23')!.rotation).toBe(1);
+
+      grid.destroy();
+    });
+
+    it('recovers lost-pointerup via capture-phase window pointerdown outside board/staging without stale teleports or spring-backs, and cleans listener on destroy() (Iter-5 Fix 3)', () => {
+      clearTacticalDeltaCache();
+      const simSpy = vi.spyOn(combatV2, 'simulateV2Combat');
+      const run = createV2TutorialRun('run_iter5_outside_down');
+
+      const laserItem = createV2EquipmentInstance({
+        instanceId: 'eq_laser_out',
+        kind: 'laser',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const batteryItem = createV2EquipmentInstance({
+        instanceId: 'eq_bat_out',
+        kind: 'battery',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+
+      let bay: V2CargoBayState = {
+        shipId: 'heavy_freighter',
+        placed: [
+          { item: laserItem, x: 1, y: 1, rotation: 0 },
+          { item: batteryItem, x: 3, y: 1, rotation: 0 },
+        ],
+        staging: [],
+        discardedThisArrange: [],
+      };
+      const dragAttempts: Array<{ readonly success: boolean; readonly reason?: string }> = [];
+
+      const mount = dom.document.createElement('div');
+      dom.document.body.appendChild(mount);
+      const pointerDownBefore = dom.window.getListenerCount('pointerdown');
+      const grid = new CargoGridV2Component(mount as unknown as HTMLElement, {
+        onBayChange: (nextBay) => {
+          bay = nextBay;
+          grid.render(bay, true);
+        },
+        getTacticalDelta: (item, zone) =>
+          computeV2PlacementTacticalDelta({
+            run,
+            bay,
+            startingHp: 28,
+            maxHp: 28,
+            targetPolicy: 'weakest',
+            item,
+            zone,
+          }),
+        onDragAttempt: (attempt) => {
+          dragAttempts.push({ success: attempt.success, reason: attempt.reason });
+        },
+      });
+      expect(dom.window.getListenerCount('pointerdown')).toBe(pointerDownBefore + 1);
+      grid.render(bay, true);
+      vi.advanceTimersByTime(300);
+
+      const board = mount.querySelector('.v2-cargo-board')!;
+      const statsEl = mount.querySelector('[data-cargo-slot="stats"]')!;
+      const p11 = cellCenter(5, 4, 1, 1);
+      const p21 = cellCenter(5, 4, 2, 1);
+      const p31 = cellCenter(5, 4, 3, 1);
+
+      // Case A: Hovered over valid empty (2,1) -> lost pointerup -> same pointerId clicks statsEl -> 0 ghosts, 0 teleport, 0 spurious attempt, delta recovers
+      clearTacticalDeltaCache();
+      simSpy.mockClear();
+      dragAttempts.length = 0;
+      dispatchWindowCaptureAndBubble(
+        dom.window,
+        board,
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p31.x, clientY: p31.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p21.x, clientY: p21.y })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+      expect(simSpy).toHaveBeenCalledTimes(0);
+
+      dispatchWindowCaptureAndBubble(
+        dom.window,
+        statsEl,
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: 10, clientY: 10 })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(mount.querySelectorAll('.dragging-source').length).toBe(0);
+      expect(mount.querySelectorAll('.cargo-cell.preview-valid').length).toBe(0);
+
+      dispatchWindowCaptureAndBubble(
+        dom.window,
+        statsEl,
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: 10, clientY: 10 })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      const batAfterStats = bay.placed.find((p) => p.item.instanceId === 'eq_bat_out')!;
+      expect({ x: batAfterStats.x, y: batAfterStats.y }).toEqual({ x: 3, y: 1 });
+      expect(dragAttempts).toHaveLength(0);
+      vi.advanceTimersByTime(200);
+      expect(simSpy.mock.calls.length).toBeGreaterThan(0);
+      expect(mount.querySelector('[data-testid="btn-toggle-item-details"]')).not.toBeNull();
+
+      // Case B: Hovered off-board -> lost pointerup -> same pointerId clicks document.body -> 0 ghosts, 0 spring-back, 0 spurious outside_board attempt
+      dragAttempts.length = 0;
+      dispatchWindowCaptureAndBubble(
+        dom.window,
+        board,
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p11.x, clientY: p11.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: 500, clientY: 500 })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+
+      dispatchWindowCaptureAndBubble(
+        dom.window,
+        dom.document.body,
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: 500, clientY: 500 })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      dispatchWindowCaptureAndBubble(
+        dom.window,
+        dom.document.body,
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: 500, clientY: 500 })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(dragAttempts).toHaveLength(0);
+
+      // Case C: Secondary mobile pointer outside board/staging is ignored, while same desktop pointer clicking inspector cancels drag & executes click cleanly
+      dispatchWindowCaptureAndBubble(
+        dom.window,
+        board,
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: p11.x, clientY: p11.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: p21.x, clientY: p21.y + 56 })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+      dispatchWindowCaptureAndBubble(
+        dom.window,
+        statsEl,
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 2, pointerType: 'touch', clientX: 10, clientY: 10 })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+
+      const rotateBtn = mount.querySelector('#btn-v2-rotate')!;
+      dispatchWindowCaptureAndBubble(
+        dom.window,
+        rotateBtn,
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: 10, clientY: 10 })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      dispatchWindowCaptureAndBubble(
+        dom.window,
+        rotateBtn,
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: 10, clientY: 10 })
+      );
+      rotateBtn.click();
+      expect(bay.placed.find((p) => p.item.instanceId === 'eq_laser_out')!.rotation).toBe(1);
+
+      grid.destroy();
+      expect(dom.window.getListenerCount('pointerdown')).toBe(pointerDownBefore);
+    });
+
+    it('cancels active drag cleanly when external render() rotates, relocates, or swaps definitionId on same instanceId, and recovers delta on staging rotation (Iter-5 Fix 4)', () => {
+      clearTacticalDeltaCache();
+      const simSpy = vi.spyOn(combatV2, 'simulateV2Combat');
+      const run = createV2TutorialRun('run_iter5_render_valid');
+
+      const laserItem = createV2EquipmentInstance({
+        instanceId: 'ps_0',
+        kind: 'laser',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const shieldItem = createV2EquipmentInstance({
+        instanceId: 'ps_0',
+        kind: 'shield',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const stLaser = createV2EquipmentInstance({
+        instanceId: 'st_rot_1',
+        kind: 'laser',
+        quality: 'common',
+        origin: 'loot',
+        acquiredDepth: 1,
+        location: 'staging',
+      });
+
+      let bay: V2CargoBayState = {
+        shipId: 'cannon_skiff',
+        placed: [{ item: laserItem, x: 0, y: 0, rotation: 0 }],
+        staging: [{ item: stLaser, rotation: 0 }],
+        discardedThisArrange: [],
+      };
+
+      const mount = dom.document.createElement('div');
+      dom.document.body.appendChild(mount);
+      const grid = new CargoGridV2Component(mount as unknown as HTMLElement, {
+        onBayChange: (nextBay) => {
+          bay = nextBay;
+          grid.render(bay, true);
+        },
+        getTacticalDelta: (item, zone) =>
+          computeV2PlacementTacticalDelta({
+            run,
+            bay,
+            startingHp: 30,
+            maxHp: 30,
+            targetPolicy: 'weakest',
+            item,
+            zone,
+          }),
+      });
+      grid.render(bay, true);
+      vi.advanceTimersByTime(300);
+
+      const board = mount.querySelector('.v2-cargo-board')!;
+      const p00 = cellCenter(4, 4, 0, 0);
+      const p21 = cellCenter(4, 4, 2, 1);
+      const p32 = cellCenter(4, 4, 3, 2);
+
+      // 1. External render() rotates dragged placed item in-place -> cancels drag & clears ghost/visuals
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p00.x, clientY: p00.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p32.x, clientY: p32.y })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+      bay = { ...bay, placed: [{ item: laserItem, x: 0, y: 0, rotation: 1 }] };
+      grid.render(bay, true);
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(mount.querySelectorAll('.dragging-source').length).toBe(0);
+      expect(mount.querySelectorAll('.cargo-cell.preview-valid').length).toBe(0);
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p32.x, clientY: p32.y })
+      );
+      expect({ x: bay.placed[0].x, y: bay.placed[0].y, rotation: bay.placed[0].rotation }).toEqual({ x: 0, y: 0, rotation: 1 });
+
+      // 2. External render() relocates dragged placed item (same instanceId & rotation, new x/y) -> cancels drag
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 2, pointerType: 'mouse', clientX: p00.x, clientY: p00.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 2, pointerType: 'mouse', clientX: p21.x, clientY: p21.y })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+      bay = { ...bay, placed: [{ item: laserItem, x: 1, y: 1, rotation: 1 }] };
+      grid.render(bay, true);
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(mount.querySelectorAll('.dragging-source').length).toBe(0);
+
+      // 3. Same-hull Prepare preset swap reusing instanceId 'ps_0' with different definitionId -> cancels drag
+      bay = { shipId: 'cannon_skiff', placed: [{ item: laserItem, x: 0, y: 0, rotation: 0 }], staging: [], discardedThisArrange: [] };
+      grid.render(bay, true, { prepareMode: true });
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 3, pointerType: 'mouse', clientX: p00.x, clientY: p00.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 3, pointerType: 'mouse', clientX: p21.x, clientY: p21.y })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+      bay = { shipId: 'cannon_skiff', placed: [{ item: shieldItem, x: 0, y: 0, rotation: 0 }], staging: [], discardedThisArrange: [] };
+      grid.render(bay, true, { prepareMode: true });
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(mount.querySelectorAll('.dragging-source').length).toBe(0);
+      expect(mount.querySelectorAll('.cargo-cell.preview-valid').length).toBe(0);
+
+      // 4. External render() rotating dragged staging item (bay.placed unchanged) cancels drag AND recovers tactical delta!
+      bay = {
+        shipId: 'cannon_skiff',
+        placed: [{ item: laserItem, x: 0, y: 0, rotation: 0 }],
+        staging: [{ item: stLaser, rotation: 0 }],
+        discardedThisArrange: [],
+      };
+      grid.render(bay, true, { prepareMode: false });
+      vi.advanceTimersByTime(200);
+      // Select placed ps_0 first so dragging unselected staging item st_rot_1 defers delta per D8.4
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 39, pointerType: 'mouse', clientX: p00.x, clientY: p00.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 39, pointerType: 'mouse', clientX: p00.x, clientY: p00.y })
+      );
+      vi.advanceTimersByTime(200);
+      clearTacticalDeltaCache();
+      simSpy.mockClear();
+
+      const stChip = mount.querySelector('[data-staging-id="st_rot_1"]')!;
+      stChip.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 4, pointerType: 'mouse', clientX: 20, clientY: 320 })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 4, pointerType: 'mouse', clientX: p21.x, clientY: p21.y })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+      expect(simSpy).toHaveBeenCalledTimes(0);
+
+      bay = { ...bay, staging: [{ item: stLaser, rotation: 1 }] };
+      grid.render(bay, true, { prepareMode: false });
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      vi.advanceTimersByTime(200);
+      expect(simSpy.mock.calls.length).toBeGreaterThan(0);
+      expect(mount.querySelector('[data-testid="btn-toggle-item-details"]')).not.toBeNull();
+
+      grid.destroy();
+    });
+
+    it('cancels live V2AppController drags & <240ms spring-backs across ARRANGE/SHOP->MAP, Help/Settings modals, visibilitychange, and same-hull preset switch (Iter-5 Fixes 1, 5, 6)', async () => {
+      const destroySpy = vi.spyOn(CargoGridV2Component.prototype, 'destroy');
+      const sfxSpy = vi.spyOn(soundEngine, 'play');
+
+      const laserItem = createV2EquipmentInstance({
+        instanceId: 'live_laser',
+        kind: 'laser',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const batteryItem = createV2EquipmentInstance({
+        instanceId: 'live_bat',
+        kind: 'battery',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+
+      const tutBase = createV2TutorialRun('run_iter5_live');
+      const arrangeRun: V2RunState = {
+        ...tutBase,
+        phase: 'ARRANGE',
+        bay: {
+          shipId: 'cannon_skiff',
+          placed: [
+            { item: laserItem, x: 0, y: 0, rotation: 0 },
+            { item: batteryItem, x: 2, y: 0, rotation: 0 },
+          ],
+          staging: [],
+          discardedThisArrange: [],
+        },
+      };
+
+      const { mountEl, controller } = mountController({ ...createFreshV2SaveData(), activeRun: arrangeRun });
+      await flushMicrotasks();
+
+      const board = mountEl.querySelector('.v2-cargo-board')!;
+      const p00 = cellCenter(4, 4, 0, 0);
+      const p10 = cellCenter(4, 4, 1, 0);
+      const p20 = cellCenter(4, 4, 2, 0);
+
+      // 1A: ARRANGE -> MAP during active drag clears ghost/dragging-source/preview-valid, 0 recreations, stray pointerup inert!
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p00.x, clientY: p00.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p10.x, clientY: p10.y })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+      expect(mountEl.querySelectorAll('.dragging-source').length).toBe(1);
+      expect(mountEl.querySelectorAll('.cargo-cell.preview-valid').length).toBe(2);
+
+      mountEl.querySelector('[data-testid="btn-leave-arrange"]')!.click();
+      expect((dom.window.__STARLINE_INSPECT__?.() as { phase?: string | null }).phase).toBe('MAP');
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(mountEl.querySelectorAll('.dragging-source').length).toBe(0);
+      expect(mountEl.querySelectorAll('.cargo-cell.preview-valid').length).toBe(0);
+      expect(destroySpy).toHaveBeenCalledTimes(0);
+
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p10.x, clientY: p10.y })
+      );
+      const savedAfterMap = readLoadedV2Save(dom.window.localStorage as unknown as Storage);
+      const laserAfterMap = savedAfterMap.activeRun!.bay.placed.find((p) => p.item.instanceId === 'live_laser')!;
+      expect({ x: laserAfterMap.x, y: laserAfterMap.y, rotation: laserAfterMap.rotation }).toEqual({ x: 0, y: 0, rotation: 0 });
+      controller.destroy();
+
+      // 1B: ARRANGE -> MAP during <240ms .is-spring-back ghost immediately flushes spring-back ghost!
+      destroySpy.mockClear();
+      const { mountEl: sbMount, controller: sbCtrl } = mountController({ ...createFreshV2SaveData(), activeRun: arrangeRun });
+      await flushMicrotasks();
+      const sbBoard = sbMount.querySelector('.v2-cargo-board')!;
+      sbBoard.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p20.x, clientY: p20.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: 500, clientY: 500 })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: 500, clientY: 500 })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost.is-spring-back').length).toBe(1);
+      sbMount.querySelector('[data-testid="btn-leave-arrange"]')!.click();
+      expect((dom.window.__STARLINE_INSPECT__?.() as { phase?: string | null }).phase).toBe('MAP');
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(destroySpy).toHaveBeenCalledTimes(0);
+      sbCtrl.destroy();
+
+      // 1C: SHOP -> MAP during active drag clears ghost & drag classes with 0 recreations!
+      destroySpy.mockClear();
+      const l1Base = tutBase.graph.nodes.L1A;
+      const shopRun: V2RunState = {
+        ...arrangeRun,
+        phase: 'SHOP',
+        currentNodeId: 'L1A',
+        visitedNodeIds: ['L1A'],
+        graph: {
+          ...tutBase.graph,
+          nodes: {
+            ...tutBase.graph.nodes,
+            L1A: {
+              ...l1Base,
+              type: 'merchant',
+              resolved: false,
+              combat: undefined,
+              merchant: {
+                offers: [],
+                fuelPrice: 15,
+                fuelAmount: 2,
+                fuelBought: false,
+                repairPrice: 15,
+                repairAmount: 4,
+                repairBought: false,
+              },
+            },
+          },
+        },
+      };
+      const { mountEl: shopMount, controller: shopCtrl } = mountController({ ...createFreshV2SaveData(), activeRun: shopRun });
+      await flushMicrotasks();
+      const shopBoard = shopMount.querySelector('.v2-cargo-board')!;
+      shopBoard.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p00.x, clientY: p00.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p10.x, clientY: p10.y })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+      shopMount.querySelector('#v2-shop-finish')!.click();
+      expect((dom.window.__STARLINE_INSPECT__?.() as { phase?: string | null }).phase).toBe('MAP');
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(shopMount.querySelectorAll('.dragging-source').length).toBe(0);
+      expect(destroySpy).toHaveBeenCalledTimes(0);
+      shopCtrl.destroy();
+
+      // 2: Help & Settings modals opened mid-drag in ARRANGE clear ghost/classes, emit 0 drag SFX while open, and keep bay intact after Escape!
+      const { mountEl: modalMount, controller: modalCtrl } = mountController({ ...createFreshV2SaveData(), activeRun: arrangeRun });
+      await flushMicrotasks();
+      const modalBoard = modalMount.querySelector('.v2-cargo-board')!;
+
+      for (const hudSelector of ['#v2-hud-help', '#v2-hud-settings'] as const) {
+        modalBoard.dispatchEvent(
+          new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p20.x, clientY: p20.y })
+        );
+        dom.window.dispatchEvent(
+          new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p10.x, clientY: p10.y })
+        );
+        expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+        expect(modalMount.querySelectorAll('.dragging-source').length).toBe(1);
+        expect(modalMount.querySelectorAll('.cargo-cell.preview-valid').length).toBe(1);
+
+        modalMount.querySelector(hudSelector)!.click();
+        expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+        expect(modalMount.querySelectorAll('.dragging-source').length).toBe(0);
+        expect(modalMount.querySelectorAll('.cargo-cell.preview-valid').length).toBe(0);
+
+        sfxSpy.mockClear();
+        dom.window.dispatchEvent(
+          new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p10.x, clientY: p10.y })
+        );
+        dom.window.dispatchEvent(
+          new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p10.x, clientY: p10.y })
+        );
+        const dragSfxDuringModal = sfxSpy.mock.calls.filter(([kind]) =>
+          ['hoverValid', 'place', 'placeHeavy', 'invalid'].includes(kind)
+        );
+        expect(dragSfxDuringModal).toHaveLength(0);
+
+        dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'Escape' }));
+        expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+        dom.window.dispatchEvent(
+          new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p10.x, clientY: p10.y })
+        );
+        const batCheck = readLoadedV2Save(dom.window.localStorage as unknown as Storage).activeRun!.bay.placed.find(
+          (p) => p.item.instanceId === 'live_bat'
+        )!;
+        expect({ x: batCheck.x, y: batCheck.y }).toEqual({ x: 2, y: 0 });
+      }
+
+      // 3: document.visibilitychange (hidden = true) mid-drag cancels drag immediately and blocks stray pointerup!
+      modalBoard.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: p20.x, clientY: p20.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: p10.x, clientY: p10.y + 56 })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+      dom.document.hidden = true;
+      dom.document.dispatchEvent(new MiniEvent('visibilitychange'));
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(modalMount.querySelectorAll('.dragging-source').length).toBe(0);
+      expect(modalMount.querySelectorAll('.cargo-cell.preview-valid').length).toBe(0);
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: p10.x, clientY: p10.y + 56 })
+      );
+      const batAfterHide = readLoadedV2Save(dom.window.localStorage as unknown as Storage).activeRun!.bay.placed.find(
+        (p) => p.item.instanceId === 'live_bat'
+      )!;
+      expect({ x: batAfterHide.x, y: batAfterHide.y }).toEqual({ x: 2, y: 0 });
+      dom.document.hidden = false;
+      modalCtrl.destroy();
+
+      // 4: Live PREPARE: Help/Settings modals mid-drag + same-hull preset switch reusing ps_0 with different definitionId!
+      const prepBase = createFreshV2SaveData();
+      const prepSave: V2SaveData = {
+        ...prepBase,
+        profile: {
+          ...prepBase.profile,
+          tutorialCompleted: true,
+          unlockedShips: ['cannon_skiff'],
+          selectedShipId: 'cannon_skiff',
+          loadoutPresets: [
+            {
+              presetId: 'preset_a',
+              name: '预设A',
+              shipId: 'cannon_skiff',
+              crewId: 'engineer',
+              primaryArchetype: 'laser',
+              slots: [
+                { definitionId: 'equipment.laser.common', quality: 'common', preferOrigin: 'loan', x: 0, y: 0, rotation: 0 },
+                { definitionId: 'equipment.battery.common', quality: 'common', preferOrigin: 'loan', x: 2, y: 0, rotation: 0 },
+              ],
+              updatedAt: '2026-11-24T00:00:00Z',
+            },
+            {
+              presetId: 'preset_b',
+              name: '预设B',
+              shipId: 'cannon_skiff',
+              crewId: 'engineer',
+              primaryArchetype: 'laser',
+              slots: [
+                { definitionId: 'equipment.shield.common', quality: 'common', preferOrigin: 'loan', x: 0, y: 0, rotation: 0 },
+                { definitionId: 'equipment.battery.common', quality: 'common', preferOrigin: 'loan', x: 2, y: 0, rotation: 0 },
+              ],
+              updatedAt: '2026-11-24T00:00:00Z',
+            },
+          ],
+        },
+        activeRun: null,
+      };
+      const { mountEl: prepMount, controller: prepCtrl } = mountController(prepSave);
+      await flushMicrotasks();
+      prepMount.querySelector('[data-testid="btn-start-recommended"]')!.click();
+      expect(prepMount.querySelector('[data-testid="prepare-screen"]')).not.toBeNull();
+      prepMount.querySelector('[data-load-preset="preset_a"]')!.click();
+
+      const prepBoard = prepMount.querySelector('.v2-cargo-board')!;
+      const p03 = cellCenter(4, 4, 0, 3);
+      for (const hudSelector of ['#v2-hud-help', '#v2-hud-settings'] as const) {
+        prepBoard.dispatchEvent(
+          new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p20.x, clientY: p20.y })
+        );
+        dom.window.dispatchEvent(
+          new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p03.x, clientY: p03.y })
+        );
+        expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+        prepMount.querySelector(hudSelector)!.click();
+        expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+        expect(prepMount.querySelectorAll('.dragging-source').length).toBe(0);
+        expect(prepMount.querySelectorAll('.cargo-cell.preview-valid').length).toBe(0);
+        dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'Escape' }));
+        dom.window.dispatchEvent(
+          new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p03.x, clientY: p03.y })
+        );
+        const ps1Tile = prepBoard.querySelector('[data-instance-id="ps_1"]')!;
+        expect({ left: ps1Tile.style.left, top: ps1Tile.style.top }).toEqual({ left: '50%', top: '0%' });
+      }
+
+      // Same-hull preset switch mid-drag (ps_0 changes laser -> shield) clears ghost & visuals cleanly
+      prepBoard.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p00.x, clientY: p00.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p10.x, clientY: p10.y })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+      prepMount.querySelector('[data-load-preset="preset_b"]')!.click();
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(prepMount.querySelectorAll('.dragging-source').length).toBe(0);
+      expect(prepMount.querySelectorAll('.cargo-cell.preview-valid').length).toBe(0);
+      prepCtrl.destroy();
+
+      // 5: Defense-in-depth standalone CargoGridV2 hasOpenModal() guard in handleWindowPointerMove & handleWindowPointerUp
+      const standaloneMount = dom.document.createElement('div');
+      const modalHost = dom.document.createElement('div');
+      dom.document.body.appendChild(standaloneMount);
+      dom.document.body.appendChild(modalHost);
+      let standaloneBay: V2CargoBayState = {
+        shipId: 'cannon_skiff',
+        placed: [
+          { item: laserItem, x: 0, y: 0, rotation: 0 },
+          { item: batteryItem, x: 2, y: 0, rotation: 0 },
+        ],
+        staging: [],
+        discardedThisArrange: [],
+      };
+      const standaloneGrid = new CargoGridV2Component(standaloneMount as unknown as HTMLElement, {
+        onBayChange: (nextBay) => {
+          standaloneBay = nextBay;
+          standaloneGrid.render(standaloneBay, true);
+        },
+      });
+      standaloneGrid.render(standaloneBay, true);
+      const standaloneBoard = standaloneMount.querySelector('.v2-cargo-board')!;
+
+      // Open modal mid-drag without controller hook -> pointermove cancels immediately with 0 SFX
+      standaloneBoard.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p20.x, clientY: p20.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p10.x, clientY: p10.y })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+      openV2HelpModal(modalHost as unknown as HTMLElement);
+      sfxSpy.mockClear();
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p10.x, clientY: p10.y })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(
+        sfxSpy.mock.calls.filter(([kind]) => ['hoverValid', 'place', 'placeHeavy', 'invalid'].includes(kind))
+      ).toHaveLength(0);
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'Escape' }));
+
+      // Open modal mid-drag without controller hook -> pointerup cancels immediately with 0 bay mutation & 0 SFX
+      standaloneBoard.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p20.x, clientY: p20.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p10.x, clientY: p10.y })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(1);
+      openV2HelpModal(modalHost as unknown as HTMLElement);
+      sfxSpy.mockClear();
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'mouse', clientX: p10.x, clientY: p10.y })
+      );
+      expect(dom.document.querySelectorAll('.v2-drag-ghost').length).toBe(0);
+      expect(
+        sfxSpy.mock.calls.filter(([kind]) => ['hoverValid', 'place', 'placeHeavy', 'invalid'].includes(kind))
+      ).toHaveLength(0);
+      expect({ x: standaloneBay.placed[1].x, y: standaloneBay.placed[1].y }).toEqual({ x: 2, y: 0 });
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'Escape' }));
+      standaloneGrid.destroy();
     });
   });
 
