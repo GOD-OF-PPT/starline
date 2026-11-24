@@ -1246,7 +1246,7 @@ export class CargoGridV2Component {
         pill.setAttribute('y', String(midY - 14));
         pill.setAttribute('width', String(pillW));
         pill.setAttribute('height', '28');
-        pill.setAttribute('rx', '14');
+        pill.setAttribute('rx', '2');
         pill.setAttribute('fill', '#0D1726');
         pill.setAttribute('stroke', col);
         pill.setAttribute('stroke-width', '2.5');
