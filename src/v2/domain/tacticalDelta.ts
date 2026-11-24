@@ -813,6 +813,18 @@ export interface V2MissionSacrificeSummary {
   readonly summaryText: string;
 }
 
+function getEffectiveFirepowerForSacrifice(
+  stats: ReturnType<typeof calculateV2BuildStats>
+): number {
+  let total = stats.nominalRound1SingleDmg;
+  for (const h of stats.heavies) {
+    if (!h.firesOnOddRounds) {
+      total += Math.round(h.baseDamage / 2);
+    }
+  }
+  return total;
+}
+
 function buildSacrificePreviewFromStatsDelta(
   item: V2ItemInstance,
   name: string,
@@ -822,7 +834,7 @@ function buildSacrificePreviewFromStatsDelta(
 ): V2ItemSacrificePreview {
   const firepowerLoss = Math.max(
     0,
-    statsBefore.nominalRound1SingleDmg - statsAfter.nominalRound1SingleDmg
+    getEffectiveFirepowerForSacrifice(statsBefore) - getEffectiveFirepowerForSacrifice(statsAfter)
   );
   const shieldLoss = Math.max(0, statsBefore.effectiveShield - statsAfter.effectiveShield);
   const repairLoss = Math.max(0, statsBefore.effectiveRepair - statsAfter.effectiveRepair);
@@ -962,46 +974,100 @@ export function summarizeV2MissionSacrificeOptions(
  */
 export function summarizeV2DiscardedSacrifices(bay: V2CargoBayState): string {
   if (bay.discardedThisArrange.length === 0) return '';
+
+  // Collect union of grid cells originally occupied by all grid-zone discarded items
+  const originalGridCells = new Set<string>();
+  for (const rec of bay.discardedThisArrange) {
+    if (rec.previousLocation.zone !== 'grid') continue;
+    const def = getAnyV2ItemDef(rec.item.definitionId);
+    if (!def) continue;
+    for (const c of getV2OccupiedCells(
+      def.shapeId,
+      rec.previousLocation.x,
+      rec.previousLocation.y,
+      rec.previousLocation.rotation
+    )) {
+      originalGridCells.add(`${c.x},${c.y}`);
+    }
+  }
+
+  // Keep currently placed items that do not overlap any discarded item's original footprint
+  const basePlaced = bay.placed.filter((p) => {
+    const pd = getAnyV2ItemDef(p.item.definitionId);
+    if (!pd) return true;
+    return !getV2OccupiedCells(pd.shapeId, p.x, p.y, p.rotation).some((c) =>
+      originalGridCells.has(`${c.x},${c.y}`)
+    );
+  });
+
+  // Reconstruct pre-discard bay by re-inserting all grid-zone discarded items
+  let runningBay: V2CargoBayState = { ...bay, placed: [...basePlaced] };
+  const reinsertedIds = new Set<string>();
+  for (const rec of bay.discardedThisArrange) {
+    if (rec.previousLocation.zone !== 'grid') continue;
+    const def = getAnyV2ItemDef(rec.item.definitionId);
+    if (!def) continue;
+    const loc = rec.previousLocation;
+    const check = validateV2Placement(
+      runningBay,
+      rec.item.definitionId,
+      loc.x,
+      loc.y,
+      loc.rotation
+    );
+    if (check.valid) {
+      runningBay = {
+        ...runningBay,
+        placed: [
+          ...runningBay.placed,
+          {
+            item: { ...rec.item, location: 'bay' },
+            x: loc.x,
+            y: loc.y,
+            rotation: loc.rotation,
+          },
+        ],
+      };
+      reinsertedIds.add(rec.item.instanceId);
+    } else {
+      const fallback = findFirstLegalV2Placement(runningBay, rec.item.definitionId);
+      if (fallback) {
+        runningBay = {
+          ...runningBay,
+          placed: [
+            ...runningBay.placed,
+            {
+              item: { ...rec.item, location: 'bay' },
+              x: fallback.x,
+              y: fallback.y,
+              rotation: fallback.rotation,
+            },
+          ],
+        };
+        reinsertedIds.add(rec.item.instanceId);
+      }
+    }
+  }
+
+  // Replay discards sequentially in original discard order (telescoping stats delta)
   const labels: string[] = [];
   for (const rec of bay.discardedThisArrange) {
     const def = getAnyV2ItemDef(rec.item.definitionId);
     if (!def) continue;
     const cells = V2_SHAPES[def.shapeId].cells.length;
-    if (rec.previousLocation.zone === 'grid') {
-      const prevLoc = rec.previousLocation;
-      const targetCoords = new Set(
-        getV2OccupiedCells(def.shapeId, prevLoc.x, prevLoc.y, prevLoc.rotation).map(
-          (c) => `${c.x},${c.y}`
-        )
-      );
-      const nonOverlappingPlaced = bay.placed.filter((p) => {
-        const pd = getAnyV2ItemDef(p.item.definitionId);
-        if (!pd) return true;
-        return !getV2OccupiedCells(pd.shapeId, p.x, p.y, p.rotation).some((c) =>
-          targetCoords.has(`${c.x},${c.y}`)
-        );
-      });
-      const probeWithout: V2CargoBayState = { ...bay, placed: nonOverlappingPlaced };
-      const probeWith: V2CargoBayState = {
-        ...bay,
-        placed: [
-          ...nonOverlappingPlaced,
-          {
-            item: { ...rec.item, location: 'bay' },
-            x: prevLoc.x,
-            y: prevLoc.y,
-            rotation: prevLoc.rotation,
-          },
-        ],
-      };
+    if (rec.previousLocation.zone === 'grid' && reinsertedIds.has(rec.item.instanceId)) {
+      const statsBefore = calculateV2BuildStats(runningBay);
+      const nextRunningBay = removeV2ItemById(runningBay, rec.item.instanceId);
+      const statsAfter = calculateV2BuildStats(nextRunningBay);
       const pv = buildSacrificePreviewFromStatsDelta(
         rec.item,
         def.name,
         cells,
-        calculateV2BuildStats(probeWith),
-        calculateV2BuildStats(probeWithout)
+        statsBefore,
+        statsAfter
       );
       labels.push(pv.fullLabel);
+      runningBay = nextRunningBay;
     } else {
       const val =
         rec.item.origin === 'loot' || rec.item.origin === 'owned'

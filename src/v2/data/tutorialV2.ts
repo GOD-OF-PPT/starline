@@ -51,7 +51,7 @@ export const V2_TUTORIAL_HINTS: Record<number, V2TutorialStageHint> = {
   4: {
     layer: 4,
     mapHint: '已抵达第 4 层终层节点，直接安全返航即可交付反应堆！',
-    encounterHint: 'A 线信标可零风险回港交付；B 线封锁拦截艇（14HP/4攻）保留激光炮+电池可 2 轮稳赢并夺取「古代导航仪」！',
+    encounterHint: 'A 线信标可零风险回港交付；B 线封锁拦截艇（7HP/4穿盾攻/甲2）保留激光炮+电池可 2 轮稳赢并夺取「古代导航仪」！',
     arrangeHint: '将战利品装舱后即可进入返航结算，免费通电工作台并领取 +40¤ 首航奖励！',
   },
 };
@@ -70,7 +70,7 @@ export const V2_TUTORIAL_HINTS: Record<number, V2TutorialStageHint> = {
  *   with >= 2 feasible single-discard choices and live sacrifice preview.
  * - Step 5 (`L4A` vs `L4B` fork):
  *   - `L4A`: Safe Return Beacon (`tutorial_safe_beacon`, 1 fallback option -> direct SETTLEMENT).
- *   - `L4B`: Optional Risk Branch (`tutorial_raider` 14 HP / 4 dmg + guaranteed `cargo.ancient_navigator`),
+ *   - `L4B`: Optional Risk Branch (`tutorial_raider` 7 HP / 4 pierce dmg / armor 2 + guaranteed `cargo.ancient_navigator`),
  *     steady (2r) if Laser+Battery kept, dangerous/lethal if Laser discarded.
  */
 export function createV2TutorialRun(runId: string): V2RunState {

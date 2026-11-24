@@ -355,7 +355,10 @@ export function resolveV2EventOption(
   const effects = resolveFallbackOptionEffects(eventState.eventId, option, run, unlockedFamilies);
 
   const nextFuel = Math.min(run.maxFuel, Math.max(0, run.fuel - fuelCost + effects.rewardFuel));
-  const nextHp = Math.min(run.maxHp, Math.max(1, run.hp - hpCost + effects.rewardHp));
+  const nextHp =
+    run.hp <= 0
+      ? 0
+      : Math.min(run.maxHp, Math.max(0, run.hp - hpCost + effects.rewardHp));
   const nextWallet = Math.max(0, run.wallet - walletCost + effects.rewardCredits);
   const nextParts = (run.salvagePartsEarned ?? 0) + Math.max(0, effects.rewardParts);
 
@@ -431,8 +434,8 @@ export function resolveV2EventOption(
   return {
     ok: true,
     run: nextRun,
-    hadDamage: hpCost > 0,
-    hadHeal: effects.rewardHp > 0,
+    hadDamage: hpCost > 0 || nextHp < run.hp,
+    hadHeal: run.hp > 0 && effects.rewardHp > 0,
     gainedItemsCount: effects.rewardItems.length,
   };
 }

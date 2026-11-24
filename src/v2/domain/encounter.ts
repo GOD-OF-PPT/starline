@@ -404,6 +404,12 @@ export function cutV2WreckHotspot(
   if (!node || node.type !== 'wreck') {
     return { ok: false, run, error: '当前节点不是漂流残骸' };
   }
+  if (node.resolved) {
+    return { ok: false, run, error: '该残骸节点已结算' };
+  }
+  if (run.hp <= 0) {
+    return { ok: false, run, error: '船体耐久归零，无法继续切割残骸' };
+  }
   if (node.combat || run.activeCombat) {
     return { ok: false, run, error: '当前存在敌舰伏击，请先处理战斗' };
   }
@@ -425,7 +431,7 @@ export function cutV2WreckHotspot(
   const spot = wreck.hotspots.find((h) => h.spotId === spotId)!;
   const grappleBonusParts = calculateV2BuildStats(run.bay).bonusSalvagePartsPerCut;
   const totalSpotParts = Math.max(0, spot.rewardParts ?? 0) + grappleBonusParts;
-  let nextHp = Math.max(1, run.hp - evalRes.effectiveHullDamage);
+  let nextHp = Math.max(0, run.hp - evalRes.effectiveHullDamage);
   let nextFuel = Math.max(0, run.fuel - evalRes.effectiveFuelCost);
   let nextWallet = run.wallet + Math.max(0, spot.rewardCredits ?? 0);
   let nextParts = (run.salvagePartsEarned ?? 0) + totalSpotParts;
@@ -620,6 +626,10 @@ export function extractV2Wreck(run: V2RunState): V2ActionOutcome {
   if (run.activeWreck?.ambushTriggered || node.combat) {
     return { ok: false, run, error: '敌舰伏击尚未清除，无法直接撤离' };
   }
+  const claimKey = `wreck_extract_${node.nodeId}`;
+  if (node.resolved || run.activeWreck?.extracted || run.claimedEventIds.includes(claimKey)) {
+    return { ok: false, run, error: '该残骸节点已结算' };
+  }
 
   const cutsMade = run.activeWreck?.cutsMade ?? 0;
   const updatedNode: V2MapNode = {
@@ -631,6 +641,7 @@ export function extractV2Wreck(run: V2RunState): V2ActionOutcome {
     ...run,
     activeWreck: null,
     wrecksDissectedThisRun: (run.wrecksDissectedThisRun ?? 0) + (cutsMade > 0 ? 1 : 0),
+    claimedEventIds: [...run.claimedEventIds, claimKey],
     graph: {
       ...run.graph,
       nodes: { ...run.graph.nodes, [node.nodeId]: updatedNode },
@@ -697,7 +708,7 @@ export function resolveV2WreckChoice(
     if (repairGain <= 0) {
       return { ok: false, run, error: '船体耐久已满，可改选抽取燃料或其他舱室' };
     }
-    nextHp = run.hp + repairGain;
+    nextHp = run.hp <= 0 ? 0 : run.hp + repairGain;
   }
 
   const updatedNode: V2MapNode = {
@@ -842,7 +853,7 @@ export function resolveV2DistressChoice(
       };
     }
     nextFuel -= node.distress.rescueFuelCost;
-    nextHp = Math.min(run.maxHp, run.hp + node.distress.repairAmount);
+    nextHp = run.hp <= 0 ? 0 : Math.min(run.maxHp, run.hp + node.distress.repairAmount);
   } else {
     nextBay = addV2ItemToStaging(nextBay, node.distress.haulCargoItem, 0);
   }
@@ -1279,7 +1290,7 @@ export function pickV2CombatReward(
   } else if (choice === 'cargo') {
     nextBay = addV2ItemToStaging(nextBay, run.pendingReward.cargoOption, 0);
   } else {
-    nextHp = Math.min(run.maxHp, run.hp + run.pendingReward.repairAmount);
+    nextHp = run.hp <= 0 ? 0 : Math.min(run.maxHp, run.hp + run.pendingReward.repairAmount);
   }
 
   // Restore any loot stashed during a wreck ambush encounter back into staging!
@@ -1324,7 +1335,7 @@ export function pickV2CombatReward(
  * - Requires staging to be completely cleared
  * - Expires any unused Engineer swap offer (§6.2)
  * - Accumulates discardedCountThisRun and clears discard undo stack
- * - At terminal layer (Layer 6 or Tutorial Layer 3), automatically transitions to safe-return SETTLEMENT!
+ * - At terminal layer (Layer 6 or Tutorial Layer 4), automatically transitions to safe-return SETTLEMENT!
  */
 export function finishV2ArrangeAndProceed(
   run: V2RunState,

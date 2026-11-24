@@ -621,6 +621,19 @@ export function evaluateWreckHotspotCut(
     };
   }
 
+  if (run.hp <= 0) {
+    return {
+      canCut: false,
+      isFirstSafeCut,
+      isLethal: true,
+      effectiveHullDamage: 0,
+      effectiveFuelCost: 0,
+      effectiveAmbushRisk: false,
+      stabilityCost,
+      disabledReason: '船体已损毁，无法继续切割（请撤离结算）',
+    };
+  }
+
   if (!isFirstSafeCut && wreck.stability <= 0) {
     return {
       canCut: false,
