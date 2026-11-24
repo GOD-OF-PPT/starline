@@ -246,7 +246,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     const selectCard = target.closest<HTMLElement>('[data-select-node]');
     if (selectCard) {
       if (!this.rootEl.contains(selectCard)) return;
-      if (selectCard instanceof HTMLButtonElement && selectCard.disabled) return;
+      if ((selectCard as HTMLButtonElement).disabled) return;
       const nid = selectCard.dataset.selectNode;
       if (nid && this.latestReachableSet.has(nid)) {
         this.latestActions.onSelectNode(nid);
