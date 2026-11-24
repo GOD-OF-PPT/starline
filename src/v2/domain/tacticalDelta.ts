@@ -8,7 +8,7 @@ import { V2_EQUIPMENT_DEFS, type V2EquipmentKind } from '../data/equipment';
 import { getV2OccupiedCells, V2_SHAPES, type V2Rotation } from '../data/shapes';
 import { V2_SHIPS } from '../data/ships';
 import { calculateV2BuildStats } from './buildStatsV2';
-import { simulateV2Combat } from './combatV2';
+import * as combatV2 from './combatV2';
 import { getReachableNextNodeIds } from './encounter';
 import {
   areV2PlacedItemsAdjacent,
@@ -24,6 +24,136 @@ import type {
   V2RunState,
   V2TargetPolicy,
 } from './types';
+
+const MAX_CACHE_ENTRIES = 256;
+
+interface CachedPlacementSpot {
+  readonly x: number;
+  readonly y: number;
+  readonly rotation: V2Rotation;
+}
+
+export interface TacticalDeltaCacheStats {
+  readonly deltaHits: number;
+  readonly deltaMisses: number;
+  readonly bestPlacementHits: number;
+  readonly bestPlacementMisses: number;
+  readonly deltaSize: number;
+  readonly bestPlacementSize: number;
+  readonly simulationCalls: number;
+}
+
+const deltaCache = new Map<string, V2TacticalDelta>();
+const bestPlacementCache = new Map<string, CachedPlacementSpot | null>();
+
+let deltaHits = 0;
+let deltaMisses = 0;
+let bestPlacementHits = 0;
+let bestPlacementMisses = 0;
+let simulationCalls = 0;
+
+function lruGet<V>(cache: Map<string, V>, key: string): { readonly hit: boolean; readonly value?: V } {
+  if (!cache.has(key)) return { hit: false };
+  const value = cache.get(key)!;
+  cache.delete(key);
+  cache.set(key, value);
+  return { hit: true, value };
+}
+
+function lruSet<V>(cache: Map<string, V>, key: string, value: V): void {
+  if (cache.has(key)) {
+    cache.delete(key);
+  } else if (cache.size >= MAX_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey !== undefined) {
+      cache.delete(oldestKey);
+    }
+  }
+  cache.set(key, value);
+}
+
+function runDeltaSimulation(
+  params: Parameters<typeof combatV2.simulateV2Combat>[0]
+): ReturnType<typeof combatV2.simulateV2Combat> {
+  simulationCalls += 1;
+  return combatV2.simulateV2Combat(params);
+}
+
+/**
+ * Pure deterministic hash of bay hull and placed items affecting stats/combat delta.
+ * Staging and discard undo entries are excluded because they do not alter combat outcomes.
+ */
+export function computeV2BayHash(bay: V2CargoBayState): string {
+  const placedPart = bay.placed
+    .map(
+      (p) =>
+        `${p.item.instanceId}:${p.item.definitionId}:${p.item.category}:${p.item.quality}:${p.item.origin}@${p.x},${p.y},${p.rotation}`
+    )
+    .join(';');
+  return `${bay.shipId}|${placedPart}`;
+}
+
+export function clearTacticalDeltaCache(): void {
+  deltaCache.clear();
+  bestPlacementCache.clear();
+  deltaHits = 0;
+  deltaMisses = 0;
+  bestPlacementHits = 0;
+  bestPlacementMisses = 0;
+  simulationCalls = 0;
+}
+
+export function getTacticalDeltaCacheStats(): TacticalDeltaCacheStats {
+  return {
+    deltaHits,
+    deltaMisses,
+    bestPlacementHits,
+    bestPlacementMisses,
+    deltaSize: deltaCache.size,
+    bestPlacementSize: bestPlacementCache.size,
+    simulationCalls,
+  };
+}
+
+function serializeUnits(units: readonly V2EnemyUnitSpec[]): string {
+  return units
+    .map(
+      (u) =>
+        `${u.enemyId}:${u.name}:${u.spriteArchetype}:${u.maxHp}:${u.damagePerRound}:${u.armor}:${u.pierceRatio}:${
+          u.isBoss ? 1 : 0
+        }:${u.role ?? ''}:${u.initialShield ?? ''}:${u.maxShield ?? ''}`
+    )
+    .join(',');
+}
+
+function serializeRefEncounter(ref: ReferenceEncounter): string {
+  return `${ref.label}|${ref.encounterKind ?? ''}|${ref.bossId ?? ''}|${serializeUnits(ref.units)}`;
+}
+
+function serializeItemKey(item: V2ItemInstance): string {
+  return `${item.instanceId}:${item.definitionId}:${item.category}:${item.quality}:${item.origin}:${item.fixedValue}`;
+}
+
+function serializeSimCtx(
+  simCtx: DeltaSimContext | undefined,
+  startingHp: number,
+  maxHp: number,
+  targetPolicy: V2TargetPolicy
+): string {
+  return [
+    String(startingHp),
+    String(maxHp),
+    targetPolicy,
+    simCtx?.sectorId ?? 'near_orbit',
+    simCtx?.crewId ?? '',
+    String(simCtx?.crewMasteryTier ?? 0),
+    simCtx?.encounterKind ?? '',
+    simCtx?.bossId ?? '',
+    String(simCtx?.endlessThreat ?? 0),
+    (simCtx?.endlessMutatorIds ?? []).join(','),
+    String(simCtx?.stargateRelayTier ?? 0),
+  ].join('|');
+}
 
 function withPlacedItem(
   bay: V2CargoBayState,
@@ -150,7 +280,7 @@ function countFreeCells(bay: V2CargoBayState): { readonly free: number; readonly
   return { free: Math.max(0, ship.validCellCount - occupied), total: ship.validCellCount };
 }
 
-interface DeltaSimContext {
+export interface DeltaSimContext {
   readonly sectorId?: SectorId;
   readonly crewId?: V2CrewId | null;
   readonly crewMasteryTier?: number;
@@ -161,7 +291,7 @@ interface DeltaSimContext {
   readonly stargateRelayTier?: number;
 }
 
-function findBestPlacementForItem(
+export function findBestPlacementForItem(
   bay: V2CargoBayState,
   item: V2ItemInstance,
   startingHp: number,
@@ -173,6 +303,23 @@ function findBestPlacementForItem(
   const ship = V2_SHIPS[bay.shipId];
   const def = getAnyV2ItemDef(item.definitionId);
   if (!def) return null;
+
+  const cacheKey = `${computeV2BayHash(bay)}|${serializeItemKey(item)}|${serializeUnits(
+    refUnits
+  )}|${serializeSimCtx(simCtx, startingHp, maxHp, policy)}`;
+  const cached = lruGet(bestPlacementCache, cacheKey);
+  if (cached.hit) {
+    bestPlacementHits += 1;
+    const spot = cached.value ?? null;
+    if (!spot) return null;
+    return {
+      x: spot.x,
+      y: spot.y,
+      rotation: spot.rotation,
+      bayAfter: withPlacedItem(bay, item, spot.x, spot.y, spot.rotation),
+    };
+  }
+  bestPlacementMisses += 1;
 
   let best: {
     x: number;
@@ -199,7 +346,7 @@ function findBestPlacementForItem(
 
         const nextBay = withPlacedItem(bay, item, x, y, rotation);
         const st = calculateV2BuildStats(nextBay);
-        const sim = simulateV2Combat({
+        const sim = runDeltaSimulation({
           resultId: 'delta_probe',
           bay: nextBay,
           startingHp,
@@ -226,13 +373,19 @@ function findBestPlacementForItem(
     }
   }
 
-  return best ? { x: best.x, y: best.y, rotation: best.rotation, bayAfter: best.bayAfter } : null;
+  if (!best) {
+    lruSet(bestPlacementCache, cacheKey, null);
+    return null;
+  }
+
+  lruSet(bestPlacementCache, cacheKey, { x: best.x, y: best.y, rotation: best.rotation });
+  return { x: best.x, y: best.y, rotation: best.rotation, bayAfter: best.bayAfter };
 }
 
 function formatSimComparison(
   label: string,
-  before: ReturnType<typeof simulateV2Combat>,
-  after: ReturnType<typeof simulateV2Combat>,
+  before: ReturnType<typeof combatV2.simulateV2Combat>,
+  after: ReturnType<typeof combatV2.simulateV2Combat>,
   mode: 'install' | 'installed_value'
 ): { readonly line: string; readonly positive: boolean } {
   const prefix = mode === 'install' ? `装入后对「${label}」：` : `相对卸下，对「${label}」：`;
@@ -286,12 +439,24 @@ export function computeV2PlacementTacticalDelta(params: {
   readonly crewMasteryTier?: number;
   readonly stargateRelayTier?: number;
 }): V2TacticalDelta {
-  const def = getAnyV2ItemDef(params.item.definitionId);
-  const cellCount = def ? V2_SHAPES[def.shapeId].cells.length : 1;
-  const freeInfo = countFreeCells(params.bay);
+  const bayHash = computeV2BayHash(params.bay);
+  const itemKey = serializeItemKey(params.item);
 
-  // Mission or pure cargo item -> clear value/contract space readout
+  // Mission, gadget, or pure cargo item -> clear value/contract space readout (skip encounter lookup)
   if (params.item.category !== 'equipment') {
+    const nonEqKey = `non_eq|${bayHash}|${itemKey}|${params.zone}`;
+    const cached = lruGet(deltaCache, nonEqKey);
+    if (cached.hit && cached.value) {
+      deltaHits += 1;
+      return cached.value;
+    }
+    deltaMisses += 1;
+
+    const def = getAnyV2ItemDef(params.item.definitionId);
+    const cellCount = def ? V2_SHAPES[def.shapeId].cells.length : 1;
+    const freeInfo = countFreeCells(params.bay);
+
+    let result: V2TacticalDelta;
     if (params.item.category === 'mission') {
       const fit =
         params.zone === 'grid'
@@ -299,16 +464,14 @@ export function computeV2PlacementTacticalDelta(params: {
           : freeInfo.free >= cellCount
           ? `需 ${cellCount} 格连续空间 · 当前余 ${freeInfo.free}/${freeInfo.total} 格`
           : `空间不足：需 ${cellCount} 格，当前仅余 ${freeInfo.free} 格（需腾舱或放弃委托）`;
-      return {
+      result = {
         synergyLine: '委托专属大件 · 不参战，安全带回即可交付悬赏',
         combatDeltaLine: '占据核心装载区，可能需要取舍部分旧货或副装备',
         spaceLine: fit,
         positiveImpact: true,
       };
-    }
-
-    if (params.item.category === 'gadget') {
-      return {
+    } else if (params.item.category === 'gadget') {
+      result = {
         synergyLine: `一次性战术消耗装置 · ${def?.gadgetDef?.shortEffectLabel ?? '主动消耗使用'}`,
         combatDeltaLine: def?.summary ?? '装入船舱后可在对应阶段主动触发并消耗',
         spaceLine:
@@ -317,23 +480,25 @@ export function computeV2PlacementTacticalDelta(params: {
             : `占 ${cellCount} 格 · 当前船舱剩余 ${freeInfo.free}/${freeInfo.total} 格`,
         positiveImpact: true,
       };
+    } else {
+      const perCell = (params.item.fixedValue / Math.max(1, cellCount)).toFixed(1);
+      result = {
+        synergyLine: `高价货物 · 不参战，回收均价 ${perCell}¤/格`,
+        combatDeltaLine: `安全返航出售 +${params.item.fixedValue}¤（商人收购 ${Math.floor(params.item.fixedValue * 0.8)}¤）`,
+        spaceLine:
+          params.zone === 'grid'
+            ? `已占 ${cellCount} 格 · 船舱剩余 ${freeInfo.free}/${freeInfo.total} 格`
+            : `占 ${cellCount} 格 · 当前船舱剩余 ${freeInfo.free}/${freeInfo.total} 格`,
+        positiveImpact: params.item.fixedValue > 0,
+      };
     }
 
-    const perCell = (params.item.fixedValue / Math.max(1, cellCount)).toFixed(1);
-    return {
-      synergyLine: `高价货物 · 不参战，回收均价 ${perCell}¤/格`,
-      combatDeltaLine: `安全返航出售 +${params.item.fixedValue}¤（商人收购 ${Math.floor(params.item.fixedValue * 0.8)}¤）`,
-      spaceLine:
-        params.zone === 'grid'
-          ? `已占 ${cellCount} 格 · 船舱剩余 ${freeInfo.free}/${freeInfo.total} 格`
-          : `占 ${cellCount} 格 · 当前船舱剩余 ${freeInfo.free}/${freeInfo.total} 格`,
-      positiveImpact: params.item.fixedValue > 0,
-    };
+    lruSet(deltaCache, nonEqKey, result);
+    return result;
   }
 
   const eqDef = V2_EQUIPMENT_DEFS[params.item.definitionId]!;
   const ref = resolveReferenceEncounter(params.run);
-  const partnerKinds = getSynergyPartnerKinds(eqDef.kind);
   const simCtx: DeltaSimContext = {
     sectorId: params.sectorId ?? params.run?.sectorId ?? 'near_orbit',
     crewId: params.crewId !== undefined ? params.crewId : params.run?.crewId ?? null,
@@ -344,9 +509,30 @@ export function computeV2PlacementTacticalDelta(params: {
     endlessMutatorIds: params.run?.endlessMutatorIds,
     stargateRelayTier: params.stargateRelayTier,
   };
+  const candidateSpotKey = params.candidateSpot
+    ? `${params.candidateSpot.x},${params.candidateSpot.y},${params.candidateSpot.rotation}`
+    : '';
+  const eqCacheKey = `eq|${bayHash}|${serializeRefEncounter(ref)}|${serializeSimCtx(
+    simCtx,
+    params.startingHp,
+    params.maxHp,
+    params.targetPolicy
+  )}|${itemKey}|${params.zone}|${candidateSpotKey}`;
+
+  const cachedEq = lruGet(deltaCache, eqCacheKey);
+  if (cachedEq.hit && cachedEq.value) {
+    deltaHits += 1;
+    return cachedEq.value;
+  }
+  deltaMisses += 1;
+
+  const def = getAnyV2ItemDef(params.item.definitionId);
+  const cellCount = def ? V2_SHAPES[def.shapeId].cells.length : 1;
+  const freeInfo = countFreeCells(params.bay);
+  const partnerKinds = getSynergyPartnerKinds(eqDef.kind);
 
   if (params.zone === 'staging') {
-    const baselineSim = simulateV2Combat({
+    const baselineSim = runDeltaSimulation({
       resultId: 'delta_base',
       bay: params.bay,
       startingHp: params.startingHp,
@@ -398,7 +584,7 @@ export function computeV2PlacementTacticalDelta(params: {
     }
 
     if (!chosenSpot) {
-      return {
+      const noSpaceResult: V2TacticalDelta = {
         synergyLine:
           partnerKinds.length > 0
             ? `可与「${V2_EQUIPMENT_DEFS[`equipment.${partnerKinds[0]}.common`].name}」正交联动`
@@ -407,6 +593,8 @@ export function computeV2PlacementTacticalDelta(params: {
         spaceLine: `需 ${cellCount} 格（${V2_SHAPES[eqDef.shapeId].label}）· 当前余 ${freeInfo.free}/${freeInfo.total} 格`,
         positiveImpact: false,
       };
+      lruSet(deltaCache, eqCacheKey, noSpaceResult);
+      return noSpaceResult;
     }
 
     const afterStats = calculateV2BuildStats(chosenSpot.bayAfter);
@@ -420,7 +608,7 @@ export function computeV2PlacementTacticalDelta(params: {
         ? `贴邻「${V2_EQUIPMENT_DEFS[`equipment.${partnerKinds[0]}.common`].name}」可触发联动（当前舱内未配对）`
         : eqDef.summary;
 
-    const afterSim = simulateV2Combat({
+    const afterSim = runDeltaSimulation({
       resultId: 'delta_after',
       bay: chosenSpot.bayAfter,
       startingHp: params.startingHp,
@@ -439,13 +627,15 @@ export function computeV2PlacementTacticalDelta(params: {
     });
     const cmp = formatSimComparison(ref.label, baselineSim, afterSim, 'install');
 
-    return {
+    const stagingResult: V2TacticalDelta = {
       synergyLine,
       combatDeltaLine: cmp.line,
       spaceLine: `占 ${cellCount} 格 · 装入后余 ${Math.max(0, freeInfo.free - cellCount)}/${freeInfo.total} 格`,
       recommendedSpot: { x: chosenSpot.x, y: chosenSpot.y, rotation: chosenSpot.rotation },
       positiveImpact: cmp.positive || activeLinks.length > 0,
     };
+    lruSet(deltaCache, eqCacheKey, stagingResult);
+    return stagingResult;
   }
 
   // Already placed in bay: show active synergy + impact vs removing it + reposition hint if unlinked partner exists!
@@ -455,7 +645,7 @@ export function computeV2PlacementTacticalDelta(params: {
   );
 
   const bayWithout = removeV2ItemById(params.bay, params.item.instanceId);
-  const simWithout = simulateV2Combat({
+  const simWithout = runDeltaSimulation({
     resultId: 'delta_without',
     bay: bayWithout,
     startingHp: params.startingHp,
@@ -471,7 +661,7 @@ export function computeV2PlacementTacticalDelta(params: {
     endlessMutatorIds: simCtx.endlessMutatorIds,
     stargateRelayTier: simCtx.stargateRelayTier,
   });
-  const simCurrent = simulateV2Combat({
+  const simCurrent = runDeltaSimulation({
     resultId: 'delta_cur',
     bay: params.bay,
     startingHp: params.startingHp,
@@ -538,11 +728,13 @@ export function computeV2PlacementTacticalDelta(params: {
   }
 
   const cmp = formatSimComparison(ref.label, simWithout, simCurrent, 'installed_value');
-  return {
+  const gridResult: V2TacticalDelta = {
     synergyLine,
     combatDeltaLine: cmp.line,
     spaceLine: `已占 ${cellCount} 格（${V2_SHAPES[eqDef.shapeId].label}）· 船舱余 ${freeInfo.free}/${freeInfo.total} 格`,
     recommendedSpot,
     positiveImpact: cmp.positive || currentLinks.length > 0,
   };
+  lruSet(deltaCache, eqCacheKey, gridResult);
+  return gridResult;
 }
