@@ -294,17 +294,21 @@ export function renderCombatPreView(
           ${rosterHtml}
         </div>
 
-        <div class="v2-policy-box">
-          <span class="v2-prep-label">集火策略</span>
-          <div style="display:flex;gap:8px;margin-top:6px;">
-            <button type="button" class="btn btn-sm ${
-              run.targetPolicy === 'weakest' ? 'btn-primary' : 'btn-secondary'
-            }" data-policy="weakest" ${readOnly ? 'disabled' : ''}>优先最弱</button>
-            <button type="button" class="btn btn-sm ${
-              run.targetPolicy === 'highest_threat' ? 'btn-primary' : 'btn-secondary'
-            }" data-policy="highest_threat" ${readOnly ? 'disabled' : ''}>优先最大威胁</button>
-          </div>
-        </div>
+        ${
+          node.combat.units.length > 1
+            ? `<div class="v2-policy-box">
+                <span class="v2-prep-label">集火策略</span>
+                <div style="display:flex;gap:8px;margin-top:6px;">
+                  <button type="button" class="btn btn-sm ${
+                    run.targetPolicy === 'weakest' ? 'btn-primary' : 'btn-secondary'
+                  }" data-policy="weakest" ${readOnly ? 'disabled' : ''}>优先最弱</button>
+                  <button type="button" class="btn btn-sm ${
+                    run.targetPolicy === 'highest_threat' ? 'btn-primary' : 'btn-secondary'
+                  }" data-policy="highest_threat" ${readOnly ? 'disabled' : ''}>优先最大威胁</button>
+                </div>
+              </div>`
+            : ''
+        }
 
         ${
           pv

@@ -412,3 +412,161 @@
   background: rgba(242, 117, 100, 0.15);
   border: 1px solid rgba(242, 117, 100, 0.46);
 }
+
+/* Unified 1-Click Star Map Destination Deck (S04) */
+.v2-shell .v3-map-dest-deck {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.v2-shell .v3-map-dest-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, #a8bdd4);
+  letter-spacing: 0.02em;
+}
+
+.v2-shell .v3-map-dest-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.v2-shell .v3-map-dest-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md, 10px);
+  background: rgba(15, 27, 44, 0.84);
+  border: 1px solid rgba(126, 162, 206, 0.34);
+  color: var(--text-primary, #eaf2fc);
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.v2-shell .v3-map-dest-card:hover {
+  border-color: rgba(246, 184, 82, 0.62);
+}
+
+.v2-shell .v3-map-dest-card.selected {
+  border-color: rgba(246, 184, 82, 0.88);
+  background: rgba(26, 40, 62, 0.92);
+  box-shadow: 0 0 0 1px rgba(246, 184, 82, 0.28), 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+
+.v2-shell .v3-map-dest-card.is-blocked {
+  border-color: rgba(142, 162, 186, 0.28);
+  background: rgba(16, 24, 38, 0.72);
+}
+
+.v2-shell .v3-map-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.v2-shell .v3-map-card-detail {
+  color: var(--text-secondary, #a8bdd4);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.v2-shell .v3-map-card-footer {
+  display: flex;
+  padding-top: 6px;
+  border-top: 1px solid rgba(126, 162, 206, 0.16);
+}
+
+.v2-shell .v3-map-card-jump-btn {
+  width: 100%;
+  min-height: 36px;
+  justify-content: center;
+}
+
+.v2-shell .v3-threat-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.v2-shell .v3-threat-pill.threat-steady {
+  color: #7ae582;
+  background: rgba(122, 229, 130, 0.15);
+  border: 1px solid rgba(122, 229, 130, 0.42);
+}
+
+.v2-shell .v3-threat-pill.threat-strained {
+  color: #f6c969;
+  background: rgba(246, 184, 82, 0.16);
+  border: 1px solid rgba(246, 184, 82, 0.45);
+}
+
+.v2-shell .v3-threat-pill.threat-danger,
+.v2-shell .v3-threat-pill.threat-lethal {
+  color: #ff9c8f;
+  background: rgba(242, 117, 100, 0.18);
+  border: 1px solid rgba(242, 117, 100, 0.52);
+}
+
+.v2-shell .v2-mc-forecast.warn {
+  color: #f6c969;
+}
+
+/* Compact Non-Duplicating Route Overview Waypoint Anchor */
+.v2-shell .v3-route-waypoint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm, 8px);
+  border: 1px dashed rgba(246, 184, 82, 0.54);
+  background: rgba(246, 184, 82, 0.08);
+  color: #f6d38b;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  user-select: none;
+}
+
+.v2-shell .v3-route-waypoint.selected {
+  border-style: solid;
+  border-color: rgba(246, 184, 82, 0.92);
+  background: rgba(246, 184, 82, 0.16);
+}
+
+/* Align mobile toggle/focus display with MapPhaseView JS breakpoint (< 860px) */
+.v2-shell .v2-map-mobile-toggle {
+  display: flex;
+}
+
+.v2-shell .v2-map-mobile-focus {
+  display: flex;
+}
+
+@media (max-width: 719px) {
+  .v2-shell .v3-map-dest-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .v2-shell .v3-map-card-jump-btn {
+    min-height: 44px;
+  }
+}
