@@ -299,6 +299,7 @@ export class SettlementPhaseView
     readonly disp: V2SettlementDisposition;
     suppressInputClick: boolean;
     suppressChange: boolean;
+    uncommitted: boolean;
     readonly token: number;
   } | null = null;
   private lastTitleKey: string | null = null;
@@ -333,6 +334,7 @@ export class SettlementPhaseView
       disp,
       suppressInputClick,
       suppressChange: true,
+      uncommitted: false,
       token,
     };
     Promise.resolve().then(() => {
@@ -392,13 +394,18 @@ export class SettlementPhaseView
 
     if (isLabel && radio?.disabled) return;
 
-    // Suppress synthetic forwarded <input> click triggered right after a <label> click in the same tick
+    // Suppress synthetic forwarded <input> click triggered right after a <label> click in the same tick.
+    // If the prior <label> click was uncommitted (e.g. rejected by !canMutate() so radio.checked was
+    // reverted to false), a genuine same-tick direct radio.click() arrives with radio.checked === true
+    // (native HTML5 pre-activation) and MUST NOT be swallowed, while synthetic forwarded clicks with
+    // radio.checked === false remain deduplicated.
     if (
       isDirectRadioClick &&
       this.pendingClickDedup &&
       this.pendingClickDedup.itemId === iid &&
       this.pendingClickDedup.disp === disp &&
-      this.pendingClickDedup.suppressInputClick
+      this.pendingClickDedup.suppressInputClick &&
+      (!this.pendingClickDedup.uncommitted || !radio?.checked)
     ) {
       this.pendingClickDedup.suppressInputClick = false;
       return;
@@ -424,13 +431,28 @@ export class SettlementPhaseView
       this.armClickDedup(iid, disp, !isDirectRadioClick);
     }
 
-    actions.onChangeDisposition(iid, disp);
-
-    // If the controller rejected the mutation (e.g. !canMutate() while a modal is open)
-    // and did not call update(), restore radio checked DOM to authoritative prevDisp
-    // while keeping selectedByItem unpoisoned.
-    if (this.updateRevision === revBefore && isLabel) {
-      this.syncRadiogroupChecked(iid, prevDisp);
+    let threw = false;
+    try {
+      actions.onChangeDisposition(iid, disp);
+    } catch (err) {
+      threw = true;
+      throw err;
+    } finally {
+      // If the controller rejected the mutation (e.g. !canMutate() while a modal is open)
+      // or threw before calling update(), restore radio checked DOM to authoritative prevDisp
+      // while keeping selectedByItem unpoisoned.
+      if (this.updateRevision === revBefore && isLabel) {
+        if (threw || isDirectRadioClick) {
+          this.pendingClickDedup = null;
+        } else if (
+          this.pendingClickDedup &&
+          this.pendingClickDedup.itemId === iid &&
+          this.pendingClickDedup.disp === disp
+        ) {
+          this.pendingClickDedup.uncommitted = true;
+        }
+        this.syncRadiogroupChecked(iid, prevDisp);
+      }
     }
   };
 
@@ -458,10 +480,13 @@ export class SettlementPhaseView
     if (prevDisp === disp) return;
 
     const revBefore = this.updateRevision;
-    this.latestActions.onChangeDisposition(iid, disp);
-
-    if (this.updateRevision === revBefore) {
-      this.syncRadiogroupChecked(iid, prevDisp);
+    try {
+      this.latestActions.onChangeDisposition(iid, disp);
+    } finally {
+      if (this.updateRevision === revBefore) {
+        this.pendingClickDedup = null;
+        this.syncRadiogroupChecked(iid, prevDisp);
+      }
     }
   };
 
@@ -1255,7 +1280,7 @@ export class SettlementPhaseView
     this.decisionRows.clear();
     this.selectedByItem.clear();
     this.updateRevision = 0;
-    this.clickDedupSeq = 0;
+    this.clickDedupSeq += 1;
     this.pendingClickDedup = null;
     this.hostEl = null;
     this.rootEl = null;

@@ -4365,6 +4365,7 @@ export class V2AppController {
         this.selectedEndingId = null;
         this.endingGalleryId = null;
         this.activeDockingNotice = null;
+        this.phaserHost?.skipBaseReturnDocking();
         this.activeCommBanner = null;
         this.preferredSectorId = null;
         this.persist();
@@ -4550,6 +4551,8 @@ export class V2AppController {
         const migrated = migrateV1ToV2SaveData(this.v1Inspection.v1Save);
         this.staticStageTracker.reset();
         this.activeCombatPlaybackKey = null;
+        this.activeDockingNotice = null;
+        this.phaserHost?.skipBaseReturnDocking();
         this.save = migrated;
         this.migrationPromptDismissed = true;
         this.persist();
