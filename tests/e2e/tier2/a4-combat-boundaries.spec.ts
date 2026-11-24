@@ -379,6 +379,25 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
       }
 
       if ((await app.inspect()).phase === 'ARRANGE') {
+        const leaveBtn = app.byTestId(TEST_IDS.BTN_LEAVE_ARRANGE);
+        for (let step = 0; step < 4 && (await leaveBtn.isDisabled()); step += 1) {
+          const stagingCard = page
+            .locator('.v2-staging-card, .staging-card, [data-testid^="staging-item"]')
+            .first();
+          if (await stagingCard.isVisible()) {
+            await stagingCard.click();
+          }
+          const resolveBtn = app
+            .byTestId(TEST_IDS.ARRANGE_SCREEN)
+            .locator('button:not([disabled])')
+            .filter({ hasText: /装入推荐位|舍弃/ })
+            .first();
+          if (await resolveBtn.isVisible()) {
+            await resolveBtn.click();
+          } else {
+            break;
+          }
+        }
         await app.leaveArrange();
       }
     }
@@ -513,7 +532,14 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
     await app.boot({ seed: 24007 });
 
     await app.startCombat();
-    await app.skipCombat();
+    if ((await app.inspect()).phase === 'ENCOUNTER') {
+      const skipBtn = app.byTestId(TEST_IDS.BTN_COMBAT_SKIP);
+      if (await skipBtn.isVisible()) {
+        await skipBtn.click().catch(() => {
+          // 1-round mutual destruction may finish immediately into SETTLEMENT
+        });
+      }
+    }
 
     await app.waitForInspect(
       (s) => s.phase === 'SETTLEMENT',

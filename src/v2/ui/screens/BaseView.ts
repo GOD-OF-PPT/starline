@@ -39,6 +39,55 @@ export interface BaseViewActions {
   readonly onOpenCareer: () => void;
 }
 
+function renderDockingNoticeHtml(activeDockingNotice: V2ReturnDockingNotice | null): string {
+  if (!activeDockingNotice) return '';
+  const n = activeDockingNotice;
+  const shownCredits = n.animating
+    ? Math.round(n.creditsBefore + (n.creditsAfter - n.creditsBefore) * n.progress)
+    : n.creditsAfter;
+  return `
+    <div class="docking-overlay-card">
+      <div class="docking-title">${
+        n.wasDefeat
+          ? '拖船已将受损舰体拖回拆解站'
+          : n.contractCompleted
+          ? '委托交付完成 · 货船安全靠泊'
+          : '货船安全返航 · 卸货入账完毕'
+      }</div>
+      <div class="docking-stats">
+        <span>本次入账 <strong class="num">+${n.earnedCredits}¤</strong></span>
+        ${
+          (n.earnedParts ?? 0) > 0
+            ? `<span>精密零件 <strong class="num">+${n.earnedParts}</strong></span>`
+            : ''
+        }
+        <span>基地余额 <strong class="num">${shownCredits}¤</strong></span>
+      </div>
+      ${n.unlockedText ? `<div class="docking-unlock">${n.unlockedText}</div>` : ''}
+      <div class="docking-actions">
+        ${
+          n.animating
+            ? `<button type="button" class="btn btn-sm btn-secondary" id="v2-skip-dock">跳过靠泊</button>`
+            : `<button type="button" class="btn btn-sm btn-primary" id="v2-close-dock">收起</button>`
+        }
+      </div>
+    </div>
+  `;
+}
+
+export function updateBaseDockingNotice(
+  overlayEl: HTMLElement,
+  activeDockingNotice: V2ReturnDockingNotice | null,
+  actions: Pick<BaseViewActions, 'onSkipDocking' | 'onCloseDocking'>
+): boolean {
+  const slot = overlayEl.querySelector<HTMLElement>('[data-slot="docking-notice"]');
+  if (!slot) return false;
+  slot.innerHTML = renderDockingNoticeHtml(activeDockingNotice);
+  slot.querySelector('#v2-skip-dock')?.addEventListener('click', actions.onSkipDocking);
+  slot.querySelector('#v2-close-dock')?.addEventListener('click', actions.onCloseDocking);
+  return true;
+}
+
 export function renderBaseHeroView(
   overlayEl: HTMLElement,
   props: BaseViewProps,
@@ -56,42 +105,7 @@ export function renderBaseHeroView(
   const relicSum = getV2RelicSummary(p);
   const recTpl = V2_CONTRACT_TEMPLATES[recommendedContractId] ?? V2_CONTRACT_TEMPLATES.transport_std;
 
-  const dockingHtml = activeDockingNotice
-    ? (() => {
-        const n = activeDockingNotice;
-        const shownCredits = n.animating
-          ? Math.round(n.creditsBefore + (n.creditsAfter - n.creditsBefore) * n.progress)
-          : n.creditsAfter;
-        return `
-          <div class="docking-overlay-card">
-            <div class="docking-title">${
-              n.wasDefeat
-                ? '拖船已将受损舰体拖回拆解站'
-                : n.contractCompleted
-                ? '委托交付完成 · 货船安全靠泊'
-                : '货船安全返航 · 卸货入账完毕'
-            }</div>
-            <div class="docking-stats">
-              <span>本次入账 <strong class="num">+${n.earnedCredits}¤</strong></span>
-              ${
-                (n.earnedParts ?? 0) > 0
-                  ? `<span>精密零件 <strong class="num">+${n.earnedParts}</strong></span>`
-                  : ''
-              }
-              <span>基地余额 <strong class="num">${shownCredits}¤</strong></span>
-            </div>
-            ${n.unlockedText ? `<div class="docking-unlock">${n.unlockedText}</div>` : ''}
-            <div class="docking-actions">
-              ${
-                n.animating
-                  ? `<button type="button" class="btn btn-sm btn-secondary" id="v2-skip-dock">跳过靠泊</button>`
-                  : `<button type="button" class="btn btn-sm btn-primary" id="v2-close-dock">收起</button>`
-              }
-            </div>
-          </div>
-        `;
-      })()
-    : '';
+  const dockingHtml = renderDockingNoticeHtml(activeDockingNotice);
 
   const commandCardHtml = !p.tutorialCompleted
     ? `
@@ -214,7 +228,7 @@ export function renderBaseHeroView(
   overlayEl.innerHTML = `
     <div class="v3-overlay-screen v2-base-screen-root" data-testid="base-screen">
       <div class="scene-stage-tag">${svgIcon('beacon', 13)} 星际拆解站 · 点击站内设施或下方指令泊位管理</div>
-      ${dockingHtml}
+      <div data-slot="docking-notice">${dockingHtml}</div>
       <div class="v2-base-hero-hud">
         ${commandCardHtml}
         ${utilityDockHtml}

@@ -38,6 +38,23 @@ export interface V2EventResolveResult {
 }
 
 /**
+ * Computes updated `stipendSpentCredits` when spending `spent` credits from `run.wallet`
+ * using stipend-first accounting (clamped to `[0, startingStipendCredits]`).
+ */
+export function computeNextStipendSpent(
+  run: Pick<V2RunState, 'startingStipendCredits' | 'stipendSpentCredits'>,
+  spent: number
+): number {
+  const startingStipend = Math.max(0, Math.floor(run.startingStipendCredits ?? 0));
+  const alreadySpent = Math.min(
+    startingStipend,
+    Math.max(0, Math.floor(run.stipendSpentCredits ?? 0))
+  );
+  const unspentStipend = Math.max(0, startingStipend - alreadySpent);
+  return alreadySpent + Math.min(unspentStipend, Math.max(0, Math.floor(spent)));
+}
+
+/**
  * Generates an Engineer swap offer (3 distinct common candidates from unlocked pool, 4 at Mastery T1+)
  * on the FIRST non-loan, non-mission equipment acquired during a run (§6.2).
  */
@@ -309,6 +326,9 @@ export function resolveV2EventOption(
     fuel: nextFuel,
     hp: nextHp,
     wallet: nextWallet,
+    ...(walletCost > 0
+      ? { stipendSpentCredits: computeNextStipendSpent(run, walletCost) }
+      : {}),
     salvagePartsEarned: nextParts,
     bay: nextBay,
     activeEvent: null,

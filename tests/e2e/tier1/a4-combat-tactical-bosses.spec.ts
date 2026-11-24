@@ -89,6 +89,9 @@ test.describe('Tier 1 · A4: Active Tactical Combat, Expanded Enemies & 3 Multi-
         activeCombat: null,
       },
     });
+    // Pre-combat preview models baseline (no tactical order) outcome; run in Pure-Auto mode
+    // so live combat resolves without mid-battle tactical overrides altering post-combat HP.
+    save.settings.pureAutoCombat = true;
 
     await app.seedStorage({ v2Save: save, skipTitleScreen: true });
     await app.boot({ seed: 4002 });

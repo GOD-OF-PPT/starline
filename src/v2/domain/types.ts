@@ -536,6 +536,10 @@ export interface V2RunState {
   readonly hp: number;
   readonly maxHp: number;
   readonly wallet: number;
+  /** Non-cashable starting expedition stipend (e.g. Stargate Relay T2/T3) usable mid-run but excluded from cashout */
+  readonly startingStipendCredits?: number;
+  /** Cumulative portion of startingStipendCredits spent mid-run (stipend-first accounting, bounded by startingStipendCredits) */
+  readonly stipendSpentCredits?: number;
   readonly graph: V2StarGraph;
   readonly visitedNodeIds: readonly string[];
   readonly currentNodeId: string | null;

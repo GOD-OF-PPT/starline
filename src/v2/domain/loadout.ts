@@ -515,6 +515,8 @@ export function launchV2Expedition(params: {
     hp: effectiveMaxHp,
     maxHp: effectiveMaxHp,
     wallet: startingWallet,
+    startingStipendCredits: startingWallet,
+    stipendSpentCredits: 0,
     graph: generated.graph,
     visitedNodeIds: [],
     currentNodeId: null,

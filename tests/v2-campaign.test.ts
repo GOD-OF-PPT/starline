@@ -469,7 +469,11 @@ describe('M2 Relic Pity Guarantee & Settlement Default Disposition', () => {
     // Default disposition keeps relic when display is built and relic is un-restored
     expect(getDefaultDispositionForItem(relicItem, 'safe_return', false, profile)).toBe('keep_relic');
     // When display is NOT built, defaults to sell (preserves legacy behavior)
-    const noDisplay = { ...profile, buildings: { ...profile.buildings, display: false } };
+    const noDisplay = {
+      ...profile,
+      buildings: { ...profile.buildings, display: false },
+      facilityTiers: { ...profile.facilityTiers, display: 0 },
+    };
     expect(getDefaultDispositionForItem(relicItem, 'safe_return', false, noDisplay)).toBe('sell');
 
     const slots = buildFreeFallbackPrepareSlots('cannon_skiff', profile.blueprints);
@@ -1448,9 +1452,10 @@ describe('M2 Iteration 2 Regression Tests (Challenger 1 & 2 Defect Parity)', () 
     expect(r2).toBeDefined();
     const actualR2RawSum = r2.enemyAttacks.reduce((sum, a) => sum + a.rawDamage, 0);
 
-    // Base damage is 6 + 1 + 1 = 8 when 3 enemies survive Round 1; with gravity_tide (+1 each) it MUST equal 11!
+    // boss_leviathan P1 R2 uses damageMult: 0.7 -> Math.round(6 * 0.7) = 4, plus 2 escorts (1+1) = 6 base;
+    // with gravity_tide (+1 per attacking enemy = +3) it MUST equal 9 and match pending.enemyThreatDamage!
     expect(pending!.enemiesAlive).toBe(3);
-    expect(actualR2RawSum).toBe(11);
+    expect(actualR2RawSum).toBe(9);
     expect(pending!.enemyThreatDamage).toBe(actualR2RawSum);
   });
 

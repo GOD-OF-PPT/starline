@@ -297,7 +297,15 @@ export class BaseScene extends Phaser.Scene {
 
   update(_time: number, delta: number): void {
     if ((!this.currentState && !this.v2State) || !this.texturesReady) return;
-    const dtMs = Math.min(delta, 50);
+    const isHidden = typeof document !== 'undefined' && document.hidden;
+    const safeDelta = Number.isFinite(delta) ? Math.max(0, delta) : 0;
+    const rawLoopDelta = this.game?.loop?.rawDelta;
+    const safeRawDelta =
+      typeof rawLoopDelta === 'number' && Number.isFinite(rawLoopDelta)
+        ? Math.max(0, rawLoopDelta)
+        : safeDelta;
+    const elapsedMs = isHidden ? 0 : Math.max(safeDelta, safeRawDelta);
+    const dtMs = Math.min(elapsedMs, 50);
     const dt = dtMs / 1000;
     this.elapsed += dt;
 
@@ -306,7 +314,7 @@ export class BaseScene extends Phaser.Scene {
     }
 
     if (this.dockingPlayback) {
-      this.dockingElapsedMs += dtMs;
+      this.dockingElapsedMs += Math.min(elapsedMs, 500);
       const p = Math.min(1, this.dockingElapsedMs / this.dockingDurationMs);
       this.dockingPlayback.onProgress?.(p);
       if (p >= 1) {
@@ -394,9 +402,16 @@ export class BaseScene extends Phaser.Scene {
       { id: 'drydock' },
     ];
 
+    const isDirectCanvasPointer = (pointer?: Phaser.Input.Pointer): boolean => {
+      const evt = pointer?.event;
+      if (!evt || !evt.target) return true;
+      return evt.target === this.game.canvas;
+    };
+
     for (const d of defs) {
       const zone = this.add.zone(0, 0, 120, 96).setInteractive({ useHandCursor: true }).setDepth(9);
-      zone.on('pointerdown', () => {
+      zone.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+        if (!isDirectCanvasPointer(pointer)) return;
         this.onBuildingClick?.(d.id);
       });
       const badgeBg = this.add.graphics().setDepth(7);
@@ -415,7 +430,8 @@ export class BaseScene extends Phaser.Scene {
     }
 
     const sgZone = this.add.zone(0, 0, 110, 86).setInteractive({ useHandCursor: true }).setDepth(9).setVisible(false);
-    sgZone.on('pointerdown', () => {
+    sgZone.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      if (!isDirectCanvasPointer(pointer)) return;
       this.onBuildingClick?.('drydock');
     });
     const sgBg = this.add.graphics().setDepth(7);
@@ -438,7 +454,8 @@ export class BaseScene extends Phaser.Scene {
       .zone(0, 0, 140, 88)
       .setInteractive({ useHandCursor: true })
       .setDepth(9);
-    this.berthZone.on('pointerdown', () => {
+    this.berthZone.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      if (!isDirectCanvasPointer(pointer)) return;
       this.onBerthClick?.();
     });
   }

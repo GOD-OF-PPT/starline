@@ -24,6 +24,7 @@ import {
 import { buildActiveWreckStateForNode, evaluateWreckHotspotCut } from './dismantle';
 import {
   buildFallbackEventStateFromLegacyNode,
+  computeNextStipendSpent,
   evaluateV2EventOption,
   maybeCreateEngineerSwapOffer,
   resolveV2EventOption,
@@ -379,7 +380,8 @@ export function cutV2WreckHotspot(
   run: V2RunState,
   spotId: V2WreckSpotId,
   unlockedFamilies: readonly V2UnlockFamilyId[],
-  reactorMode?: 'fuel' | 'repair'
+  reactorMode?: 'fuel' | 'repair',
+  profile?: V2ProfileState
 ): V3WreckCutOutcome {
   if (run.phase !== 'ENCOUNTER' || !run.currentNodeId) {
     return { ok: false, run, error: '当前不在残骸拆解节点内' };
@@ -392,7 +394,7 @@ export function cutV2WreckHotspot(
     return { ok: false, run, error: '当前存在敌舰伏击，请先处理战斗' };
   }
 
-  const built = buildActiveWreckStateForNode(run, node);
+  const built = buildActiveWreckStateForNode(run, node, profile);
   const wreck = built.wreck;
   let nextStreams = built.nextStreams;
 
@@ -895,8 +897,16 @@ export function abandonV2EventAndReturn(run: V2RunState): V2ActionOutcome {
     return { ok: false, run, error: '当前不在可放弃的事件中' };
   }
   const node = run.graph.nodes[run.currentNodeId];
-  if (!node || node.type === 'combat' || node.type === 'elite' || node.type === 'boss') {
-    return { ok: false, run, error: '战斗节点不可按非战斗事件放弃' };
+  if (
+    !node ||
+    node.type === 'combat' ||
+    node.type === 'elite' ||
+    node.type === 'boss' ||
+    Boolean(node.combat) ||
+    Boolean(run.activeCombat) ||
+    Boolean(run.activeWreck?.ambushTriggered)
+  ) {
+    return { ok: false, run, error: '战斗节点或残骸伏击战斗不可按非战斗事件放弃' };
   }
   const updatedNode: V2MapNode = { ...node, abandoned: true, resolved: false };
   const nextRun = freezeRunBonusObjectiveForSettlement(
@@ -958,6 +968,9 @@ export function buyV2MerchantOffer(
   let nextRun: V2RunState = {
     ...run,
     wallet: run.wallet - effectivePrice,
+    ...(effectivePrice > 0
+      ? { stipendSpentCredits: computeNextStipendSpent(run, effectivePrice) }
+      : {}),
     bay: addV2ItemToStaging(run.bay, offer.item, 0),
     transactionIds: [...run.transactionIds, transactionId],
     graph: {
@@ -1007,6 +1020,9 @@ export function buyV2MerchantFuel(
     run: {
       ...run,
       wallet: run.wallet - effectivePrice,
+      ...(effectivePrice > 0
+        ? { stipendSpentCredits: computeNextStipendSpent(run, effectivePrice) }
+        : {}),
       fuel: run.fuel + actualGain,
       transactionIds: [...run.transactionIds, transactionId],
       graph: {
@@ -1055,6 +1071,9 @@ export function buyV2MerchantRepair(
     run: {
       ...run,
       wallet: run.wallet - effectivePrice,
+      ...(effectivePrice > 0
+        ? { stipendSpentCredits: computeNextStipendSpent(run, effectivePrice) }
+        : {}),
       hp: run.hp + actualGain,
       transactionIds: [...run.transactionIds, transactionId],
       graph: {

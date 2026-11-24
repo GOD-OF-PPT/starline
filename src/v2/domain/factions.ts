@@ -112,6 +112,22 @@ export function getDismantlePartsMultiplier(freeSalvagersRep: number): number {
   return 1.0;
 }
 
+/**
+ * Authoritative anti-arbitrage minimum Salvage Parts craft cost floor:
+ * Ensures crafting an equipment module or gadget with parts can NEVER yield >= parts
+ * upon immediate (or later max-rank/max-tuning) dismantling across Workbench T0-T3 (x1.1),
+ * Free Salvagers Lv1-Lv3 (x1.35), and Hull Salvage Tuning (0..maxSalvageTuning).
+ */
+export function getAntiArbitragePartsCraftFloor(
+  baseDismantleParts: number,
+  maxSalvageTuning = 2,
+  minMargin = 2
+): number {
+  const maxMult = getDismantlePartsMultiplier(V3_FACTION_MAX_REP) * 1.1;
+  const maxPossibleYield = Math.max(1, Math.ceil(baseDismantleParts * maxMult) + maxSalvageTuning);
+  return maxPossibleYield + minMargin;
+}
+
 /** Free Salvagers Lv3 bonus initial structural stability on derelict wrecks */
 export function getWreckFactionStabilityBonus(freeSalvagersRep: number): number {
   return getFactionRank(freeSalvagersRep) >= 3 ? 10 : 0;
