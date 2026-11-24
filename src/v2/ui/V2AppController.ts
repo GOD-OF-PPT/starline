@@ -163,7 +163,7 @@ import {
 import { openV3CampaignModal, type CampaignModalTab } from './modals/CampaignModal';
 import { openV3CareerModal, type CareerModalTab } from './modals/CareerModal';
 import { renderArrangeView } from './screens/ArrangeView';
-import { renderBaseHeroView } from './screens/BaseView';
+import { renderBaseHeroView, updateBaseDockingNotice } from './screens/BaseView';
 import { renderCombatLiveOverlay, renderCombatPreView } from './screens/CombatView';
 import { renderEndingView } from './screens/EndingView';
 import { renderEventView } from './screens/EventView';
@@ -2868,6 +2868,23 @@ export class V2AppController {
           this.syncAll();
 
           if (!reduced) {
+            const syncDockingSlot = () => {
+              const updated = updateBaseDockingNotice(this.sceneOverlayEl, this.activeDockingNotice, {
+                onSkipDocking: () => {
+                  this.phaserHost?.skipBaseReturnDocking();
+                },
+                onCloseDocking: () => {
+                  this.activeDockingNotice = null;
+                  updateBaseDockingNotice(this.sceneOverlayEl, null, {
+                    onSkipDocking: () => {},
+                    onCloseDocking: () => {},
+                  });
+                },
+              });
+              if (!updated && this.computeCurrentScreen() === 'base') {
+                this.renderBaseHeroOverlay();
+              }
+            };
             this.phaserHost?.playBaseReturnDocking({
               earnedCredits: notice.earnedCredits,
               crateCount: notice.crateCount,
@@ -2877,14 +2894,14 @@ export class V2AppController {
                 if (this.activeDockingNotice !== notice) return;
                 notice.progress = prog;
                 this.renderTopHud();
-                this.renderBaseHeroOverlay();
+                syncDockingSlot();
               },
               onFinish: () => {
                 if (this.activeDockingNotice !== notice) return;
                 notice.animating = false;
                 notice.progress = 1;
                 this.renderTopHud();
-                this.renderBaseHeroOverlay();
+                syncDockingSlot();
               },
             });
           }

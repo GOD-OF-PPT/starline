@@ -132,7 +132,7 @@ export function renderSettlementView(
       ? '4 站精华试玩结算'
       : isSafe
       ? '安全返航清点'
-      : '紧急拖回结算'
+      : '战败 · 紧急拖回结算'
   }</h2>
         <span class="panel-sub">${
           run.isShowcase ? '独立试玩 · 不影响正式存档' : '每件战利品择一去向'

@@ -246,7 +246,16 @@ export class StarlineAppDriver {
     await expect
       .poll(
         async () => {
-          latest = await this.inspect();
+          const snapshot = await this.page.evaluate(() => {
+            const fn = (
+              window as unknown as {
+                __STARLINE_INSPECT__?: () => StarlineInspectSnapshot;
+              }
+            ).__STARLINE_INSPECT__;
+            return typeof fn === 'function' ? fn() : null;
+          });
+          if (!snapshot) return false;
+          latest = snapshot;
           return predicate(latest);
         },
         { timeout: timeoutMs, message: `Timed out waiting for ${description}` },
