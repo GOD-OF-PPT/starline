@@ -27,7 +27,7 @@ import {
   validateV2Placement,
 } from '../domain/inventoryV2';
 import { getAnyV2ItemDef } from '../domain/itemCatalog';
-import type { V2TacticalDelta } from '../domain/tacticalDelta';
+import { computeV2BayHash, type V2TacticalDelta } from '../domain/tacticalDelta';
 import type {
   V2CargoBayState,
   V2ItemInstance,
@@ -146,17 +146,26 @@ function computeSynergyColor(sourceKind: V2AdjacencyLink['sourceKind']): string 
   }
 }
 
+type IdleHandle = { readonly kind: 'ric' | 'timeout'; readonly id: number };
+
+interface IdleSchedulerHost {
+  requestIdleCallback?: (cb: () => void, opts?: { readonly timeout?: number }) => number;
+  cancelIdleCallback?: (handle: number) => void;
+}
+
 /**
  * Interactive Variable-Hull V2 Cargo Bay (4x4 Skiff/Cruiser & 5x4 Freighter with disabled bulkheads):
+ * - Persistent sub-containers (stats, board, cells, items, synergySvg, staging, inspector) with dirty diffing
  * - Drag-and-drop (pointer + touch lift + ghost silhouette)
  * - Tap-to-select / tap-to-place / rotate / discard / undo
  * - Full WAI-ARIA keyboard roving tabindex (Arrows, Enter/Space, R, Delete, Escape),
  *   strictly isolated whenever any modal dialog is open!
+ * - Idle-scheduled tactical delta updates with stale-bayHash discard guard
  * - Explicit four-way origin markers (借/自/拾/任) + quality notches (non-color-only).
  */
 export class CargoGridV2Component {
   private readonly root: HTMLElement;
-  private readonly callbacks: CargoGridV2Callbacks;
+  private callbacks: CargoGridV2Callbacks;
 
   private bay: V2CargoBayState | null = null;
   private editable = false;
@@ -167,11 +176,48 @@ export class CargoGridV2Component {
   private gridHasFocus = false;
   private drag: DragState | null = null;
   private lastSnappedId: string | null = null;
+  private pendingSnapFeedback = false;
+  private renderedShipId: V2CargoBayState['shipId'] | null = null;
+  private cellsShipId: V2CargoBayState['shipId'] | null = null;
   private invalidToastText: string | null = null;
-  private invalidToastTimer: number | null = null;
+  private invalidToastTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   private prevLinkCount = 0;
+
+  // Persistent sub-containers created once in ensureContainers()
+  private containersReady = false;
+  private statsEl: HTMLElement | null = null;
   private boardEl: HTMLElement | null = null;
+  private toastEl: HTMLElement | null = null;
+  private cellsWrapEl: HTMLElement | null = null;
+  private itemLayerEl: HTMLElement | null = null;
+  private synergySvgEl: SVGSVGElement | null = null;
+  private stagingEl: HTMLElement | null = null;
+  private inspectorEl: HTMLElement | null = null;
   private lastExternalInspectorHost: HTMLElement | null = null;
+
+  private readonly cellElements = new Map<string, HTMLElement>();
+  private readonly placedTileElements = new Map<string, HTMLElement>();
+  private readonly stagingChipElements = new Map<string, HTMLButtonElement>();
+  private readonly recommendedCellKeys = new Set<string>();
+
+  // Dirty tracking & cached stats / delta
+  private lastBayCombatHash = '';
+  private lastPlacedUiHash = '';
+  private lastStagingUiHash = '';
+  private lastSynergyRenderKey = '';
+  private lastInspectorStateKey = '';
+  private renderedSelectedKey = 'none';
+  private lastSelectedItemMetaKey = 'none';
+  private lastRenderedEditable: boolean | null = null;
+  private lastRenderedPrepareMode: boolean | null = null;
+  private callbacksDirty = false;
+  private lastStats: ReturnType<typeof calculateV2BuildStats> | null = null;
+
+  private activeDelta: V2TacticalDelta | null = null;
+  private activeDeltaKey: string | null = null;
+  private deltaJobToken = 0;
+  private pendingDeltaHandle: IdleHandle | null = null;
+  private destroyed = false;
 
   constructor(root: HTMLElement, callbacks: CargoGridV2Callbacks) {
     this.root = root;
@@ -182,19 +228,289 @@ export class CargoGridV2Component {
     window.addEventListener('keydown', this.handleKeyDown);
   }
 
+  setCallbacks(callbacks: CargoGridV2Callbacks): void {
+    this.callbacks = callbacks;
+    this.callbacksDirty = true;
+  }
+
+  getRoot(): HTMLElement {
+    return this.root;
+  }
+
+  getUiStateSnapshot(): {
+    readonly selected: { readonly zone: 'grid' | 'staging'; readonly instanceId: string } | null;
+    readonly focusedCell: V2GridCoord;
+    readonly prevLinkCount: number;
+    readonly lastSnappedId: string | null;
+    readonly carrying: boolean;
+  } {
+    return {
+      selected: this.selected ? { ...this.selected } : null,
+      focusedCell: { ...this.focusedCell },
+      prevLinkCount: this.prevLinkCount,
+      lastSnappedId: this.lastSnappedId,
+      carrying: this.carrying,
+    };
+  }
+
+  private clearInvalidToast(): void {
+    this.invalidToastText = null;
+    if (this.invalidToastTimer !== null) {
+      globalThis.clearTimeout(this.invalidToastTimer);
+      this.invalidToastTimer = null;
+    }
+    this.renderToast();
+  }
+
+  private scheduleIdle(fn: () => void): IdleHandle {
+    const win = (typeof window !== 'undefined' ? window : undefined) as IdleSchedulerHost | undefined;
+    const glob = globalThis as unknown as IdleSchedulerHost;
+    const ric =
+      typeof win?.requestIdleCallback === 'function'
+        ? win.requestIdleCallback.bind(win)
+        : typeof glob.requestIdleCallback === 'function'
+        ? glob.requestIdleCallback.bind(glob)
+        : null;
+    if (ric) {
+      return { kind: 'ric', id: ric(() => fn(), { timeout: 120 }) };
+    }
+    return { kind: 'timeout', id: globalThis.setTimeout(fn, 0) as unknown as number };
+  }
+
+  private cancelPendingDeltaJob(): void {
+    this.deltaJobToken += 1;
+    if (!this.pendingDeltaHandle) return;
+    const handle = this.pendingDeltaHandle;
+    this.pendingDeltaHandle = null;
+    if (handle.kind === 'ric') {
+      const win = (typeof window !== 'undefined' ? window : undefined) as IdleSchedulerHost | undefined;
+      const glob = globalThis as unknown as IdleSchedulerHost;
+      const cancelRic =
+        typeof win?.cancelIdleCallback === 'function'
+          ? win.cancelIdleCallback.bind(win)
+          : typeof glob.cancelIdleCallback === 'function'
+          ? glob.cancelIdleCallback.bind(glob)
+          : null;
+      cancelRic?.(handle.id);
+    } else {
+      globalThis.clearTimeout(handle.id);
+    }
+  }
+
   destroy(): void {
+    this.destroyed = true;
     window.removeEventListener('pointermove', this.handleWindowPointerMove);
     window.removeEventListener('pointerup', this.handleWindowPointerUp);
     window.removeEventListener('pointercancel', this.handleWindowPointerCancel);
     window.removeEventListener('keydown', this.handleKeyDown);
+    this.boardEl?.removeEventListener('pointerdown', this.handleBoardPointerDown);
+    this.stagingEl?.removeEventListener('pointerdown', this.handleStagingPointerDown);
+    this.stagingEl?.removeEventListener('click', this.handleStagingClick);
+    this.inspectorEl?.removeEventListener('click', this.handleInspectorClick);
+    this.cancelPendingDeltaJob();
     this.clearDragGhost();
+    this.drag = null;
+    this.clearInvalidToast();
+    if (this.inspectorEl?.parentNode) {
+      this.inspectorEl.parentNode.removeChild(this.inspectorEl);
+    }
     if (this.lastExternalInspectorHost) {
       this.lastExternalInspectorHost.innerHTML = '';
       this.lastExternalInspectorHost = null;
     }
-    if (this.invalidToastTimer !== null) {
-      window.clearTimeout(this.invalidToastTimer);
-      this.invalidToastTimer = null;
+    this.cellElements.clear();
+    this.placedTileElements.clear();
+    this.stagingChipElements.clear();
+    this.recommendedCellKeys.clear();
+    this.statsEl = null;
+    this.boardEl = null;
+    this.toastEl = null;
+    this.cellsWrapEl = null;
+    this.itemLayerEl = null;
+    this.synergySvgEl = null;
+    this.stagingEl = null;
+    this.inspectorEl = null;
+    this.containersReady = false;
+  }
+
+  private ensureContainers(): void {
+    if (this.containersReady) return;
+    this.root.innerHTML = '';
+
+    const statsEl = document.createElement('div');
+    statsEl.className = 'stats-strip v2-stats-strip';
+    statsEl.dataset.cargoSlot = 'stats';
+
+    const boardEl = document.createElement('div');
+    boardEl.className = 'cargo-board-outer v2-cargo-board';
+    boardEl.dataset.cargoSlot = 'board';
+    boardEl.setAttribute('role', 'grid');
+
+    const cellsWrapEl = document.createElement('div');
+    cellsWrapEl.className = 'cargo-grid-cells v2-grid-cells';
+    cellsWrapEl.dataset.cargoSlot = 'cells';
+
+    const itemLayerEl = document.createElement('div');
+    itemLayerEl.className = 'cargo-item-layer';
+    itemLayerEl.dataset.cargoSlot = 'items';
+
+    const synergySvgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    synergySvgEl.setAttribute('class', 'synergy-overlay-svg');
+    synergySvgEl.setAttribute('data-cargo-slot', 'synergy');
+    synergySvgEl.setAttribute('preserveAspectRatio', 'none');
+    synergySvgEl.style.display = 'none';
+
+    boardEl.appendChild(cellsWrapEl);
+    boardEl.appendChild(itemLayerEl);
+    boardEl.appendChild(synergySvgEl);
+
+    const stagingEl = document.createElement('div');
+    stagingEl.className = 'staging-box v2-staging-box';
+    stagingEl.dataset.cargoSlot = 'staging';
+    stagingEl.style.display = 'none';
+
+    const inspectorEl = document.createElement('div');
+    inspectorEl.className = 'inspector-bar v2-inspector-bar';
+    inspectorEl.dataset.cargoSlot = 'inspector';
+
+    this.root.appendChild(statsEl);
+    this.root.appendChild(boardEl);
+    this.root.appendChild(stagingEl);
+    this.root.appendChild(inspectorEl);
+
+    boardEl.addEventListener('pointerdown', this.handleBoardPointerDown);
+    stagingEl.addEventListener('pointerdown', this.handleStagingPointerDown);
+    stagingEl.addEventListener('click', this.handleStagingClick);
+    inspectorEl.addEventListener('click', this.handleInspectorClick);
+
+    this.statsEl = statsEl;
+    this.boardEl = boardEl;
+    this.cellsWrapEl = cellsWrapEl;
+    this.itemLayerEl = itemLayerEl;
+    this.synergySvgEl = synergySvgEl;
+    this.stagingEl = stagingEl;
+    this.inspectorEl = inspectorEl;
+    this.containersReady = true;
+  }
+
+  private ensureBoardCells(shipId: V2CargoBayState['shipId']): void {
+    if (!this.boardEl || !this.cellsWrapEl || !this.synergySvgEl) return;
+    if (this.cellsShipId === shipId) return;
+    this.cellsShipId = shipId;
+
+    const ship = V2_SHIPS[shipId];
+    this.boardEl.dataset.cols = String(ship.cols);
+    this.boardEl.dataset.rows = String(ship.rows);
+    this.boardEl.style.aspectRatio = `${ship.cols} / ${ship.rows}`;
+    this.boardEl.setAttribute(
+      'aria-label',
+      `${ship.name} ${ship.cols}列${ship.rows}行船舱网格（${ship.validCellCount}格可用），方向键移动焦点，回车选取或放置，R键旋转`
+    );
+
+    this.cellsWrapEl.style.gridTemplateColumns = `repeat(${ship.cols}, 1fr)`;
+    this.cellsWrapEl.style.gridTemplateRows = `repeat(${ship.rows}, 1fr)`;
+    this.synergySvgEl.setAttribute('viewBox', `0 0 ${ship.cols * 100} ${ship.rows * 100}`);
+
+    this.cellsWrapEl.innerHTML = '';
+    this.cellElements.clear();
+
+    for (let y = 0; y < ship.rows; y++) {
+      for (let x = 0; x < ship.cols; x++) {
+        const cellEl = document.createElement('div');
+        const disabled = isCellDisabledForShip(shipId, x, y);
+        const isPowerCell = !disabled && isCellPowerCellForShip(shipId, x, y);
+        cellEl.className = `cargo-cell${disabled ? ' v2-cell-disabled' : ''}${
+          isPowerCell ? ' v3-power-cell' : ''
+        }`;
+        cellEl.dataset.cx = String(x);
+        cellEl.dataset.cy = String(y);
+        if (isPowerCell) {
+          cellEl.dataset.powerCell = 'true';
+          cellEl.title = '船体供能格：装备覆盖此格即可获得超导强化';
+        }
+        cellEl.setAttribute('role', 'gridcell');
+        if (disabled) {
+          cellEl.setAttribute('aria-disabled', 'true');
+          cellEl.innerHTML = `<span class="v2-bulkhead-mark" aria-hidden="true">✕</span>`;
+          cellEl.dataset.markState = 'bulkhead';
+        } else if (isPowerCell) {
+          cellEl.innerHTML = `<span class="v3-power-cell-mark" aria-hidden="true">⚡</span>`;
+          cellEl.dataset.markState = 'power';
+        } else {
+          cellEl.dataset.markState = 'empty';
+        }
+
+        const isRoving = this.focusedCell.x === x && this.focusedCell.y === y;
+        cellEl.tabIndex = isRoving ? 0 : -1;
+
+        cellEl.addEventListener('focus', () => {
+          if (this.destroyed) return;
+          const changed = !this.gridHasFocus || this.focusedCell.x !== x || this.focusedCell.y !== y;
+          this.focusedCell = { x, y };
+          this.gridHasFocus = true;
+          if (changed) {
+            this.updateCellVisualFocusAndPreview();
+          }
+        });
+        cellEl.addEventListener('blur', () => {
+          queueMicrotask(() => {
+            if (this.destroyed) return;
+            if (this.boardEl && !this.boardEl.contains(document.activeElement)) {
+              this.gridHasFocus = false;
+              this.updateCellVisualFocusAndPreview();
+            }
+          });
+        });
+
+        this.cellsWrapEl.appendChild(cellEl);
+        this.cellElements.set(`${x},${y}`, cellEl);
+      }
+    }
+  }
+
+  private updateCellAriaLabels(bay: V2CargoBayState): void {
+    const ship = V2_SHIPS[bay.shipId];
+    for (let y = 0; y < ship.rows; y++) {
+      for (let x = 0; x < ship.cols; x++) {
+        const cellEl = this.cellElements.get(`${x},${y}`);
+        if (!cellEl) continue;
+        const disabled = isCellDisabledForShip(bay.shipId, x, y);
+        const isPowerCell = !disabled && isCellPowerCellForShip(bay.shipId, x, y);
+        const occupant = disabled ? undefined : findV2ItemAtCell(bay, x, y);
+        const occName = disabled
+          ? '不可用舱壁格'
+          : occupant
+          ? getAnyV2ItemDef(occupant.item.definitionId)?.name ?? occupant.item.definitionId
+          : isPowerCell
+          ? '空位（供能格）'
+          : '空位';
+        cellEl.setAttribute('aria-label', `第${y + 1}行第${x + 1}列 ${occName}`);
+      }
+    }
+  }
+
+  private renderToast(): void {
+    if (!this.boardEl) return;
+    if (!this.invalidToastText) {
+      if (this.toastEl) {
+        this.toastEl.remove();
+        this.toastEl = null;
+      }
+      return;
+    }
+    if (!this.toastEl) {
+      const toast = document.createElement('div');
+      toast.className = 'drag-reason-toast';
+      toast.setAttribute('role', 'alert');
+      this.toastEl = toast;
+      if (this.cellsWrapEl && this.cellsWrapEl.parentNode === this.boardEl) {
+        this.boardEl.insertBefore(toast, this.cellsWrapEl);
+      } else {
+        this.boardEl.appendChild(toast);
+      }
+    }
+    if (this.toastEl.textContent !== this.invalidToastText) {
+      this.toastEl.textContent = this.invalidToastText;
     }
   }
 
@@ -203,16 +519,51 @@ export class CargoGridV2Component {
     editable: boolean,
     options?: { readonly prepareMode?: boolean; readonly restoreCellFocus?: boolean }
   ): void {
+    if (this.destroyed) return;
+    this.ensureContainers();
+
     const wasCellFocused =
       Boolean(options?.restoreCellFocus) ||
       (this.boardEl !== null && this.boardEl.contains(document.activeElement));
 
+    const nextPrepareMode = Boolean(options?.prepareMode);
+    const isFirstRender = this.bay === null;
+    const shipChanged = this.renderedShipId !== null && this.renderedShipId !== bay.shipId;
+    const modeChanged = !isFirstRender && this.prepareMode !== nextPrepareMode;
+    const editableDisabled = !isFirstRender && this.editable && !editable;
+    const editableChanged = this.lastRenderedEditable !== editable;
+    const prepareModeChanged = this.lastRenderedPrepareMode !== nextPrepareMode;
+    const callbacksWereDirty = this.callbacksDirty;
+    this.callbacksDirty = false;
+
+    if (shipChanged || modeChanged) {
+      this.clearDragGhost();
+      this.drag = null;
+      this.carrying = false;
+      this.lastSnappedId = null;
+      this.pendingSnapFeedback = false;
+      this.clearInvalidToast();
+      this.cancelPendingDeltaJob();
+      this.activeDelta = null;
+      this.activeDeltaKey = null;
+      this.recommendedCellKeys.clear();
+      if (modeChanged) {
+        this.selected = null;
+      }
+    } else if (editableDisabled) {
+      this.clearDragGhost();
+      this.drag = null;
+      this.carrying = false;
+      this.lastSnappedId = null;
+      this.pendingSnapFeedback = false;
+    }
+
     this.bay = bay;
     this.editable = editable;
-    this.prepareMode = Boolean(options?.prepareMode);
+    this.prepareMode = nextPrepareMode;
+    this.renderedShipId = bay.shipId;
 
     const ship = V2_SHIPS[bay.shipId];
-    // Keep focused cell within current ship bounds
     this.focusedCell = {
       x: Math.max(0, Math.min(ship.cols - 1, this.focusedCell.x)),
       y: Math.max(0, Math.min(ship.rows - 1, this.focusedCell.y)),
@@ -234,21 +585,135 @@ export class CargoGridV2Component {
       }
     }
 
+    if (this.lastSnappedId && !bay.placed.some((p) => p.item.instanceId === this.lastSnappedId)) {
+      this.lastSnappedId = null;
+      this.pendingSnapFeedback = false;
+    }
+
     // Auto-select first staging item when editable for 1-tap placement convenience
     if (editable && !this.selected && bay.staging.length > 0) {
       this.selected = { zone: 'staging', instanceId: bay.staging[0].item.instanceId };
     }
 
-    const stats = calculateV2BuildStats(bay);
-    const occ = getV2BayOccupancy(bay);
-    if (stats.links.length > this.prevLinkCount && this.prevLinkCount >= 0 && this.lastSnappedId) {
-      soundEngine.play('energyLink');
+    const bayCombatHash = computeV2BayHash(bay);
+    const placedUiHash = `${bayCombatHash}|${bay.placed.map((p) => p.item.fixedValue).join(',')}`;
+    const stagingUiHash = `${bay.staging
+      .map(
+        (s) =>
+          `${s.item.instanceId}:${s.item.definitionId}:${s.item.origin}:${s.item.quality}:${s.item.fixedValue}:${s.rotation}`
+      )
+      .join(';')}|d=${bay.discardedThisArrange.length}|e=${editable ? 1 : 0}|pm=${nextPrepareMode ? 1 : 0}`;
+    const selKey = this.selected ? `${this.selected.zone}:${this.selected.instanceId}` : 'none';
+    const selectedItemMetaKey = this.computeSelectedItemMetaKey();
+
+    const bayCombatChanged = isFirstRender || bayCombatHash !== this.lastBayCombatHash;
+    const placedUiChanged = isFirstRender || shipChanged || placedUiHash !== this.lastPlacedUiHash;
+    const stagingUiChanged = isFirstRender || stagingUiHash !== this.lastStagingUiHash;
+    const selectionChanged = selKey !== this.renderedSelectedKey;
+    const selectedItemMetaChanged = selectedItemMetaKey !== this.lastSelectedItemMetaKey;
+
+    const stats =
+      placedUiChanged || !this.lastStats ? calculateV2BuildStats(bay) : this.lastStats;
+    this.lastStats = stats;
+
+    const forceSnapReplay = this.pendingSnapFeedback;
+    if (isFirstRender || shipChanged || modeChanged) {
+      this.prevLinkCount = stats.links.length;
+      this.pendingSnapFeedback = false;
+    } else {
+      if (this.pendingSnapFeedback && this.lastSnappedId && stats.links.length > this.prevLinkCount) {
+        soundEngine.play('energyLink');
+      }
+      this.prevLinkCount = stats.links.length;
+      this.pendingSnapFeedback = false;
     }
-    this.prevLinkCount = stats.links.length;
 
-    this.root.innerHTML = '';
+    this.ensureBoardCells(bay.shipId);
 
-    // 1. Live V2 Build Stats Strip
+    if (placedUiChanged) {
+      this.renderStatsStrip(bay, stats);
+      this.updateCellAriaLabels(bay);
+      this.renderPlacedItems(bay, stats);
+    } else if (forceSnapReplay) {
+      this.renderPlacedItems(bay, stats);
+    }
+
+    if (stagingUiChanged) {
+      this.renderStagingTray(bay, editable);
+    }
+
+    if (!placedUiChanged && !forceSnapReplay) {
+      this.updateSelectionAndDragClasses();
+    } else if (!stagingUiChanged) {
+      this.updateSelectionAndDragClasses();
+    }
+
+    this.lastBayCombatHash = bayCombatHash;
+    this.lastPlacedUiHash = placedUiHash;
+    this.lastStagingUiHash = stagingUiHash;
+    this.renderedSelectedKey = selKey;
+    this.lastSelectedItemMetaKey = selectedItemMetaKey;
+    this.lastRenderedEditable = editable;
+    this.lastRenderedPrepareMode = nextPrepareMode;
+
+    this.renderSynergySvg(bay, stats);
+    this.renderToast();
+
+    this.syncInspectorHost();
+
+    const currentDeltaKey = `${bayCombatHash}|${selectedItemMetaKey}`;
+    const deltaInputChanged =
+      bayCombatChanged ||
+      selectionChanged ||
+      selectedItemMetaChanged ||
+      callbacksWereDirty ||
+      editableChanged ||
+      prepareModeChanged ||
+      shipChanged;
+
+    if (bayCombatChanged) {
+      this.cancelPendingDeltaJob();
+      this.activeDelta = null;
+      this.activeDeltaKey = null;
+      this.recommendedCellKeys.clear();
+    }
+
+    if (!this.selected || !this.callbacks.getTacticalDelta) {
+      this.cancelPendingDeltaJob();
+      this.activeDelta = null;
+      this.activeDeltaKey = null;
+      this.recommendedCellKeys.clear();
+      this.renderSelectedInspector(editable, null);
+    } else if (deltaInputChanged) {
+      if (!callbacksWereDirty && this.activeDeltaKey === currentDeltaKey && this.activeDelta !== null) {
+        this.updateRecommendedCells(this.activeDelta);
+        this.renderSelectedInspector(editable, this.activeDelta);
+      } else {
+        this.cancelPendingDeltaJob();
+        this.activeDelta = null;
+        this.activeDeltaKey = null;
+        this.recommendedCellKeys.clear();
+        this.renderSelectedInspector(editable, null);
+        this.scheduleTacticalDeltaUpdate();
+      }
+    }
+
+    this.updateCellVisualFocusAndPreview();
+
+    if (wasCellFocused && this.gridHasFocus) {
+      const targetCell = this.cellElements.get(`${this.focusedCell.x},${this.focusedCell.y}`);
+      if (targetCell && document.activeElement !== targetCell) {
+        targetCell.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  private renderStatsStrip(
+    bay: V2CargoBayState,
+    stats: ReturnType<typeof calculateV2BuildStats>
+  ): void {
+    if (!this.statsEl) return;
+    const occ = getV2BayOccupancy(bay);
     const heavySummary =
       stats.heavies.length > 0
         ? `重炮 ${stats.heavies.reduce((s, h) => s + h.baseDamage + h.firstShotBonus, 0)}爆发`
@@ -276,9 +741,7 @@ export class CargoGridV2Component {
       stats.empJammers.reduce((sum, e) => sum + e.damage, 0) +
       stats.salvageGrapples.reduce((sum, g) => sum + g.damage, 0);
 
-    const statsStrip = document.createElement('div');
-    statsStrip.className = 'stats-strip v2-stats-strip';
-    statsStrip.innerHTML = `
+    this.statsEl.innerHTML = `
       <div class="stat-chip">
         <span class="k">常规/构筑火力</span>
         <span class="v num">${regularDps}</span>
@@ -316,137 +779,16 @@ export class CargoGridV2Component {
     }</span>
       </div>
     `;
-    this.root.appendChild(statsStrip);
+  }
 
-    // 2. Variable-Dimension Ship Hull Grid Board
-    const board = document.createElement('div');
-    board.className = 'cargo-board-outer v2-cargo-board';
-    board.dataset.cols = String(ship.cols);
-    board.dataset.rows = String(ship.rows);
-    board.style.aspectRatio = `${ship.cols} / ${ship.rows}`;
-    board.setAttribute('role', 'grid');
-    board.setAttribute(
-      'aria-label',
-      `${ship.name} ${ship.cols}列${ship.rows}行船舱网格（${ship.validCellCount}格可用），方向键移动焦点，回车选取或放置，R键旋转`
-    );
-    this.boardEl = board;
-
-    if (this.invalidToastText) {
-      const toast = document.createElement('div');
-      toast.className = 'drag-reason-toast';
-      toast.setAttribute('role', 'alert');
-      toast.textContent = this.invalidToastText;
-      board.appendChild(toast);
-    }
-
-    // 2a. Background grid cells with disabled hull bulkheads & roving tabindex
-    const cellsWrap = document.createElement('div');
-    cellsWrap.className = 'cargo-grid-cells v2-grid-cells';
-    cellsWrap.style.gridTemplateColumns = `repeat(${ship.cols}, 1fr)`;
-    cellsWrap.style.gridTemplateRows = `repeat(${ship.rows}, 1fr)`;
-    const preview = this.computeActivePreview();
-
-    // Compute optional tactical delta & recommended optimal synergy spot once per render
-    const selInfoForDelta = this.getSelectedItemInfo();
-    const activeDelta =
-      selInfoForDelta && this.callbacks.getTacticalDelta
-        ? this.callbacks.getTacticalDelta(selInfoForDelta.item, selInfoForDelta.zone)
-        : null;
-    const recommendedCellSet = new Set<string>();
-    if (editable && selInfoForDelta && activeDelta?.recommendedSpot) {
-      const sDef = getAnyV2ItemDef(selInfoForDelta.item.definitionId);
-      if (sDef) {
-        const recCells = getV2OccupiedCells(
-          sDef.shapeId,
-          activeDelta.recommendedSpot.x,
-          activeDelta.recommendedSpot.y,
-          activeDelta.recommendedSpot.rotation
-        );
-        for (const rc of recCells) recommendedCellSet.add(`${rc.x},${rc.y}`);
-      }
-    }
-
-    for (let y = 0; y < ship.rows; y++) {
-      for (let x = 0; x < ship.cols; x++) {
-        const cellEl = document.createElement('div');
-        const disabled = isCellDisabledForShip(bay.shipId, x, y);
-        const isPowerCell = !disabled && isCellPowerCellForShip(bay.shipId, x, y);
-        const isRecommended = !disabled && !preview && recommendedCellSet.has(`${x},${y}`);
-        cellEl.className = `cargo-cell${disabled ? ' v2-cell-disabled' : ''}${
-          isPowerCell ? ' v3-power-cell' : ''
-        }${isRecommended ? ' cell-recommended' : ''}`;
-        cellEl.dataset.cx = String(x);
-        cellEl.dataset.cy = String(y);
-        if (isPowerCell) {
-          cellEl.dataset.powerCell = 'true';
-          cellEl.title = '船体供能格：装备覆盖此格即可获得超导强化';
-        }
-        cellEl.setAttribute('role', 'gridcell');
-        if (disabled) {
-          cellEl.setAttribute('aria-disabled', 'true');
-        }
-
-        const isRoving = this.focusedCell.x === x && this.focusedCell.y === y;
-        cellEl.tabIndex = isRoving ? 0 : -1;
-        if (isRoving && this.gridHasFocus) {
-          cellEl.classList.add('kb-focused');
-        }
-
-        const occupant = disabled ? undefined : findV2ItemAtCell(bay, x, y);
-        const occName = disabled
-          ? '不可用舱壁格'
-          : occupant
-          ? getAnyV2ItemDef(occupant.item.definitionId)?.name ?? occupant.item.definitionId
-          : isPowerCell
-          ? '空位（供能格）'
-          : '空位';
-        cellEl.setAttribute('aria-label', `第${y + 1}行第${x + 1}列 ${occName}`);
-
-        if (disabled) {
-          cellEl.innerHTML = `<span class="v2-bulkhead-mark" aria-hidden="true">✕</span>`;
-        } else if (isPowerCell) {
-          cellEl.innerHTML = `<span class="v3-power-cell-mark" aria-hidden="true">⚡</span>`;
-        }
-
-        cellEl.addEventListener('focus', () => {
-          this.focusedCell = { x, y };
-          if (!this.gridHasFocus) {
-            this.gridHasFocus = true;
-            this.updateCellVisualFocusAndPreview();
-          }
-        });
-        cellEl.addEventListener('blur', () => {
-          queueMicrotask(() => {
-            if (this.boardEl && !this.boardEl.contains(document.activeElement)) {
-              this.gridHasFocus = false;
-              this.boardEl
-                .querySelectorAll('.kb-focused')
-                .forEach((el) => el.classList.remove('kb-focused'));
-            }
-          });
-        });
-
-        if (preview) {
-          const inCells = preview.cells.some((c) => c.x === x && c.y === y);
-          const inConflicts = preview.conflictCells.some((c) => c.x === x && c.y === y);
-          if (preview.valid && inCells) {
-            cellEl.classList.add('preview-valid');
-            cellEl.innerHTML = `<span class="cargo-cell-mark">✓</span>`;
-          } else if (!preview.valid && (inConflicts || inCells)) {
-            cellEl.classList.add('preview-invalid');
-            if (inConflicts && !disabled) {
-              cellEl.innerHTML = `<span class="cargo-cell-mark">✕</span>`;
-            }
-          }
-        }
-        cellsWrap.appendChild(cellEl);
-      }
-    }
-    board.appendChild(cellsWrap);
-
-    // 2b. Placed Items Visual Layer
-    const itemLayer = document.createElement('div');
-    itemLayer.className = 'cargo-item-layer';
+  private renderPlacedItems(
+    bay: V2CargoBayState,
+    stats: ReturnType<typeof calculateV2BuildStats>
+  ): void {
+    if (!this.itemLayerEl) return;
+    const ship = V2_SHIPS[bay.shipId];
+    this.itemLayerEl.innerHTML = '';
+    this.placedTileElements.clear();
 
     const boostedIds = new Set<string>();
     for (const lnk of stats.links) {
@@ -469,6 +811,7 @@ export class CargoGridV2Component {
       const isPowerBoosted = powerBoostedSet.has(placed.item.instanceId);
 
       const tile = document.createElement('div');
+      tile.dataset.instanceId = placed.item.instanceId;
       tile.className = `placed-item v2-placed-item origin-${placed.item.origin} ${
         placed.item.category === 'equipment'
           ? placed.item.quality === 'improved'
@@ -491,7 +834,6 @@ export class CargoGridV2Component {
       tile.style.width = `${(bounds.width / ship.cols) * 100}%`;
       tile.style.height = `${(bounds.height / ship.rows) * 100}%`;
 
-      // Draw exact sub-cell backplates so L3 / T4 transparent cutouts stay transparent!
       const localCells = getV2OccupiedCells(def.shapeId, 0, 0, placed.rotation);
       for (const lc of localCells) {
         const sub = document.createElement('div');
@@ -503,7 +845,6 @@ export class CargoGridV2Component {
         tile.appendChild(sub);
       }
 
-      // Rotated hand-painted sprite (V2Rotation is 0|1|2|3 -> *90 deg!)
       const spriteWrap = document.createElement('div');
       spriteWrap.className = 'placed-sprite-wrap';
       const baseBounds = getV2ShapeBounds(def.shapeId, 0);
@@ -524,14 +865,12 @@ export class CargoGridV2Component {
       spriteWrap.appendChild(img);
       tile.appendChild(spriteWrap);
 
-      // Explicit Origin Badge (借/自/拾/任) top-left — never color-only!
       const originPill = document.createElement('span');
       originPill.className = `v2-origin-badge origin-${placed.item.origin}`;
       originPill.textContent = originTagText(placed.item.origin);
       originPill.title = originFullLabel(placed.item.origin);
       tile.appendChild(originPill);
 
-      // Quality notch badge top-right for equipment (良 / 普) or consumable gadget (耗)
       if (placed.item.category === 'equipment') {
         const qPill = document.createElement('span');
         qPill.className = `v2-quality-notch ${
@@ -550,7 +889,6 @@ export class CargoGridV2Component {
         tile.appendChild(gPill);
       }
 
-      // Compact name / synergy badge bottom
       const labelEl = document.createElement('span');
       labelEl.className = 'placed-label';
       labelEl.textContent =
@@ -563,316 +901,366 @@ export class CargoGridV2Component {
           : def.name.slice(0, 4);
       tile.appendChild(labelEl);
 
-      itemLayer.appendChild(tile);
-    }
-    board.appendChild(itemLayer);
-
-    // 2c. Uncluttered Synergy Indicator Layer:
-    // - Always shows subtle glowing connector pins right on the shared orthogonal seam (zero art obstruction!)
-    // - Illuminates full energy conduit beam + bonus pill ONLY when a linked item is selected, dragged, or just snapped!
-    if (stats.links.length > 0) {
-      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      svg.setAttribute('class', 'synergy-overlay-svg');
-      svg.setAttribute('viewBox', `0 0 ${ship.cols * 100} ${ship.rows * 100}`);
-      svg.setAttribute('preserveAspectRatio', 'none');
-
-      const centerOf = (instanceId: string): { x: number; y: number } | null => {
-        const p = bay.placed.find((item) => item.item.instanceId === instanceId);
-        if (!p) return null;
-        const cells = getV2PlacedCells(p);
-        if (cells.length === 0) return null;
-        const avgX = cells.reduce((acc, c) => acc + c.x + 0.5, 0) / cells.length;
-        const avgY = cells.reduce((acc, c) => acc + c.y + 0.5, 0) / cells.length;
-        return { x: avgX * 100, y: avgY * 100 };
-      };
-
-      const seamMidpointOf = (idA: string, idB: string): { x: number; y: number } | null => {
-        const pA = bay.placed.find((item) => item.item.instanceId === idA);
-        const pB = bay.placed.find((item) => item.item.instanceId === idB);
-        if (!pA || !pB) return null;
-        const cellsA = getV2PlacedCells(pA);
-        const cellsB = getV2PlacedCells(pB);
-        for (const a of cellsA) {
-          for (const b of cellsB) {
-            if (Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1) {
-              return { x: ((a.x + b.x) * 0.5 + 0.5) * 100, y: ((a.y + b.y) * 0.5 + 0.5) * 100 };
-            }
-          }
-        }
-        return null;
-      };
-
-      const focusIds = new Set<string>();
-      if (this.selected?.zone === 'grid') focusIds.add(this.selected.instanceId);
-      if (this.drag?.active) focusIds.add(this.drag.item.instanceId);
-      if (this.lastSnappedId) focusIds.add(this.lastSnappedId);
-
-      for (const lnk of stats.links) {
-        const p1 = centerOf(lnk.sourceInstanceId);
-        const p2 = centerOf(lnk.targetInstanceId);
-        const seam = seamMidpointOf(lnk.sourceInstanceId, lnk.targetInstanceId);
-        if (!p1 || !p2) continue;
-        const col = computeSynergyColor(lnk.sourceKind);
-        const highlighted =
-          focusIds.has(lnk.sourceInstanceId) || focusIds.has(lnk.targetInstanceId);
-
-        if (highlighted) {
-          const glow = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-          glow.setAttribute('x1', String(p1.x));
-          glow.setAttribute('y1', String(p1.y));
-          glow.setAttribute('x2', String(p2.x));
-          glow.setAttribute('y2', String(p2.y));
-          glow.setAttribute('stroke', col);
-          glow.setAttribute('stroke-width', '10');
-          glow.setAttribute('stroke-linecap', 'round');
-          glow.setAttribute('opacity', '0.26');
-          svg.appendChild(glow);
-
-          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-          line.setAttribute('x1', String(p1.x));
-          line.setAttribute('y1', String(p1.y));
-          line.setAttribute('x2', String(p2.x));
-          line.setAttribute('y2', String(p2.y));
-          line.setAttribute('stroke', col);
-          line.setAttribute('stroke-width', '4.5');
-          line.setAttribute('stroke-linecap', 'round');
-          line.setAttribute('stroke-dasharray', '10 6');
-          line.setAttribute('opacity', '0.95');
-          svg.appendChild(line);
-
-          const midX = seam ? seam.x : (p1.x + p2.x) * 0.5;
-          const midY = seam ? seam.y : (p1.y + p2.y) * 0.5;
-          const pill = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-          const pillW = Math.max(46, lnk.label.length * 16 + 16);
-          pill.setAttribute('x', String(midX - pillW * 0.5));
-          pill.setAttribute('y', String(midY - 14));
-          pill.setAttribute('width', String(pillW));
-          pill.setAttribute('height', '28');
-          pill.setAttribute('rx', '14');
-          pill.setAttribute('fill', '#0D1726');
-          pill.setAttribute('stroke', col);
-          pill.setAttribute('stroke-width', '2.5');
-          svg.appendChild(pill);
-
-          const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-          txt.setAttribute('x', String(midX));
-          txt.setAttribute('y', String(midY + 6));
-          txt.setAttribute('text-anchor', 'middle');
-          txt.setAttribute('fill', col);
-          txt.setAttribute('font-size', '16');
-          txt.setAttribute('font-weight', '700');
-          txt.textContent = lnk.label;
-          svg.appendChild(txt);
-        } else if (seam) {
-          // Subtle connector pin right at the shared seam so module art stays 100% clean!
-          const pinHalo = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-          pinHalo.setAttribute('cx', String(seam.x));
-          pinHalo.setAttribute('cy', String(seam.y));
-          pinHalo.setAttribute('r', '10');
-          pinHalo.setAttribute('fill', col);
-          pinHalo.setAttribute('opacity', '0.28');
-          svg.appendChild(pinHalo);
-
-          const pin = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-          pin.setAttribute('cx', String(seam.x));
-          pin.setAttribute('cy', String(seam.y));
-          pin.setAttribute('r', '5.5');
-          pin.setAttribute('fill', col);
-          pin.setAttribute('stroke', '#0D1726');
-          pin.setAttribute('stroke-width', '2.2');
-          svg.appendChild(pin);
-        }
-      }
-      board.appendChild(svg);
-    }
-
-    // 2d. Board pointerdown hit-test strictly by cell coordinates (cutouts click through!)
-    board.addEventListener('pointerdown', (e) => {
-      if (hasOpenModal()) return;
-      if (e.button !== 0 && e.pointerType === 'mouse') return;
-      const cell = this.clientPointToCell(e.clientX, e.clientY);
-      if (!cell) return;
-      this.focusedCell = cell;
-
-      if (isCellDisabledForShip(bay.shipId, cell.x, cell.y)) {
-        this.showInvalidReason('disabled_cell');
-        return;
-      }
-
-      const occupant = findV2ItemAtCell(bay, cell.x, cell.y);
-
-      if (!this.editable) {
-        if (occupant) {
-          this.selected = { zone: 'grid', instanceId: occupant.item.instanceId };
-          this.render(bay, this.editable, { prepareMode: this.prepareMode });
-        }
-        return;
-      }
-
-      if (occupant) {
-        const isSameSelected =
-          this.selected?.zone === 'grid' && this.selected.instanceId === occupant.item.instanceId;
-        this.selected = { zone: 'grid', instanceId: occupant.item.instanceId };
-        this.carrying = false;
-        this.drag = {
-          pointerId: e.pointerId,
-          pointerType: e.pointerType,
-          zone: 'grid',
-          item: occupant.item,
-          rotation: occupant.rotation,
-          originX: occupant.x,
-          originY: occupant.y,
-          startClientX: e.clientX,
-          startClientY: e.clientY,
-          grabOffsetCellX: cell.x - occupant.x,
-          grabOffsetCellY: cell.y - occupant.y,
-          active: false,
-          hoverOriginX: occupant.x,
-          hoverOriginY: occupant.y,
-          ghostEl: null,
-        };
-        if (!isSameSelected) {
-          soundEngine.play('click');
-        }
-        this.render(bay, this.editable, { prepareMode: this.prepareMode });
-        return;
-      }
-
-      // Clicked empty valid cell while an item is selected -> try placing/moving immediately!
-      if (this.selected) {
-        this.tryPlaceSelectedAt(cell.x, cell.y);
-      }
-    });
-
-    this.root.appendChild(board);
-
-    // 3. Staging Tray (in Run mode when staging or discard undo exists)
-    if (!this.prepareMode && (bay.staging.length > 0 || bay.discardedThisArrange.length > 0)) {
-      const stagingBox = document.createElement('div');
-      stagingBox.className = 'staging-box v2-staging-box';
-      const head = document.createElement('div');
-      head.className = 'staging-head';
-      head.innerHTML = `
-        <span class="staging-title">暂存区 (${bay.staging.length}) ${
-        bay.staging.length > 0 ? '<span class="v2-warn-pill">需清空才可离开</span>' : ''
-      }</span>
-        <div class="staging-head-actions">
-          ${
-            editable && bay.discardedThisArrange.length > 0
-              ? `<button type="button" class="btn btn-sm btn-ghost" id="btn-v2-undo-discard">↩ 撤回舍弃 (${bay.discardedThisArrange.length})</button>`
-              : ''
-          }
-        </div>
-      `;
-      stagingBox.appendChild(head);
-
-      if (bay.staging.length > 0) {
-        const list = document.createElement('div');
-        list.className = 'staging-list';
-        for (const st of bay.staging) {
-          const def = getAnyV2ItemDef(st.item.definitionId);
-          if (!def) continue;
-          const isSelected =
-            this.selected?.zone === 'staging' && this.selected.instanceId === st.item.instanceId;
-          const chip = document.createElement('button');
-          chip.type = 'button';
-          chip.className = `staging-item-card v2-staging-card origin-${st.item.origin} ${
-            isSelected ? 'selected' : ''
-          }`;
-          chip.dataset.stagingId = st.item.instanceId;
-          chip.innerHTML = `
-            <span class="v2-origin-badge origin-${st.item.origin}">${originTagText(st.item.origin)}</span>
-            <img class="staging-thumb" src="${getItemImageUrl(st.item.definitionId)}" alt="${def.name}" draggable="false" />
-            <span class="staging-meta">
-              <span class="staging-name">${def.name}${
-            st.item.category === 'equipment'
-              ? ` <small class="v2-q-tag">${st.item.quality === 'improved' ? '优良' : '普通'}</small>`
-              : ''
-          }</span>
-              <span class="staging-sub">${renderV2MiniMaskHtml(def.shapeId, st.rotation)} ${
-            V2_SHAPES[def.shapeId].label
-          }${st.item.fixedValue > 0 ? ` · ${st.item.fixedValue}¤` : ''}</span>
-            </span>
-          `;
-
-          chip.addEventListener('pointerdown', (ev) => {
-            if (!this.editable || hasOpenModal()) return;
-            if (ev.button !== 0 && ev.pointerType === 'mouse') return;
-            this.selected = { zone: 'staging', instanceId: st.item.instanceId };
-            this.carrying = false;
-            this.drag = {
-              pointerId: ev.pointerId,
-              pointerType: ev.pointerType,
-              zone: 'staging',
-              item: st.item,
-              rotation: st.rotation,
-              startClientX: ev.clientX,
-              startClientY: ev.clientY,
-              grabOffsetCellX: 0,
-              grabOffsetCellY: 0,
-              active: false,
-              hoverOriginX: null,
-              hoverOriginY: null,
-              ghostEl: null,
-            };
-          });
-
-          chip.addEventListener('click', () => {
-            this.selected = { zone: 'staging', instanceId: st.item.instanceId };
-            this.carrying = false;
-            soundEngine.play('click');
-            this.render(bay, this.editable, { prepareMode: this.prepareMode });
-          });
-
-          list.appendChild(chip);
-        }
-        stagingBox.appendChild(list);
-      }
-
-      stagingBox.querySelector('#btn-v2-undo-discard')?.addEventListener('click', () => {
-        if (!this.editable || !this.bay) return;
-        const res = undoV2LastDiscard(this.bay);
-        if (res.ok) {
-          soundEngine.play('click');
-          this.callbacks.onBayChange(res.bay);
-        }
-      });
-
-      this.root.appendChild(stagingBox);
-    }
-
-    // 4. Compact Selected Item Action & Tactical Delta Inspector Strip
-    this.renderSelectedInspector(editable, activeDelta);
-
-    // Restore keyboard focus to the active cell when re-rendered via keyboard navigation
-    if (wasCellFocused && this.gridHasFocus) {
-      const targetCell = board.querySelector<HTMLElement>(
-        `.cargo-cell[data-cx="${this.focusedCell.x}"][data-cy="${this.focusedCell.y}"]`
-      );
-      targetCell?.focus({ preventScroll: true });
+      this.itemLayerEl.appendChild(tile);
+      this.placedTileElements.set(placed.item.instanceId, tile);
     }
   }
 
-  private mountInspectorBox(box: HTMLElement): void {
+  private renderSynergySvg(
+    bay: V2CargoBayState | null = this.bay,
+    stats: ReturnType<typeof calculateV2BuildStats> | null = this.lastStats
+  ): void {
+    const svg = this.synergySvgEl;
+    if (!svg || !bay || !stats) return;
+    if (stats.links.length === 0) {
+      if (this.lastSynergyRenderKey !== 'empty') {
+        svg.innerHTML = '';
+        svg.style.display = 'none';
+        this.lastSynergyRenderKey = 'empty';
+      }
+      return;
+    }
+
+    const focusIds = new Set<string>();
+    if (this.selected?.zone === 'grid') focusIds.add(this.selected.instanceId);
+    if (this.drag?.active) focusIds.add(this.drag.item.instanceId);
+    if (this.lastSnappedId) focusIds.add(this.lastSnappedId);
+
+    const renderKey = `${this.lastBayCombatHash}|${[...focusIds].sort().join(',')}|${stats.links.length}`;
+    if (renderKey === this.lastSynergyRenderKey) return;
+    this.lastSynergyRenderKey = renderKey;
+
+    const ship = V2_SHIPS[bay.shipId];
+    svg.setAttribute('viewBox', `0 0 ${ship.cols * 100} ${ship.rows * 100}`);
+    svg.style.display = '';
+    svg.innerHTML = '';
+
+    const centerOf = (instanceId: string): { x: number; y: number } | null => {
+      const p = bay.placed.find((item) => item.item.instanceId === instanceId);
+      if (!p) return null;
+      const cells = getV2PlacedCells(p);
+      if (cells.length === 0) return null;
+      const avgX = cells.reduce((acc, c) => acc + c.x + 0.5, 0) / cells.length;
+      const avgY = cells.reduce((acc, c) => acc + c.y + 0.5, 0) / cells.length;
+      return { x: avgX * 100, y: avgY * 100 };
+    };
+
+    const seamMidpointOf = (idA: string, idB: string): { x: number; y: number } | null => {
+      const pA = bay.placed.find((item) => item.item.instanceId === idA);
+      const pB = bay.placed.find((item) => item.item.instanceId === idB);
+      if (!pA || !pB) return null;
+      const cellsA = getV2PlacedCells(pA);
+      const cellsB = getV2PlacedCells(pB);
+      for (const a of cellsA) {
+        for (const b of cellsB) {
+          if (Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1) {
+            return { x: ((a.x + b.x) * 0.5 + 0.5) * 100, y: ((a.y + b.y) * 0.5 + 0.5) * 100 };
+          }
+        }
+      }
+      return null;
+    };
+
+    for (const lnk of stats.links) {
+      const p1 = centerOf(lnk.sourceInstanceId);
+      const p2 = centerOf(lnk.targetInstanceId);
+      const seam = seamMidpointOf(lnk.sourceInstanceId, lnk.targetInstanceId);
+      if (!p1 || !p2) continue;
+      const col = computeSynergyColor(lnk.sourceKind);
+      const highlighted =
+        focusIds.has(lnk.sourceInstanceId) || focusIds.has(lnk.targetInstanceId);
+
+      if (highlighted) {
+        const glow = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        glow.setAttribute('x1', String(p1.x));
+        glow.setAttribute('y1', String(p1.y));
+        glow.setAttribute('x2', String(p2.x));
+        glow.setAttribute('y2', String(p2.y));
+        glow.setAttribute('stroke', col);
+        glow.setAttribute('stroke-width', '10');
+        glow.setAttribute('stroke-linecap', 'round');
+        glow.setAttribute('opacity', '0.26');
+        svg.appendChild(glow);
+
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', String(p1.x));
+        line.setAttribute('y1', String(p1.y));
+        line.setAttribute('x2', String(p2.x));
+        line.setAttribute('y2', String(p2.y));
+        line.setAttribute('stroke', col);
+        line.setAttribute('stroke-width', '4.5');
+        line.setAttribute('stroke-linecap', 'round');
+        line.setAttribute('stroke-dasharray', '10 6');
+        line.setAttribute('opacity', '0.95');
+        svg.appendChild(line);
+
+        const midX = seam ? seam.x : (p1.x + p2.x) * 0.5;
+        const midY = seam ? seam.y : (p1.y + p2.y) * 0.5;
+        const pill = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        const pillW = Math.max(46, lnk.label.length * 16 + 16);
+        pill.setAttribute('x', String(midX - pillW * 0.5));
+        pill.setAttribute('y', String(midY - 14));
+        pill.setAttribute('width', String(pillW));
+        pill.setAttribute('height', '28');
+        pill.setAttribute('rx', '14');
+        pill.setAttribute('fill', '#0D1726');
+        pill.setAttribute('stroke', col);
+        pill.setAttribute('stroke-width', '2.5');
+        svg.appendChild(pill);
+
+        const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        txt.setAttribute('x', String(midX));
+        txt.setAttribute('y', String(midY + 6));
+        txt.setAttribute('text-anchor', 'middle');
+        txt.setAttribute('fill', col);
+        txt.setAttribute('font-size', '16');
+        txt.setAttribute('font-weight', '700');
+        txt.textContent = lnk.label;
+        svg.appendChild(txt);
+      } else if (seam) {
+        const pinHalo = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        pinHalo.setAttribute('cx', String(seam.x));
+        pinHalo.setAttribute('cy', String(seam.y));
+        pinHalo.setAttribute('r', '10');
+        pinHalo.setAttribute('fill', col);
+        pinHalo.setAttribute('opacity', '0.28');
+        svg.appendChild(pinHalo);
+
+        const pin = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        pin.setAttribute('cx', String(seam.x));
+        pin.setAttribute('cy', String(seam.y));
+        pin.setAttribute('r', '5.5');
+        pin.setAttribute('fill', col);
+        pin.setAttribute('stroke', '#0D1726');
+        pin.setAttribute('stroke-width', '2.2');
+        svg.appendChild(pin);
+      }
+    }
+  }
+
+  private renderStagingTray(bay: V2CargoBayState, editable: boolean): void {
+    if (!this.stagingEl) return;
+    if (this.prepareMode || (bay.staging.length === 0 && bay.discardedThisArrange.length === 0)) {
+      this.stagingEl.style.display = 'none';
+      this.stagingEl.innerHTML = '';
+      this.stagingChipElements.clear();
+      return;
+    }
+
+    this.stagingEl.style.display = '';
+    this.stagingEl.innerHTML = '';
+    this.stagingChipElements.clear();
+
+    const head = document.createElement('div');
+    head.className = 'staging-head';
+    head.innerHTML = `
+      <span class="staging-title">暂存区 (${bay.staging.length}) ${
+      bay.staging.length > 0 ? '<span class="v2-warn-pill">需清空才可离开</span>' : ''
+    }</span>
+      <div class="staging-head-actions">
+        ${
+          editable && bay.discardedThisArrange.length > 0
+            ? `<button type="button" class="btn btn-sm btn-ghost" id="btn-v2-undo-discard">↩ 撤回舍弃 (${bay.discardedThisArrange.length})</button>`
+            : ''
+        }
+      </div>
+    `;
+    this.stagingEl.appendChild(head);
+
+    if (bay.staging.length > 0) {
+      const list = document.createElement('div');
+      list.className = 'staging-list';
+      for (const st of bay.staging) {
+        const def = getAnyV2ItemDef(st.item.definitionId);
+        if (!def) continue;
+        const isSelected =
+          this.selected?.zone === 'staging' && this.selected.instanceId === st.item.instanceId;
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = `staging-item-card v2-staging-card origin-${st.item.origin} ${
+          isSelected ? 'selected' : ''
+        }`;
+        chip.dataset.stagingId = st.item.instanceId;
+        chip.innerHTML = `
+          <span class="v2-origin-badge origin-${st.item.origin}">${originTagText(st.item.origin)}</span>
+          <img class="staging-thumb" src="${getItemImageUrl(st.item.definitionId)}" alt="${def.name}" draggable="false" />
+          <span class="staging-meta">
+            <span class="staging-name">${def.name}${
+          st.item.category === 'equipment'
+            ? ` <small class="v2-q-tag">${st.item.quality === 'improved' ? '优良' : '普通'}</small>`
+            : ''
+        }</span>
+            <span class="staging-sub">${renderV2MiniMaskHtml(def.shapeId, st.rotation)} ${
+          V2_SHAPES[def.shapeId].label
+        }${st.item.fixedValue > 0 ? ` · ${st.item.fixedValue}¤` : ''}</span>
+          </span>
+        `;
+        list.appendChild(chip);
+        this.stagingChipElements.set(st.item.instanceId, chip);
+      }
+      this.stagingEl.appendChild(list);
+    }
+  }
+
+  private updateSelectionAndDragClasses(): void {
+    this.placedTileElements.forEach((tile, instanceId) => {
+      const isSelected = this.selected?.zone === 'grid' && this.selected.instanceId === instanceId;
+      const isDraggingThis = Boolean(
+        this.drag?.active && this.drag.zone === 'grid' && this.drag.item.instanceId === instanceId
+      );
+      const isSnapped = this.lastSnappedId === instanceId;
+      tile.classList.toggle('selected', isSelected);
+      tile.classList.toggle('dragging-source', isDraggingThis);
+      tile.classList.toggle('just-snapped', isSnapped);
+    });
+    this.stagingChipElements.forEach((chip, instanceId) => {
+      const isSelected = this.selected?.zone === 'staging' && this.selected.instanceId === instanceId;
+      chip.classList.toggle('selected', isSelected);
+    });
+  }
+
+  private updateRecommendedCells(delta: V2TacticalDelta | null): void {
+    this.recommendedCellKeys.clear();
+    if (!this.editable || !delta?.recommendedSpot) return;
+    const sel = this.getSelectedItemInfo();
+    if (!sel) return;
+    const sDef = getAnyV2ItemDef(sel.item.definitionId);
+    if (!sDef) return;
+    const recCells = getV2OccupiedCells(
+      sDef.shapeId,
+      delta.recommendedSpot.x,
+      delta.recommendedSpot.y,
+      delta.recommendedSpot.rotation
+    );
+    for (const rc of recCells) {
+      this.recommendedCellKeys.add(`${rc.x},${rc.y}`);
+    }
+  }
+
+  private computeSelectedItemMetaKey(): string {
+    const sel = this.getSelectedItemInfo();
+    if (!sel) return 'none';
+    return `${sel.zone}:${sel.item.instanceId}:${sel.item.definitionId}:${sel.item.category}:${sel.item.quality}:${sel.item.origin}:${sel.item.fixedValue}`;
+  }
+
+  private scheduleTacticalDeltaUpdate(): void {
+    const sel = this.getSelectedItemInfo();
+    const provider = this.callbacks.getTacticalDelta;
+    if (!this.bay || !sel || !provider) return;
+
+    this.cancelPendingDeltaJob();
+    const token = this.deltaJobToken;
+    const expectedBayHash = this.lastBayCombatHash;
+    const expectedSelZone = sel.zone;
+    const expectedSelId = sel.item.instanceId;
+    const expectedSelItem = sel.item;
+    const expectedSelMetaKey = this.computeSelectedItemMetaKey();
+    const expectedDeltaKey = `${expectedBayHash}|${expectedSelMetaKey}`;
+
+    let jobRan = false;
+    const runJob = (): void => {
+      if (this.destroyed || token !== this.deltaJobToken) return;
+      jobRan = true;
+      this.pendingDeltaHandle = null;
+      if (!this.bay || this.lastBayCombatHash !== expectedBayHash) return;
+      if (
+        !this.selected ||
+        this.selected.zone !== expectedSelZone ||
+        this.selected.instanceId !== expectedSelId ||
+        this.computeSelectedItemMetaKey() !== expectedSelMetaKey
+      ) {
+        return;
+      }
+      const delta = provider(expectedSelItem, expectedSelZone);
+      if (
+        this.destroyed ||
+        token !== this.deltaJobToken ||
+        !this.bay ||
+        this.lastBayCombatHash !== expectedBayHash ||
+        !this.selected ||
+        this.selected.zone !== expectedSelZone ||
+        this.selected.instanceId !== expectedSelId ||
+        this.computeSelectedItemMetaKey() !== expectedSelMetaKey
+      ) {
+        return;
+      }
+      this.activeDelta = delta;
+      this.activeDeltaKey = expectedDeltaKey;
+      this.updateRecommendedCells(delta);
+      this.renderSelectedInspector(this.editable, delta);
+      this.updateCellVisualFocusAndPreview();
+    };
+
+    const handle = this.scheduleIdle(runJob);
+    if (!jobRan && !this.destroyed && token === this.deltaJobToken) {
+      this.pendingDeltaHandle = handle;
+    }
+  }
+
+  private selectItem(
+    nextSel: SelectedRef | null,
+    opts?: { readonly playSfx?: boolean; readonly clearSnap?: boolean }
+  ): void {
+    if (!this.bay) return;
+    const nextKey = nextSel ? `${nextSel.zone}:${nextSel.instanceId}` : 'none';
+    if (nextKey === this.renderedSelectedKey) return;
+
+    this.selected = nextSel;
+    this.renderedSelectedKey = nextKey;
+    this.lastSelectedItemMetaKey = this.computeSelectedItemMetaKey();
+    if (opts?.clearSnap !== false) {
+      this.lastSnappedId = null;
+      this.pendingSnapFeedback = false;
+    }
+    if (opts?.playSfx) {
+      soundEngine.play('click');
+    }
+
+    this.updateSelectionAndDragClasses();
+    this.renderSynergySvg();
+
+    this.cancelPendingDeltaJob();
+    this.activeDelta = null;
+    this.activeDeltaKey = null;
+    this.recommendedCellKeys.clear();
+    this.syncInspectorHost();
+    this.renderSelectedInspector(this.editable, null);
+    if (nextSel && this.callbacks.getTacticalDelta) {
+      this.scheduleTacticalDeltaUpdate();
+    }
+    this.updateCellVisualFocusAndPreview();
+  }
+
+  private syncInspectorHost(): void {
+    if (!this.inspectorEl) return;
     const externalHost = this.callbacks.getInspectorHost?.() ?? null;
     if (this.lastExternalInspectorHost && this.lastExternalInspectorHost !== externalHost) {
+      if (this.inspectorEl.parentNode === this.lastExternalInspectorHost) {
+        this.lastExternalInspectorHost.removeChild(this.inspectorEl);
+      }
       this.lastExternalInspectorHost.innerHTML = '';
     }
     this.lastExternalInspectorHost = externalHost;
     if (externalHost) {
-      externalHost.innerHTML = '';
-      externalHost.appendChild(box);
-    } else {
-      this.root.appendChild(box);
+      if (this.inspectorEl.parentNode !== externalHost) {
+        externalHost.innerHTML = '';
+        externalHost.appendChild(this.inspectorEl);
+      }
+    } else if (this.inspectorEl.parentNode !== this.root) {
+      this.root.appendChild(this.inspectorEl);
     }
   }
 
   private renderSelectedInspector(editable: boolean, delta: V2TacticalDelta | null): void {
+    if (!this.inspectorEl) return;
+    const box = this.inspectorEl;
     const sel = this.getSelectedItemInfo();
-    const box = document.createElement('div');
-    box.className = 'inspector-bar v2-inspector-bar';
 
     if (!sel) {
+      const emptyKey = `empty|e=${editable ? 1 : 0}|pm=${this.prepareMode ? 1 : 0}`;
+      if (this.lastInspectorStateKey === emptyKey) return;
+      this.lastInspectorStateKey = emptyKey;
+      box.style.display = '';
       box.innerHTML = `<div class="inspector-empty">${
         editable
           ? this.prepareMode
@@ -880,22 +1268,39 @@ export class CargoGridV2Component {
             : '点选或拖拽整理船舱（快捷键：方向键移格 · 回车拿放 · R 旋转 · Del 舍弃）。'
           : '点击任意已装设备查看联动与战力变化。'
       }</div>`;
-      this.mountInspectorBox(box);
       return;
     }
 
     const def = getAnyV2ItemDef(sel.item.definitionId);
     if (!def) {
-      if (this.lastExternalInspectorHost) {
-        this.lastExternalInspectorHost.innerHTML = '';
-      }
+      this.lastInspectorStateKey = 'missing_def';
+      box.innerHTML = '';
+      box.style.display = 'none';
       return;
     }
-    const eqDef = sel.item.category === 'equipment' ? V2_EQUIPMENT_DEFS[sel.item.definitionId] : undefined;
+
     const isSelectedPowerBoosted =
       sel.zone === 'grid' &&
-      this.bay !== null &&
-      calculateV2BuildStats(this.bay).powerCellBoostedIds.includes(sel.item.instanceId);
+      this.lastStats !== null &&
+      this.lastStats.powerCellBoostedIds.includes(sel.item.instanceId);
+    const hasPrepareRemove = Boolean(this.callbacks.onPrepareRemoveItem);
+    const deltaKeyPart = delta
+      ? `${delta.positiveImpact ? 1 : 0}|${delta.synergyLine}|${delta.combatDeltaLine}|${delta.spaceLine}|${
+          delta.recommendedSpot
+            ? `${delta.recommendedSpot.x},${delta.recommendedSpot.y},${delta.recommendedSpot.rotation}`
+            : ''
+        }`
+      : 'pending';
+    const stateKey = `sel|${sel.zone}:${sel.item.instanceId}:${sel.item.definitionId}:${sel.item.category}:${
+      sel.item.quality
+    }:${sel.item.origin}:${sel.item.fixedValue}|e=${editable ? 1 : 0}|pm=${
+      this.prepareMode ? 1 : 0
+    }|pr=${hasPrepareRemove ? 1 : 0}|pb=${isSelectedPowerBoosted ? 1 : 0}|d=${deltaKeyPart}`;
+    if (this.lastInspectorStateKey === stateKey) return;
+    this.lastInspectorStateKey = stateKey;
+    box.style.display = '';
+
+    const eqDef = sel.item.category === 'equipment' ? V2_EQUIPMENT_DEFS[sel.item.definitionId] : undefined;
 
     const deltaHtml = delta
       ? `<div class="v2-delta-strip ${delta.positiveImpact ? 'positive' : ''}" data-testid="tactical-delta">
@@ -942,7 +1347,7 @@ export class CargoGridV2Component {
                       delta?.recommendedSpot ? '↓ 装入推荐位' : '↓ 放入船舱'
                     }</button>`
                   : this.prepareMode
-                  ? this.callbacks.onPrepareRemoveItem
+                  ? hasPrepareRemove
                     ? `<button type="button" class="btn btn-sm btn-danger" id="btn-v2-prep-remove">✕ 移出配装</button>`
                     : `<span class="v2-origin-chip origin-loan" style="align-self:center;">全息模板锁定 · 可拖动/旋转</span>`
                   : `<button type="button" class="btn btn-sm btn-ghost" id="btn-v2-to-staging">↑ 移至暂存</button>`
@@ -956,54 +1361,6 @@ export class CargoGridV2Component {
           : ''
       }
     `;
-
-    if (editable) {
-      box.querySelector('#btn-v2-rotate')?.addEventListener('click', () => {
-        this.rotateSelected();
-      });
-      box.querySelector('#btn-v2-autoplace')?.addEventListener('click', () => {
-        if (!this.bay || sel.zone !== 'staging') return;
-        const spot =
-          delta?.recommendedSpot ?? findFirstLegalV2Placement(this.bay, sel.item.definitionId);
-        if (!spot) {
-          this.showInvalidReason('overlap');
-          return;
-        }
-        const res = placeV2FromStaging(
-          this.bay,
-          sel.item.instanceId,
-          spot.x,
-          spot.y,
-          spot.rotation
-        );
-        if (res.ok) {
-          this.lastSnappedId = sel.item.instanceId;
-          this.selected = { zone: 'grid', instanceId: sel.item.instanceId };
-          soundEngine.play('place');
-          this.callbacks.onBayChange(res.bay);
-        }
-      });
-      box.querySelector('#btn-v2-to-staging')?.addEventListener('click', () => {
-        if (!this.bay || sel.zone !== 'grid') return;
-        const res = moveV2PlacedToStaging(this.bay, sel.item.instanceId);
-        if (res.ok) {
-          this.selected = { zone: 'staging', instanceId: sel.item.instanceId };
-          soundEngine.play('click');
-          this.callbacks.onBayChange(res.bay);
-        }
-      });
-      box.querySelector('#btn-v2-prep-remove')?.addEventListener('click', () => {
-        if (sel.zone !== 'grid') return;
-        this.selected = null;
-        soundEngine.play('click');
-        this.callbacks.onPrepareRemoveItem?.(sel.item.instanceId);
-      });
-      box.querySelector('#btn-v2-discard')?.addEventListener('click', () => {
-        this.discardSelected();
-      });
-    }
-
-    this.mountInspectorBox(box);
   }
 
   private getSelectedItemInfo(): {
@@ -1036,6 +1393,7 @@ export class CargoGridV2Component {
     const res = rotateV2PlacedItem(this.bay, sel.item.instanceId);
     if (res.ok) {
       this.lastSnappedId = sel.item.instanceId;
+      this.pendingSnapFeedback = true;
       soundEngine.play('rotate');
       this.callbacks.onBayChange(res.bay);
     } else {
@@ -1049,6 +1407,8 @@ export class CargoGridV2Component {
     if (!sel) return;
     const res = discardV2Item(this.bay, sel.item.instanceId);
     if (res.ok) {
+      this.lastSnappedId = null;
+      this.pendingSnapFeedback = false;
       this.selected = null;
       this.carrying = false;
       soundEngine.play('click');
@@ -1069,6 +1429,7 @@ export class CargoGridV2Component {
       const res = placeV2FromStaging(this.bay, sel.item.instanceId, x, y, sel.rotation);
       if (!res.ok) return false;
       this.lastSnappedId = sel.item.instanceId;
+      this.pendingSnapFeedback = true;
       this.selected = { zone: 'grid', instanceId: sel.item.instanceId };
       this.carrying = false;
       soundEngine.play('place');
@@ -1091,6 +1452,7 @@ export class CargoGridV2Component {
     const res = moveV2PlacedItem(this.bay, sel.item.instanceId, x, y, sel.rotation);
     if (!res.ok) return false;
     this.lastSnappedId = sel.item.instanceId;
+    this.pendingSnapFeedback = true;
     this.carrying = false;
     soundEngine.play('place');
     this.callbacks.onBayChange(res.bay);
@@ -1132,28 +1494,77 @@ export class CargoGridV2Component {
   private updateCellVisualFocusAndPreview(): void {
     if (!this.boardEl || !this.bay) return;
     const preview = this.computeActivePreview();
-    this.boardEl.querySelectorAll<HTMLElement>('.cargo-cell').forEach((cellEl) => {
+    const hasPreview = preview !== null;
+    this.cellElements.forEach((cellEl) => {
       const cx = Number(cellEl.dataset.cx);
       const cy = Number(cellEl.dataset.cy);
       const isRoving = this.focusedCell.x === cx && this.focusedCell.y === cy;
-      cellEl.tabIndex = isRoving ? 0 : -1;
+      const nextTabIndex = isRoving ? 0 : -1;
+      if (cellEl.tabIndex !== nextTabIndex) {
+        cellEl.tabIndex = nextTabIndex;
+      }
       cellEl.classList.toggle('kb-focused', isRoving && this.gridHasFocus);
-      cellEl.classList.remove('preview-valid', 'preview-invalid');
+
       const disabled = isCellDisabledForShip(this.bay!.shipId, cx, cy);
       const isPowerCell = !disabled && isCellPowerCellForShip(this.bay!.shipId, cx, cy);
+      const isRecommended =
+        !disabled && !hasPreview && this.editable && this.recommendedCellKeys.has(`${cx},${cy}`);
+      cellEl.classList.toggle('cell-recommended', isRecommended);
+
+      let nextPreviewValid = false;
+      let nextPreviewInvalid = false;
+      let desiredMark: 'bulkhead' | 'power' | 'valid' | 'invalid' | 'empty' = disabled
+        ? 'bulkhead'
+        : isPowerCell
+        ? 'power'
+        : 'empty';
+
       if (preview) {
         const inCells = preview.cells.some((c) => c.x === cx && c.y === cy);
         const inConf = preview.conflictCells.some((c) => c.x === cx && c.y === cy);
         if (preview.valid && inCells) {
-          cellEl.classList.add('preview-valid');
+          nextPreviewValid = true;
+          desiredMark = 'valid';
         } else if (!preview.valid && (inConf || inCells)) {
-          cellEl.classList.add('preview-invalid');
+          nextPreviewInvalid = true;
+          if (inConf && !disabled) {
+            desiredMark = 'invalid';
+          }
         }
       }
-      if (!disabled && !cellEl.classList.contains('preview-valid') && !cellEl.classList.contains('preview-invalid')) {
-        cellEl.innerHTML = isPowerCell ? `<span class="v3-power-cell-mark" aria-hidden="true">⚡</span>` : '';
+
+      cellEl.classList.toggle('preview-valid', nextPreviewValid);
+      cellEl.classList.toggle('preview-invalid', nextPreviewInvalid);
+
+      if (cellEl.dataset.markState !== desiredMark) {
+        cellEl.dataset.markState = desiredMark;
+        if (desiredMark === 'bulkhead') {
+          cellEl.innerHTML = `<span class="v2-bulkhead-mark" aria-hidden="true">✕</span>`;
+        } else if (desiredMark === 'power') {
+          cellEl.innerHTML = `<span class="v3-power-cell-mark" aria-hidden="true">⚡</span>`;
+        } else if (desiredMark === 'valid') {
+          cellEl.innerHTML = `<span class="cargo-cell-mark">✓</span>`;
+        } else if (desiredMark === 'invalid') {
+          cellEl.innerHTML = `<span class="cargo-cell-mark">✕</span>`;
+        } else {
+          cellEl.innerHTML = '';
+        }
       }
     });
+  }
+
+  private moveKeyboardFocus(dx: number, dy: number): void {
+    if (!this.bay) return;
+    const ship = V2_SHIPS[this.bay.shipId];
+    this.focusedCell = {
+      x: (this.focusedCell.x + dx + ship.cols) % ship.cols,
+      y: (this.focusedCell.y + dy + ship.rows) % ship.rows,
+    };
+    this.updateCellVisualFocusAndPreview();
+    const targetCell = this.cellElements.get(`${this.focusedCell.x},${this.focusedCell.y}`);
+    if (targetCell && document.activeElement !== targetCell) {
+      targetCell.focus({ preventScroll: true });
+    }
   }
 
   private clientPointToCell(clientX: number, clientY: number): V2GridCoord | null {
@@ -1175,21 +1586,19 @@ export class CargoGridV2Component {
   }
 
   private showInvalidReason(reason?: 'out_of_bounds' | 'disabled_cell' | 'overlap'): void {
+    if (this.destroyed) return;
     this.invalidToastText = reasonToZh(reason);
     soundEngine.play('invalid');
     if (this.invalidToastTimer !== null) {
-      window.clearTimeout(this.invalidToastTimer);
+      globalThis.clearTimeout(this.invalidToastTimer);
     }
-    this.invalidToastTimer = window.setTimeout(() => {
+    this.invalidToastTimer = globalThis.setTimeout(() => {
+      if (this.destroyed) return;
       this.invalidToastText = null;
       this.invalidToastTimer = null;
-      if (this.bay) {
-        this.render(this.bay, this.editable, { prepareMode: this.prepareMode });
-      }
+      this.renderToast();
     }, 1500);
-    if (this.bay) {
-      this.render(this.bay, this.editable, { prepareMode: this.prepareMode });
-    }
+    this.renderToast();
   }
 
   private ensureDragGhost(drag: DragState): HTMLElement {
@@ -1222,11 +1631,187 @@ export class CargoGridV2Component {
     }
   }
 
+  private handleBoardPointerDown = (e: PointerEvent): void => {
+    if (this.destroyed || !this.bay || hasOpenModal()) return;
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    const cell = this.clientPointToCell(e.clientX, e.clientY);
+    if (!cell) return;
+    this.focusedCell = cell;
+
+    if (isCellDisabledForShip(this.bay.shipId, cell.x, cell.y)) {
+      this.showInvalidReason('disabled_cell');
+      return;
+    }
+
+    const occupant = findV2ItemAtCell(this.bay, cell.x, cell.y);
+
+    if (!this.editable) {
+      if (occupant) {
+        this.selectItem({ zone: 'grid', instanceId: occupant.item.instanceId }, { playSfx: false });
+      }
+      return;
+    }
+
+    if (occupant) {
+      const isSameSelected =
+        this.selected?.zone === 'grid' && this.selected.instanceId === occupant.item.instanceId;
+      this.carrying = false;
+      this.drag = {
+        pointerId: e.pointerId,
+        pointerType: e.pointerType,
+        zone: 'grid',
+        item: occupant.item,
+        rotation: occupant.rotation,
+        originX: occupant.x,
+        originY: occupant.y,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        grabOffsetCellX: cell.x - occupant.x,
+        grabOffsetCellY: cell.y - occupant.y,
+        active: false,
+        hoverOriginX: occupant.x,
+        hoverOriginY: occupant.y,
+        ghostEl: null,
+      };
+      this.selectItem(
+        { zone: 'grid', instanceId: occupant.item.instanceId },
+        { playSfx: !isSameSelected }
+      );
+      return;
+    }
+
+    if (this.selected) {
+      this.tryPlaceSelectedAt(cell.x, cell.y);
+    }
+  };
+
+  private handleStagingPointerDown = (ev: PointerEvent): void => {
+    if (this.destroyed || !this.editable || !this.bay || hasOpenModal()) return;
+    if (ev.button !== 0 && ev.pointerType === 'mouse') return;
+    const target = ev.target as HTMLElement | null;
+    const chip = target?.closest<HTMLButtonElement>('[data-staging-id]');
+    if (!chip) return;
+    const stagingId = chip.dataset.stagingId;
+    if (!stagingId) return;
+    const st = this.bay.staging.find((item) => item.item.instanceId === stagingId);
+    if (!st) return;
+
+    this.carrying = false;
+    this.drag = {
+      pointerId: ev.pointerId,
+      pointerType: ev.pointerType,
+      zone: 'staging',
+      item: st.item,
+      rotation: st.rotation,
+      startClientX: ev.clientX,
+      startClientY: ev.clientY,
+      grabOffsetCellX: 0,
+      grabOffsetCellY: 0,
+      active: false,
+      hoverOriginX: null,
+      hoverOriginY: null,
+      ghostEl: null,
+    };
+    this.selectItem({ zone: 'staging', instanceId: st.item.instanceId }, { playSfx: false });
+  };
+
+  private handleStagingClick = (ev: MouseEvent): void => {
+    if (this.destroyed || !this.bay) return;
+    const target = ev.target as HTMLElement | null;
+    const undoBtn = target?.closest<HTMLButtonElement>('#btn-v2-undo-discard');
+    if (undoBtn) {
+      if (!this.editable) return;
+      const res = undoV2LastDiscard(this.bay);
+      if (res.ok) {
+        this.lastSnappedId = null;
+        this.pendingSnapFeedback = false;
+        soundEngine.play('click');
+        this.callbacks.onBayChange(res.bay);
+      }
+      return;
+    }
+
+    const chip = target?.closest<HTMLButtonElement>('[data-staging-id]');
+    if (!chip) return;
+    const stagingId = chip.dataset.stagingId;
+    if (!stagingId) return;
+    const st = this.bay.staging.find((item) => item.item.instanceId === stagingId);
+    if (!st) return;
+
+    this.carrying = false;
+    soundEngine.play('click');
+    this.selectItem({ zone: 'staging', instanceId: st.item.instanceId }, { playSfx: false });
+  };
+
+  private handleInspectorClick = (ev: MouseEvent): void => {
+    if (this.destroyed || !this.editable || !this.bay) return;
+    const target = ev.target as HTMLElement | null;
+    const btn = target?.closest<HTMLButtonElement>('button[id]');
+    if (!btn) return;
+    const sel = this.getSelectedItemInfo();
+    if (!sel) return;
+
+    if (btn.id === 'btn-v2-rotate') {
+      this.rotateSelected();
+      return;
+    }
+    if (btn.id === 'btn-v2-autoplace') {
+      if (sel.zone !== 'staging') return;
+      const spot =
+        this.activeDelta?.recommendedSpot ?? findFirstLegalV2Placement(this.bay, sel.item.definitionId);
+      if (!spot) {
+        this.showInvalidReason('overlap');
+        return;
+      }
+      const res = placeV2FromStaging(
+        this.bay,
+        sel.item.instanceId,
+        spot.x,
+        spot.y,
+        spot.rotation
+      );
+      if (res.ok) {
+        this.lastSnappedId = sel.item.instanceId;
+        this.pendingSnapFeedback = true;
+        this.selected = { zone: 'grid', instanceId: sel.item.instanceId };
+        soundEngine.play('place');
+        this.callbacks.onBayChange(res.bay);
+      }
+      return;
+    }
+    if (btn.id === 'btn-v2-to-staging') {
+      if (sel.zone !== 'grid') return;
+      const res = moveV2PlacedToStaging(this.bay, sel.item.instanceId);
+      if (res.ok) {
+        this.lastSnappedId = null;
+        this.pendingSnapFeedback = false;
+        this.selected = { zone: 'staging', instanceId: sel.item.instanceId };
+        soundEngine.play('click');
+        this.callbacks.onBayChange(res.bay);
+      }
+      return;
+    }
+    if (btn.id === 'btn-v2-prep-remove') {
+      if (sel.zone !== 'grid') return;
+      this.lastSnappedId = null;
+      this.pendingSnapFeedback = false;
+      this.selected = null;
+      soundEngine.play('click');
+      this.callbacks.onPrepareRemoveItem?.(sel.item.instanceId);
+      return;
+    }
+    if (btn.id === 'btn-v2-discard') {
+      this.discardSelected();
+    }
+  };
+
   private handleWindowPointerMove = (e: PointerEvent): void => {
-    if (!this.drag || !this.bay || e.pointerId !== this.drag.pointerId) return;
+    if (this.destroyed || !this.drag || !this.bay || e.pointerId !== this.drag.pointerId) return;
     const dist = Math.hypot(e.clientX - this.drag.startClientX, e.clientY - this.drag.startClientY);
+    let justActivated = false;
     if (!this.drag.active && dist >= 8) {
       this.drag.active = true;
+      justActivated = true;
     }
     if (!this.drag.active) return;
 
@@ -1243,11 +1828,15 @@ export class CargoGridV2Component {
       this.drag.hoverOriginX = null;
       this.drag.hoverOriginY = null;
     }
+    if (justActivated) {
+      this.updateSelectionAndDragClasses();
+      this.renderSynergySvg();
+    }
     this.updateCellVisualFocusAndPreview();
   };
 
   private handleWindowPointerUp = (e: PointerEvent): void => {
-    if (!this.drag || e.pointerId !== this.drag.pointerId) return;
+    if (this.destroyed || !this.drag || e.pointerId !== this.drag.pointerId) return;
     const drag = this.drag;
     this.clearDragGhost();
     this.drag = null;
@@ -1257,25 +1846,32 @@ export class CargoGridV2Component {
     if (drag.hoverOriginX !== null && drag.hoverOriginY !== null) {
       const ok = this.tryPlaceSelectedAt(drag.hoverOriginX, drag.hoverOriginY);
       if (!ok) {
-        this.render(this.bay, this.editable, { prepareMode: this.prepareMode });
+        this.updateSelectionAndDragClasses();
+        this.updateCellVisualFocusAndPreview();
+        this.renderSynergySvg();
       }
     } else {
-      this.render(this.bay, this.editable, { prepareMode: this.prepareMode });
+      this.updateSelectionAndDragClasses();
+      this.updateCellVisualFocusAndPreview();
+      this.renderSynergySvg();
     }
   };
 
   private handleWindowPointerCancel = (): void => {
-    if (!this.drag) return;
+    if (this.destroyed || !this.drag) return;
+    const wasActive = this.drag.active;
     this.clearDragGhost();
     this.drag = null;
-    if (this.bay) {
-      this.render(this.bay, this.editable, { prepareMode: this.prepareMode });
+    if (wasActive && this.bay) {
+      this.updateSelectionAndDragClasses();
+      this.updateCellVisualFocusAndPreview();
+      this.renderSynergySvg();
     }
   };
 
   private handleKeyDown = (e: KeyboardEvent): void => {
     // Strictly isolated when ANY modal is open or grid is hidden/read-only (AC17/F01)!
-    if (hasOpenModal() || !this.bay || !this.editable) return;
+    if (this.destroyed || hasOpenModal() || !this.bay || !this.editable) return;
     const target = e.target as HTMLElement | null;
     if (
       target &&
@@ -1283,50 +1879,27 @@ export class CargoGridV2Component {
     ) {
       return;
     }
-    const ship = V2_SHIPS[this.bay.shipId];
 
-    // Grid navigation when focus is on grid
+    // Grid navigation when focus is on grid (zero DOM rebuilds & zero simulateV2Combat calls!)
     if (this.gridHasFocus) {
       if (e.key === 'ArrowRight') {
         e.preventDefault();
-        this.focusedCell = { x: (this.focusedCell.x + 1) % ship.cols, y: this.focusedCell.y };
-        this.render(this.bay, this.editable, {
-          prepareMode: this.prepareMode,
-          restoreCellFocus: true,
-        });
+        this.moveKeyboardFocus(1, 0);
         return;
       }
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
-        this.focusedCell = {
-          x: (this.focusedCell.x + ship.cols - 1) % ship.cols,
-          y: this.focusedCell.y,
-        };
-        this.render(this.bay, this.editable, {
-          prepareMode: this.prepareMode,
-          restoreCellFocus: true,
-        });
+        this.moveKeyboardFocus(-1, 0);
         return;
       }
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        this.focusedCell = { x: this.focusedCell.x, y: (this.focusedCell.y + 1) % ship.rows };
-        this.render(this.bay, this.editable, {
-          prepareMode: this.prepareMode,
-          restoreCellFocus: true,
-        });
+        this.moveKeyboardFocus(0, 1);
         return;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
-        this.focusedCell = {
-          x: this.focusedCell.x,
-          y: (this.focusedCell.y + ship.rows - 1) % ship.rows,
-        };
-        this.render(this.bay, this.editable, {
-          prepareMode: this.prepareMode,
-          restoreCellFocus: true,
-        });
+        this.moveKeyboardFocus(0, -1);
         return;
       }
       if (e.key === 'Enter' || e.key === ' ') {
@@ -1341,13 +1914,13 @@ export class CargoGridV2Component {
         }
         const occ = findV2ItemAtCell(this.bay, this.focusedCell.x, this.focusedCell.y);
         if (occ) {
-          this.selected = { zone: 'grid', instanceId: occ.item.instanceId };
           this.carrying = true;
-          soundEngine.play('click');
-          this.render(this.bay, this.editable, {
-            prepareMode: this.prepareMode,
-            restoreCellFocus: true,
-          });
+          const prevKey = this.renderedSelectedKey;
+          this.selectItem({ zone: 'grid', instanceId: occ.item.instanceId }, { playSfx: true });
+          if (prevKey === this.renderedSelectedKey) {
+            soundEngine.play('click');
+          }
+          this.updateCellVisualFocusAndPreview();
         } else if (this.selected) {
           this.tryPlaceSelectedAt(this.focusedCell.x, this.focusedCell.y);
         }
@@ -1367,6 +1940,8 @@ export class CargoGridV2Component {
           if (!this.callbacks.onPrepareRemoveItem) return;
           const sel = this.getSelectedItemInfo();
           if (sel && sel.zone === 'grid') {
+            this.lastSnappedId = null;
+            this.pendingSnapFeedback = false;
             this.selected = null;
             this.callbacks.onPrepareRemoveItem(sel.item.instanceId);
           }
@@ -1375,14 +1950,21 @@ export class CargoGridV2Component {
         }
       }
     } else if (e.key === 'Escape') {
-      if (this.carrying || this.selected) {
+      if (this.drag || this.carrying || this.selected) {
         e.preventDefault();
+        const hadActiveDrag = Boolean(this.drag?.active);
+        if (this.drag) {
+          this.clearDragGhost();
+          this.drag = null;
+        }
         this.carrying = false;
-        this.selected = null;
-        this.render(this.bay, this.editable, {
-          prepareMode: this.prepareMode,
-          restoreCellFocus: this.gridHasFocus,
-        });
+        const hadSelection = this.selected !== null;
+        this.selectItem(null, { playSfx: false, clearSnap: true });
+        if (hadActiveDrag && !hadSelection) {
+          this.updateSelectionAndDragClasses();
+          this.renderSynergySvg();
+        }
+        this.updateCellVisualFocusAndPreview();
       }
     }
   };

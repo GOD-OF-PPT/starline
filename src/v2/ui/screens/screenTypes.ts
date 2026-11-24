@@ -1,5 +1,7 @@
+import type { SectorBgIndex } from '../../../data/nodes';
 import { CAMPAIGN_CHAPTERS } from '../../data/campaign';
 import type { V2CrewId } from '../../data/crew';
+import type { V2EnemyUnitSpec } from '../../data/enemies';
 import {
   getV2EquipmentDefByKind,
   type V2ArchetypeId,
@@ -10,6 +12,7 @@ import { V2_SHAPES } from '../../data/shapes';
 import type { V2ShipId } from '../../data/ships';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
 import type { V2PrepareSlotEntry, V2ResolvedPresetSlot } from '../../domain/loadout';
+import type { V2ShipVisualSpec } from '../../domain/shipVisualSpec';
 import type {
   CampaignActId,
   SectorId,
@@ -19,6 +22,18 @@ import type {
   V2TrialBuildId,
 } from '../../domain/types';
 import { crewPortraitSvg, svgIcon, type V2IconName } from '../icons';
+
+/**
+ * Stateful PhaseView lifecycle contract (PROJECT.md § Interface Contracts #6).
+ * - `mount(host)` creates persistent DOM skeleton and binds delegated/static listeners once.
+ * - `update(props, actions)` reconciles dynamic text, attributes, classes, and keyed children in-place.
+ * - `unmount()` removes all event listeners, detaches DOM cleanly, and releases references.
+ */
+export interface PhaseView<P, A> {
+  mount(host: HTMLElement): void;
+  update(props: P, actions: A): void;
+  unmount(): void;
+}
 
 export interface V2PrepareDraft {
   contractTemplateId: string;
@@ -165,4 +180,96 @@ export function bindEngineerSwapHandlers(
       onSwap(kind);
     });
   });
+}
+
+export type V2StaticStageMode =
+  | 'prepare'
+  | 'wreck'
+  | 'pre_combat'
+  | 'event'
+  | 'map'
+  | 'shop'
+  | 'reward'
+  | 'arrange'
+  | 'settlement';
+
+export interface V2StaticStageKeyInput {
+  readonly mode: V2StaticStageMode;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly shipId: V2ShipId;
+  readonly sectorId: SectorId;
+  readonly sectorIndex: SectorBgIndex;
+  readonly eventBackdrop: 'wreck' | 'merchant' | 'anomaly' | 'distress' | null;
+  readonly units: readonly V2EnemyUnitSpec[];
+}
+
+export function buildV2EnemyFormationKey(units: readonly V2EnemyUnitSpec[]): string {
+  if (units.length === 0) return 'none';
+  return units
+    .map(
+      (u) =>
+        `${u.enemyId}:${u.spriteArchetype}:${u.maxHp}:${u.damagePerRound}:${u.armor}:${Math.round(
+          u.pierceRatio * 100
+        )}:${u.initialShield ?? 0}:${u.maxShield ?? u.initialShield ?? 0}:${u.isBoss ? 1 : 0}:${
+          u.role ?? ''
+        }:${u.name}`
+    )
+    .join(',');
+}
+
+export function buildV2StaticStagePlaybackKey(input: V2StaticStageKeyInput): string {
+  return [
+    input.mode,
+    input.runId,
+    input.nodeId,
+    input.shipId,
+    input.sectorId,
+    String(input.sectorIndex),
+    input.eventBackdrop ?? 'none',
+    buildV2EnemyFormationKey(input.units),
+  ].join('|');
+}
+
+export interface V2StaticStageHostLike<P> {
+  isV2StageMode(): boolean;
+  showV2Stage(playback: P): void;
+  updateV2ShipVisualSpec(spec: V2ShipVisualSpec | null): void;
+}
+
+/**
+ * Stateful controller-side deduplicator for static V2CombatScene stages (F02).
+ * Pure TS (zero Phaser/DOM imports) so V2AppController and Vitest share the exact same logic.
+ */
+export class V2StaticStageSyncTracker {
+  private activeKey: string | null = null;
+
+  getActiveKey(): string | null {
+    return this.activeKey;
+  }
+
+  reset(): void {
+    this.activeKey = null;
+  }
+
+  sync<
+    P extends {
+      readonly playbackKey?: string;
+      readonly shipVisualSpec?: V2ShipVisualSpec | null;
+    }
+  >(
+    host: V2StaticStageHostLike<P>,
+    keyInput: V2StaticStageKeyInput,
+    visualSpec: V2ShipVisualSpec | null,
+    buildPlayback: (playbackKey: string) => P
+  ): { readonly key: string; readonly reused: boolean } {
+    const key = buildV2StaticStagePlaybackKey(keyInput);
+    if (this.activeKey === key && host.isV2StageMode()) {
+      host.updateV2ShipVisualSpec(visualSpec);
+      return { key, reused: true };
+    }
+    this.activeKey = key;
+    host.showV2Stage(buildPlayback(key));
+    return { key, reused: false };
+  }
 }

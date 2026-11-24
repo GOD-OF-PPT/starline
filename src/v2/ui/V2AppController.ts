@@ -153,7 +153,7 @@ import {
   type V2WreckSpotId,
   type V3HullTuningTrack,
 } from '../domain/types';
-import { CargoGridV2Component } from './CargoGridV2';
+import { CargoGridV2Component, type CargoGridV2Callbacks } from './CargoGridV2';
 import { crewPortraitSvg, svgIcon } from './icons';
 import {
   buildV2InspectSnapshot,
@@ -162,19 +162,22 @@ import {
 } from './inspectSnapshot';
 import { openV3CampaignModal, type CampaignModalTab } from './modals/CampaignModal';
 import { openV3CareerModal, type CareerModalTab } from './modals/CareerModal';
-import { renderArrangeView } from './screens/ArrangeView';
+import { ArrangePhaseView } from './screens/ArrangeView';
 import { renderBaseHeroView, updateBaseDockingNotice } from './screens/BaseView';
 import { renderCombatLiveOverlay, renderCombatPreView } from './screens/CombatView';
 import { renderEndingView } from './screens/EndingView';
 import { renderEventView } from './screens/EventView';
-import { renderMapView } from './screens/MapView';
+import { MapPhaseView } from './screens/MapView';
 import { renderPrepareView } from './screens/PrepareView';
 import { renderRewardView } from './screens/RewardView';
 import {
   NODE_TYPE_META,
+  V2StaticStageSyncTracker,
   type NextBaseGoal,
+  type PhaseView,
   type V2PrepareDraft,
   type V2ReturnDockingNotice,
+  type V2StaticStageMode,
 } from './screens/screenTypes';
 import { renderSettlementView } from './screens/SettlementView';
 import { renderShopView } from './screens/ShopView';
@@ -217,6 +220,13 @@ export class V2AppController {
   private showcaseRun: V2RunState | null = null;
   private phaserHost: PhaserHost | null = null;
   private cargoGrid: CargoGridV2Component | null = null;
+  private cargoHeaderTitleEl: HTMLElement | null = null;
+  private cargoHeaderSubEl: HTMLElement | null = null;
+  private cargoMountEl: HTMLElement | null = null;
+  private activeLeftPhaseKey: 'MAP' | 'ARRANGE' | null = null;
+  private activeLeftPhaseView: PhaseView<unknown, unknown> | null = null;
+  private readonly mapPhaseView = new MapPhaseView();
+  private readonly arrangePhaseView = new ArrangePhaseView();
   private tabGuard: MultiTabGuard;
 
   private sessionLaunchIndex = 0;
@@ -253,6 +263,7 @@ export class V2AppController {
 
   // Live combat playback display telemetry (pure presentation)
   private activeCombatPlaybackKey: string | null = null;
+  private readonly staticStageTracker = new V2StaticStageSyncTracker();
   private liveCombatRound = 0;
   private liveCombatPlayerHp = 30;
   private liveCombatPlayerShield = 0;
@@ -356,11 +367,15 @@ export class V2AppController {
         error: loaded.error,
         hasBackup: true,
         onRestoreBackup: () => {
+          this.staticStageTracker.reset();
+          this.activeCombatPlaybackKey = null;
           this.save = loaded.backup;
           this.persist();
           this.syncAll();
         },
         onResetFresh: () => {
+          this.staticStageTracker.reset();
+          this.activeCombatPlaybackKey = null;
           clearV2SaveData(window.localStorage);
           this.save = createFreshV2SaveData();
           this.persist();
@@ -374,6 +389,8 @@ export class V2AppController {
         error: loaded.error,
         hasBackup: false,
         onResetFresh: () => {
+          this.staticStageTracker.reset();
+          this.activeCombatPlaybackKey = null;
           clearV2SaveData(window.localStorage);
           this.save = createFreshV2SaveData();
           this.persist();
@@ -447,8 +464,10 @@ export class V2AppController {
       window.clearTimeout(this.actionToastTimer);
       this.actionToastTimer = null;
     }
-    this.cargoGrid?.destroy();
-    this.cargoGrid = null;
+    this.staticStageTracker.reset();
+    this.activeCombatPlaybackKey = null;
+    this.unmountActiveLeftPhaseView();
+    this.teardownCargoBay();
     this.tabGuard.destroy();
     this.phaserHost?.destroy();
     this.phaserHost = null;
@@ -875,6 +894,8 @@ export class V2AppController {
   }
 
   private startShowcaseRun(trialId: V2TrialBuildId): void {
+    this.staticStageTracker.reset();
+    this.activeCombatPlaybackKey = null;
     this.titleEntered = true;
     this.writeTitleSession(true);
     this.prepareDraft = null;
@@ -1016,6 +1037,7 @@ export class V2AppController {
     this.topHudEl.querySelector('#v2-btn-exit-showcase')?.addEventListener('click', () => {
       soundEngine.play('click');
       this.showcaseRun = null;
+      this.staticStageTracker.reset();
       this.activeCombatPlaybackKey = null;
       this.awaitingEliteDecision = false;
       this.syncAll();
@@ -1151,6 +1173,7 @@ export class V2AppController {
       if (latest.status === 'loaded') {
         this.save = latest.data;
       }
+      this.staticStageTracker.reset();
       this.tabGuard.takeOver();
       this.isReadOnlyTab = !this.tabGuard.canWrite();
       this.phaserHost?.setCombatPaused(this.isReadOnlyTab);
@@ -1215,6 +1238,7 @@ export class V2AppController {
 
     // 1. BASE HERO STAGE (Native V2 Diorama Parity — Contract #4)
     if (!run && !this.prepareDraft) {
+      this.staticStageTracker.reset();
       this.activeCombatPlaybackKey = null;
       this.awaitingEliteDecision = false;
       this.phaserHost.showV2Base(this.buildV2DioramaState());
@@ -1232,6 +1256,7 @@ export class V2AppController {
       const ship = V2_SHIPS[draft.shipId];
 
       if (draft.playingDemo && draft.trialBuildId) {
+        this.staticStageTracker.reset();
         const trial = V2_TRIAL_BUILDS[draft.trialBuildId];
         const demoUnits = getTrialDemoUnits(draft.trialBuildId);
         const demoKey = `demo_${draft.shipId}_${draft.trialBuildId}`;
@@ -1281,16 +1306,31 @@ export class V2AppController {
 
       draft.demoPlaybackKey = null;
       const prepSector = getV3SectorDef(draft.sectorId);
-      this.phaserHost.showV2Stage({
-        shipId: draft.shipId,
-        shipVisualSpec: visualSpec,
-        sectorId: draft.sectorId,
-        sectorIndex: prepSector.primaryBgIndex,
-        eventBackdrop: null,
-        units: [],
-        simulation: null,
-        settings: this.save.settings,
-      });
+      this.staticStageTracker.sync(
+        this.phaserHost,
+        {
+          mode: 'prepare',
+          runId: 'prepare',
+          nodeId: 'none',
+          shipId: draft.shipId,
+          sectorId: draft.sectorId,
+          sectorIndex: prepSector.primaryBgIndex,
+          eventBackdrop: null,
+          units: [],
+        },
+        visualSpec,
+        (playbackKey) => ({
+          playbackKey,
+          shipId: draft.shipId,
+          shipVisualSpec: visualSpec,
+          sectorId: draft.sectorId,
+          sectorIndex: prepSector.primaryBgIndex,
+          eventBackdrop: null,
+          units: [],
+          simulation: null,
+          settings: this.save.settings,
+        })
+      );
 
       const mountChips =
         visualSpec.mountSummaryTags.length > 0
@@ -1313,6 +1353,7 @@ export class V2AppController {
 
     // 3. LIVE COMBAT HERO STAGE
     if (run.phase === 'ENCOUNTER' && run.activeCombat && currentNode?.combat) {
+      this.staticStageTracker.reset();
       const activeCombat = run.activeCombat;
       const sim = activeCombat.simulation;
       const pending = activeCombat.pendingDecision;
@@ -1466,16 +1507,32 @@ export class V2AppController {
       !currentNode.combat
     ) {
       this.activeCombatPlaybackKey = null;
-      this.phaserHost.showV2Stage({
-        shipId: run.shipId,
-        shipVisualSpec: visualSpec,
-        sectorId: run.sectorId,
-        sectorIndex,
-        eventBackdrop: 'wreck',
-        units: [],
-        simulation: null,
-        settings: this.save.settings,
-      });
+      this.awaitingEliteDecision = false;
+      this.staticStageTracker.sync(
+        this.phaserHost,
+        {
+          mode: 'wreck',
+          runId: run.runId,
+          nodeId: currentNode.nodeId,
+          shipId: run.shipId,
+          sectorId: run.sectorId,
+          sectorIndex,
+          eventBackdrop: 'wreck',
+          units: [],
+        },
+        visualSpec,
+        (playbackKey) => ({
+          playbackKey,
+          shipId: run.shipId,
+          shipVisualSpec: visualSpec,
+          sectorId: run.sectorId,
+          sectorIndex,
+          eventBackdrop: 'wreck' as const,
+          units: [],
+          simulation: null,
+          settings: this.save.settings,
+        })
+      );
       this.renderWreckOverlay(run, currentNode);
       return;
     }
@@ -1492,17 +1549,46 @@ export class V2AppController {
         : null;
     const previewUnits =
       run.phase === 'ENCOUNTER' && currentNode?.combat ? currentNode.combat.units : [];
+    const stageMode: V2StaticStageMode =
+      run.phase === 'MAP'
+        ? 'map'
+        : run.phase === 'SHOP'
+        ? 'shop'
+        : run.phase === 'REWARD'
+        ? 'reward'
+        : run.phase === 'ARRANGE'
+        ? 'arrange'
+        : run.phase === 'SETTLEMENT'
+        ? 'settlement'
+        : currentNode?.combat
+        ? 'pre_combat'
+        : 'event';
 
-    this.phaserHost.showV2Stage({
-      shipId: run.shipId,
-      shipVisualSpec: visualSpec,
-      sectorId: run.sectorId,
-      sectorIndex,
-      eventBackdrop: eventBg,
-      units: previewUnits,
-      simulation: null,
-      settings: this.save.settings,
-    });
+    this.staticStageTracker.sync(
+      this.phaserHost,
+      {
+        mode: stageMode,
+        runId: run.runId,
+        nodeId: currentNode?.nodeId ?? 'none',
+        shipId: run.shipId,
+        sectorId: run.sectorId,
+        sectorIndex,
+        eventBackdrop: eventBg,
+        units: previewUnits,
+      },
+      visualSpec,
+      (playbackKey) => ({
+        playbackKey,
+        shipId: run.shipId,
+        shipVisualSpec: visualSpec,
+        sectorId: run.sectorId,
+        sectorIndex,
+        eventBackdrop: eventBg,
+        units: previewUnits,
+        simulation: null,
+        settings: this.save.settings,
+      })
+    );
 
     const stageLabel =
       run.phase === 'MAP'
@@ -1700,14 +1786,39 @@ export class V2AppController {
     );
   }
 
+  private unmountActiveLeftPhaseView(): void {
+    if (this.activeLeftPhaseView) {
+      this.activeLeftPhaseView.unmount();
+      this.activeLeftPhaseView = null;
+      this.activeLeftPhaseKey = null;
+    }
+  }
+
+  private updateManagedLeftPhaseView<P, A>(
+    key: 'MAP' | 'ARRANGE',
+    view: PhaseView<P, A>,
+    props: P,
+    actions: A
+  ): void {
+    const erasedView = view as PhaseView<unknown, unknown>;
+    if (this.activeLeftPhaseKey !== key || this.activeLeftPhaseView !== erasedView) {
+      this.unmountActiveLeftPhaseView();
+      this.leftPanelEl.innerHTML = '';
+      view.mount(this.leftPanelEl);
+      this.activeLeftPhaseKey = key;
+      this.activeLeftPhaseView = erasedView;
+    }
+    view.update(props, actions);
+  }
+
   private renderPanels(): void {
     const run = this.getCurrentRun();
     if (!run) {
       if (this.prepareDraft) {
         this.renderPreparePanels();
       } else {
-        this.cargoGrid?.destroy();
-        this.cargoGrid = null;
+        this.unmountActiveLeftPhaseView();
+        this.teardownCargoBay();
         this.leftPanelEl.innerHTML = '';
         this.rightPanelEl.innerHTML = '';
       }
@@ -1907,6 +2018,7 @@ export class V2AppController {
   private renderPreparePanels(): void {
     const draft = this.prepareDraft;
     if (!draft) return;
+    this.unmountActiveLeftPhaseView();
     const p = this.save.profile;
     const readOnly = this.isReadOnlyTab;
     const validation = validateV2PrepareLoadout(
@@ -2246,6 +2358,8 @@ export class V2AppController {
           stargateRelayTier: getFacilityTier(p, 'stargate_relay'),
         }),
       onChange: (nextBay) => {
+        if (!this.canMutate() || this.prepareDraft !== draft) return;
+        const wasPlayingDemo = draft.playingDemo;
         draft.playingDemo = false;
         draft.demoPlaybackKey = null;
         draft.slots = nextBay.placed.map((pl) => {
@@ -2264,17 +2378,19 @@ export class V2AppController {
             rotation: pl.rotation,
           };
         });
-        this.syncAll();
+        this.syncPrepareLocal(draft, wasPlayingDemo);
       },
       onPrepareRemove: draft.trialBuildId
         ? undefined
         : (instanceId) => {
+            if (!this.canMutate() || this.prepareDraft !== draft) return;
+            const wasPlayingDemo = draft.playingDemo;
             draft.playingDemo = false;
             draft.demoPlaybackKey = null;
             draft.slots = draft.slots.filter(
               (s) => s.slotKey !== instanceId && s.warehouseInstanceId !== instanceId
             );
-            this.syncAll();
+            this.syncPrepareLocal(draft, wasPlayingDemo);
           },
     });
   }
@@ -2297,8 +2413,9 @@ export class V2AppController {
   private renderMapPhase(run: V2RunState): void {
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const relicPassives = getActiveRelicPassives(this.save.profile);
-    renderMapView(
-      this.leftPanelEl,
+    this.updateManagedLeftPhaseView(
+      'MAP',
+      this.mapPhaseView,
       {
         run,
         readOnly,
@@ -2314,16 +2431,24 @@ export class V2AppController {
         onToggleMobileMap: () => {
           this.mobileMapShowFull = !this.mobileMapShowFull;
           soundEngine.play('click');
-          this.renderMapPhase(run);
+          const latest = this.getCurrentRun();
+          if (latest && latest.phase === 'MAP') {
+            this.renderMapPhase(latest);
+          }
         },
         onSelectNode: (nid) => {
           this.selectedMapNodeId = nid;
           soundEngine.play('click');
-          this.renderMapPhase(run);
+          const latest = this.getCurrentRun();
+          if (latest && latest.phase === 'MAP') {
+            this.renderMapPhase(latest);
+          }
         },
         onJumpNode: (nid) => {
           if (!this.canMutate()) return;
-          const res = selectV2MapNode(run, nid, {
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'MAP') return;
+          const res = selectV2MapNode(latest, nid, {
             bonusBossCharges: this.getBonusBossCharges(),
             profile: this.save.profile,
           });
@@ -2342,10 +2467,16 @@ export class V2AppController {
           soundEngine.play('warpJump');
           this.syncAll();
         },
-        onUseGadget: (instanceId) => this.handleUseGadget(run, instanceId),
+        onUseGadget: (instanceId) => {
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'MAP') return;
+          this.handleUseGadget(latest, instanceId);
+        },
         onSafeReturn: () => {
           if (!this.canMutate()) return;
-          const res = initiateV2SafeReturnFromMap(run);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'MAP') return;
+          const res = initiateV2SafeReturnFromMap(latest);
           if (!res.ok) return this.showToast(res.error ?? '当前无法返航');
           this.settlementDispositions = {};
           this.setCurrentRun(res.run);
@@ -2354,11 +2485,13 @@ export class V2AppController {
         },
         onAbortContract: () => {
           if (!this.canMutate()) return;
-          const nextRun = abortActiveV2Contract(run);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'MAP') return;
+          const nextRun = abortActiveV2Contract(latest);
           this.setCurrentRun(nextRun);
           soundEngine.play('click');
           this.showToast(
-            run.contract.type === 'rescue'
+            latest.contract.type === 'rescue'
               ? '已放弃救援委托：救生舱已由信标移交，释放船舱空位与额外油耗。'
               : '已放弃当前委托，可继续自由探索或免费返航。'
           );
@@ -2374,14 +2507,14 @@ export class V2AppController {
   }
 
   private renderEncounterPhase(run: V2RunState): void {
+    this.unmountActiveLeftPhaseView();
     const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
     if (!node) return;
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
 
     if (node.combat) {
       if (run.activeCombat) {
-        this.cargoGrid?.destroy();
-        this.cargoGrid = null;
+        this.teardownCargoBay();
         this.leftPanelEl.innerHTML = '';
         this.rightPanelEl.innerHTML = '';
         return;
@@ -2459,9 +2592,6 @@ export class V2AppController {
           },
           onCutSpot: (spotId: V2WreckSpotId) => {
             if (!this.canMutate()) return;
-            const spotCoords =
-              spotId === 'armory' ? [0.22, 0.48] : spotId === 'cargo' ? [0.78, 0.5] : [0.5, 0.45];
-            this.phaserHost?.triggerV2WreckCutFx(spotCoords[0], spotCoords[1]);
             const res = cutV2WreckHotspot(
               run,
               spotId,
@@ -2475,11 +2605,16 @@ export class V2AppController {
             if (res.ambushTriggered) {
               soundEngine.play('bossAlarm');
               this.showToast('残骸警报触发！敌舰伏击来袭，战利品已暂封待战后返还！');
-            } else if (res.tookHazard) {
-              soundEngine.play('hullHit');
-              if (res.summaryText) this.showToast(res.summaryText);
             } else {
-              soundEngine.play('place');
+              const spotCoords =
+                spotId === 'armory' ? [0.22, 0.48] : spotId === 'cargo' ? [0.78, 0.5] : [0.5, 0.45];
+              this.phaserHost?.triggerV2WreckCutFx(spotCoords[0], spotCoords[1]);
+              if (res.tookHazard) {
+                soundEngine.play('hullHit');
+                if (res.summaryText) this.showToast(res.summaryText);
+              } else {
+                soundEngine.play('place');
+              }
             }
             this.syncAll();
           },
@@ -2572,6 +2707,7 @@ export class V2AppController {
   }
 
   private renderShopPhase(run: V2RunState): void {
+    this.unmountActiveLeftPhaseView();
     const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
     if (!node || !node.merchant) return;
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
@@ -2633,26 +2769,30 @@ export class V2AppController {
 
     this.mountV2CargoBay(run.bay, !readOnly, {
       title: '商人节点船舱整理',
-      getTacticalDelta: (item, zone) =>
-        computeV2PlacementTacticalDelta({
-          run,
-          bay: run.bay,
-          startingHp: run.hp,
-          maxHp: run.maxHp,
-          targetPolicy: run.targetPolicy,
+      getTacticalDelta: (item, zone) => {
+        const activeRun = this.getCurrentRun() ?? run;
+        return computeV2PlacementTacticalDelta({
+          run: activeRun,
+          bay: activeRun.bay,
+          startingHp: activeRun.hp,
+          maxHp: activeRun.maxHp,
+          targetPolicy: activeRun.targetPolicy,
           item,
           zone,
           stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
-        }),
+        });
+      },
       onChange: (nextBay) => {
         if (!this.canMutate()) return;
-        this.setCurrentRun({ ...run, bay: nextBay });
-        this.syncAll();
+        const curRun = this.getCurrentRun();
+        if (!curRun || curRun.phase !== 'SHOP') return;
+        this.syncShopLocal({ ...curRun, bay: nextBay });
       },
     });
   }
 
   private renderRewardPhase(run: V2RunState): void {
+    this.unmountActiveLeftPhaseView();
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     renderRewardView(
       this.leftPanelEl,
@@ -2680,29 +2820,42 @@ export class V2AppController {
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const collapsed = this.isArrangeSceneCollapsed();
 
-    renderArrangeView(
-      this.leftPanelEl,
+    this.updateManagedLeftPhaseView(
+      'ARRANGE',
+      this.arrangePhaseView,
       { run, readOnly, sceneCollapsed: collapsed },
       {
         onToggleShipPreview: () => {
-          this.sceneCollapseOverride = !collapsed;
+          this.sceneCollapseOverride = !this.isArrangeSceneCollapsed();
           soundEngine.play('click');
           this.syncAll();
         },
-        onEngineerSwap: (kind) => this.handleEngineerSwap(run, kind),
+        onEngineerSwap: (kind) => {
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ARRANGE') return;
+          this.handleEngineerSwap(latest, kind);
+        },
         onSurveyScan: () => {
           if (!this.canMutate()) return;
-          const res = performSurveyAtCurrentNode(run);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ARRANGE') return;
+          const res = performSurveyAtCurrentNode(latest);
           if (!res.ok) return this.showToast(res.reason ?? '无法执行勘测');
           this.setCurrentRun(res.run);
           soundEngine.play('energyLink');
           this.showToast('航迹勘测完成！');
           this.syncAll();
         },
-        onUseGadget: (instanceId) => this.handleUseGadget(run, instanceId),
+        onUseGadget: (instanceId) => {
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ARRANGE') return;
+          this.handleUseGadget(latest, instanceId);
+        },
         onAbortContract: () => {
           if (!this.canMutate()) return;
-          const nextRun = abortActiveV2Contract(run);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ARRANGE') return;
+          const nextRun = abortActiveV2Contract(latest);
           this.setCurrentRun(nextRun);
           soundEngine.play('click');
           this.showToast('已放弃当前委托。');
@@ -2710,8 +2863,12 @@ export class V2AppController {
         },
         onLeaveArrange: (terminal) => {
           if (!this.canMutate()) return;
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ARRANGE') return;
           const proceed = () => {
-            const res = finishV2ArrangeAndProceed(run, terminal ? 'safe_return' : 'map');
+            const cur = this.getCurrentRun();
+            if (!cur || cur.phase !== 'ARRANGE') return;
+            const res = finishV2ArrangeAndProceed(cur, terminal ? 'safe_return' : 'map');
             if (!res.ok) return this.showToast(res.error ?? '当前无法离开整理');
             if (res.run.phase === 'SETTLEMENT') {
               this.settlementDispositions = {};
@@ -2720,8 +2877,8 @@ export class V2AppController {
             soundEngine.play('click');
             this.syncAll();
           };
-          if (run.bay.discardedThisArrange.length > 0) {
-            openV2DiscardConfirmModal(this.modalHostEl, run.bay.discardedThisArrange, proceed);
+          if (latest.bay.discardedThisArrange.length > 0) {
+            openV2DiscardConfirmModal(this.modalHostEl, latest.bay.discardedThisArrange, proceed);
           } else {
             proceed();
           }
@@ -2734,29 +2891,33 @@ export class V2AppController {
       statusBadge: '可调整',
       getInspectorHost: () =>
         window.innerWidth >= 860
-          ? this.leftPanelEl.querySelector<HTMLElement>('#v3-arrange-inspector-slot')
+          ? this.arrangePhaseView.getInspectorSlot() ??
+            this.leftPanelEl.querySelector<HTMLElement>('#v3-arrange-inspector-slot')
           : null,
-      getTacticalDelta: (item, zone) =>
-        computeV2PlacementTacticalDelta({
-          run,
-          bay: run.bay,
-          startingHp: run.hp,
-          maxHp: run.maxHp,
-          targetPolicy: run.targetPolicy,
+      getTacticalDelta: (item, zone) => {
+        const activeRun = this.getCurrentRun() ?? run;
+        return computeV2PlacementTacticalDelta({
+          run: activeRun,
+          bay: activeRun.bay,
+          startingHp: activeRun.hp,
+          maxHp: activeRun.maxHp,
+          targetPolicy: activeRun.targetPolicy,
           item,
           zone,
           stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
-        }),
+        });
+      },
       onChange: (nextBay) => {
         if (!this.canMutate()) return;
-        this.setCurrentRun({ ...run, bay: nextBay });
-        this.phaserHost?.updateV2ShipVisualSpec(deriveV2ShipVisualSpec(nextBay));
-        this.syncAll();
+        const curRun = this.getCurrentRun();
+        if (!curRun || curRun.phase !== 'ARRANGE') return;
+        this.syncArrangeLocal({ ...curRun, bay: nextBay });
       },
     });
   }
 
   private renderSettlementPhase(run: V2RunState): void {
+    this.unmountActiveLeftPhaseView();
     const p = this.save.profile;
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const summary = calculateV2Settlement(run, p, this.settlementDispositions);
@@ -2917,6 +3078,74 @@ export class V2AppController {
 
   // --- Shared Right-Panel CargoGridV2 Mount ---
 
+  private teardownCargoBay(): void {
+    this.cargoGrid?.destroy();
+    this.cargoGrid = null;
+    this.cargoHeaderTitleEl = null;
+    this.cargoHeaderSubEl = null;
+    this.cargoMountEl = null;
+  }
+
+  private updateStageMountStrip(
+    visualSpec: ReturnType<typeof deriveV2ShipVisualSpec>,
+    fallbackMutedLabel?: string
+  ): void {
+    const existingStrip = this.sceneOverlayEl.querySelector<HTMLElement>('.v2-mount-strip');
+    if (visualSpec.mountSummaryTags.length === 0 && !fallbackMutedLabel) {
+      existingStrip?.remove();
+      return;
+    }
+    const html =
+      visualSpec.mountSummaryTags.length > 0
+        ? visualSpec.mountSummaryTags.map((t) => `<span class="v2-mount-pill">${t}</span>`).join('')
+        : `<span class="v2-mount-pill muted">${fallbackMutedLabel}</span>`;
+    if (existingStrip) {
+      existingStrip.innerHTML = html;
+    } else if (this.sceneOverlayEl.querySelector('.scene-stage-tag')) {
+      const strip = document.createElement('div');
+      strip.className = 'v2-mount-strip';
+      strip.innerHTML = html;
+      this.sceneOverlayEl.appendChild(strip);
+    }
+  }
+
+  private syncArrangeLocal(nextRun: V2RunState): void {
+    const prevStorageError = this.storageError;
+    this.setCurrentRun(nextRun);
+    const visualSpec = deriveV2ShipVisualSpec(nextRun.bay);
+    this.phaserHost?.updateV2ShipVisualSpec(visualSpec);
+    this.updateStageMountStrip(visualSpec);
+    this.renderTopHud();
+    if (this.storageError !== prevStorageError) {
+      this.renderBanners();
+    }
+    this.renderArrangePhase(nextRun);
+  }
+
+  private syncShopLocal(nextRun: V2RunState): void {
+    const prevStorageError = this.storageError;
+    this.setCurrentRun(nextRun);
+    const visualSpec = deriveV2ShipVisualSpec(nextRun.bay);
+    this.phaserHost?.updateV2ShipVisualSpec(visualSpec);
+    this.renderTopHud();
+    if (this.storageError !== prevStorageError) {
+      this.renderBanners();
+    }
+    this.renderShopPhase(nextRun);
+  }
+
+  private syncPrepareLocal(draft: V2PrepareDraft, wasPlayingDemo: boolean): void {
+    const previewBay = this.buildPreparePreviewBay(draft);
+    const visualSpec = deriveV2ShipVisualSpec(previewBay);
+    if (wasPlayingDemo) {
+      this.syncPhaserStage();
+    } else {
+      this.phaserHost?.updateV2ShipVisualSpec(visualSpec);
+      this.updateStageMountStrip(visualSpec, '仅舰载核心小炮');
+    }
+    this.renderPreparePanels();
+  }
+
   private mountV2CargoBay(
     bay: V2CargoBayState,
     editable: boolean,
@@ -2933,22 +3162,58 @@ export class V2AppController {
       readonly onPrepareRemove?: (instanceId: string) => void;
     }
   ): void {
-    this.rightPanelEl.innerHTML = `
-      <div class="panel-header">
-        <h2>${opts.title}</h2>
-        <span class="panel-sub">${opts.statusBadge ?? (editable ? '可调整' : '当前配置')}</span>
-      </div>
-      <div class="cargo-mount-root" id="v2-cargo-mount"></div>
-    `;
-    const mount = this.rightPanelEl.querySelector<HTMLElement>('#v2-cargo-mount')!;
-    this.cargoGrid?.destroy();
-    this.cargoGrid = new CargoGridV2Component(mount, {
+    const badgeText = opts.statusBadge ?? (editable ? '可调整' : '当前配置');
+    const callbacks: CargoGridV2Callbacks = {
       onBayChange: (nextBay) => opts.onChange?.(nextBay),
-      onPrepareRemoveItem: (id) => opts.onPrepareRemove?.(id),
+      onPrepareRemoveItem: opts.onPrepareRemove ? (id) => opts.onPrepareRemove?.(id) : undefined,
       getTacticalDelta: opts.getTacticalDelta,
       getInspectorHost: opts.getInspectorHost,
-    });
-    this.cargoGrid.render(bay, editable, { prepareMode: opts.prepareMode });
+    };
+
+    const canReuse =
+      this.cargoGrid !== null &&
+      this.cargoMountEl !== null &&
+      this.rightPanelEl.contains(this.cargoMountEl);
+
+    if (!canReuse) {
+      this.teardownCargoBay();
+      this.rightPanelEl.innerHTML = '';
+
+      const header = document.createElement('div');
+      header.className = 'panel-header';
+
+      const titleEl = document.createElement('h2');
+      titleEl.textContent = opts.title;
+
+      const subEl = document.createElement('span');
+      subEl.className = 'panel-sub';
+      subEl.textContent = badgeText;
+
+      header.appendChild(titleEl);
+      header.appendChild(subEl);
+
+      const mount = document.createElement('div');
+      mount.className = 'cargo-mount-root';
+      mount.id = 'v2-cargo-mount';
+
+      this.rightPanelEl.appendChild(header);
+      this.rightPanelEl.appendChild(mount);
+
+      this.cargoHeaderTitleEl = titleEl;
+      this.cargoHeaderSubEl = subEl;
+      this.cargoMountEl = mount;
+      this.cargoGrid = new CargoGridV2Component(mount, callbacks);
+    } else {
+      if (this.cargoHeaderTitleEl && this.cargoHeaderTitleEl.textContent !== opts.title) {
+        this.cargoHeaderTitleEl.textContent = opts.title;
+      }
+      if (this.cargoHeaderSubEl && this.cargoHeaderSubEl.textContent !== badgeText) {
+        this.cargoHeaderSubEl.textContent = badgeText;
+      }
+      this.cargoGrid!.setCallbacks(callbacks);
+    }
+
+    this.cargoGrid!.render(bay, editable, { prepareMode: opts.prepareMode });
   }
 
   // --- Modal Launchers ---
@@ -3079,6 +3344,8 @@ export class V2AppController {
       onOpenMigration: this.v1Inspection.hasV1Save ? () => this.openMigrationWizard() : undefined,
       onResetV2Save: () => {
         if (!this.canMutate()) return;
+        this.staticStageTracker.reset();
+        this.activeCombatPlaybackKey = null;
         clearV2SaveData(window.localStorage);
         this.save = createFreshV2SaveData();
         this.showcaseRun = null;
@@ -3269,6 +3536,8 @@ export class V2AppController {
           return;
         }
         const migrated = migrateV1ToV2SaveData(this.v1Inspection.v1Save);
+        this.staticStageTracker.reset();
+        this.activeCombatPlaybackKey = null;
         this.save = migrated;
         this.migrationPromptDismissed = true;
         this.persist();
