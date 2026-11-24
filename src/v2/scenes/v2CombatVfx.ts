@@ -930,3 +930,80 @@ export function computeIdleMicroTiltDeg(input: {
 export function lerpNumber(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
+
+// ---------------------------------------------------------------------------
+// S08 + A07-code — Wreck Direct Plasma Cut Timeline & Compartment Visual State
+// ---------------------------------------------------------------------------
+
+export const VFX_WRECK_CUT_DURATION_MS = 600;
+export const VFX_WRECK_CLAMP_POP_RATIO = 0.72;
+export const VFX_WRECK_FLIP_DURATION_MS = 260;
+
+export interface WreckCompartmentVisualState {
+  readonly spotId: 'armory' | 'reactor' | 'cargo';
+  readonly normX: number;
+  readonly normY: number;
+  readonly cut: boolean;
+  readonly cutting: boolean;
+  readonly canCut: boolean;
+  readonly isLethal: boolean;
+  readonly isRisky: boolean;
+  readonly silhouetteKind: 'equipment' | 'cargo' | 'reactor';
+}
+
+export interface WreckCutTimelineFrame {
+  readonly progress: number;
+  readonly seamProgress: number;
+  readonly clampPopped: boolean;
+  readonly torchLocalX: number;
+  readonly torchLocalY: number;
+  readonly complete: boolean;
+}
+
+export function computeWreckCutTimeline(
+  elapsedMs: number,
+  durationMs: number,
+  reducedMotion: boolean
+): WreckCutTimelineFrame {
+  if (reducedMotion || !Number.isFinite(durationMs) || durationMs <= 0) {
+    return {
+      progress: 1,
+      seamProgress: 1,
+      clampPopped: true,
+      torchLocalX: 1,
+      torchLocalY: 0,
+      complete: true,
+    };
+  }
+  const safeElapsed = Number.isFinite(elapsedMs) ? Math.max(0, elapsedMs) : 0;
+  const progress = Math.max(0, Math.min(1, safeElapsed / durationMs));
+  const seamProgress = Math.max(0, Math.min(1, progress / VFX_WRECK_CLAMP_POP_RATIO));
+  const clampPopped = progress >= VFX_WRECK_CLAMP_POP_RATIO;
+
+  // Trace normalized compartment perimeter [-1..1, -1..1] across 4 sides
+  const seg = seamProgress * 4;
+  let torchLocalX = -1;
+  let torchLocalY = -1;
+  if (seg <= 1) {
+    torchLocalX = lerpNumber(-1, 1, seg);
+    torchLocalY = -1;
+  } else if (seg <= 2) {
+    torchLocalX = 1;
+    torchLocalY = lerpNumber(-1, 1, seg - 1);
+  } else if (seg <= 3) {
+    torchLocalX = lerpNumber(1, -1, seg - 2);
+    torchLocalY = 1;
+  } else {
+    torchLocalX = -1;
+    torchLocalY = lerpNumber(1, -1, Math.min(1, seg - 3));
+  }
+
+  return {
+    progress,
+    seamProgress,
+    clampPopped,
+    torchLocalX,
+    torchLocalY,
+    complete: progress >= 1,
+  };
+}

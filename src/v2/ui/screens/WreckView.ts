@@ -1,3 +1,4 @@
+import { getItemImageUrl } from '../../../assets/itemArt';
 import { getV3GadgetDef } from '../../data/gadgets';
 import { getV3SectorDef } from '../../data/sectors';
 import { V2_SHAPES } from '../../data/shapes';
@@ -22,16 +23,28 @@ export interface WreckHotspotOverlayProps {
   readonly profile?: V2ProfileState;
   readonly readOnly: boolean;
   readonly selectedHotspot: WreckHotspotId;
+  readonly cuttingSpotId?: WreckHotspotId | null;
 }
 
 export interface WreckHotspotOverlayActions {
   readonly onSelectHotspot: (spot: WreckHotspotId) => void;
+  readonly onCutHotspot?: (spot: WreckHotspotId) => void;
+  readonly onSkipCut?: () => void;
 }
 
-const SPOT_COORDS: Record<V2WreckSpotId, { readonly left: string; readonly top: string; readonly icon: V2IconName }> = {
-  armory: { left: '22%', top: '48%', icon: 'cannon' },
-  reactor: { left: '50%', top: '45%', icon: 'fuel' },
-  cargo: { left: '78%', top: '50%', icon: 'crate' },
+export const WRECK_SPOT_COORDS: Record<
+  V2WreckSpotId,
+  {
+    readonly normX: number;
+    readonly normY: number;
+    readonly left: string;
+    readonly top: string;
+    readonly icon: V2IconName;
+  }
+> = {
+  armory: { normX: 0.22, normY: 0.48, left: '22%', top: '38%', icon: 'cannon' },
+  reactor: { normX: 0.5, normY: 0.45, left: '50%', top: '34%', icon: 'fuel' },
+  cargo: { normX: 0.78, normY: 0.5, left: '78%', top: '39%', icon: 'crate' },
 };
 
 function describeItemForSalvager(item: V2ItemInstance): string {
@@ -51,28 +64,44 @@ function getSpotItems(spot: V2WreckHotspot): readonly V2ItemInstance[] {
 }
 
 /**
- * Top Phaser canvas overlay for derelict dissection:
- * Renders stage tag, compact stability pill, and interactive target pins over `event_wreck.webp`.
- * Strictly omits `data-testid="wreck-screen"` so the DOM contains exactly ONE wreck-screen root (in leftPanelEl).
+ * Top Phaser canvas overlay for derelict dissection (S08 + A07-code):
+ * - Renders closed / cutting / cutaway compartment clamp pins with bundled item silhouette layer (0 broken URLs).
+ * - Clicking a legal clamp pin directly initiates the 600ms skippable plasma cut FX!
+ * - Strictly omits `data-testid="wreck-screen"` so the DOM contains exactly ONE wreck-screen root (in leftPanelEl).
  */
 export function renderWreckHotspotOverlay(
   overlayEl: HTMLElement,
   props: WreckHotspotOverlayProps,
   actions: WreckHotspotOverlayActions
 ): void {
-  const { run, node, profile, selectedHotspot: sel } = props;
+  const { run, node, profile, readOnly, selectedHotspot: sel, cuttingSpotId = null } = props;
   const wreck = buildActiveWreckStateForNode(run, node, profile).wreck;
   const sector = getV3SectorDef(run.sectorId);
+  const peek = run.crewId === 'salvager';
   const pct =
     wreck.maxStability > 0 ? Math.max(0, Math.min(100, Math.round((wreck.stability / wreck.maxStability) * 100))) : 0;
   const toneCls = pct >= 70 ? 'tone-safe' : pct >= 35 ? 'tone-warn' : 'tone-critical';
 
   const pinsHtml = wreck.hotspots
     .map((spot) => {
-      const pos = SPOT_COORDS[spot.spotId] ?? { left: '50%', top: '50%', icon: 'wreck' as V2IconName };
+      const pos = WRECK_SPOT_COORDS[spot.spotId] ?? {
+        normX: 0.5,
+        normY: 0.45,
+        left: '50%',
+        top: '36%',
+        icon: 'wreck' as V2IconName,
+      };
       const evalRes = evaluateWreckHotspotCut(run, wreck, spot.spotId);
+      const isCuttingThis = cuttingSpotId === spot.spotId;
+      const compartmentState: 'closed' | 'cutting' | 'cutaway' = spot.cut
+        ? 'cutaway'
+        : isCuttingThis
+        ? 'cutting'
+        : 'closed';
       const stateCls = spot.cut
         ? 'is-cut'
+        : isCuttingThis
+        ? 'is-cutting'
         : evalRes.isLethal
         ? 'is-lethal'
         : wreck.cutsMade >= 1
@@ -80,29 +109,60 @@ export function renderWreckHotspotOverlay(
         : '';
       const badgeText = spot.cut
         ? '已切开'
+        : isCuttingThis
+        ? '切割中…'
         : evalRes.isLethal
         ? '致命'
         : wreck.cutsMade === 0
-        ? '安全'
-        : '高危';
+        ? '点击切开'
+        : '贪刀切开';
+
+      const items = getSpotItems(spot);
+      const silhouetteHtml =
+        items.length > 0
+          ? `<span class="v3-wreck-silhouette-layer" data-silhouette-state="${
+              peek || spot.cut ? 'revealed' : 'masked'
+            }"><img class="v3-wreck-silhouette-img ${
+              peek || spot.cut ? 'is-revealed' : 'is-masked'
+            }" src="${getItemImageUrl(items[0].definitionId)}" alt="" draggable="false" /></span>`
+          : `<span class="v3-wreck-silhouette-layer" data-silhouette-state="${
+              spot.cut ? 'revealed' : 'masked'
+            }">${svgIcon('fuel', 18)}</span>`;
+
+      const canDirectCut = !readOnly && !spot.cut && evalRes.canCut && cuttingSpotId === null;
 
       return `
-        <button type="button" class="v2-wreck-hotspot v3-wreck-hotspot-pin ${
+        <button type="button" class="v2-wreck-hotspot v3-wreck-hotspot-pin v3-wreck-compartment-pin ${
           sel === spot.spotId ? 'active' : ''
         } ${stateCls}"
           style="left:${pos.left};top:${pos.top};"
           data-wreck-spot="${spot.spotId}"
           data-testid="wreck-spot-${spot.spotId}"
-          aria-pressed="${sel === spot.spotId}">
+          data-compartment-state="${compartmentState}"
+          data-can-direct-cut="${canDirectCut ? 'true' : 'false'}"
+          data-action="wreck-cut"
+          aria-pressed="${sel === spot.spotId}"
+          ${spot.cut && cuttingSpotId === null ? 'disabled' : ''}>
+          <span class="v3-clamp-bracket left" aria-hidden="true"></span>
+          <span class="v3-clamp-bracket right" aria-hidden="true"></span>
           <span class="v2-hotspot-ring"></span>
+          ${silhouetteHtml}
           <span class="v2-hotspot-tag">${svgIcon(pos.icon, 13)} ${spot.label} · <em>${badgeText}</em></span>
         </button>
       `;
     })
     .join('');
 
+  const cuttingBannerHtml = cuttingSpotId
+    ? `<div class="v3-wreck-cut-skip-bar">
+        <button type="button" class="btn btn-sm btn-secondary v3-wreck-skip-btn" data-testid="btn-skip-wreck-cut">
+          ${svgIcon('cut', 13)} 等离子切割中… 点击或按空格跳过
+        </button>
+      </div>`
+    : '';
+
   overlayEl.innerHTML = `
-    <div class="v3-overlay-screen v3-wreck-stage-overlay">
+    <div class="v3-overlay-screen v3-wreck-stage-overlay ${cuttingSpotId ? 'is-cutting-active' : ''}">
       <div class="v3-wreck-stage-head">
         <div class="scene-stage-tag">${svgIcon('wreck', 13)} ${sector.name} · 第 ${node.layer} 层 漂流残骸 · 多刀拆解</div>
         <div class="v3-wreck-stage-meter ${toneCls}">
@@ -110,14 +170,39 @@ export function renderWreckHotspotOverlay(
         </div>
       </div>
       ${pinsHtml}
+      ${cuttingBannerHtml}
     </div>
   `;
 
   overlayEl.querySelectorAll<HTMLButtonElement>('[data-wreck-spot]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      actions.onSelectHotspot(btn.dataset.wreckSpot as WreckHotspotId);
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const spotId = btn.dataset.wreckSpot as WreckHotspotId;
+      if (cuttingSpotId !== null) {
+        actions.onSkipCut?.();
+        return;
+      }
+      if (btn.dataset.canDirectCut === 'true' && actions.onCutHotspot) {
+        actions.onCutHotspot(spotId);
+        return;
+      }
+      actions.onSelectHotspot(spotId);
     });
   });
+
+  if (cuttingSpotId !== null) {
+    overlayEl
+      .querySelector<HTMLButtonElement>('[data-testid="btn-skip-wreck-cut"]')
+      ?.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        actions.onSkipCut?.();
+      });
+    overlayEl
+      .querySelector<HTMLElement>('.v3-wreck-stage-overlay')
+      ?.addEventListener('click', () => {
+        actions.onSkipCut?.();
+      });
+  }
 }
 
 export interface WreckLeftPanelProps {
@@ -126,11 +211,13 @@ export interface WreckLeftPanelProps {
   readonly profile?: V2ProfileState;
   readonly readOnly: boolean;
   readonly selectedHotspot: WreckHotspotId;
+  readonly cuttingSpotId?: WreckHotspotId | null;
 }
 
 export interface WreckLeftPanelActions {
   readonly onSelectHotspot: (spot: WreckHotspotId) => void;
   readonly onCutSpot: (spotId: V2WreckSpotId) => void;
+  readonly onSkipCut?: () => void;
   readonly onUseGadget?: (instanceId: string) => void;
   readonly onExtract: () => void;
   readonly onAbandon: () => void;
@@ -140,7 +227,7 @@ export interface WreckLeftPanelActions {
  * Primary multi-cut derelict dissection panel (`[data-testid="wreck-screen"]`):
  * - Displays live Structural Stability / Alarm Meter (`[data-testid="wreck-stability"]`)
  * - Simultaneously mounts ALL hotspot cut cards (`[data-testid="wreck-cut-<spotId>"]`, >= 44x44px)
- * - Discloses greedy-cut hull/fuel/ambush risks and disables lethal cuts cleanly
+ * - Discloses greedy-cut hull/fuel/ambush risks, disables lethal cuts & in-flight double-clicks cleanly
  * - Keeps sticky Extract CTA (`[data-testid="btn-wreck-extract"]`) above fold on 1366x768 & 390x844
  */
 export function renderWreckLeftPanel(
@@ -148,10 +235,11 @@ export function renderWreckLeftPanel(
   props: WreckLeftPanelProps,
   actions: WreckLeftPanelActions
 ): void {
-  const { run, node, profile, readOnly, selectedHotspot } = props;
+  const { run, node, profile, readOnly, selectedHotspot, cuttingSpotId = null } = props;
   const wreck = buildActiveWreckStateForNode(run, node, profile).wreck;
   const peek = run.crewId === 'salvager';
   const salvagerT2 = peek && (run.crewMasteryTier ?? 0) >= 2;
+  const isBusyCutting = cuttingSpotId !== null;
 
   const pct =
     wreck.maxStability > 0
@@ -168,9 +256,10 @@ export function renderWreckLeftPanel(
   const cardsHtml = wreck.hotspots
     .map((spot) => {
       const evalRes = evaluateWreckHotspotCut(run, wreck, spot.spotId);
-      const pos = SPOT_COORDS[spot.spotId] ?? { icon: 'wreck' as V2IconName };
+      const pos = WRECK_SPOT_COORDS[spot.spotId] ?? { icon: 'wreck' as V2IconName };
       const items = getSpotItems(spot);
       const isSelected = selectedHotspot === spot.spotId;
+      const isCuttingThis = cuttingSpotId === spot.spotId;
 
       // Build loot preview (Salvager full reveal vs shrouded range)
       let previewLine = '';
@@ -203,6 +292,8 @@ export function renderWreckLeftPanel(
       let riskHtml = '';
       if (spot.cut) {
         riskHtml = `<span class="v3-risk-pill risk-done">${svgIcon('check', 12)} 舱室已切开</span>`;
+      } else if (isCuttingThis) {
+        riskHtml = `<span class="v3-risk-pill risk-warn">${svgIcon('cut', 12)} 等离子割枪切割中…</span>`;
       } else if (evalRes.isFirstSafeCut) {
         riskHtml = `<span class="v3-risk-pill risk-safe">${svgIcon('check', 12)} 首刀无伤（0 耐久 / 0 燃料消耗）</span>`;
       } else if (wreck.stabilizerActive) {
@@ -236,6 +327,8 @@ export function renderWreckLeftPanel(
 
       const btnLabel = spot.cut
         ? '已切开'
+        : isCuttingThis
+        ? `${svgIcon('cut', 14)} 等离子切割中…`
         : evalRes.isLethal
         ? `${svgIcon('warning', 14)} 船体不足 · 无法切割`
         : !evalRes.canCut
@@ -247,7 +340,7 @@ export function renderWreckLeftPanel(
       return `
         <div class="v3-wreck-cut-card ${isSelected ? 'is-selected' : ''} ${
         spot.cut ? 'is-cut' : ''
-      } ${evalRes.isLethal ? 'is-lethal' : ''}" data-wreck-card="${spot.spotId}">
+      } ${isCuttingThis ? 'is-cutting' : ''} ${evalRes.isLethal ? 'is-lethal' : ''}" data-wreck-card="${spot.spotId}">
           <div class="v3-wcc-head">
             <div class="v3-wcc-title">
               ${svgIcon(pos.icon, 15)}
@@ -259,9 +352,25 @@ export function renderWreckLeftPanel(
               }
             </div>
             <span class="v3-wcc-status ${
-              spot.cut ? 'done' : evalRes.isLethal ? 'lethal' : evalRes.isFirstSafeCut ? 'safe' : 'warn'
+              spot.cut
+                ? 'done'
+                : isCuttingThis
+                ? 'warn'
+                : evalRes.isLethal
+                ? 'lethal'
+                : evalRes.isFirstSafeCut
+                ? 'safe'
+                : 'warn'
             }">${
-        spot.cut ? '已切开' : evalRes.isLethal ? '致命风险' : evalRes.isFirstSafeCut ? '首刀安全' : '贪刀风险'
+        spot.cut
+          ? '已切开'
+          : isCuttingThis
+          ? '切割中'
+          : evalRes.isLethal
+          ? '致命风险'
+          : evalRes.isFirstSafeCut
+          ? '首刀安全'
+          : '贪刀风险'
       }</span>
           </div>
           <div class="v3-wcc-preview">${previewLine}</div>
@@ -277,7 +386,7 @@ export function renderWreckLeftPanel(
                 : 'btn-secondary'
             } v3-wreck-cut-btn" data-cut-spot="${spot.spotId}" data-testid="wreck-cut-${
         spot.spotId
-      }" ${readOnly || !evalRes.canCut ? 'disabled' : ''}>${btnLabel}</button>
+      }" data-action="wreck-cut" ${readOnly || isBusyCutting || !evalRes.canCut ? 'disabled' : ''}>${btnLabel}</button>
           </div>
         </div>
       `;
@@ -303,7 +412,7 @@ export function renderWreckLeftPanel(
             .map(({ item, def }) => {
               const chk = canUseV3GadgetInRun(run, item.instanceId);
               return `<button type="button" class="btn btn-sm btn-primary v3-gadget-use-btn" data-use-gadget="${item.instanceId}" data-gadget-kind="${def.kind}" data-gadget-id="${def.kind}" data-testid="btn-use-gadget-${def.kind}" ${
-                readOnly || !chk.usable ? 'disabled' : ''
+                readOnly || isBusyCutting || !chk.usable ? 'disabled' : ''
               }>使用${def.buttonLabel}（${def.shortEffectLabel}）</button>`;
             })
             .join('')}
@@ -316,7 +425,7 @@ export function renderWreckLeftPanel(
       <div class="panel-header">
         <h2>${svgIcon('wreck', 16)} 漂流残骸 · 多刀拆解</h2>
         <button type="button" class="btn btn-sm btn-ghost" id="v2-btn-abandon-event" ${
-          readOnly ? 'disabled' : ''
+          readOnly || isBusyCutting ? 'disabled' : ''
         }>放弃并返航</button>
       </div>
 
@@ -369,8 +478,13 @@ export function renderWreckLeftPanel(
       </div>
 
       <div class="v3-sticky-cta-footer">
-        <button type="button" class="btn btn-primary btn-launch-hero v3-wreck-extract-btn" id="v3-btn-wreck-extract" data-testid="btn-wreck-extract" ${
-          readOnly ? 'disabled' : ''
+        ${
+          isBusyCutting
+            ? `<button type="button" class="btn btn-secondary v3-wreck-skip-panel-btn" data-testid="btn-skip-wreck-cut-panel">${svgIcon('cut', 14)} 跳过切割动画</button>`
+            : ''
+        }
+        <button type="button" class="btn btn-primary btn-launch-hero v3-wreck-extract-btn" id="v3-btn-wreck-extract" data-testid="btn-wreck-extract" data-action="wreck-extract" ${
+          readOnly || isBusyCutting ? 'disabled' : ''
         }>${svgIcon('rocket', 15)} ${
     wreck.cutsMade > 0 ? '安全撤离并整理战利品 →' : '暂不切割 · 直接撤离'
   }</button>
@@ -381,6 +495,10 @@ export function renderWreckLeftPanel(
   leftPanelEl.querySelectorAll<HTMLElement>('[data-wreck-card]').forEach((card) => {
     card.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).closest('button')) return;
+      if (isBusyCutting) {
+        actions.onSkipCut?.();
+        return;
+      }
       actions.onSelectHotspot(card.dataset.wreckCard as WreckHotspotId);
     });
   });
@@ -397,6 +515,9 @@ export function renderWreckLeftPanel(
     });
   });
 
+  leftPanelEl
+    .querySelector<HTMLButtonElement>('[data-testid="btn-skip-wreck-cut-panel"]')
+    ?.addEventListener('click', () => actions.onSkipCut?.());
   leftPanelEl.querySelector('#v3-btn-wreck-extract')?.addEventListener('click', actions.onExtract);
   leftPanelEl.querySelector('#v2-btn-abandon-event')?.addEventListener('click', actions.onAbandon);
 }

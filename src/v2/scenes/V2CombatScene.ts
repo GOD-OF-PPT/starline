@@ -25,9 +25,11 @@ import {
   type DamagePopupTier,
   type HpTrailState,
   type MicroExplosionSpec,
+  type WreckCompartmentVisualState,
   VFX_HIT_MILD_TINT,
   VFX_IMPACT_GLOW_MAX_RADIUS,
   VFX_MAX_ACTIVE_PARTICLES,
+  VFX_WRECK_CUT_DURATION_MS,
   VfxParticlePool,
   allocateNonOverlappingPopupPos,
   applyHpChangeToTrail,
@@ -40,6 +42,7 @@ import {
   computeIdleMicroTiltDeg,
   computeSplitHullHalvesSpec,
   computeThreeLayerBeamStrokes,
+  computeWreckCutTimeline,
   getDamagePopupStyle,
   lerpNumber,
   resolveHitFlashDecision,
@@ -243,6 +246,14 @@ export class V2CombatScene extends Phaser.Scene {
   private particlePool = new VfxParticlePool(VFX_MAX_ACTIVE_PARTICLES);
   private smokes: SmokePuff[] = [];
   private popups: PopupFx[] = [];
+  private wreckCompartments: readonly WreckCompartmentVisualState[] = [];
+  private wreckCutAnim: {
+    normX: number;
+    normY: number;
+    elapsedMs: number;
+    durationMs: number;
+    clampPopped: boolean;
+  } | null = null;
 
   private viewW = 390;
   private viewH = 240;
@@ -445,6 +456,8 @@ export class V2CombatScene extends Phaser.Scene {
       this.clearDeathChoreos();
       this.smokes = [];
       this.clearPopups();
+      this.wreckCompartments = [];
+      this.wreckCutAnim = null;
       this.destroyModuleSprites();
       this.destroyEnemySprites();
       this.playerSprite = null;
@@ -548,6 +561,9 @@ export class V2CombatScene extends Phaser.Scene {
     readonly playerTrailHp: number;
     readonly playerShield: number;
     readonly plumesRendered: number;
+    readonly wreckCutActive: boolean;
+    readonly wreckCompartmentsCut: number;
+    readonly wreckCompartmentCount: number;
     readonly enemiesState: readonly {
       readonly enemyId: string;
       readonly hp: number;
@@ -583,6 +599,9 @@ export class V2CombatScene extends Phaser.Scene {
       playerTrailHp: this.playerHpState.trailHp,
       playerShield: this.playerShield,
       plumesRendered: this.plumesRendered,
+      wreckCutActive: this.wreckCutAnim !== null,
+      wreckCompartmentsCut: this.wreckCompartments.filter((c) => c.cut).length,
+      wreckCompartmentCount: this.wreckCompartments.length,
       enemiesState: this.enemies.map((e) => ({
         enemyId: e.enemyId,
         hp: e.hp,
@@ -597,12 +616,14 @@ export class V2CombatScene extends Phaser.Scene {
   }
 
   /**
-   * Plays short mechanical cutting spark burst on wreck backdrop when player cuts a room open.
+   * Plays plasma cutting seam + spark burst on wreck backdrop when player cuts a room open.
+   * Preserves exact 2-arg signature & Frame-0 ring/SFX invariants (F02/S08/A07-code).
    */
   triggerWreckCutFx(normX: number, normY: number): void {
     if (!this.scene?.isActive() || !this.texturesReady) return;
     const x = this.viewW * normX;
     const y = this.viewH * normY;
+    const reduced = this.playback?.settings.reducedMotion ?? false;
     this.rings.push({ x, y, maxR: 38, color: 0xf6b852, life: 0.36, maxLife: 0.36 });
     this.rings.push({ x, y, maxR: 22, color: 0x62d6df, life: 0.28, maxLife: 0.28 });
     this.spawnImpactGlow(x, y, 0xf6b852, 'heavy', 16);
@@ -614,7 +635,43 @@ export class V2CombatScene extends Phaser.Scene {
       color: 0xf6b852,
       lowQuality: this.playback?.settings.lowQuality ?? false,
     });
+    this.wreckCutAnim = reduced
+      ? null
+      : {
+          normX,
+          normY,
+          elapsedMs: 0,
+          durationMs: VFX_WRECK_CUT_DURATION_MS,
+          clampPopped: false,
+        };
     soundEngine.play('wreckCut');
+  }
+
+  setWreckCompartmentStates(states: readonly WreckCompartmentVisualState[]): void {
+    this.wreckCompartments = states;
+  }
+
+  popWreckCutClamp(normX: number, normY: number): void {
+    if (!this.scene?.isActive() || !this.texturesReady) return;
+    const x = this.viewW * normX;
+    const y = this.viewH * normY;
+    if (this.wreckCutAnim) {
+      this.wreckCutAnim.clampPopped = true;
+    }
+    this.rings.push({ x, y, maxR: 44, color: 0x62d6df, life: 0.3, maxLife: 0.3 });
+    this.spawnImpactGlow(x, y, 0x62d6df, 'shield', 15);
+    this.particlePool.spawnBurst({
+      kind: 'spark',
+      x,
+      y,
+      count: 12,
+      color: 0x62d6df,
+      lowQuality: this.playback?.settings.lowQuality ?? false,
+    });
+  }
+
+  finishWreckCutFx(): void {
+    this.wreckCutAnim = null;
   }
 
   private cancelRoundTimers(): void {
@@ -1219,6 +1276,10 @@ export class V2CombatScene extends Phaser.Scene {
       return;
     }
     this.appliedPlaybackKey = !pb.simulation ? (pb.playbackKey ?? null) : null;
+    this.wreckCutAnim = null;
+    if (pb.eventBackdrop !== 'wreck') {
+      this.wreckCompartments = [];
+    }
     const initPlayerHp = pb.simulation?.startingPlayerHp ?? 0;
     const initPlayerShield = pb.simulation?.startingPlayerShield ?? 0;
     this.playerHpState = {
@@ -3030,6 +3091,91 @@ export class V2CombatScene extends Phaser.Scene {
       strokeBeamPath(this.addFxGraphics, b);
       return true;
     });
+
+    // A07-code + S08: Wreck compartment closed / cutting / cutaway visual layers
+    if (pb?.eventBackdrop === 'wreck') {
+      if (this.wreckCutAnim) {
+        this.wreckCutAnim.elapsedMs += worldDt * 1000;
+        if (this.wreckCutAnim.elapsedMs >= this.wreckCutAnim.durationMs) {
+          this.wreckCutAnim = null;
+        }
+      }
+      const scale = Math.max(0.65, Math.min(1.25, Math.min(this.viewW / 960, this.viewH / 540)));
+      const boxW = Math.round(78 * scale);
+      const boxH = Math.round(54 * scale);
+
+      for (const comp of this.wreckCompartments) {
+        const cx = this.viewW * comp.normX;
+        const cy = this.viewH * comp.normY;
+        const left = cx - boxW * 0.5;
+        const top = cy - boxH * 0.5;
+        // Optional external plate hook (strictly exists-checked, 0 404 requests!)
+        const optionalPlateKey = comp.cut
+          ? `event.wreck.room.${comp.spotId}.open`
+          : `event.wreck.room.${comp.spotId}.closed`;
+        const hasOptionalPlate = Boolean(this.textures?.exists(optionalPlateKey));
+
+        if (!hasOptionalPlate) {
+          if (comp.cut) {
+            // Exposed cutaway interior cavity with ribs + sheared clamp brackets
+            this.fxGraphics.fillStyle(0x08101c, 0.86);
+            this.fxGraphics.fillRoundedRect(left, top, boxW, boxH, 6);
+            this.fxGraphics.lineStyle(2, 0x62d6df, 0.72);
+            this.fxGraphics.strokeRoundedRect(left, top, boxW, boxH, 6);
+            this.fxGraphics.lineStyle(1, 0x2b4566, 0.75);
+            this.fxGraphics.lineBetween(left + boxW * 0.25, top + 4, left + boxW * 0.25, top + boxH - 4);
+            this.fxGraphics.lineBetween(left + boxW * 0.75, top + 4, left + boxW * 0.75, top + boxH - 4);
+            // Popped clamps shifted outward
+            this.fxGraphics.fillStyle(0x62d6df, 0.6);
+            this.fxGraphics.fillRect(left - 8, cy - 6, 5, 12);
+            this.fxGraphics.fillRect(left + boxW + 3, cy - 6, 5, 12);
+          } else {
+            // Armored closed bulkhead hatch + glowing hydraulic clamps
+            const clampColor = comp.isLethal
+              ? 0xf27564
+              : comp.isRisky
+              ? 0xf6b852
+              : 0x62d6df;
+            const pulseAlpha = reduced ? 0.78 : 0.62 + Math.sin(this.elapsed * 4.2 + comp.normX * 7) * 0.24;
+            this.fxGraphics.fillStyle(0x18273a, 0.72);
+            this.fxGraphics.fillRoundedRect(left, top, boxW, boxH, 6);
+            this.fxGraphics.lineStyle(1.8, clampColor, pulseAlpha);
+            this.fxGraphics.strokeRoundedRect(left, top, boxW, boxH, 6);
+            // Clamps gripping left/right seams
+            this.fxGraphics.fillStyle(clampColor, pulseAlpha);
+            this.fxGraphics.fillRect(left - 3, cy - 8, 6, 16);
+            this.fxGraphics.fillRect(left + boxW - 3, cy - 8, 6, 16);
+          }
+        }
+
+        if (comp.cutting && this.wreckCutAnim) {
+          const frame = computeWreckCutTimeline(
+            this.wreckCutAnim.elapsedMs,
+            this.wreckCutAnim.durationMs,
+            reduced
+          );
+          const torchX = cx + frame.torchLocalX * (boxW * 0.5);
+          const torchY = cy + frame.torchLocalY * (boxH * 0.5);
+          // Glowing ADD-blend plasma cut perimeter & torch head
+          this.addFxGraphics.lineStyle(3.2, 0xf6b852, 0.92);
+          this.addFxGraphics.strokeRoundedRect(left, top, boxW, boxH, 6);
+          this.addFxGraphics.fillStyle(0xfff1cc, 0.95);
+          this.addFxGraphics.fillCircle(torchX, torchY, 6 * scale);
+          this.addFxGraphics.fillStyle(0xf6b852, 0.48);
+          this.addFxGraphics.fillCircle(torchX, torchY, 13 * scale);
+          if (!lowQuality && !reduced) {
+            this.particlePool.spawnBurst({
+              kind: 'spark',
+              x: torchX,
+              y: torchY,
+              count: 2,
+              color: 0xf6b852,
+              lowQuality,
+            });
+          }
+        }
+      }
+    }
 
     // Impact rings
     this.rings = this.rings.filter((r) => {

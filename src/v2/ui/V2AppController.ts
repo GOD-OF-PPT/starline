@@ -1,3 +1,4 @@
+import { getItemImageUrl } from '../../assets/itemArt';
 import { soundEngine } from '../../audio/soundEngine';
 import { createRandomSeed } from '../../domain/rng';
 import { MultiTabGuard } from '../../domain/tabLock';
@@ -53,8 +54,10 @@ import {
   pickRecommendedV2ContractId,
 } from '../domain/contracts';
 import {
+  buildActiveWreckStateForNode,
   craftV2EquipmentWithParts,
   dismantleV2WarehouseItem,
+  evaluateWreckHotspotCut,
   getEffectiveShipLoadoutBudget,
   getEffectiveShipMaxHp,
   tuneV2ShipHull,
@@ -188,6 +191,13 @@ import { renderSettlementView } from './screens/SettlementView';
 import { renderShopView } from './screens/ShopView';
 import { renderTitleView } from './screens/TitleView';
 import {
+  VFX_WRECK_CLAMP_POP_RATIO,
+  VFX_WRECK_CUT_DURATION_MS,
+  VFX_WRECK_FLIP_DURATION_MS,
+  type WreckCompartmentVisualState,
+} from '../scenes/v2CombatVfx';
+import {
+  WRECK_SPOT_COORDS,
   renderWreckHotspotOverlay,
   renderWreckLeftPanel,
   type WreckHotspotId,
@@ -283,6 +293,21 @@ export class V2AppController {
   private livePhaseBannerText: string | null = null;
   private awaitingEliteDecision = false;
   private showCombatLogDetails = false;
+  private inFlightWreckCut: {
+    readonly runId: string;
+    readonly nodeId: string;
+    readonly spotId: V2WreckSpotId;
+    readonly normX: number;
+    readonly normY: number;
+    readonly willAmbush: boolean;
+    readonly flipItemDefIds: readonly string[];
+    phase: 'cutting' | 'flipping';
+    clampPopped: boolean;
+    clampTimerId: number | null;
+    cutTimerId: number | null;
+    flipTimerId: number | null;
+    flipEls: HTMLElement[];
+  } | null = null;
 
   // Persistent DOM anchors so Phaser canvas never flickers
   private appShellEl!: HTMLElement;
@@ -471,6 +496,7 @@ export class V2AppController {
       if (this.preCombatAutoEngage.pause('modal')) {
         this.refreshPreCombatAutoEngageUi();
       }
+      this.cancelInFlightWreckCut();
     });
 
     this.syncAll();
@@ -494,6 +520,7 @@ export class V2AppController {
     }
     this.unsubscribeModalOpen?.();
     this.unsubscribeModalOpen = null;
+    this.cancelInFlightWreckCut();
     this.preCombatAutoEngage.destroy();
     if (this.actionToastTimer !== null) {
       window.clearTimeout(this.actionToastTimer);
@@ -1022,6 +1049,7 @@ export class V2AppController {
   }
 
   private startShowcaseRun(trialId: V2TrialBuildId): void {
+    this.cancelInFlightWreckCut();
     this.staticStageTracker.reset();
     this.activeCombatPlaybackKey = null;
     this.titleEntered = true;
@@ -1668,6 +1696,7 @@ export class V2AppController {
           settings: this.save.settings,
         })
       );
+      this.syncWreckCompartmentsToPhaser(run, currentNode, this.inFlightWreckCut?.spotId ?? null);
       this.renderWreckOverlay(run, currentNode);
       return;
     }
@@ -1901,6 +1930,295 @@ export class V2AppController {
     );
   }
 
+  private buildWreckCompartmentStates(
+    run: V2RunState,
+    node: V2MapNode,
+    cuttingSpotId: V2WreckSpotId | null
+  ): readonly WreckCompartmentVisualState[] {
+    const wreck = buildActiveWreckStateForNode(run, node, this.save.profile).wreck;
+    return wreck.hotspots.map((spot) => {
+      const coords = WRECK_SPOT_COORDS[spot.spotId] ?? { normX: 0.5, normY: 0.45 };
+      const evalRes = evaluateWreckHotspotCut(run, wreck, spot.spotId);
+      return {
+        spotId: spot.spotId,
+        normX: coords.normX,
+        normY: coords.normY,
+        cut: spot.cut,
+        cutting: cuttingSpotId === spot.spotId,
+        canCut: evalRes.canCut,
+        isLethal: evalRes.isLethal,
+        isRisky: !evalRes.isFirstSafeCut && !wreck.stabilizerActive,
+        silhouetteKind:
+          spot.spotId === 'armory' ? 'equipment' : spot.spotId === 'cargo' ? 'cargo' : 'reactor',
+      };
+    });
+  }
+
+  private syncWreckCompartmentsToPhaser(
+    run: V2RunState,
+    node: V2MapNode,
+    cuttingSpotId: V2WreckSpotId | null
+  ): void {
+    this.phaserHost?.updateV2WreckCompartments(
+      this.buildWreckCompartmentStates(run, node, cuttingSpotId)
+    );
+  }
+
+  private readonly handleWreckCutSkipKey = (ev: KeyboardEvent): void => {
+    if (!this.inFlightWreckCut) return;
+    if (ev.key === ' ' || ev.key === 'Enter' || ev.key === 'Escape') {
+      ev.preventDefault();
+      this.skipInFlightWreckCut();
+    }
+  };
+
+  private cancelInFlightWreckCut(): void {
+    const active = this.inFlightWreckCut;
+    if (!active) return;
+    if (active.clampTimerId !== null) window.clearTimeout(active.clampTimerId);
+    if (active.cutTimerId !== null) window.clearTimeout(active.cutTimerId);
+    if (active.flipTimerId !== null) window.clearTimeout(active.flipTimerId);
+    for (const el of active.flipEls) {
+      el.remove();
+    }
+    window.removeEventListener('keydown', this.handleWreckCutSkipKey);
+    this.inFlightWreckCut = null;
+    this.phaserHost?.finishV2WreckCutFx();
+  }
+
+  private resolveWreckFlipTargetRect(): { readonly left: number; readonly top: number; readonly width: number; readonly height: number } {
+    const candidates: (HTMLElement | null)[] = [
+      this.rightPanelEl.querySelector<HTMLElement>('[data-cargo-slot="staging"]'),
+      this.rightPanelEl.querySelector<HTMLElement>('[data-cargo-slot="board"]'),
+      this.leftPanelEl.querySelector<HTMLElement>('[data-testid="wreck-stability"]'),
+      this.rightPanelEl.querySelector<HTMLElement>('#v2-cargo-mount'),
+    ];
+    for (const el of candidates) {
+      if (!el) continue;
+      if (el.style?.display === 'none') continue;
+      const r = el.getBoundingClientRect();
+      if (r && r.width > 0 && r.height > 0) {
+        return { left: r.left, top: r.top, width: r.width, height: r.height };
+      }
+    }
+    const vw = typeof window !== 'undefined' && window.innerWidth > 0 ? window.innerWidth : 1024;
+    const vh = typeof window !== 'undefined' && window.innerHeight > 0 ? window.innerHeight : 768;
+    return { left: vw * 0.72, top: vh * 0.72, width: 48, height: 48 };
+  }
+
+  private launchWreckFlipGhosts(
+    spotId: V2WreckSpotId,
+    normX: number,
+    normY: number,
+    itemDefIds: readonly string[]
+  ): HTMLElement[] {
+    if (typeof document === 'undefined' || itemDefIds.length === 0) return [];
+    const pinEl = this.sceneOverlayEl.querySelector<HTMLElement>(
+      `[data-testid="wreck-spot-${spotId}"]`
+    );
+    const pinRect = pinEl?.getBoundingClientRect();
+    const stageRect = this.sceneWrapEl.getBoundingClientRect();
+    const startX =
+      pinRect && pinRect.width > 0
+        ? pinRect.left + pinRect.width * 0.5
+        : stageRect && stageRect.width > 0
+        ? stageRect.left + stageRect.width * normX
+        : 320;
+    const startY =
+      pinRect && pinRect.height > 0
+        ? pinRect.top + pinRect.height * 0.5
+        : stageRect && stageRect.height > 0
+        ? stageRect.top + stageRect.height * normY
+        : 220;
+
+    const targetRect = this.resolveWreckFlipTargetRect();
+    const endX = targetRect.left + targetRect.width * 0.5;
+    const endY = targetRect.top + targetRect.height * 0.5;
+    const dx = endX - startX;
+    const dy = endY - startY;
+
+    const created: HTMLElement[] = [];
+    itemDefIds.slice(0, 3).forEach((defId, idx) => {
+      const ghost = document.createElement('div');
+      ghost.className = 'v3-wreck-flip-ghost';
+      ghost.dataset.testid = 'wreck-flip-ghost';
+      ghost.dataset.itemDefId = defId;
+      ghost.style.left = `${startX - 24 + idx * 8}px`;
+      ghost.style.top = `${startY - 24 - idx * 6}px`;
+      ghost.style.transform = 'translate(0px, 0px) scale(1)';
+
+      const img = document.createElement('img');
+      img.src = getItemImageUrl(defId);
+      img.alt = '';
+      img.draggable = false;
+      ghost.appendChild(img);
+      document.body.appendChild(ghost);
+      created.push(ghost);
+
+      // Apply FLIP destination transform (triggers CSS transition in real browser, inspectable immediately in tests)
+      ghost.classList.add('is-flying');
+      ghost.style.transform = `translate(${Math.round(dx)}px, ${Math.round(dy)}px) scale(0.55)`;
+      ghost.style.opacity = '0.25';
+    });
+    return created;
+  }
+
+  private startWreckCutSequence(spotId: V2WreckSpotId): void {
+    if (!this.canMutate() || this.inFlightWreckCut) return;
+    const run = this.getCurrentRun();
+    const node = run?.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
+    if (!run || run.phase !== 'ENCOUNTER' || !node || node.type !== 'wreck' || node.resolved || node.combat) {
+      return;
+    }
+
+    const wreck = buildActiveWreckStateForNode(run, node, this.save.profile).wreck;
+    const evalRes = evaluateWreckHotspotCut(run, wreck, spotId);
+    if (!evalRes.canCut) {
+      this.showToast(evalRes.disabledReason ?? '无法切割该舱室');
+      return;
+    }
+
+    const spot = wreck.hotspots.find((h) => h.spotId === spotId);
+    const coords = WRECK_SPOT_COORDS[spotId] ?? { normX: 0.5, normY: 0.45 };
+    const flipItemDefIds = spot
+      ? spot.rewardItems && spot.rewardItems.length > 0
+        ? spot.rewardItems.map((i) => i.definitionId)
+        : spot.rewardItem
+        ? [spot.rewardItem.definitionId]
+        : []
+      : [];
+    const willAmbush = Boolean(evalRes.effectiveAmbushRisk);
+
+    this.selectedWreckHotspot = spotId;
+    if (this.phaserHost) {
+      this.phaserHost.triggerV2WreckCutFx(coords.normX, coords.normY);
+    } else {
+      soundEngine.play('wreckCut');
+    }
+
+    // Instant commit path in reducedMotion (0 timers, 0 FLIP ghosts, zero info loss)
+    if (this.save.settings.reducedMotion) {
+      soundEngine.play('clampPop');
+      this.phaserHost?.popV2WreckCutClamp(coords.normX, coords.normY);
+      this.commitWreckCut(run.runId, node.nodeId, spotId);
+      return;
+    }
+
+    const state = {
+      runId: run.runId,
+      nodeId: node.nodeId,
+      spotId,
+      normX: coords.normX,
+      normY: coords.normY,
+      willAmbush,
+      flipItemDefIds,
+      phase: 'cutting' as 'cutting' | 'flipping',
+      clampPopped: false,
+      clampTimerId: null as number | null,
+      cutTimerId: null as number | null,
+      flipTimerId: null as number | null,
+      flipEls: [] as HTMLElement[],
+    };
+    this.inFlightWreckCut = state;
+    this.syncWreckCompartmentsToPhaser(run, node, spotId);
+    this.renderWreckOverlay(run, node);
+    this.renderEncounterPhase(run);
+    window.addEventListener('keydown', this.handleWreckCutSkipKey);
+
+    const clampDelayMs = Math.round(VFX_WRECK_CUT_DURATION_MS * VFX_WRECK_CLAMP_POP_RATIO);
+    state.clampTimerId = window.setTimeout(() => {
+      if (this.inFlightWreckCut !== state) return;
+      state.clampTimerId = null;
+      if (!state.clampPopped) {
+        state.clampPopped = true;
+        soundEngine.play('clampPop');
+        this.phaserHost?.popV2WreckCutClamp(state.normX, state.normY);
+      }
+    }, clampDelayMs);
+
+    state.cutTimerId = window.setTimeout(() => {
+      if (this.inFlightWreckCut !== state) return;
+      state.cutTimerId = null;
+      if (!state.clampPopped) {
+        state.clampPopped = true;
+        soundEngine.play('clampPop');
+        this.phaserHost?.popV2WreckCutClamp(state.normX, state.normY);
+      }
+      if (state.willAmbush || state.flipItemDefIds.length === 0) {
+        this.commitWreckCut(state.runId, state.nodeId, state.spotId);
+        return;
+      }
+      state.phase = 'flipping';
+      state.flipEls = this.launchWreckFlipGhosts(
+        state.spotId,
+        state.normX,
+        state.normY,
+        state.flipItemDefIds
+      );
+      state.flipTimerId = window.setTimeout(() => {
+        if (this.inFlightWreckCut !== state) return;
+        state.flipTimerId = null;
+        this.commitWreckCut(state.runId, state.nodeId, state.spotId);
+      }, VFX_WRECK_FLIP_DURATION_MS);
+    }, VFX_WRECK_CUT_DURATION_MS);
+  }
+
+  private skipInFlightWreckCut(): void {
+    const active = this.inFlightWreckCut;
+    if (!active) return;
+    const { runId, nodeId, spotId, normX, normY, clampPopped } = active;
+    this.cancelInFlightWreckCut();
+    if (!clampPopped) {
+      soundEngine.play('clampPop');
+      this.phaserHost?.popV2WreckCutClamp(normX, normY);
+    }
+    this.commitWreckCut(runId, nodeId, spotId);
+  }
+
+  private commitWreckCut(
+    expectedRunId: string,
+    expectedNodeId: string,
+    spotId: V2WreckSpotId
+  ): void {
+    this.cancelInFlightWreckCut();
+    if (!this.canMutate()) {
+      this.syncAll();
+      return;
+    }
+    const latestRun = this.getCurrentRun();
+    if (
+      !latestRun ||
+      latestRun.runId !== expectedRunId ||
+      latestRun.phase !== 'ENCOUNTER' ||
+      latestRun.currentNodeId !== expectedNodeId
+    ) {
+      this.syncAll();
+      return;
+    }
+    const res = cutV2WreckHotspot(
+      latestRun,
+      spotId,
+      this.save.profile.unlockedFamilies,
+      undefined,
+      this.save.profile
+    );
+    if (!res.ok) {
+      this.showToast(res.error ?? '无法切割该舱室');
+      this.syncAll();
+      return;
+    }
+    this.selectedWreckHotspot = spotId;
+    this.setCurrentRun(res.run);
+    if (res.ambushTriggered) {
+      soundEngine.play('bossAlarm');
+      this.showToast('残骸警报触发！敌舰伏击来袭，战利品已暂封待战后返还！');
+    } else if (res.tookHazard) {
+      soundEngine.play('hullHit');
+      if (res.summaryText) this.showToast(res.summaryText);
+    }
+    this.syncAll();
+  }
+
   private renderWreckOverlay(run: V2RunState, node: V2MapNode): void {
     renderWreckHotspotOverlay(
       this.sceneOverlayEl,
@@ -1910,13 +2228,20 @@ export class V2AppController {
         profile: this.save.profile,
         readOnly: this.isReadOnlyTab && !run.isShowcase,
         selectedHotspot: this.selectedWreckHotspot,
+        cuttingSpotId: this.inFlightWreckCut?.spotId ?? null,
       },
       {
         onSelectHotspot: (spot) => {
           this.selectedWreckHotspot = spot;
-          soundEngine.play('click');
+          soundEngine.play('hoverValid');
           this.renderWreckOverlay(run, node);
           this.renderEncounterPhase(run);
+        },
+        onCutHotspot: (spot) => {
+          this.startWreckCutSequence(spot);
+        },
+        onSkipCut: () => {
+          this.skipInFlightWreckCut();
         },
       }
     );
@@ -1951,6 +2276,14 @@ export class V2AppController {
     const run = this.getCurrentRun();
     if (!run || this.computeCurrentScreen() !== 'run') {
       this.preCombatAutoEngage.reset();
+      this.cancelInFlightWreckCut();
+    } else if (
+      this.inFlightWreckCut &&
+      (run.phase !== 'ENCOUNTER' ||
+        run.runId !== this.inFlightWreckCut.runId ||
+        run.currentNodeId !== this.inFlightWreckCut.nodeId)
+    ) {
+      this.cancelInFlightWreckCut();
     }
     if (!run) {
       if (this.prepareDraft) {
@@ -2788,56 +3121,38 @@ export class V2AppController {
           profile: this.save.profile,
           readOnly,
           selectedHotspot: this.selectedWreckHotspot,
+          cuttingSpotId: this.inFlightWreckCut?.spotId ?? null,
         },
         {
           onSelectHotspot: (spot) => {
             this.selectedWreckHotspot = spot;
-            soundEngine.play('click');
+            soundEngine.play('hoverValid');
             this.renderWreckOverlay(run, node);
             this.renderEncounterPhase(run);
           },
           onCutSpot: (spotId: V2WreckSpotId) => {
-            if (!this.canMutate()) return;
-            const res = cutV2WreckHotspot(
-              run,
-              spotId,
-              this.save.profile.unlockedFamilies,
-              undefined,
-              this.save.profile
-            );
-            if (!res.ok) return this.showToast(res.error ?? '无法切割该舱室');
-            this.selectedWreckHotspot = spotId;
-            this.setCurrentRun(res.run);
-            if (res.ambushTriggered) {
-              soundEngine.play('bossAlarm');
-              this.showToast('残骸警报触发！敌舰伏击来袭，战利品已暂封待战后返还！');
-            } else {
-              const spotCoords =
-                spotId === 'armory' ? [0.22, 0.48] : spotId === 'cargo' ? [0.78, 0.5] : [0.5, 0.45];
-              this.phaserHost?.triggerV2WreckCutFx(spotCoords[0], spotCoords[1]);
-              if (res.tookHazard) {
-                soundEngine.play('hullHit');
-                if (res.summaryText) this.showToast(res.summaryText);
-              } else {
-                soundEngine.play('place');
-              }
-            }
-            this.syncAll();
+            this.startWreckCutSequence(spotId);
           },
-          onUseGadget: (instanceId) => this.handleUseGadget(run, instanceId),
+          onSkipCut: () => {
+            this.skipInFlightWreckCut();
+          },
+          onUseGadget: (instanceId) => {
+            if (this.inFlightWreckCut) return;
+            this.handleUseGadget(run, instanceId);
+          },
           onExtract: () => {
-            if (!this.canMutate()) return;
+            if (!this.canMutate() || this.inFlightWreckCut) return;
             const res = extractV2Wreck(run);
             if (!res.ok) return this.showToast(res.error ?? '无法撤离残骸');
             if (res.run.phase === 'SETTLEMENT') {
               this.settlementDispositions = {};
             }
             this.setCurrentRun(res.run);
-            soundEngine.play('click');
+            soundEngine.play(res.run.phase === 'SETTLEMENT' ? 'returnDock' : 'pickup');
             this.syncAll();
           },
           onAbandon: () => {
-            if (!this.canMutate()) return;
+            if (!this.canMutate() || this.inFlightWreckCut) return;
             const res = abandonV2EventAndReturn(run);
             if (!res.ok) return this.showToast(res.error ?? '无法放弃返航');
             this.settlementDispositions = {};
