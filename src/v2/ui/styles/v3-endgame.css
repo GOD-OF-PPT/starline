@@ -150,7 +150,10 @@
   gap: 5px;
 }
 
-.v2-shell .v3-threat-pill {
+.v2-shell .v3-threat-pills .v3-threat-pill {
+  display: block;
+  white-space: normal;
+  letter-spacing: normal;
   padding: 5px 4px;
   border-radius: 6px;
   border: 1px solid var(--border-subtle);
@@ -163,13 +166,13 @@
   text-align: center;
 }
 
-.v2-shell .v3-threat-pill.active {
+.v2-shell .v3-threat-pills .v3-threat-pill.active {
   border-color: #c9a0ff;
   background: rgba(201, 160, 255, 0.28);
   color: #f4e9ff;
 }
 
-.v2-shell .v3-threat-pill:disabled {
+.v2-shell .v3-threat-pills .v3-threat-pill:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
@@ -1158,7 +1161,7 @@
     grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 
-  .v2-shell .v3-threat-pill,
+  .v2-shell .v3-threat-pills .v3-threat-pill,
   .v3-career-tabs button,
   .v3-ach-claim-btn {
     min-height: 44px;

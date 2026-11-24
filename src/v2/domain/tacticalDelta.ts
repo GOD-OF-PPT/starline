@@ -478,9 +478,13 @@ function formatSimComparison(
       positive: false,
     };
   }
+  const positive =
+    before.outcome === 'defeat' && after.outcome === 'defeat'
+      ? after.roundsCount > before.roundsCount
+      : hpSaved > 0 || (hpSaved === 0 && roundDiff > 0);
   return {
     line: `${prefix}${parts.join('，')}`,
-    positive: roundDiff > 0 || hpSaved > 0,
+    positive,
   };
 }
 
@@ -508,8 +512,6 @@ function formatQualitativeComparison(
   );
   const beforeMeta = getV2ThreatTierMeta(beforeClass.tier);
   const afterMeta = getV2ThreatTierMeta(afterClass.tier);
-  const roundDiff = before.roundsCount - after.roundsCount;
-  const hpSaved = after.finalPlayerHpAfterRepair - before.finalPlayerHpAfterRepair;
 
   const trendDirection = classifyV2CombatDeltaTrend({
     beforeOutcome: before.outcome,
@@ -527,9 +529,9 @@ function formatQualitativeComparison(
     qualitativeBody = `↑ 威胁缓和（${beforeMeta.label} → ${afterMeta.label}）`;
   } else if (afterMeta.rank > beforeMeta.rank) {
     qualitativeBody = `↓ 风险上升（${beforeMeta.label} → ${afterMeta.label}）`;
-  } else if (roundDiff > 0 || hpSaved > 0) {
+  } else if (trendDirection === 'up') {
     qualitativeBody = `↑ 压制提升（${afterMeta.symbol} ${afterMeta.label}）`;
-  } else if (roundDiff < 0 || hpSaved < 0) {
+  } else if (trendDirection === 'down') {
     qualitativeBody = `↓ 战力回落（${afterMeta.symbol} ${afterMeta.label}）`;
   } else {
     qualitativeBody = `= 威胁持平（${afterMeta.symbol} ${afterMeta.label}）`;
@@ -976,10 +978,22 @@ export function classifyV2CombatDeltaTrend(params: {
   const afterRank = THREAT_TIER_VISUAL_META[afterTier].rank;
   if (afterRank < beforeRank) return 'up';
   if (afterRank > beforeRank) return 'down';
-  const roundDiff = params.beforeRounds - params.afterRounds;
+
+  // Defeat -> Defeat: surviving more rounds is better; dying faster is worse.
+  if (params.beforeOutcome === 'defeat' && params.afterOutcome === 'defeat') {
+    if (params.afterRounds > params.beforeRounds) return 'up';
+    if (params.afterRounds < params.beforeRounds) return 'down';
+    return 'neutral';
+  }
+
+  // Same-tier Victory -> Victory (or stalemate): prioritize HP saved first;
+  // use fewer combat rounds only as a tie-breaker when final HP is equal.
   const hpSaved = params.afterHp - params.beforeHp;
-  if (roundDiff > 0 || hpSaved > 0) return 'up';
-  if (roundDiff < 0 || hpSaved < 0) return 'down';
+  if (hpSaved > 0) return 'up';
+  if (hpSaved < 0) return 'down';
+  const roundDiff = params.beforeRounds - params.afterRounds;
+  if (roundDiff > 0) return 'up';
+  if (roundDiff < 0) return 'down';
   return 'neutral';
 }
 
