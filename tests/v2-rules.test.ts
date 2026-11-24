@@ -410,9 +410,14 @@ describe('V2 规则与验收矩阵核心测试（T01–T12 / AC01–AC18, AC22�
     expect(buyRep.run.hp).toBe(30);
     expect(buyV2MerchantRepair(buyRep.run, 'tx_rep_2').ok).toBe(false);
 
+    // Leaving merchant WITH staged purchase still enters ARRANGE; leaving with empty staging auto-skips to MAP (S02)
+    const leftWithPurchase = finishV2MerchantVisit(bought.run);
+    expect(leftWithPurchase.ok).toBe(true);
+    expect(leftWithPurchase.run.phase).toBe('ARRANGE');
+
     const left = finishV2MerchantVisit(buyRep.run);
     expect(left.ok).toBe(true);
-    expect(left.run.phase).toBe('ARRANGE');
+    expect(left.run.phase).toBe('MAP');
 
     // Anomaly breach strictly requires HP > 4; when fuel=0 & hp=4 all options unaffordable -> abandon enters SETTLEMENT
     const anomalyNode = Object.values(run.graph.nodes).find((n) => n.type === 'anomaly');

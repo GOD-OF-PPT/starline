@@ -1301,10 +1301,17 @@ function buildArrangeRun(overrides?: Partial<V2RunState>): V2RunState {
 }
 
 function buildWreckRun(): V2RunState {
-  const base = createV2TutorialRun('run_wreck_test');
-  const res = selectV2MapNode(base, 'L1B');
+  const raw = createV2TutorialRun('run_wreck_test');
+  const readyForWreck: V2RunState = {
+    ...raw,
+    phase: 'MAP',
+    currentNodeId: 'L1A',
+    visitedNodeIds: ['L1A'],
+    bay: { ...raw.bay, staging: [] },
+  };
+  const res = selectV2MapNode(readyForWreck, 'L2A');
   if (!res.ok) {
-    throw new Error(res.error ?? 'Failed to enter tutorial wreck L1B');
+    throw new Error(res.error ?? 'Failed to enter tutorial wreck L2A');
   }
   return res.run;
 }
@@ -2962,7 +2969,15 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
       const host = dom.document.createElement('div');
       dom.document.body.appendChild(host);
 
-      const tutRun = createV2TutorialRun('run_map_tut');
+      const rawTut = createV2TutorialRun('run_map_tut');
+      // Position tutorial run at penultimate L3A fork where BOTH L4A and L4B are reachable
+      const tutRun: V2RunState = {
+        ...rawTut,
+        phase: 'MAP',
+        currentNodeId: 'L3A',
+        visitedNodeIds: ['L1A', 'L2A', 'L3A'],
+        bay: { ...rawTut.bay, staging: [] },
+      };
       const a1 = {
         onToggleMobileMap: vi.fn(),
         onSelectNode: vi.fn(),
@@ -2986,7 +3001,7 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
         {
           run: tutRun,
           readOnly: false,
-          selectedMapNodeId: 'L1A',
+          selectedMapNodeId: 'L4A',
           mobileMapShowFull: false,
           isCompactViewport: false,
           pureAutoCombat: false,
@@ -2996,22 +3011,27 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
 
       const rootRef = host.querySelector('[data-testid="map-screen"]')!;
       const dagScrollRef = host.querySelector('.v2-dag-scroll')!;
-      const nodeL1ARef = host.querySelector('[data-testid="map-node-L1A"]')!;
-      const nodeL1BRef = host.querySelector('[data-testid="map-node-L1B"]')!;
-      const compareL1BRef = host.querySelector('[data-testid="map-compare-L1B"]')!;
-      const jumpBtnRef = host.querySelector('[data-testid="btn-jump-node"]')!;
+      const nodeL4ARef = host.querySelector('[data-testid="map-node-L4A"]')!;
+      const nodeL4BRef = host.querySelector('[data-testid="map-node-L4B"]')!;
+      const jumpL4ARef = host.querySelector('[data-jump-node="L4A"]')!;
+      const jumpL4BRef = host.querySelector('[data-jump-node="L4B"]')!;
       const safeReturnRef = host.querySelector('[data-testid="btn-safe-return"]')!;
+
+      // S04: zero duplicate map-compare-* cards; strictly 1 btn-jump-node on selected card L4A
+      expect(host.querySelector('[data-testid="map-compare-L4B"]')).toBeNull();
+      expect(host.querySelectorAll('[data-testid="btn-jump-node"]')).toHaveLength(1);
+      expect(host.querySelector('[data-testid="btn-jump-node"]')).toBe(jumpL4ARef);
 
       host.scrollTop = 88;
       dagScrollRef.scrollLeft = 120;
-      nodeL1BRef.focus();
+      nodeL4BRef.focus();
 
-      // Select L1B with fresh a2 actions -> ALL refs strictly ===, scroll & focus preserved!
+      // Select L4B with fresh a2 actions -> ALL refs strictly ===, scroll & focus preserved!
       view.update(
         {
           run: tutRun,
           readOnly: false,
-          selectedMapNodeId: 'L1B',
+          selectedMapNodeId: 'L4B',
           mobileMapShowFull: false,
           isCompactViewport: false,
           pureAutoCombat: false,
@@ -3021,37 +3041,40 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
 
       expect(host.querySelector('[data-testid="map-screen"]')).toBe(rootRef);
       expect(host.querySelector('.v2-dag-scroll')).toBe(dagScrollRef);
-      expect(host.querySelector('[data-testid="map-node-L1A"]')).toBe(nodeL1ARef);
-      expect(host.querySelector('[data-testid="map-node-L1B"]')).toBe(nodeL1BRef);
-      expect(host.querySelector('[data-testid="map-compare-L1B"]')).toBe(compareL1BRef);
-      expect(host.querySelector('[data-testid="btn-jump-node"]')).toBe(jumpBtnRef);
+      expect(host.querySelector('[data-testid="map-node-L4A"]')).toBe(nodeL4ARef);
+      expect(host.querySelector('[data-testid="map-node-L4B"]')).toBe(nodeL4BRef);
+      expect(host.querySelector('[data-jump-node="L4A"]')).toBe(jumpL4ARef);
+      expect(host.querySelector('[data-jump-node="L4B"]')).toBe(jumpL4BRef);
+      expect(host.querySelectorAll('[data-testid="btn-jump-node"]')).toHaveLength(1);
+      expect(host.querySelector('[data-testid="btn-jump-node"]')).toBe(jumpL4BRef);
       expect(host.querySelector('[data-testid="btn-safe-return"]')).toBe(safeReturnRef);
       expect(host.scrollTop).toBe(88);
       expect(dagScrollRef.scrollLeft).toBe(120);
-      expect(dom.document.activeElement).toBe(nodeL1BRef);
-      expect(nodeL1BRef.classList.contains('selected')).toBe(true);
-      expect(nodeL1ARef.classList.contains('selected')).toBe(false);
-      expect(compareL1BRef.classList.contains('selected')).toBe(true);
+      expect(dom.document.activeElement).toBe(nodeL4BRef);
+      expect(nodeL4BRef.classList.contains('selected')).toBe(true);
+      expect(nodeL4ARef.classList.contains('selected')).toBe(false);
 
-      // Jump button invokes latest a2.onJumpNode('L1B') (0 stale a1 calls!)
-      jumpBtnRef.click();
+      // Jump button invokes latest a2.onJumpNode('L4B') with 0 stale a1 calls and 0 double-fire select calls!
+      jumpL4BRef.click();
       expect(a1.onJumpNode).toHaveBeenCalledTimes(0);
-      expect(a2.onJumpNode).toHaveBeenCalledWith('L1B');
+      expect(a2.onSelectNode).toHaveBeenCalledTimes(0);
+      expect(a2.onJumpNode).toHaveBeenCalledTimes(1);
+      expect(a2.onJumpNode).toHaveBeenCalledWith('L4B');
 
       // Desktop <-> Mobile Focus toggle strictly preserves <= 1 DOM node per map-node-<id>
       view.update(
         {
           run: tutRun,
           readOnly: false,
-          selectedMapNodeId: 'L1B',
+          selectedMapNodeId: 'L4B',
           mobileMapShowFull: false,
           isCompactViewport: true,
           pureAutoCombat: false,
         },
         a2
       );
-      expect(host.querySelectorAll('[data-testid="map-node-L1A"]')).toHaveLength(1);
-      expect(host.querySelectorAll('[data-testid="map-node-L1B"]')).toHaveLength(1);
+      expect(host.querySelectorAll('[data-testid="map-node-L4A"]')).toHaveLength(1);
+      expect(host.querySelectorAll('[data-testid="map-node-L4B"]')).toHaveLength(1);
       expect(host.querySelector('.v2-dag-scroll')).toBeNull();
       expect(host.querySelector('.v2-map-mobile-focus')).not.toBeNull();
 
@@ -3060,14 +3083,15 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
         {
           run: tutRun,
           readOnly: false,
-          selectedMapNodeId: 'L1A',
+          selectedMapNodeId: 'L4A',
           mobileMapShowFull: true,
           isCompactViewport: true,
           pureAutoCombat: false,
         },
         a2
       );
-      expect(host.querySelectorAll('[data-testid="map-node-L1A"]')).toHaveLength(1);
+      expect(host.querySelectorAll('[data-testid="map-node-L4A"]')).toHaveLength(1);
+      expect(host.querySelectorAll('[data-testid="map-node-L4B"]')).toHaveLength(1);
       expect(host.querySelector('.v2-dag-scroll')).toBe(dagScrollRef);
 
       // Switch to a different 6-layer run -> stale nodes pruned cleanly
@@ -3107,7 +3131,8 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
       view.unmount();
       expect(host.children).toHaveLength(0);
       expect(rootRef.getListenerCount('click')).toBe(0);
-      expect(jumpBtnRef.getListenerCount('click')).toBe(0);
+      expect(rootRef.getListenerCount('keydown')).toBe(0);
+      expect(jumpL4BRef.getListenerCount('click')).toBe(0);
       expect(safeReturnRef.getListenerCount('click')).toBe(0);
     });
 
@@ -3130,22 +3155,43 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
       controller.init();
       await flushMicrotasks();
 
-      // Start tutorial -> enters MAP (mounts MapPhaseView once)
+      // Start tutorial -> S01 enters Step-1 ARRANGE (battery in staging, mounts ArrangePhaseView once)
       const tutBtn = mountEl.querySelector('[data-testid="btn-start-tutorial"]')!;
       expect(tutBtn).not.toBeNull();
       tutBtn.click();
+      expect(arrangeMountSpy).toHaveBeenCalledTimes(1);
+      const tutArrangeRoot = mountEl.querySelector('[data-testid="arrange-screen"]')!;
+      expect(tutArrangeRoot).not.toBeNull();
+
+      // Place staged battery at (1,0) adjacent to Laser -> ArrangePhaseView stays mounted without remount!
+      const tutBoard = mountEl.querySelector('.v2-cargo-board')!;
+      const tutPt = cellCenterPoint(4, 4, 1, 0);
+      tutBoard.dispatchEvent(
+        new FakeEvent('pointerdown', {
+          bubbles: true,
+          button: 0,
+          pointerType: 'mouse',
+          clientX: tutPt.x,
+          clientY: tutPt.y,
+        })
+      );
+      expect(mountEl.querySelector('[data-testid="arrange-screen"]')).toBe(tutArrangeRoot);
+      expect(arrangeMountSpy).toHaveBeenCalledTimes(1);
+
+      // Leave Step-1 ARRANGE -> unmounts ArrangePhaseView & mounts MapPhaseView once!
+      const tutLeaveBtn = mountEl.querySelector('[data-testid="btn-leave-arrange"]')!;
+      expect(tutLeaveBtn.disabled).toBe(false);
+      tutLeaveBtn.click();
+      expect(arrangeUnmountSpy).toHaveBeenCalledTimes(1);
       expect(mapMountSpy).toHaveBeenCalledTimes(1);
       const mapRoot1 = mountEl.querySelector('[data-testid="map-screen"]')!;
 
-      // Select L1B then L1A -> reuses same MapPhaseView & DOM root without remounting
-      mountEl.querySelector('[data-testid="map-node-L1B"]')!.click();
-      expect(mountEl.querySelector('[data-testid="map-screen"]')).toBe(mapRoot1);
-      expect(mapMountSpy).toHaveBeenCalledTimes(1);
+      // Select L1A card body -> reuses same MapPhaseView & DOM root without remounting
       mountEl.querySelector('[data-testid="map-node-L1A"]')!.click();
       expect(mountEl.querySelector('[data-testid="map-screen"]')).toBe(mapRoot1);
       expect(mapMountSpy).toHaveBeenCalledTimes(1);
 
-      // Jump to L1A -> enters ENCOUNTER (unmounts MapPhaseView!)
+      // 1-click jump to L1A -> enters ENCOUNTER (unmounts MapPhaseView!)
       mountEl.querySelector('[data-testid="btn-jump-node"]')!.click();
       expect(mapUnmountSpy).toHaveBeenCalledTimes(1);
       expect(mountEl.querySelector('[data-testid="map-screen"]')).toBeNull();
@@ -3165,7 +3211,7 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
       controller2.init();
       await flushMicrotasks();
 
-      expect(arrangeMountSpy).toHaveBeenCalledTimes(1);
+      expect(arrangeMountSpy).toHaveBeenCalledTimes(2);
       const arrangeRoot = mountEl2.querySelector('[data-testid="arrange-screen"]')!;
       const inspectorSlot = mountEl2.querySelector('#v3-arrange-inspector-slot')!;
       expect(arrangeRoot).not.toBeNull();
@@ -3185,14 +3231,14 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
       );
       expect(mountEl2.querySelector('[data-testid="arrange-screen"]')).toBe(arrangeRoot);
       expect(mountEl2.querySelector('#v3-arrange-inspector-slot')).toBe(inspectorSlot);
-      expect(arrangeMountSpy).toHaveBeenCalledTimes(1);
-      expect(arrangeUnmountSpy).toHaveBeenCalledTimes(0);
+      expect(arrangeMountSpy).toHaveBeenCalledTimes(2);
+      expect(arrangeUnmountSpy).toHaveBeenCalledTimes(1);
 
       // Leave ARRANGE -> unmounts ArrangePhaseView & mounts MapPhaseView!
       const leaveBtn = mountEl2.querySelector('[data-testid="btn-leave-arrange"]')!;
       expect(leaveBtn.disabled).toBe(false);
       leaveBtn.click();
-      expect(arrangeUnmountSpy).toHaveBeenCalledTimes(1);
+      expect(arrangeUnmountSpy).toHaveBeenCalledTimes(2);
       expect(mapMountSpy).toHaveBeenCalledTimes(2);
       expect(mountEl2.querySelector('[data-testid="map-screen"]')).not.toBeNull();
 
@@ -3296,7 +3342,12 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
       const host = dom.document.createElement('div');
       dom.document.body.appendChild(host);
 
-      const baseRun = createV2TutorialRun('run_map_slots_test');
+      const rawTut = createV2TutorialRun('run_map_slots_test');
+      const baseRun: V2RunState = {
+        ...rawTut,
+        phase: 'MAP',
+        bay: { ...rawTut.bay, staging: [] },
+      };
       const onJumpNode = vi.fn();
       const actions = {
         onSelectNode: vi.fn(),
@@ -3375,16 +3426,19 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
       expect(navSlot.style.display).toBe('none');
       expect(navSlot.children).toHaveLength(0);
 
-      // 2. Capture jumpBtnRef while L1A is reachable, then move to terminal node L3A (0 reachable nodes)
+      // 2. Capture jumpBtnRef while L1A is reachable, then move to terminal node (0 reachable nodes)
       const jumpBtnRef = host.querySelector('[data-testid="btn-jump-node"]')!;
       expect(jumpBtnRef).not.toBeNull();
       expect(jumpBtnRef.disabled).toBe(false);
       expect(jumpBtnRef.dataset.jumpNode).toBe('L1A');
 
+      const terminalNodeId = Object.values(baseRun.graph.nodes).find(
+        (n) => n.nextNodeIds.length === 0
+      )!.nodeId;
       const terminalRun: V2RunState = {
         ...baseRun,
-        currentNodeId: 'L3A',
-        visitedNodeIds: ['L1A', 'L2A', 'L3A'],
+        currentNodeId: terminalNodeId,
+        visitedNodeIds: ['L1A', 'L2A', 'L3A', terminalNodeId],
       };
       view.update(
         {
