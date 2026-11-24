@@ -81,12 +81,12 @@ function handleGlobalModalKeyDown(e: KeyboardEvent): void {
     const active = document.activeElement as HTMLElement | null;
 
     if (e.shiftKey) {
-      if (!active || active === first || !top.card.contains(active)) {
+      if (!active || active === top.card || active === first || !top.card.contains(active)) {
         e.preventDefault();
         last.focus();
       }
     } else {
-      if (!active || active === last || !top.card.contains(active)) {
+      if (!active || active === top.card || active === last || !top.card.contains(active)) {
         e.preventDefault();
         first.focus();
       }
