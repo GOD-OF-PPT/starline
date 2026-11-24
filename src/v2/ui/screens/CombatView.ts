@@ -165,6 +165,7 @@ export class PreCombatAutoEngageController {
       const live = this.isLiveEligible(this.nodeKey);
       if (!live.eligible) {
         this.reset();
+        this.onChange?.(this.getSnapshot());
         return;
       }
       if (!live.canMutate || live.modalOpen || live.hidden) {
@@ -186,6 +187,7 @@ export class PreCombatAutoEngageController {
       const live = this.isLiveEligible(targetKey);
       if (!live.eligible) {
         this.reset();
+        this.onChange?.(this.getSnapshot());
         return;
       }
       if (!live.canMutate || live.modalOpen || live.hidden) {
@@ -264,6 +266,7 @@ export class PreCombatAutoEngageController {
       const live = this.isLiveEligible(this.nodeKey);
       if (!live.eligible) {
         this.reset();
+        this.onChange?.(this.getSnapshot());
         return false;
       }
       if (!live.canMutate || live.modalOpen || live.hidden) {
@@ -286,17 +289,26 @@ export class PreCombatAutoEngageController {
   }
 
   engageNow(): boolean {
-    this.clearTimers();
     if (!this.nodeKey || this.status === 'engaged' || this.engagedNodeKey === this.nodeKey) {
+      this.clearTimers();
       return false;
     }
     const targetKey = this.nodeKey;
     if (this.isLiveEligible) {
       const live = this.isLiveEligible(targetKey);
-      if (!live.eligible || !live.canMutate || live.modalOpen) {
+      if (!live.eligible) {
+        this.reset();
+        this.onChange?.(this.getSnapshot());
+        return false;
+      }
+      if (!live.canMutate || live.modalOpen) {
+        if (this.status === 'countdown') {
+          this.pause(this.resolveBlockReason(live));
+        }
         return false;
       }
     }
+    this.clearTimers();
     this.status = 'engaged';
     this.engagedNodeKey = targetKey;
     this.remainingMs = 0;

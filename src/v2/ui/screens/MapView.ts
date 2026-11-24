@@ -218,6 +218,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
 
   private footerEl: HTMLElement | null = null;
   private safeReturnBtn: HTMLButtonElement | null = null;
+  private safeReturnLabelEl: HTMLSpanElement | null = null;
   private abortBtn: HTMLButtonElement | null = null;
 
   private latestActions: MapViewActions | null = null;
@@ -448,7 +449,14 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     safeReturnBtn.className = 'btn btn-secondary';
     safeReturnBtn.id = 'v2-btn-safe-return';
     safeReturnBtn.dataset.testid = 'btn-safe-return';
-    safeReturnBtn.innerHTML = `${svgIcon('beacon', 14)} 免费安全返航`;
+    const safeReturnIconEl = document.createElement('span');
+    safeReturnIconEl.style.display = 'contents';
+    safeReturnIconEl.innerHTML = `${svgIcon('beacon', 14)} `;
+    const safeReturnLabelEl = document.createElement('span');
+    safeReturnLabelEl.style.display = 'contents';
+    safeReturnLabelEl.textContent = '免费安全返航';
+    safeReturnBtn.appendChild(safeReturnIconEl);
+    safeReturnBtn.appendChild(safeReturnLabelEl);
 
     const abortBtn = document.createElement('button');
     abortBtn.type = 'button';
@@ -499,6 +507,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.mobileFocusEl = mobileFocusEl;
     this.footerEl = footerEl;
     this.safeReturnBtn = safeReturnBtn;
+    this.safeReturnLabelEl = safeReturnLabelEl;
     this.abortBtn = abortBtn;
     this.lastSectorId = null;
     this.lastFinalMissionKey = null;
@@ -586,7 +595,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
 
     const innerKey = `${n.type}:${compact ? 1 : 0}:${n.contractMarker ? 1 : 0}:${
       n.hasSupportGuarantee ? 1 : 0
-    }:${n.hasRelicSignal ? 1 : 0}`;
+    }:${n.hasRelicSignal ? 1 : 0}:${run.isTutorial ? 1 : 0}`;
     if (this.overviewNodeInnerKeys.get(n.nodeId) !== innerKey) {
       this.overviewNodeInnerKeys.set(n.nodeId, innerKey);
       btn.innerHTML = `
@@ -887,6 +896,10 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       this.safeReturnBtn.title = hasStagedItems
         ? `请先处理暂存区 ${run.bay.staging.length} 件物品再返航`
         : '免费呼叫回收信标安全返航';
+      const nextSafeLabel = hasStagedItems ? '免费安全返航（需清空暂存区）' : '免费安全返航';
+      if (this.safeReturnLabelEl && this.safeReturnLabelEl.textContent !== nextSafeLabel) {
+        this.safeReturnLabelEl.textContent = nextSafeLabel;
+      }
     }
     if (this.footerEl && this.abortBtn) {
       if (canAbort) {
@@ -1442,6 +1455,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.lastEdgesKey = null;
     this.footerEl = null;
     this.safeReturnBtn = null;
+    this.safeReturnLabelEl = null;
     this.abortBtn = null;
     this.latestActions = null;
     this.latestHasStagedItems = false;

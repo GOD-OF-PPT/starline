@@ -555,6 +555,8 @@
 /* Align mobile toggle/focus display with MapPhaseView JS breakpoint (< 860px) */
 .v2-shell .v2-map-mobile-toggle {
   display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .v2-shell .v2-map-mobile-focus {

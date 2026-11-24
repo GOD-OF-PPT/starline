@@ -2559,6 +2559,7 @@ export class V2AppController {
           const latest = this.getCurrentRun();
           if (!latest || latest.phase !== 'MAP') return;
           const executeJump = () => {
+            if (!this.canMutate()) return;
             const cur = this.getCurrentRun();
             if (!cur || cur.phase !== 'MAP') return;
             const res = selectV2MapNode(cur, nid, {
@@ -2596,6 +2597,7 @@ export class V2AppController {
           const latest = this.getCurrentRun();
           if (!latest || latest.phase !== 'MAP') return;
           const executeSafeReturn = () => {
+            if (!this.canMutate()) return;
             const cur = this.getCurrentRun();
             if (!cur || cur.phase !== 'MAP') return;
             const res = initiateV2SafeReturnFromMap(cur);
@@ -2932,14 +2934,30 @@ export class V2AppController {
           if (!this.canMutate()) return;
           const latest = this.getCurrentRun();
           if (!latest || latest.phase !== 'SHOP') return;
-          const res = finishV2MerchantVisit(latest);
-          if (!res.ok) return this.showToast(res.error ?? '无法离开商人节点');
-          if (res.run.phase === 'SETTLEMENT') {
-            this.settlementDispositions = {};
+          const preview = finishV2MerchantVisit(latest);
+          if (!preview.ok) return this.showToast(preview.error ?? '无法离开商人节点');
+          const executeFinish = () => {
+            if (!this.canMutate()) return;
+            const cur = this.getCurrentRun();
+            if (!cur || cur.phase !== 'SHOP') return;
+            const res = finishV2MerchantVisit(cur);
+            if (!res.ok) return this.showToast(res.error ?? '无法离开商人节点');
+            if (res.run.phase === 'SETTLEMENT') {
+              this.settlementDispositions = {};
+            }
+            this.setCurrentRun(res.run);
+            soundEngine.play('click');
+            this.syncAll();
+          };
+          if (latest.bay.discardedThisArrange.length > 0 && preview.run.phase !== 'ARRANGE') {
+            openV2DiscardConfirmModal(
+              this.modalHostEl,
+              latest.bay.discardedThisArrange,
+              executeFinish
+            );
+          } else {
+            executeFinish();
           }
-          this.setCurrentRun(res.run);
-          soundEngine.play('click');
-          this.syncAll();
         },
       }
     );
@@ -3048,6 +3066,7 @@ export class V2AppController {
           const latest = this.getCurrentRun();
           if (!latest || latest.phase !== 'ARRANGE') return;
           const proceed = () => {
+            if (!this.canMutate()) return;
             const cur = this.getCurrentRun();
             if (!cur || cur.phase !== 'ARRANGE') return;
             const res = finishV2ArrangeAndProceed(cur, terminal ? 'safe_return' : 'map');
@@ -3547,6 +3566,7 @@ export class V2AppController {
         this.activeCombatPlaybackKey = null;
         clearV2SaveData(window.localStorage);
         this.save = createFreshV2SaveData();
+        this.campaignBannerCollapsed = true;
         this.showcaseRun = null;
         this.prepareDraft = null;
         this.selectedEndingId = null;
