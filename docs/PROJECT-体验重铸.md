@@ -1,9 +1,14 @@
-# PROJECT · 星际拆解站 V3「亲手改船」体验重铸
+# PROJECT · 星际拆解站「亲手改船」体验重铸
+
+> [!WARNING]
+> **适用范围**：本文的诊断和代码行号基于 V3 扩展之前的 `084e781`/`8f43788`。`main` 此后合入了 V3 扩展（PR #1：战役、战术指令与敌人意图、多刀拆解、事件与派系、构筑扩展、终局内容），部分结论可能已修复或发生变化。正在针对 V3 代码逐条复核，复核结果会更新本文（v1.1）。执行前请以复核版为准。
+>
+> 本文是根目录 [PROJECT.md](../PROJECT.md)（V3 内容扩展计划）的**体验质量补充**，不替代它。
 
 > **文档状态**：执行指南 v1.0（2026-11-24）。基于提交 `8f43788`（分支 `docs/first-voyage-review-20261124`）。
-> **基线**：`npm test` 共 42/42 通过。V2 为默认入口，V1 保留回退。
-> **输入**：用户试玩反馈（美术不精致 / 不好玩 / 交互像工作台）、[首航体验与改版建议](output/design-review-20261124/design-review.md)，以及对 `src/` 的逐文件审计和规则引擎数值实验。
-> **用途**：后续所有优化任务按本文的里程碑、任务编号、验收标准和决策门槛执行。新需求先改本文，再写代码。
+> **基线**：当时 `npm test` 为 42/42 通过。V2 为默认入口，V1 保留回退。
+> **输入**：用户试玩反馈（美术不精致 / 不好玩 / 交互像工作台）、[首航体验与改版建议](../output/design-review-20261124/design-review.md)，以及对 `src/` 的逐文件审计和规则引擎数值实验。
+> **用途**：后续体验优化任务按本文的里程碑、任务编号、验收标准和决策门槛执行。新需求先改本文，再写代码。
 
 ---
 
@@ -34,39 +39,39 @@
 
 | # | 根因 | 证据 |
 |---|---|---|
-| G1 | **战斗是播放已知结果**：开战时整场模拟就算完并锁定，过程中只能变速或跳过；航路卡、战前卡、装舱差值都精确到“几轮、剩几耐久” | [startV2CombatAtCurrentNode](src/v2/domain/combatV2.ts#L459)、[previewV2CombatNode](src/v2/domain/combatV2.ts#L343)、[航路预报文案](src/v2/ui/V2AppController.ts#L2364) |
-| G2 | **唯一的临场决策默认关闭**：精英战第 2 回合抉择藏在设置项 `eliteTacticExperiment` 后，默认值缺省为关 | [commitV2EliteTacticDecision](src/v2/domain/combatV2.ts#L521)、[settings 类型](src/domain/progression.ts#L26) |
-| G3 | **统治解**：一块电池给所有相邻激光加成，没有容量限制。“激光-电池-激光”夹心只需 5 预算、首日可借，在 13 种遭遇中最优或接近最优，并且是唯一能打赢第 6 层精英的构筑（6 轮 / 余 3）。T09 平衡测试没有覆盖这种组合 | [buildStatsV2 电池遍历](src/v2/domain/buildStatsV2.ts#L118-L140)、[T09 测试](tests/v2-rules.test.ts#L566) |
-| G4 | **目标策略形同虚设**：5 构筑 × 6 层 × 5 遭遇共 150 场，切换策略后只有 24 场的轮数或耐久变化，**胜负零变化**；单敌时也照样显示策略切换 | [selectTargetByPolicy](src/v2/domain/combatV2.ts#L39) |
-| G5 | **敌人同质**：所有敌人每轮伤害恒定，没有意图和行为变化 | [enemies.ts](src/v2/data/enemies.ts#L45-L155) |
-| G6 | **空间取舍极少**：整局模拟中，真正的空间冲突每局只有 0.18（救援）/ 0.20（勘测）/ 约 1（运输，几乎都来自反应堆）次；空整理每局 0.25–0.63 次 | [inventoryV2](src/v2/domain/inventoryV2.ts)、[cargo 数据](src/v2/data/cargo.ts) |
-| G7 | **零风险**：任何时刻免费安全返航，战败仍保底 40%，补血来源多（奖励 +10、废船 +8、求救 +10、商人）。只要绕开预报会输的战斗，360 局模拟零战败 | [initiateV2SafeReturnFromMap](src/v2/domain/encounter.ts#L825)、[战败 40%](src/v2/domain/settlementV2.ts#L136-L139) |
-| G8 | **成长只是数字**：设施只改数值或装饰，改变玩法的三套流派按固定顺序赠送；第一次有意义的升级大约在第 2 局后（约 15 分钟） | [固定解锁顺序](src/v2/domain/settlementV2.ts#L316-L339)、[facilities](src/v2/data/facilities.ts) |
-| G9 | **教学顺序错位**（与评审一致，已复核）：首战巡逻艇 15HP/2 攻，接线 7 伤和不接线 5 伤都是 3 轮、余 24；电池是预先摆好的；反应堆放在终点，之后自动结算；工程师技能被关闭 | [教学初始摆放](src/v2/data/tutorialV2.ts#L229-L295)、[终层自动结算](src/v2/domain/encounter.ts#L798)、[engineerSwapAvailable:false](src/v2/data/tutorialV2.ts#L329) |
+| G1 | **战斗是播放已知结果**：开战时整场模拟就算完并锁定，过程中只能变速或跳过；航路卡、战前卡、装舱差值都精确到“几轮、剩几耐久” | [startV2CombatAtCurrentNode](../src/v2/domain/combatV2.ts#L459)、[previewV2CombatNode](../src/v2/domain/combatV2.ts#L343)、[航路预报文案](../src/v2/ui/V2AppController.ts#L2364) |
+| G2 | **唯一的临场决策默认关闭**：精英战第 2 回合抉择藏在设置项 `eliteTacticExperiment` 后，默认值缺省为关 | [commitV2EliteTacticDecision](../src/v2/domain/combatV2.ts#L521)、[settings 类型](../src/domain/progression.ts#L26) |
+| G3 | **统治解**：一块电池给所有相邻激光加成，没有容量限制。“激光-电池-激光”夹心只需 5 预算、首日可借，在 13 种遭遇中最优或接近最优，并且是唯一能打赢第 6 层精英的构筑（6 轮 / 余 3）。T09 平衡测试没有覆盖这种组合 | [buildStatsV2 电池遍历](../src/v2/domain/buildStatsV2.ts#L118-L140)、[T09 测试](../tests/v2-rules.test.ts#L566) |
+| G4 | **目标策略形同虚设**：5 构筑 × 6 层 × 5 遭遇共 150 场，切换策略后只有 24 场的轮数或耐久变化，**胜负零变化**；单敌时也照样显示策略切换 | [selectTargetByPolicy](../src/v2/domain/combatV2.ts#L39) |
+| G5 | **敌人同质**：所有敌人每轮伤害恒定，没有意图和行为变化 | [enemies.ts](../src/v2/data/enemies.ts#L45-L155) |
+| G6 | **空间取舍极少**：整局模拟中，真正的空间冲突每局只有 0.18（救援）/ 0.20（勘测）/ 约 1（运输，几乎都来自反应堆）次；空整理每局 0.25–0.63 次 | [inventoryV2](../src/v2/domain/inventoryV2.ts)、[cargo 数据](../src/v2/data/cargo.ts) |
+| G7 | **零风险**：任何时刻免费安全返航，战败仍保底 40%，补血来源多（奖励 +10、废船 +8、求救 +10、商人）。只要绕开预报会输的战斗，360 局模拟零战败 | [initiateV2SafeReturnFromMap](../src/v2/domain/encounter.ts#L825)、[战败 40%](../src/v2/domain/settlementV2.ts#L136-L139) |
+| G8 | **成长只是数字**：设施只改数值或装饰，改变玩法的三套流派按固定顺序赠送；第一次有意义的升级大约在第 2 局后（约 15 分钟） | [固定解锁顺序](../src/v2/domain/settlementV2.ts#L316-L339)、[facilities](../src/v2/data/facilities.ts) |
+| G9 | **教学顺序错位**（与评审一致，已复核）：首战巡逻艇 15HP/2 攻，接线 7 伤和不接线 5 伤都是 3 轮、余 24；电池是预先摆好的；反应堆放在终点，之后自动结算；工程师技能被关闭 | [教学初始摆放](../src/v2/data/tutorialV2.ts#L229-L295)、[终层自动结算](../src/v2/domain/encounter.ts#L798)、[engineerSwapAvailable:false](../src/v2/data/tutorialV2.ts#L329) |
 
 ### 2.2「交互差，像工作台」：布局、重建、文字三重叠加
 
 | # | 根因 | 证据 |
 |---|---|---|
-| U1 | **固定的三块式骨架**：舞台卡 + 左表单 + 右只读船舱。航行阶段舞台只有 120–270px 高（航路阶段被压到 156/120px），整理阶段画布默认隐藏 | [app shell](src/v2/ui/V2AppController.ts#L565-L617)、[isArrangeSceneCollapsed](src/v2/ui/V2AppController.ts#L408-L412)、styles.css L4019-4036 / L5403-5412 |
-| U2 | **每次状态变化都整体重建**：`syncAll()` 重写 HUD、横幅、Phaser 舞台和两侧面板；船舱组件每次 `destroy()` 后重新创建 | [syncAll](src/v2/ui/V2AppController.ts#L641)、[mountV2CargoBay](src/v2/ui/V2AppController.ts#L3593-L3623) |
-| U3 | **重建直接吃掉手感**：放置后选中丢失；吸附回弹动画、接通供能音效**永远不会触发**；键盘焦点丢失；Phaser 场景被 `applyPlayback` 清空，**废船切割特效当帧被清除** | CargoGridV2 L225-234、L440；[applyPlayback](src/v2/scenes/V2CombatScene.ts#L553-L559)、[切割回调](src/v2/ui/V2AppController.ts#L1632-L1645) |
-| U4 | **纯确认步骤多**：一个战斗节点最少点 4 次，通常 5–6 次，其中 2–3 次没有决策（开始交火、空整理、跃迁）；5 个事件处理函数都无条件进入 `ARRANGE` | encounter.ts L274/350/412/647/760、[空整理页](src/v2/ui/V2AppController.ts#L3219-L3227) |
-| U5 | **同一信息重复表达**：航路上同一目的地有节点按钮、对比卡、跃迁大按钮三处；HUD 和面板里各有一个“展开舰体” | [renderMapPhase](src/v2/ui/V2AppController.ts#L2286) |
-| U6 | **数字墙**：4 个数值格（常规/构筑火力、护盾/反击…）、`预计胜 · 余 24HP (3轮)`、逐回合日志、每格售价、每件物品两个角标（借/自/拾/任、良/普） | CargoGridV2 L257-288、L481-507；[tacticalDelta 文案](src/v2/domain/tacticalDelta.ts#L192-L221) |
-| U7 | **系统替玩家解题**：推荐落点遍历所有位置和旋转并高亮最优格，玩家变成“照提示放”；免费配装预先摆好联动 | [findBestPlacementForItem](src/v2/domain/tacticalDelta.ts#L127)、`buildFreeFallbackPrepareSlots` |
+| U1 | **固定的三块式骨架**：舞台卡 + 左表单 + 右只读船舱。航行阶段舞台只有 120–270px 高（航路阶段被压到 156/120px），整理阶段画布默认隐藏 | [app shell](../src/v2/ui/V2AppController.ts#L565-L617)、[isArrangeSceneCollapsed](../src/v2/ui/V2AppController.ts#L408-L412)、styles.css L4019-4036 / L5403-5412 |
+| U2 | **每次状态变化都整体重建**：`syncAll()` 重写 HUD、横幅、Phaser 舞台和两侧面板；船舱组件每次 `destroy()` 后重新创建 | [syncAll](../src/v2/ui/V2AppController.ts#L641)、[mountV2CargoBay](../src/v2/ui/V2AppController.ts#L3593-L3623) |
+| U3 | **重建直接吃掉手感**：放置后选中丢失；吸附回弹动画、接通供能音效**永远不会触发**；键盘焦点丢失；Phaser 场景被 `applyPlayback` 清空，**废船切割特效当帧被清除** | CargoGridV2 L225-234、L440；[applyPlayback](../src/v2/scenes/V2CombatScene.ts#L553-L559)、[切割回调](../src/v2/ui/V2AppController.ts#L1632-L1645) |
+| U4 | **纯确认步骤多**：一个战斗节点最少点 4 次，通常 5–6 次，其中 2–3 次没有决策（开始交火、空整理、跃迁）；5 个事件处理函数都无条件进入 `ARRANGE` | encounter.ts L274/350/412/647/760、[空整理页](../src/v2/ui/V2AppController.ts#L3219-L3227) |
+| U5 | **同一信息重复表达**：航路上同一目的地有节点按钮、对比卡、跃迁大按钮三处；HUD 和面板里各有一个“展开舰体” | [renderMapPhase](../src/v2/ui/V2AppController.ts#L2286) |
+| U6 | **数字墙**：4 个数值格（常规/构筑火力、护盾/反击…）、`预计胜 · 余 24HP (3轮)`、逐回合日志、每格售价、每件物品两个角标（借/自/拾/任、良/普） | CargoGridV2 L257-288、L481-507；[tacticalDelta 文案](../src/v2/domain/tacticalDelta.ts#L192-L221) |
+| U7 | **系统替玩家解题**：推荐落点遍历所有位置和旋转并高亮最优格，玩家变成“照提示放”；免费配装预先摆好联动 | [findBestPlacementForItem](../src/v2/domain/tacticalDelta.ts#L127)、`buildFreeFallbackPrepareSlots` |
 
 ### 2.3「美术不精致」：手绘底子不差，表现层太粗糙
 
 | # | 根因 | 证据 |
 |---|---|---|
-| A1 | **受击时整船填白**：`setTintFill(0xffffff)`，且同一帧触发，双方同时变成白色剪影 | [V2CombatScene L1097 / L1123 / L537](src/v2/scenes/V2CombatScene.ts#L1093-L1129) |
-| A2 | **一回合只有一帧**：`executeRoundVisual` 把我方全部攻击、敌方攻击、护盾、反击、死亡放在同一帧执行，之后是近 950ms 的空白 | [executeRoundVisual](src/v2/scenes/V2CombatScene.ts#L769-L1023) |
-| A3 | **程序画的几何特效**：光束是单层直线，命中是空心圆，死亡只是变暗加一个圆环；V2 场景内零 tweens、零粒子、零混合模式；没有引擎尾焰（V1 有） | V2CombatScene L1282-1317、L1006-1019；V1 [CombatScene L547-562](src/scenes/CombatScene.ts#L547-L562) |
-| A4 | **主要素材分辨率不足**：舰船 512×256（2× 屏源/CSS 比 1.31），基地/背景/事件 1280×720（≈1.12），标题图在 1080p 下 <1；只有物品图标达标（2.29） | [asset_clarity_diagnostics](docs/reviews/2026-11-21-v2-polish/asset_clarity_diagnostics.json) |
-| A5 | **四种视觉语言混在一屏**：手绘厚涂、程序几何、扁平 DOM 卡片、细线 SVG。基地靠泊用侧视舰图硬旋转塞进轴测场景；外挂模块像贴纸 | [BaseScene 靠泊](src/scenes/BaseScene.ts#L664-L751)、`rebuildModuleSprites` |
-| A6 | **UI 是通用深色后台皮**：圆角 8/12 + 1px 线 + 系统字体；`clip-path` 0 处、纹理 0 处、`@keyframes` 仅 3 个。**美术规范 §8 本身就规定了这种圆角** | styles.css L1-27、L221-260、L468；[美术规范](docs/星际拆解站-美术制作与验收规范.md) |
-| A7 | **声音单薄**：V2 完全没有 BGM（`setTrack` 只在 V1 调用）；`creditTick` 全项目零调用；`click` 约 80 处，大部分操作听起来一样；敌方开火没有声音 | [soundEngine](src/audio/soundEngine.ts#L1-L23)、[V1 setTrack](src/ui/AppController.ts#L595) |
+| A1 | **受击时整船填白**：`setTintFill(0xffffff)`，且同一帧触发，双方同时变成白色剪影 | [V2CombatScene L1097 / L1123 / L537](../src/v2/scenes/V2CombatScene.ts#L1093-L1129) |
+| A2 | **一回合只有一帧**：`executeRoundVisual` 把我方全部攻击、敌方攻击、护盾、反击、死亡放在同一帧执行，之后是近 950ms 的空白 | [executeRoundVisual](../src/v2/scenes/V2CombatScene.ts#L769-L1023) |
+| A3 | **程序画的几何特效**：光束是单层直线，命中是空心圆，死亡只是变暗加一个圆环；V2 场景内零 tweens、零粒子、零混合模式；没有引擎尾焰（V1 有） | V2CombatScene L1282-1317、L1006-1019；V1 [CombatScene L547-562](../src/scenes/CombatScene.ts#L547-L562) |
+| A4 | **主要素材分辨率不足**：舰船 512×256（2× 屏源/CSS 比 1.31），基地/背景/事件 1280×720（≈1.12），标题图在 1080p 下 <1；只有物品图标达标（2.29） | [asset_clarity_diagnostics](reviews/2026-11-21-v2-polish/asset_clarity_diagnostics.json) |
+| A5 | **四种视觉语言混在一屏**：手绘厚涂、程序几何、扁平 DOM 卡片、细线 SVG。基地靠泊用侧视舰图硬旋转塞进轴测场景；外挂模块像贴纸 | [BaseScene 靠泊](../src/scenes/BaseScene.ts#L664-L751)、`rebuildModuleSprites` |
+| A6 | **UI 是通用深色后台皮**：圆角 8/12 + 1px 线 + 系统字体；`clip-path` 0 处、纹理 0 处、`@keyframes` 仅 3 个。**美术规范 §8 本身就规定了这种圆角** | styles.css L1-27、L221-260、L468；[美术规范](星际拆解站-美术制作与验收规范.md) |
+| A7 | **声音单薄**：V2 完全没有 BGM（`setTrack` 只在 V1 调用）；`creditTick` 全项目零调用；`click` 约 80 处，大部分操作听起来一样；敌方开火没有声音 | [soundEngine](../src/audio/soundEngine.ts#L1-L23)、[V1 setTrack](../src/ui/AppController.ts#L595) |
 
 ---
 
@@ -90,7 +95,7 @@
 
 ## 4. 目标体验
 
-### 4.1 新首航脚本（约 5 分钟，替换 [tutorialV2.ts](src/v2/data/tutorialV2.ts)）
+### 4.1 新首航脚本（约 5 分钟，替换 [tutorialV2.ts](../src/v2/data/tutorialV2.ts)）
 
 | 步 | 画面主体 | 玩家动作 | 系统反馈 | 教会什么 |
 |---|---|---|---|---|
@@ -134,7 +139,7 @@
 
 ### 5.1 渲染层改造（M0，所有后续工作的前提）
 
-1. **船舱组件常驻**：`mountV2CargoBay` 改为只在节点不存在时创建，之后只调用 `cargoGrid.render(bay, editable, opts)`，回调改为 setter。整理阶段的 `onChange` 不再走 `syncAll`，只刷新 HUD、Dock 和船舱（V1 就是这么做的，见 [AppController L1173-1185](src/ui/AppController.ts#L1173-L1185)）。
+1. **船舱组件常驻**：`mountV2CargoBay` 改为只在节点不存在时创建，之后只调用 `cargoGrid.render(bay, editable, opts)`，回调改为 setter。整理阶段的 `onChange` 不再走 `syncAll`，只刷新 HUD、Dock 和船舱（V1 就是这么做的，见 [AppController L1173-1185](../src/ui/AppController.ts#L1173-L1185)）。
 2. **Phaser 舞台去重**：`syncPhaserStage` 计算 `playbackKey`（舰船 + 背景 + 敌人 + 模式），key 不变就不调用 `showV2Stage`/`applyPlayback`，只调用 `updateV2ShipVisualSpec`。
 3. **阶段视图模块化**：新建 `src/v2/ui/phases/{Map,Encounter,Reward,Arrange,Wreck,Shop,Settlement,Prepare}View.ts`，统一接口 `mount(host) / update(run) / unmount()`。控制器只在 phase 切换时 mount/unmount。拆分顺序：Arrange → Map → Reward → Encounter → Settlement → Prepare。
 4. **推演按需计算**：`computeV2PlacementTacticalDelta` 按 `bayHash + itemId + zone` 缓存，只在选中项变化时计算，放进 `requestIdleCallback`。CargoGrid 内部拆成 board / items / overlay / inspector 四个子渲染，方向键只更新焦点类。
@@ -174,12 +179,12 @@
 |---|---|---|---|
 | S01 | 按 §4.1 重写首航：14HP 教学靶舰、电池从手里放、反应堆放在倒数第二站、终点前分岔、开启工程师换型 | tutorialV2.ts、encounter.ts | 规则测试：接线 2 轮 / 26 耐久，不接线 3 轮 / 24 耐久；卸炮后风险支线预报为“危险”，保炮为“稳”；反应堆发放后不会被自动跳过吞掉 |
 | S02 | 自动跳过空整理：新增 `shouldAutoSkipArrange(run)`（暂存区空、无任务物、无工程师或勘测机会时返回 MAP），在航路阶段也允许编辑船舱 | encounter.ts 中 5 个 resolve/pick 函数、`selectV2MapNode` | 空整理次数为 0；航路阶段可以拖动物件；任务物和换型机会不被跳过 |
-| S03 | 常驻舞台布局：ShipStage + HoldView + ContextDock，新增 `.v2-shell.phase-*` 布局，整理阶段默认展开舰体 | V2AppController、styles.css、[isArrangeSceneCollapsed](src/v2/ui/V2AppController.ts#L408) | 1366×768、390×844、844×390 三个尺寸下，航行阶段舞台 ≥ 60% 视口；HoldView 跨阶段保持同一个 DOM 节点 |
+| S03 | 常驻舞台布局：ShipStage + HoldView + ContextDock，新增 `.v2-shell.phase-*` 布局，整理阶段默认展开舰体 | V2AppController、styles.css、[isArrangeSceneCollapsed](../src/v2/ui/V2AppController.ts#L408) | 1366×768、390×844、844×390 三个尺寸下，航行阶段舞台 ≥ 60% 视口；HoldView 跨阶段保持同一个 DOM 节点 |
 | S04 | 航路合一：节点即卡片，跃迁按钮在卡片内；单敌时隐藏集火策略 | `renderMapPhase` | 同一目的地只有一处表达；跃迁只需 1 次点击 |
 | S05 | 战前合并：跃迁到战斗节点后 1.5 秒自动开打，可暂停 | `renderEncounterPhase` | 战斗节点纯确认点击 ≤ 1 |
 | S06 | 预报降精度：默认显示威胁档位（稳 / 吃力 / 危险 / 致命）和 ↑↓ 徽记；精确推演放进详情抽屉；4 个数值格压缩成一行图标 | V2AppController、tacticalDelta.ts、CargoGridV2 L257-288 | 第一层文案中不出现“余 xxHP (n轮)”；详情里仍可查到完整推演（**需先确认决策 D1**） |
 | S07 | 拖放手感：按抓取点偏移、物件吸附预览、拖动中实时预演将接通的连线、失败回弹、`energy-link-line` 流光，区分拿起 / 合法悬停 / 落位轻重 / 非法音效；推荐落点改为玩家主动请求才显示 | CargoGridV2、styles.css、soundEngine | 静音录屏时能看出合法与非法；遮屏只听声音能分辨拿起、落位、接通、非法 |
-| S08 | 废船直接操作：点夹具后切割（约 600ms，可跳过），零件剪影用 FLIP 飞进暂存区，然后才切换状态 | [renderWreckHotspotOverlay](src/v2/ui/V2AppController.ts#L1540)、V2CombatScene `triggerV2WreckCutFx` | 切割到入舱全程连贯；reducedMotion 下直接切换，信息不丢 |
+| S08 | 废船直接操作：点夹具后切割（约 600ms，可跳过），零件剪影用 FLIP 飞进暂存区，然后才切换状态 | [renderWreckHotspotOverlay](../src/v2/ui/V2AppController.ts#L1540)、V2CombatScene `triggerV2WreckCutFx` | 切割到入舱全程连贯；reducedMotion 下直接切换，信息不丢 |
 | S09 | 返港：吊臂卸下本次带回的**真实物品图**；只有一种去向的条目自动处理；账单逐行 `creditTick` 跳数 | BaseScene L664-751、`renderSettlementPhase` | 结算页按钮数 ≤ 需要决策的条目数 + 1 |
 | S10 | 首航后推荐一单玩法不同、带取舍点的委托 | V2AppController 推荐委托排序（约 L550）、contracts 数据 | 首航后首屏推荐不再是“再运一次反应堆” |
 
@@ -304,7 +309,7 @@
 
 ## 10. 执行规程
 
-1. **开始前**：阅读本文、[首航评审](output/design-review-20261124/design-review.md)和[美术规范](docs/星际拆解站-美术制作与验收规范.md)；确认分支和未提交改动；`npm ci && npm test` 必须全绿。
+1. **开始前**：阅读本文、[首航评审](../output/design-review-20261124/design-review.md)和[美术规范](星际拆解站-美术制作与验收规范.md)；确认分支和未提交改动；`npm ci && npm test` 必须全绿。
 2. **分支**：`v3/<任务ID>-<简述>`，例如 `v3/F01-persistent-cargo-grid`；一个分支一个任务。
 3. **提交**：`<type>(<任务ID>): <说明>`，正文写明对应的指标和测量值。
 4. **验证**：每个任务完成后跑 `npm test` 和 `npm run build`，并附上 1366×768 与 390×844 两个尺寸的截图；涉及表现的任务附 reducedMotion 截图。
@@ -318,19 +323,19 @@
 
 | 领域 | 位置 |
 |---|---|
-| 阶段状态机 | [types.ts `V2RunPhase`](src/v2/domain/types.ts#L272)、[encounter.ts](src/v2/domain/encounter.ts) |
-| 战斗模拟、预报、精英抉择 | [combatV2.ts](src/v2/domain/combatV2.ts#L98)（`simulateV2Combat` L98、预报 L343、开战 L459、精英抉择 L521、结算 L580） |
-| 相邻联动 | [buildStatsV2.ts](src/v2/domain/buildStatsV2.ts#L118) |
-| 推荐落点和参考敌舰 | [tacticalDelta.ts](src/v2/domain/tacticalDelta.ts#L53)（参考敌舰 L53、最佳落点 L127、差值 L229） |
-| 航路生成 | [routeGenerator.ts](src/v2/domain/routeGenerator.ts) |
-| 结算和解锁 | [settlementV2.ts](src/v2/domain/settlementV2.ts)（计算 L96、应用 L242、解锁 L316） |
-| 教学脚本 | [tutorialV2.ts](src/v2/data/tutorialV2.ts) |
-| 主控制器和刷新链 | [V2AppController.ts](src/v2/ui/V2AppController.ts#L641)（`syncAll` L641、`renderPanels` L1650、船舱挂载 L3593） |
-| 船舱交互 | [CargoGridV2.ts](src/v2/ui/CargoGridV2.ts) |
-| 战斗表现 | [V2CombatScene.ts](src/v2/scenes/V2CombatScene.ts#L769)（回合表现 L769、`update` L1025、光束 L1282） |
-| 基地表现 | [BaseScene.ts](src/scenes/BaseScene.ts#L664) |
-| 声音 | [soundEngine.ts](src/audio/soundEngine.ts) |
-| 视觉 token | [styles.css](src/ui/styles.css#L1-L27) |
+| 阶段状态机 | [types.ts `V2RunPhase`](../src/v2/domain/types.ts#L272)、[encounter.ts](../src/v2/domain/encounter.ts) |
+| 战斗模拟、预报、精英抉择 | [combatV2.ts](../src/v2/domain/combatV2.ts#L98)（`simulateV2Combat` L98、预报 L343、开战 L459、精英抉择 L521、结算 L580） |
+| 相邻联动 | [buildStatsV2.ts](../src/v2/domain/buildStatsV2.ts#L118) |
+| 推荐落点和参考敌舰 | [tacticalDelta.ts](../src/v2/domain/tacticalDelta.ts#L53)（参考敌舰 L53、最佳落点 L127、差值 L229） |
+| 航路生成 | [routeGenerator.ts](../src/v2/domain/routeGenerator.ts) |
+| 结算和解锁 | [settlementV2.ts](../src/v2/domain/settlementV2.ts)（计算 L96、应用 L242、解锁 L316） |
+| 教学脚本 | [tutorialV2.ts](../src/v2/data/tutorialV2.ts) |
+| 主控制器和刷新链 | [V2AppController.ts](../src/v2/ui/V2AppController.ts#L641)（`syncAll` L641、`renderPanels` L1650、船舱挂载 L3593） |
+| 船舱交互 | [CargoGridV2.ts](../src/v2/ui/CargoGridV2.ts) |
+| 战斗表现 | [V2CombatScene.ts](../src/v2/scenes/V2CombatScene.ts#L769)（回合表现 L769、`update` L1025、光束 L1282） |
+| 基地表现 | [BaseScene.ts](../src/scenes/BaseScene.ts#L664) |
+| 声音 | [soundEngine.ts](../src/audio/soundEngine.ts) |
+| 视觉 token | [styles.css](../src/ui/styles.css#L1-L27) |
 
 ## 附录 B · 数值实验复现
 

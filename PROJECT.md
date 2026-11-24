@@ -2,6 +2,7 @@
 
 > **User Request**: `"游戏主线不明确，玩法不完整；整个游戏比较像demo，请规划分析全方位完善游戏"` (`.agents/teamwork/ORIGINAL_REQUEST.md`)
 > **Baseline**: `main@084e781` (TypeScript 5.8 + Vite 6 + Phaser 3.90 + Vitest 3.2; 35,107 LOC across 62 files; 56 hand-painted WebP assets; V2 vertical slice + V1 `?mode=v1` preserved).
+> **Companion (experience quality)**: [docs/PROJECT-体验重铸.md](docs/PROJECT-体验重铸.md) — playtest-driven plan addressing "not fun / art not refined / UI feels like a workbench" (first-voyage slice, interaction & art polish, playtest gates). Based on 2026-11-24 review in `output/design-review-20261124/`.
 
 ---
 
