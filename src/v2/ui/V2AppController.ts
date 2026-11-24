@@ -913,7 +913,7 @@ export class V2AppController {
       run?.phase === 'ENCOUNTER' && curNode?.type === 'wreck' && !curNode.combat && !run.activeCombat
     );
     const isMapHero = Boolean(isMap);
-    const phaseKey = `${currentScreen}:${run?.phase ?? ''}:${isLiveCombat ? 'live' : 'idle'}`;
+    const phaseKey = `${currentScreen}:${run?.phase ?? ''}:${isLiveCombat ? 'live' : isPreCombat ? 'pre' : 'idle'}`;
     if (this.lastViewportPhaseKey !== phaseKey) {
       this.lastViewportPhaseKey = phaseKey;
       this.mobileHoldZoomed = false;
@@ -2321,6 +2321,11 @@ export class V2AppController {
     }
     this.selectedWreckHotspot = spotId;
     this.setCurrentRun(res.run);
+    const updatedNode = res.run.currentNodeId ? res.run.graph.nodes[res.run.currentNodeId] : null;
+    if (res.ambushTriggered || updatedNode?.combat) {
+      this.showCombatLogDetails = false;
+      this.cargoGrid?.collapseDetailsDrawer();
+    }
     if (res.ambushTriggered) {
       soundEngine.play('bossAlarm');
       this.showToast('残骸警报触发！敌舰伏击来袭，战利品已暂封待战后返还！');

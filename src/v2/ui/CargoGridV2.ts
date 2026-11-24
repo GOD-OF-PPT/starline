@@ -614,9 +614,9 @@ export class CargoGridV2Component {
       this.activeDeltaKey = null;
       this.recommendedCellKeys.clear();
       this.showRecommendHint = false;
+      this.showItemDetailsDrawer = false;
       if (modeChanged) {
         this.selected = null;
-        this.showItemDetailsDrawer = false;
       }
     } else if (editableDisabled) {
       this.clearDragGhost();
@@ -1355,7 +1355,7 @@ export class CargoGridV2Component {
   }
 
   private scheduleTacticalDeltaUpdate(): void {
-    if (this.drag?.active) return;
+    if (this.drag) return;
     const sel = this.getSelectedItemInfo();
     const provider = this.callbacks.getTacticalDelta;
     if (!this.bay || !sel || !provider) return;
@@ -1372,7 +1372,7 @@ export class CargoGridV2Component {
     let jobRan = false;
     const runJob = (): void => {
       if (this.destroyed || token !== this.deltaJobToken) return;
-      if (this.drag?.active) {
+      if (this.drag) {
         this.pendingDeltaHandle = null;
         return;
       }
@@ -2324,6 +2324,9 @@ export class CargoGridV2Component {
         drag.ghostEl.remove();
         drag.ghostEl = null;
       }
+      if (this.bay && this.selected && !this.activeDelta && !this.pendingDeltaHandle) {
+        this.scheduleTacticalDeltaUpdate();
+      }
       return;
     }
 
@@ -2348,12 +2351,21 @@ export class CargoGridV2Component {
           drag.ghostEl.remove();
           drag.ghostEl = null;
         }
+        if (this.pendingSnapFeedback) {
+          this.pendingSnapFeedback = false;
+          this.updateSelectionAndDragClasses();
+          this.updateCellVisualFocusAndPreview();
+          this.renderSynergySvg();
+        }
+        if (this.bay && this.selected && !this.activeDelta && !this.pendingDeltaHandle) {
+          this.scheduleTacticalDeltaUpdate();
+        }
       } else {
         this.launchInvalidSpringBack(drag, true);
         this.updateSelectionAndDragClasses();
         this.updateCellVisualFocusAndPreview();
         this.renderSynergySvg();
-        if (this.selected && !this.activeDelta) {
+        if (this.bay && this.selected && !this.activeDelta && !this.pendingDeltaHandle) {
           this.scheduleTacticalDeltaUpdate();
         }
       }
@@ -2368,7 +2380,7 @@ export class CargoGridV2Component {
       this.updateSelectionAndDragClasses();
       this.updateCellVisualFocusAndPreview();
       this.renderSynergySvg();
-      if (this.selected && !this.activeDelta) {
+      if (this.bay && this.selected && !this.activeDelta && !this.pendingDeltaHandle) {
         this.scheduleTacticalDeltaUpdate();
       }
     }
@@ -2383,9 +2395,9 @@ export class CargoGridV2Component {
       this.updateSelectionAndDragClasses();
       this.updateCellVisualFocusAndPreview();
       this.renderSynergySvg();
-      if (this.selected && !this.activeDelta) {
-        this.scheduleTacticalDeltaUpdate();
-      }
+    }
+    if (this.bay && this.selected && !this.activeDelta && !this.pendingDeltaHandle) {
+      this.scheduleTacticalDeltaUpdate();
     }
   };
 
@@ -2399,6 +2411,7 @@ export class CargoGridV2Component {
     ) {
       return;
     }
+    if (this.drag && e.key !== 'Escape') return;
 
     // Grid navigation when focus is on grid (zero DOM rebuilds & zero simulateV2Combat calls!)
     if (this.gridHasFocus) {
@@ -2447,7 +2460,6 @@ export class CargoGridV2Component {
     }
 
     if (e.key === 'r' || e.key === 'R') {
-      if (this.drag) return;
       if (this.selected) {
         e.preventDefault();
         this.rotateSelected();
