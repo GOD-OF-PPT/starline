@@ -268,10 +268,13 @@ export class CargoGridV2Component {
   constructor(root: HTMLElement, callbacks: CargoGridV2Callbacks) {
     this.root = root;
     this.callbacks = callbacks;
-    window.addEventListener('pointermove', this.handleWindowPointerMove);
-    window.addEventListener('pointerup', this.handleWindowPointerUp);
-    window.addEventListener('pointercancel', this.handleWindowPointerCancel);
-    window.addEventListener('keydown', this.handleKeyDown);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pointermove', this.handleWindowPointerMove);
+      window.addEventListener('pointerup', this.handleWindowPointerUp);
+      window.addEventListener('pointercancel', this.handleWindowPointerCancel);
+      window.addEventListener('blur', this.handleWindowBlur);
+      window.addEventListener('keydown', this.handleKeyDown);
+    }
   }
 
   setCallbacks(callbacks: CargoGridV2Callbacks): void {
@@ -354,10 +357,13 @@ export class CargoGridV2Component {
 
   destroy(): void {
     this.destroyed = true;
-    window.removeEventListener('pointermove', this.handleWindowPointerMove);
-    window.removeEventListener('pointerup', this.handleWindowPointerUp);
-    window.removeEventListener('pointercancel', this.handleWindowPointerCancel);
-    window.removeEventListener('keydown', this.handleKeyDown);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('pointermove', this.handleWindowPointerMove);
+      window.removeEventListener('pointerup', this.handleWindowPointerUp);
+      window.removeEventListener('pointercancel', this.handleWindowPointerCancel);
+      window.removeEventListener('blur', this.handleWindowBlur);
+      window.removeEventListener('keydown', this.handleKeyDown);
+    }
     this.boardEl?.removeEventListener('pointerdown', this.handleBoardPointerDown);
     this.stagingEl?.removeEventListener('pointerdown', this.handleStagingPointerDown);
     this.stagingEl?.removeEventListener('click', this.handleStagingClick);
@@ -642,7 +648,17 @@ export class CargoGridV2Component {
       this.carrying = false;
     }
 
-    // Validate selection still exists
+    // Validate active/pending drag & selection still exist in updated bay
+    if (this.drag) {
+      const dragExists =
+        this.drag.zone === 'grid'
+          ? bay.placed.some((p) => p.item.instanceId === this.drag?.item.instanceId)
+          : bay.staging.some((s) => s.item.instanceId === this.drag?.item.instanceId);
+      if (!dragExists) {
+        this.clearDragGhost();
+        this.drag = null;
+      }
+    }
     if (this.selected) {
       const exists =
         this.selected.zone === 'grid'
@@ -1973,6 +1989,27 @@ export class CargoGridV2Component {
     }
   }
 
+  private rescheduleDeltaIfIdle(): void {
+    if (this.bay && this.selected && !this.activeDelta && !this.pendingDeltaHandle) {
+      this.scheduleTacticalDeltaUpdate();
+    }
+  }
+
+  private cancelActiveDrag(rescheduleDelta = true): void {
+    if (!this.drag) return;
+    const wasActive = this.drag.active;
+    this.clearDragGhost();
+    this.drag = null;
+    if (wasActive && this.bay) {
+      this.updateSelectionAndDragClasses();
+      this.updateCellVisualFocusAndPreview();
+      this.renderSynergySvg();
+    }
+    if (rescheduleDelta) {
+      this.rescheduleDeltaIfIdle();
+    }
+  }
+
   private launchInvalidSpringBack(drag: DragState, isInvalidDrop: boolean): void {
     const ghost = drag.ghostEl;
     drag.ghostEl = null;
@@ -2027,12 +2064,23 @@ export class CargoGridV2Component {
   private handleBoardPointerDown = (e: PointerEvent): void => {
     if (this.destroyed || !this.bay || hasOpenModal()) return;
     if (e.button !== 0 && e.pointerType === 'mouse') return;
+    const pointerId = e.pointerId ?? 0;
+    let recoveredDrag = false;
+    if (this.drag) {
+      if (pointerId !== this.drag.pointerId) return;
+      this.cancelActiveDrag(false);
+      recoveredDrag = true;
+    }
     const cell = this.clientPointToCell(e.clientX, e.clientY);
-    if (!cell) return;
+    if (!cell) {
+      if (recoveredDrag) this.rescheduleDeltaIfIdle();
+      return;
+    }
     this.focusedCell = cell;
 
     if (isCellDisabledForShip(this.bay.shipId, cell.x, cell.y)) {
       this.showInvalidReason('disabled_cell');
+      if (recoveredDrag) this.rescheduleDeltaIfIdle();
       return;
     }
 
@@ -2042,6 +2090,7 @@ export class CargoGridV2Component {
       if (occupant) {
         this.selectItem({ zone: 'grid', instanceId: occupant.item.instanceId }, { playSfx: false });
       }
+      if (recoveredDrag) this.rescheduleDeltaIfIdle();
       return;
     }
 
@@ -2059,7 +2108,7 @@ export class CargoGridV2Component {
       const grabOffsetPxX = Math.max(0, Math.min(tileW, e.clientX - tileLeft));
       const grabOffsetPxY = Math.max(0, Math.min(tileH, e.clientY - tileTop));
       this.drag = {
-        pointerId: e.pointerId,
+        pointerId,
         pointerType: e.pointerType,
         zone: 'grid',
         item: occupant.item,
@@ -2089,18 +2138,37 @@ export class CargoGridV2Component {
     if (this.selected) {
       this.tryPlaceSelectedAt(cell.x, cell.y);
     }
+    if (recoveredDrag) {
+      this.rescheduleDeltaIfIdle();
+    }
   };
 
   private handleStagingPointerDown = (ev: PointerEvent): void => {
     if (this.destroyed || !this.editable || !this.bay || hasOpenModal()) return;
     if (ev.button !== 0 && ev.pointerType === 'mouse') return;
+    const pointerId = ev.pointerId ?? 0;
+    let recoveredDrag = false;
+    if (this.drag) {
+      if (pointerId !== this.drag.pointerId) return;
+      this.cancelActiveDrag(false);
+      recoveredDrag = true;
+    }
     const target = ev.target as HTMLElement | null;
     const chip = target?.closest<HTMLButtonElement>('[data-staging-id]');
-    if (!chip) return;
+    if (!chip) {
+      if (recoveredDrag) this.rescheduleDeltaIfIdle();
+      return;
+    }
     const stagingId = chip.dataset.stagingId;
-    if (!stagingId) return;
+    if (!stagingId) {
+      if (recoveredDrag) this.rescheduleDeltaIfIdle();
+      return;
+    }
     const st = this.bay.staging.find((item) => item.item.instanceId === stagingId);
-    if (!st) return;
+    if (!st) {
+      if (recoveredDrag) this.rescheduleDeltaIfIdle();
+      return;
+    }
 
     const def = getAnyV2ItemDef(st.item.definitionId);
     const bounds = getV2ShapeBounds(def?.shapeId ?? '1x1', st.rotation);
@@ -2115,7 +2183,7 @@ export class CargoGridV2Component {
 
     this.carrying = false;
     this.drag = {
-      pointerId: ev.pointerId,
+      pointerId,
       pointerType: ev.pointerType,
       zone: 'staging',
       item: st.item,
@@ -2137,7 +2205,7 @@ export class CargoGridV2Component {
   };
 
   private handleStagingClick = (ev: MouseEvent): void => {
-    if (this.destroyed || !this.bay) return;
+    if (this.destroyed || !this.bay || this.drag) return;
     const target = ev.target as HTMLElement | null;
     const undoBtn = target?.closest<HTMLButtonElement>('#btn-v2-undo-discard');
     if (undoBtn) {
@@ -2165,7 +2233,7 @@ export class CargoGridV2Component {
   };
 
   private handleInspectorClick = (ev: MouseEvent): void => {
-    if (this.destroyed || !this.bay) return;
+    if (this.destroyed || !this.bay || this.drag?.active) return;
     const target = ev.target as HTMLElement | null;
     const btn = target?.closest<HTMLButtonElement>('button[id]');
     if (!btn) return;
@@ -2260,7 +2328,8 @@ export class CargoGridV2Component {
   };
 
   private handleWindowPointerMove = (e: PointerEvent): void => {
-    if (this.destroyed || !this.drag || !this.bay || e.pointerId !== this.drag.pointerId) return;
+    const pointerId = e.pointerId ?? 0;
+    if (this.destroyed || !this.drag || !this.bay || pointerId !== this.drag.pointerId) return;
     const dist = Math.hypot(e.clientX - this.drag.startClientX, e.clientY - this.drag.startClientY);
     let justActivated = false;
     if (!this.drag.active && dist >= 8) {
@@ -2315,7 +2384,8 @@ export class CargoGridV2Component {
   };
 
   private handleWindowPointerUp = (e: PointerEvent): void => {
-    if (this.destroyed || !this.drag || e.pointerId !== this.drag.pointerId) return;
+    const pointerId = e.pointerId ?? 0;
+    if (this.destroyed || !this.drag || pointerId !== this.drag.pointerId) return;
     const drag = this.drag;
     this.drag = null;
 
@@ -2324,9 +2394,7 @@ export class CargoGridV2Component {
         drag.ghostEl.remove();
         drag.ghostEl = null;
       }
-      if (this.bay && this.selected && !this.activeDelta && !this.pendingDeltaHandle) {
-        this.scheduleTacticalDeltaUpdate();
-      }
+      this.rescheduleDeltaIfIdle();
       return;
     }
 
@@ -2357,17 +2425,13 @@ export class CargoGridV2Component {
           this.updateCellVisualFocusAndPreview();
           this.renderSynergySvg();
         }
-        if (this.bay && this.selected && !this.activeDelta && !this.pendingDeltaHandle) {
-          this.scheduleTacticalDeltaUpdate();
-        }
+        this.rescheduleDeltaIfIdle();
       } else {
         this.launchInvalidSpringBack(drag, true);
         this.updateSelectionAndDragClasses();
         this.updateCellVisualFocusAndPreview();
         this.renderSynergySvg();
-        if (this.bay && this.selected && !this.activeDelta && !this.pendingDeltaHandle) {
-          this.scheduleTacticalDeltaUpdate();
-        }
+        this.rescheduleDeltaIfIdle();
       }
     } else {
       this.callbacks.onDragAttempt?.({
@@ -2380,25 +2444,19 @@ export class CargoGridV2Component {
       this.updateSelectionAndDragClasses();
       this.updateCellVisualFocusAndPreview();
       this.renderSynergySvg();
-      if (this.bay && this.selected && !this.activeDelta && !this.pendingDeltaHandle) {
-        this.scheduleTacticalDeltaUpdate();
-      }
+      this.rescheduleDeltaIfIdle();
     }
   };
 
-  private handleWindowPointerCancel = (): void => {
+  private handleWindowPointerCancel = (e?: PointerEvent): void => {
     if (this.destroyed || !this.drag) return;
-    const wasActive = this.drag.active;
-    this.clearDragGhost();
-    this.drag = null;
-    if (wasActive && this.bay) {
-      this.updateSelectionAndDragClasses();
-      this.updateCellVisualFocusAndPreview();
-      this.renderSynergySvg();
-    }
-    if (this.bay && this.selected && !this.activeDelta && !this.pendingDeltaHandle) {
-      this.scheduleTacticalDeltaUpdate();
-    }
+    if (e && e.pointerId !== undefined && e.pointerId !== this.drag.pointerId) return;
+    this.cancelActiveDrag(true);
+  };
+
+  private handleWindowBlur = (): void => {
+    if (this.destroyed || !this.drag) return;
+    this.cancelActiveDrag(true);
   };
 
   private handleKeyDown = (e: KeyboardEvent): void => {
