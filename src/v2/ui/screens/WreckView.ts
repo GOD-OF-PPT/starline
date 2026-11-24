@@ -352,6 +352,8 @@ export function renderWreckLeftPanel(
         ${
           node.contractMarker && run.contract.type === 'derelict'
             ? `<div class="v3-relic-pity-banner">${svgIcon('star', 13)} 黑匣打捞目标残骸：撤离时将同步回收 1×2 加密黑匣记录仪！</div>`
+            : node.contractMarker && run.contract.type === 'transport'
+            ? `<div class="v3-relic-pity-banner">${svgIcon('star', 13)} 委托目标封存舱：撤离时将同步回收 2×3 密封反应堆（占 6 格）！</div>`
             : ''
         }
 

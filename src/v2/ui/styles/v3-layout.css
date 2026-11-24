@@ -369,3 +369,46 @@
   filter: brightness(0) saturate(0);
   opacity: 0.35;
 }
+
+/* Step-0 Base Screen Tutorial Focus (S01) */
+.v2-shell .v2-base-screen-root.is-tutorial-focus .v2-base-cmd-card {
+  border-color: rgba(246, 184, 82, 0.72);
+  box-shadow: 0 0 24px rgba(246, 184, 82, 0.2), inset 0 0 0 1px rgba(246, 184, 82, 0.22);
+}
+
+.v2-shell .v2-base-screen-root.is-tutorial-focus .v2-base-utility-col {
+  opacity: 0.84;
+}
+
+.v2-shell .v2-base-screen-root.is-tutorial-focus .v2-base-utility-col:hover,
+.v2-shell .v2-base-screen-root.is-tutorial-focus .v2-base-utility-col:focus-within {
+  opacity: 1;
+}
+
+.v2-shell .v2-base-screen-root.is-tutorial-focus .v2-dock-btn {
+  min-height: 44px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+/* Real-Time Sacrifice Preview in Inspector & Arrange Banner (S01 Step 4) */
+.v2-shell .v2-sacrifice-preview {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: #ffd3a8;
+  background: rgba(242, 117, 100, 0.14);
+  border: 1px solid rgba(242, 117, 100, 0.42);
+}
+
+.v2-shell .v2-arrange-sacrifice-banner {
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #ffe0b5;
+  background: rgba(242, 117, 100, 0.15);
+  border: 1px solid rgba(242, 117, 100, 0.46);
+}

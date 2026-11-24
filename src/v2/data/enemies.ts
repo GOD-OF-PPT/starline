@@ -22,6 +22,8 @@ export type V2RegularEncounterKind =
 
 export type V2EncounterKind =
   | V2RegularEncounterKind
+  | 'patrol_tutorial'
+  | 'tutorial_raider'
   | 'elite'
   | 'boss_anvil'
   | 'boss_dreadnought'
@@ -115,6 +117,46 @@ export const V2_ENCOUNTER_TEMPLATES: Record<V2EncounterKind, V2EncounterTemplate
         spriteArchetype: 'scout',
         baseHp: 20,
         baseDamage: 3,
+        armor: 0,
+        pierceRatio: 0,
+        role: 'standard',
+      },
+    ],
+  },
+  patrol_tutorial: {
+    kind: 'patrol_tutorial',
+    name: '教学巡逻靶舰',
+    badge: '教学靶舰',
+    tacticHint: '14 耐久轻型靶舰：激光炮贴邻能量电池后每轮 7 伤，2 轮击破（少挨 1 轮火力）',
+    scaleWithDepth: false,
+    extraBounty: 0,
+    units: [
+      {
+        unitIdSuffix: 'patrol_tut_1',
+        name: '巡逻靶舰',
+        spriteArchetype: 'scout',
+        baseHp: 14,
+        baseDamage: 2,
+        armor: 0,
+        pierceRatio: 0,
+        role: 'standard',
+      },
+    ],
+  },
+  tutorial_raider: {
+    kind: 'tutorial_raider',
+    name: '封锁拦截艇',
+    badge: '高火风险',
+    tacticHint: '高火力单体拦截艇（14HP / 4攻）：保留激光炮+电池可 2 轮稳赢；卸炮仅靠核心炮将面临重创或战败风险',
+    scaleWithDepth: false,
+    extraBounty: 0,
+    units: [
+      {
+        unitIdSuffix: 'tut_raider_1',
+        name: '封锁拦截艇',
+        spriteArchetype: 'interceptor',
+        baseHp: 14,
+        baseDamage: 4,
         armor: 0,
         pierceRatio: 0,
         role: 'standard',

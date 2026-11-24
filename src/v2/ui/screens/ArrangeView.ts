@@ -5,6 +5,10 @@ import { V2_SHIPS } from '../../data/ships';
 import { canPerformSurveyAtCurrentNode, isContractReadyForDelivery } from '../../domain/contracts';
 import { canUseV3GadgetInRun, isAtTerminalLayer } from '../../domain/encounter';
 import { deriveV2ShipVisualSpec } from '../../domain/shipVisualSpec';
+import {
+  summarizeV2DiscardedSacrifices,
+  summarizeV2MissionSacrificeOptions,
+} from '../../domain/tacticalDelta';
 import type { V2RunState } from '../../domain/types';
 import { crewPortraitSvg, svgIcon } from '../icons';
 import { findEngineerSwapTargetInBay, type PhaseView } from './screenTypes';
@@ -37,6 +41,9 @@ export class ArrangePhaseView implements PhaseView<ArrangeViewProps, ArrangeView
   private shipNameEl: HTMLElement | null = null;
   private mountPillsHostEl: HTMLElement | null = null;
   private toggleShipBtn: HTMLButtonElement | null = null;
+
+  private sacrificeSlotEl: HTMLElement | null = null;
+  private sacrificeBannerEl: HTMLElement | null = null;
 
   private engineerSlotEl: HTMLElement | null = null;
   private engineerBannerEl: HTMLElement | null = null;
@@ -166,6 +173,15 @@ export class ArrangePhaseView implements PhaseView<ArrangeViewProps, ArrangeView
     exteriorBar.appendChild(toggleShipBtn);
     rootEl.appendChild(exteriorBar);
 
+    // Optional Mission Sacrifice Preview slot (persistent DOM identity!)
+    const sacrificeSlotEl = document.createElement('div');
+    sacrificeSlotEl.dataset.slot = 'mission-sacrifice';
+    sacrificeSlotEl.style.display = 'none';
+    const sacrificeBannerEl = document.createElement('div');
+    sacrificeBannerEl.className = 'v2-arrange-sacrifice-banner';
+    sacrificeBannerEl.dataset.testid = 'arrange-sacrifice-banner';
+    rootEl.appendChild(sacrificeSlotEl);
+
     // Optional Engineer Swap slot
     const engineerSlotEl = document.createElement('div');
     engineerSlotEl.dataset.slot = 'engineer-swap';
@@ -262,6 +278,8 @@ export class ArrangePhaseView implements PhaseView<ArrangeViewProps, ArrangeView
     this.shipNameEl = shipNameEl;
     this.mountPillsHostEl = mountPillsHostEl;
     this.toggleShipBtn = toggleShipBtn;
+    this.sacrificeSlotEl = sacrificeSlotEl;
+    this.sacrificeBannerEl = sacrificeBannerEl;
     this.engineerSlotEl = engineerSlotEl;
     this.engineerBannerEl = engineerBannerEl;
     this.engineerTitleEl = engineerTitleEl;
@@ -340,6 +358,9 @@ export class ArrangePhaseView implements PhaseView<ArrangeViewProps, ArrangeView
       }
     }
 
+    // Reconcile Mission Sacrifice Preview Banner
+    this.reconcileSacrificeBanner(run);
+
     // Reconcile Engineer Swap Banner
     this.reconcileEngineerSwap(run, readOnly);
 
@@ -371,13 +392,16 @@ export class ArrangePhaseView implements PhaseView<ArrangeViewProps, ArrangeView
     // Leave Arrange button
     if (this.leaveBtn) {
       this.leaveBtn.disabled = readOnly || hasStaging;
-      const leaveKey = `${hasStaging ? 1 : 0}:${terminal ? 1 : 0}`;
+      const isStep1Tutorial = run.isTutorial && currentLayer === 0;
+      const leaveKey = `${hasStaging ? 1 : 0}:${terminal ? 1 : 0}:${isStep1Tutorial ? 1 : 0}`;
       if (leaveKey !== this.lastLeaveBtnKey) {
         this.lastLeaveBtnKey = leaveKey;
         this.leaveBtn.innerHTML = hasStaging
           ? '请先放置或舍弃暂存区物品'
           : terminal
           ? `${svgIcon('beacon', 15)} 抵达终层 · 进入返航结算`
+          : isStep1Tutorial
+          ? `${svgIcon('rocket', 15)} 装配完成 · 前往星图`
           : `${svgIcon('rocket', 15)} 整理完毕 · 返回航路`;
       }
     }
@@ -392,6 +416,43 @@ export class ArrangePhaseView implements PhaseView<ArrangeViewProps, ArrangeView
       } else if (this.abortBtn.parentNode === this.actionsRowEl) {
         this.actionsRowEl.removeChild(this.abortBtn);
       }
+    }
+  }
+
+  private reconcileSacrificeBanner(run: V2RunState): void {
+    if (!this.sacrificeSlotEl || !this.sacrificeBannerEl) return;
+
+    const missionSummary = summarizeV2MissionSacrificeOptions(run.bay);
+    const hasMissionInBay =
+      run.bay.staging.some((s) => s.item.origin === 'mission' || s.item.category === 'mission') ||
+      run.bay.placed.some((p) => p.item.origin === 'mission' || p.item.category === 'mission');
+
+    let bannerText = '';
+    if (missionSummary?.needsSpace && missionSummary.summaryText) {
+      bannerText = `腾舱取舍 · ${missionSummary.summaryText}`;
+    } else if (missionSummary?.needsRearrangeOnly) {
+      bannerText = `腾舱提示 · 调整舱内现有物品位置即可装入「${missionSummary.missionItemName}」（无需舍弃）`;
+    } else if (hasMissionInBay && run.bay.discardedThisArrange.length > 0) {
+      const discardedText = summarizeV2DiscardedSacrifices(run.bay);
+      if (discardedText) {
+        bannerText = `已舍弃（离开前可撤回）· ${discardedText}`;
+      }
+    }
+
+    if (!bannerText) {
+      if (this.sacrificeBannerEl.parentNode === this.sacrificeSlotEl) {
+        this.sacrificeSlotEl.removeChild(this.sacrificeBannerEl);
+      }
+      this.sacrificeSlotEl.style.display = 'none';
+      return;
+    }
+
+    if (this.sacrificeBannerEl.parentNode !== this.sacrificeSlotEl) {
+      this.sacrificeSlotEl.appendChild(this.sacrificeBannerEl);
+    }
+    this.sacrificeSlotEl.style.display = 'contents';
+    if (this.sacrificeBannerEl.textContent !== bannerText) {
+      this.sacrificeBannerEl.textContent = bannerText;
     }
   }
 
@@ -534,6 +595,8 @@ export class ArrangePhaseView implements PhaseView<ArrangeViewProps, ArrangeView
     this.shipNameEl = null;
     this.mountPillsHostEl = null;
     this.toggleShipBtn = null;
+    this.sacrificeSlotEl = null;
+    this.sacrificeBannerEl = null;
     this.engineerSlotEl = null;
     this.engineerBannerEl = null;
     this.engineerTitleEl = null;

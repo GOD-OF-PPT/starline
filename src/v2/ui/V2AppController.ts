@@ -403,6 +403,7 @@ export class V2AppController {
       this.titleEntered = true;
       this.writeTitleSession(true);
     }
+    this.campaignBannerCollapsed = !this.save.profile.tutorialCompleted;
 
     this.applySettingsEffects();
 
@@ -555,6 +556,15 @@ export class V2AppController {
   }
 
   private computeNextBaseGoal(p: V2ProfileState, projectedCredits = p.credits): NextBaseGoal {
+    if (!p.tutorialCompleted) {
+      return {
+        title: '首航目标：启动拆解工作台',
+        detail: '完成首航教学带回密封反应堆，免费通电工作台并奖 +40¤',
+        actionKind: 'facilities',
+        ready: true,
+      };
+    }
+
     if (p.buildings.research_lab) {
       const researchable = p.equipmentWarehouse.find(
         (w) => canResearchV2Instance(p, w.instanceId).canResearch
@@ -1090,7 +1100,7 @@ export class V2AppController {
           : hint.mapHint || hint.arrangeHint;
       items.push(`
         <div class="tutorial-banner">
-          <span class="tutorial-badge">首航教学 ${currentLayer}/3</span>
+          <span class="tutorial-badge">首航教学 ${currentLayer}/${run.graph.maxLayers}</span>
           <span>${hintText}</span>
         </div>
       `);
@@ -2961,11 +2971,15 @@ export class V2AppController {
             return;
           }
 
+          const wasTutorialCompleted = this.save.profile.tutorialCompleted;
           this.save = {
             ...this.save,
             profile: result.profile,
             activeRun: null,
           };
+          if (!wasTutorialCompleted && result.profile.tutorialCompleted) {
+            this.campaignBannerCollapsed = false;
+          }
           this.settlementDispositions = {};
           this.persist();
 
