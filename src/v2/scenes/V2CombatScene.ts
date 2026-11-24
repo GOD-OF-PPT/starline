@@ -2477,12 +2477,11 @@ export class V2CombatScene extends Phaser.Scene {
       this.playerSprite
         .setPosition(this.playerBaseX + this.playerRecoilX, this.playerBaseY + bobP)
         .setAngle(this.playerAngleDeg);
-      if (this.playerFlashMs > 0 && !reduced) {
-        this.playerFlashMs = Math.max(0, this.playerFlashMs - fxDeltaMs);
+      this.playerFlashMs = reduced ? 0 : Math.max(0, this.playerFlashMs - fxDeltaMs);
+      if (this.playerFlashMs > 0) {
         this.playerSprite.setTint(VFX_HIT_MILD_TINT);
         this.playerCurrentTint = VFX_HIT_MILD_TINT;
       } else {
-        this.playerFlashMs = 0;
         this.playerCurrentTint = this.playerBaseTint;
         if (this.playerBaseTint !== null) {
           this.playerSprite.setTint(this.playerBaseTint);
@@ -2519,19 +2518,16 @@ export class V2CombatScene extends Phaser.Scene {
         e.intentTag.setPosition(e.baseX + e.recoilX, e.baseY + bobE - yOff);
       }
       const isDamaged = e.hp > 0 && e.hp <= e.maxHp * 0.5;
-      if (e.flashMs > 0 && !reduced) {
-        e.flashMs = Math.max(0, e.flashMs - fxDeltaMs);
+      e.flashMs = reduced ? 0 : Math.max(0, e.flashMs - fxDeltaMs);
+      if (e.flashMs > 0) {
         e.sprite.setTint(VFX_HIT_MILD_TINT);
+      } else if (isDamaged) {
+        const flicker = !reduced && Math.sin(this.elapsed * 18 + i * 3) > 0.72;
+        e.sprite.setTint(flicker ? 0x8fa1b8 : 0xb6c0cf);
+      } else if (e.baseTint !== null) {
+        e.sprite.setTint(e.baseTint);
       } else {
-        e.flashMs = 0;
-        if (isDamaged) {
-          const flicker = !reduced && Math.sin(this.elapsed * 18 + i * 3) > 0.72;
-          e.sprite.setTint(flicker ? 0x8fa1b8 : 0xb6c0cf);
-        } else if (e.baseTint !== null) {
-          e.sprite.setTint(e.baseTint);
-        } else {
-          e.sprite.clearTint();
-        }
+        e.sprite.clearTint();
       }
       if (emitSmoke && isDamaged) {
         this.smokes.push({
