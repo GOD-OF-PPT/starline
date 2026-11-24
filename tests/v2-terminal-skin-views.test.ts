@@ -551,6 +551,9 @@ vi.mock('phaser', () => ({
   },
 }));
 
+import { soundEngine } from '../src/audio/soundEngine';
+import { createFreshSaveData, persistSaveData } from '../src/domain/persistence';
+import type { BaseScene } from '../src/scenes/BaseScene';
 import { PhaserHost } from '../src/scenes/PhaserHost';
 import { openManagedModal } from '../src/ui/Modals';
 import { createV2TutorialRun } from '../src/v2/data/tutorialV2';
@@ -2052,7 +2055,7 @@ describe('Suite A — A09 + M5-3 Industrial Terminal UI Skin, V1 Isolation & Art
     expect(modalCardsBase!.body).not.toContain('border-color:');
 
     for (const preservedVariant of [
-      '.v2-shell .v2-wreck-hotspot.active:not(:disabled)',
+      '.v2-shell .v2-wreck-hotspot.active:not(:disabled):not(.is-lethal)',
       '.v2-shell .v2-dag-node.current',
       '.v2-shell .v2-dag-node.selected',
       '.v2-shell .v2-dock-btn:hover:not(:disabled)',
@@ -2129,6 +2132,69 @@ describe('Suite A — A09 + M5-3 Industrial Terminal UI Skin, V1 Isolation & Art
         mediaTransformKill.some((r) => r.selectors.some((s) => s.includes(centeredEl)))
       ).toBe(false);
     }
+  });
+
+  it('Iter-3 CSS cascade regression (C1-Iter2 #1–#3 + hardening): preserves lethal zebra pin when active, S05 paused countdown button style, disabled pin hover lock & locked sector chip rules', async () => {
+    const skinCss = await readRepoText('src/v2/ui/styles/v3-terminal-skin.css');
+    const rules = parseCssRules(skinCss);
+    const allSelectors = rules.flatMap((r) => r.selectors);
+
+    // 1. C1-Iter2 #1: Active wreck hotspot MUST exclude .is-lethal, and lethal active pin adds selection halo AFTER Section 5 lethal rule without altering zebra bg/border
+    expect(allSelectors).toContain('.v2-shell .v2-wreck-hotspot.active:not(:disabled):not(.is-lethal)');
+    expect(allSelectors).not.toContain('.v2-shell .v2-wreck-hotspot.active:not(:disabled)');
+
+    const lethalBaseIdx = rules.findIndex((r) =>
+      r.selectors.includes('.v2-shell .v3-wreck-compartment-pin.is-lethal')
+    );
+    const lethalActiveIdx = rules.findIndex((r) =>
+      r.selectors.includes('.v2-shell .v3-wreck-compartment-pin.is-lethal.active:not(:disabled)')
+    );
+    expect(lethalBaseIdx).toBeGreaterThan(-1);
+    expect(lethalActiveIdx).toBeGreaterThan(lethalBaseIdx);
+    expect(rules[lethalActiveIdx]!.body).toContain('box-shadow:');
+    expect(rules[lethalActiveIdx]!.body).not.toContain('background');
+    expect(rules[lethalActiveIdx]!.body).not.toContain('border');
+
+    // 2. C1-Iter2 #2: S05 Pre-Combat paused countdown button (.v3-pause-auto-btn.is-paused) beats .btn.btn-secondary while yielding to Section 9 :disabled
+    const btnSecondaryIdx = rules.findIndex((r) =>
+      r.selectors.includes('.v2-shell .btn.btn-secondary')
+    );
+    const pausePausedIdx = rules.findIndex((r) =>
+      r.selectors.includes('.v2-shell .btn.btn-secondary.v3-pause-auto-btn.is-paused:not(:disabled)')
+    );
+    const disabledIdx = rules.findIndex((r) => r.selectors.includes('.v2-shell .btn:disabled'));
+    expect(btnSecondaryIdx).toBeGreaterThan(-1);
+    expect(pausePausedIdx).toBeGreaterThan(btnSecondaryIdx);
+    expect(disabledIdx).toBeGreaterThan(pausePausedIdx);
+    expect(rules[pausePausedIdx]!.body).toContain('border-left: 3px solid var(--ts-phosphor-amber)');
+    expect(rules[pausePausedIdx]!.body).toContain('color: #ffe09a');
+
+    // 3. C1-Iter2 #3: Disabled/cut wreck compartment pin locks transform: translate(-50%, -50%) & cursor: not-allowed (including :hover)
+    const disabledPinRule = rules.find((r) =>
+      r.selectors.includes('.v2-shell .v3-wreck-compartment-pin:disabled')
+    );
+    expect(disabledPinRule).toBeDefined();
+    expect(disabledPinRule!.selectors).toContain('.v2-shell .v3-wreck-compartment-pin:disabled:hover');
+    expect(disabledPinRule!.selectors).toContain('.v2-shell .v2-wreck-hotspot:disabled');
+    expect(disabledPinRule!.selectors).toContain('.v2-shell .v2-wreck-hotspot:disabled:hover');
+    expect(disabledPinRule!.body).toMatch(/transform:\s*translate\(-50%,\s*-50%\)/);
+    expect(disabledPinRule!.body).toMatch(/cursor:\s*not-allowed/);
+
+    // 4. Hardening: Locked sector chips without :disabled are also covered in Section 9
+    for (const lockedSectorSel of [
+      '.v2-shell .v2-sector-chip.active.is-locked',
+      '.v2-shell .v2-sector-chip.sector-frozen.is-locked',
+      '.v2-shell .v2-sector-chip.sector-frozen.active.is-locked',
+      '.v2-shell .v2-sector-chip.sector-abyss.is-locked',
+      '.v2-shell .v2-sector-chip.sector-abyss.active.is-locked',
+    ]) {
+      expect(rules[disabledIdx]!.selectors).toContain(lockedSectorSel);
+    }
+
+    // 5. Global hygiene invariants preserved: 0 #id selectors, 0 unscoped selectors, 0 99px/999px pill radii
+    expect(allSelectors.filter((s) => s.includes('#'))).toEqual([]);
+    expect(allSelectors.filter((s) => !isStrictlyV2ScopedSelector(s))).toEqual([]);
+    expect(skinCss).not.toMatch(/border-radius:\s*(99|999|9999)px/);
   });
 });
 
@@ -3598,6 +3664,175 @@ describe('Suite B — M5-4 Stateful PhaseView Lifecycle Across All 12 Upgraded V
 
     view.unmount();
   });
+
+  it('Iter-3 Fix 5 & 7 (C2-#1, #2, #4): SettlementPhaseView clears pendingClickDedup on rejected click, recovers radio DOM via try/finally on throw, and keeps clickDedupSeq monotonic across remounts', async () => {
+    const host = env.doc.createElement('div');
+    env.doc.body.appendChild(host);
+
+    const profile = makeRichProfile();
+    const baseRun = makeLaunchedRun(profile, 4343);
+    const lootEq = createV2EquipmentInstance({
+      instanceId: 'iter3_settle_eq',
+      kind: 'shield',
+      quality: 'common',
+      origin: 'loot',
+      acquiredDepth: 1,
+      location: 'bay',
+    });
+    const settleRun: V2RunState = {
+      ...baseRun,
+      phase: 'SETTLEMENT',
+      settlementReason: 'safe_return',
+      bay: {
+        ...baseRun.bay,
+        placed: [...baseRun.bay.placed, { item: lootEq, x: 2, y: 2, rotation: 0 }],
+      },
+    };
+
+    const disps: Record<string, 'sell' | 'store' | 'dismantle'> = {};
+    let mode: 'accept' | 'reject' | 'throw_label' | 'throw_change' = 'accept';
+    const calls: Array<{ id: string; disp: string }> = [];
+    const view = new SettlementPhaseView();
+    view.mount(host as unknown as HTMLElement);
+
+    const syncView = () => {
+      const summary = calculateV2Settlement(settleRun, profile, disps);
+      view.update(
+        { run: settleRun, profile, summary, nextGoal: makeNextGoal(), readOnly: false },
+        {
+          onChangeDisposition: (id, disp) => {
+            if (mode === 'reject') return;
+            if (mode === 'throw_label') throw new Error('boom-label');
+            if (mode === 'throw_change') throw new Error('boom-change');
+            calls.push({ id, disp });
+            disps[id] = disp as 'sell' | 'store' | 'dismantle';
+            syncView();
+          },
+          onShowcaseRetry: () => {},
+          onShowcaseToBase: () => {},
+          onConfirmSettlement: () => {},
+        }
+      );
+    };
+    syncView();
+
+    const getRefs = () => {
+      const sellLabel = host.querySelector(
+        `label[data-settle-item="${lootEq.instanceId}"][data-settle-disp="sell"]`
+      )!;
+      const storeLabel = host.querySelector(
+        `label[data-settle-item="${lootEq.instanceId}"][data-settle-disp="store"]`
+      )!;
+      const dismantleLabel = host.querySelector(
+        `label[data-settle-item="${lootEq.instanceId}"][data-settle-disp="dismantle"]`
+      )!;
+      return {
+        sellLabel,
+        storeLabel,
+        dismantleLabel,
+        sellRadio: sellLabel.querySelector('input[data-settle-radio]')!,
+        storeRadio: storeLabel.querySelector('input[data-settle-radio]')!,
+        dismantleRadio: dismantleLabel.querySelector('input[data-settle-radio]')!,
+      };
+    };
+
+    const r1 = getRefs();
+    expect(r1.sellRadio.checked).toBe(true);
+
+    // (a) C2-#1: Rejected <label> click -> same-tick direct radio.click() retry MUST immediately succeed!
+    mode = 'reject';
+    r1.dismantleLabel.click();
+    expect(calls).toHaveLength(0);
+    expect(r1.dismantleRadio.checked).toBe(false);
+    expect(r1.sellRadio.checked).toBe(true);
+
+    // Same tick (before any microtask flush): unlock & directly activate radio + paired change
+    mode = 'accept';
+    r1.dismantleRadio.checked = true;
+    r1.dismantleRadio.dispatchEvent(new MiniEvent('click', { bubbles: true }));
+    r1.dismantleRadio.dispatchEvent(new MiniEvent('change', { bubbles: true }));
+    expect(calls).toEqual([{ id: lootEq.instanceId, disp: 'dismantle' }]);
+    expect(r1.dismantleRadio.checked).toBe(true);
+    expect(r1.sellRadio.checked).toBe(false);
+    expect(r1.dismantleLabel.classList.contains('is-selected')).toBe(true);
+
+    // (b) C2-#2: Throwing onChangeDisposition on BOTH <label> click AND direct change restores prevDisp cleanly
+    mode = 'throw_label';
+    expect(() => r1.storeLabel.click()).toThrow('boom-label');
+    expect(r1.storeRadio.checked).toBe(false);
+    expect(r1.storeRadio.getAttribute('checked')).toBeNull();
+    expect(r1.dismantleRadio.checked).toBe(true);
+    expect(r1.dismantleLabel.classList.contains('is-selected')).toBe(true);
+
+    mode = 'throw_change';
+    r1.sellRadio.checked = true;
+    expect(() => r1.sellRadio.dispatchEvent(new MiniEvent('change', { bubbles: true }))).toThrow(
+      'boom-change'
+    );
+    expect(r1.sellRadio.checked).toBe(false);
+    expect(r1.sellRadio.getAttribute('checked')).toBeNull();
+    expect(r1.dismantleRadio.checked).toBe(true);
+    expect(r1.dismantleLabel.classList.contains('is-selected')).toBe(true);
+
+    // Recovery click after throws still works cleanly
+    mode = 'accept';
+    r1.sellLabel.click();
+    expect(calls).toEqual([
+      { id: lootEq.instanceId, disp: 'dismantle' },
+      { id: lootEq.instanceId, disp: 'sell' },
+    ]);
+    expect(r1.sellRadio.checked).toBe(true);
+
+    // (c) C2-#4: Same-tick click -> unmount -> remount -> click MUST NOT let stale pre-unmount microtask wipe new pendingClickDedup
+    await Promise.resolve();
+    calls.length = 0;
+
+    // Mount #1 click queues stale microtask M1 (token = t1)
+    r1.dismantleLabel.click();
+    expect(calls).toEqual([{ id: lootEq.instanceId, disp: 'dismantle' }]);
+
+    // Queue probe microtask strictly AFTER M1 and strictly BEFORE M2!
+    let pendingAfterStaleMicrotask: { token: number; disp: string } | null = null;
+    const probeDone = Promise.resolve().then(() => {
+      const cur = (
+        view as unknown as {
+          pendingClickDedup: { token: number; disp: string } | null;
+        }
+      ).pendingClickDedup;
+      pendingAfterStaleMicrotask = cur ? { token: cur.token, disp: cur.disp } : null;
+    });
+
+    // Still synchronously in the same tick: unmount -> remount -> sync -> click (arms token = t2 > t1 & queues M2)
+    view.unmount();
+    disps[lootEq.instanceId] = 'sell';
+    view.mount(host as unknown as HTMLElement);
+    syncView();
+    const r2 = getRefs();
+    r2.storeLabel.click();
+    const tokenOnRemount = (
+      view as unknown as { pendingClickDedup: { token: number } | null }
+    ).pendingClickDedup!.token;
+
+    await probeDone;
+    // M1 ran, MUST NOT have cleared Mount #2's pendingClickDedup!
+    expect(pendingAfterStaleMicrotask).toEqual({ token: tokenOnRemount, disp: 'store' });
+
+    // Forwarded synthetic radio click + change after M1 MUST still be deduplicated until M2 runs
+    r2.storeRadio.dispatchEvent(new MiniEvent('click', { bubbles: true }));
+    r2.storeRadio.dispatchEvent(new MiniEvent('change', { bubbles: true }));
+    expect(calls).toEqual([
+      { id: lootEq.instanceId, disp: 'dismantle' },
+      { id: lootEq.instanceId, disp: 'store' },
+    ]);
+
+    // After M2 flushes, pendingClickDedup clears cleanly
+    await Promise.resolve();
+    expect(
+      (view as unknown as { pendingClickDedup: unknown }).pendingClickDedup
+    ).toBeNull();
+
+    view.unmount();
+  });
 });
 
 // ===========================================================================
@@ -4133,5 +4368,100 @@ describe('Suite C — V2AppController Unified 4-Slot PhaseView Lifecycle Integra
     (ctrl as unknown as { activeDockingNotice: unknown }).activeDockingNotice = { animating: true };
     ctrl.destroy();
     expect((ctrl as unknown as { activeDockingNotice: unknown }).activeDockingNotice).toBeNull();
+  });
+
+  it('Iter-3 Fix 6 (C2-#3): resetting V2 save or confirming V1->V2 migration mid-Base-docking calls skipBaseReturnDocking() and produces 0 craneServo SFX on BaseScene.update()', () => {
+    vi.useFakeTimers();
+
+    const makeSettlementSave = (): V2SaveData => {
+      const profile = makeRichProfile();
+      const baseRun = makeLaunchedRun(profile, 6464);
+      const settleRun: V2RunState = {
+        ...baseRun,
+        phase: 'SETTLEMENT',
+        settlementReason: 'safe_return',
+        wallet: 120,
+      };
+      return {
+        ...createFreshV2SaveData(),
+        profile,
+        settings: { ...createFreshV2SaveData().settings, reducedMotion: false },
+        activeRun: settleRun,
+      };
+    };
+
+    const getBaseScene = (ctrl: V2AppController): BaseScene =>
+      (ctrl as unknown as { phaserHost: { baseScene: BaseScene } }).phaserHost.baseScene;
+
+    // 1. onResetV2Save mid-docking
+    persistV2SaveData(env.win.localStorage as unknown as Storage, makeSettlementSave());
+    env.win.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+    const skipDockingSpy = vi.spyOn(PhaserHost.prototype, 'skipBaseReturnDocking');
+    const soundPlaySpy = vi.spyOn(soundEngine, 'play');
+
+    const ctrl1 = new V2AppController(env.mountEl as unknown as HTMLElement, {
+      onSwitchToV1: () => {},
+    });
+    ctrl1.init();
+
+    // Confirm settlement in non-reducedMotion -> starts BaseScene return docking!
+    env.mountEl.querySelector('[data-testid="btn-confirm-settlement"]')!.click();
+    const baseScene1 = getBaseScene(ctrl1);
+    expect(baseScene1.getDockingVisualSnapshot().active).toBe(true);
+    expect((ctrl1 as unknown as { activeDockingNotice: unknown }).activeDockingNotice).not.toBeNull();
+
+    // Open Settings -> click Reset Save twice (arm + confirm)
+    env.mountEl.querySelector('#v2-hud-settings')!.click();
+    env.mountEl.querySelector('#v2-btn-reset')!.click();
+    env.mountEl.querySelector('#v2-btn-reset')!.click();
+
+    expect(skipDockingSpy).toHaveBeenCalledTimes(1);
+    expect((ctrl1 as unknown as { activeDockingNotice: unknown }).activeDockingNotice).toBeNull();
+    expect(baseScene1.getDockingVisualSnapshot().active).toBe(false);
+
+    // Step BaseScene.update() after reset -> MUST fire 0 craneServo SFX!
+    soundPlaySpy.mockClear();
+    for (let i = 0; i < 6; i++) {
+      baseScene1.update(i * 400, 400);
+    }
+    const craneAfterReset = soundPlaySpy.mock.calls.filter(([kind]) => kind === 'craneServo');
+    expect(craneAfterReset).toHaveLength(0);
+    ctrl1.destroy();
+
+    // 2. onConfirmMigrate mid-docking
+    env.win.localStorage.clear();
+    const v1Save = createFreshSaveData();
+    persistSaveData(env.win.localStorage as unknown as Storage, v1Save);
+    persistV2SaveData(env.win.localStorage as unknown as Storage, makeSettlementSave());
+    env.win.sessionStorage.setItem('starline_v2_title_entered', '1');
+    skipDockingSpy.mockClear();
+
+    const ctrl2 = new V2AppController(env.mountEl as unknown as HTMLElement, {
+      onSwitchToV1: () => {},
+    });
+    ctrl2.init();
+
+    env.mountEl.querySelector('[data-testid="btn-confirm-settlement"]')!.click();
+    const baseScene2 = getBaseScene(ctrl2);
+    expect(baseScene2.getDockingVisualSnapshot().active).toBe(true);
+    expect((ctrl2 as unknown as { activeDockingNotice: unknown }).activeDockingNotice).not.toBeNull();
+
+    // Open Settings -> Open Migration Wizard -> Confirm Migrate
+    env.mountEl.querySelector('#v2-hud-settings')!.click();
+    env.mountEl.querySelector('#v2-btn-open-mig')!.click();
+    env.mountEl.querySelector('#v2-mig-go')!.click();
+
+    expect(skipDockingSpy).toHaveBeenCalledTimes(1);
+    expect((ctrl2 as unknown as { activeDockingNotice: unknown }).activeDockingNotice).toBeNull();
+    expect(baseScene2.getDockingVisualSnapshot().active).toBe(false);
+
+    soundPlaySpy.mockClear();
+    for (let i = 0; i < 6; i++) {
+      baseScene2.update(i * 400, 400);
+    }
+    const craneAfterMigrate = soundPlaySpy.mock.calls.filter(([kind]) => kind === 'craneServo');
+    expect(craneAfterMigrate).toHaveLength(0);
+    ctrl2.destroy();
   });
 });
