@@ -321,8 +321,8 @@
     inset 0 -2px 0 rgba(3, 8, 16, 0.8);
 }
 
-/* Active wreck hotspot highlight (preserves translate(-50%, -50%) centering untouched) */
-.v2-shell .v2-wreck-hotspot.active:not(:disabled) {
+/* Active wreck hotspot highlight (preserves translate(-50%, -50%) centering untouched; never overrides .is-lethal hazard zebra) */
+.v2-shell .v2-wreck-hotspot.active:not(:disabled):not(.is-lethal) {
   border-color: var(--ts-phosphor-amber);
   background: linear-gradient(180deg, rgba(84, 56, 18, 0.94) 0%, rgba(44, 28, 10, 0.96) 100%);
   color: #fff;
@@ -645,6 +645,14 @@
   border-color: #49617e;
   border-top-color: #6d89ab;
   border-bottom: 3px solid #0a121d;
+}
+
+/* S05 Pre-Combat paused auto-engage countdown key (yields cleanly to Section 9 :disabled) */
+.v2-shell .btn.btn-secondary.v3-pause-auto-btn.is-paused:not(:disabled) {
+  border-color: rgba(246, 184, 82, 0.78);
+  border-top-color: #ffe2a4;
+  border-left: 3px solid var(--ts-phosphor-amber);
+  color: #ffe09a;
 }
 
 /* Ghost Recessed Console Auxiliary Key */
@@ -1011,6 +1019,13 @@
   color: #ffe8e2;
 }
 
+/* Active selection halo on lethal wreck pin (preserves crimson zebra stripes & safety border intact) */
+.v2-shell .v3-wreck-compartment-pin.is-lethal.active:not(:disabled) {
+  box-shadow:
+    0 0 0 2px rgba(246, 184, 82, 0.9),
+    0 0 18px rgba(242, 117, 100, 0.55);
+}
+
 .v2-shell .v3-wcc-status.lethal,
 .v2-shell .v3-risk-pill.risk-lethal,
 .v2-shell .v3-risk-pill.risk-ambush,
@@ -1336,8 +1351,13 @@
 .v2-shell .v2-crew-pill.is-locked,
 .v2-shell .v2-sector-chip:disabled,
 .v2-shell .v2-sector-chip.is-locked,
+.v2-shell .v2-sector-chip.active.is-locked,
 .v2-shell .v2-sector-chip.sector-frozen:disabled,
+.v2-shell .v2-sector-chip.sector-frozen.is-locked,
+.v2-shell .v2-sector-chip.sector-frozen.active.is-locked,
 .v2-shell .v2-sector-chip.sector-abyss:disabled,
+.v2-shell .v2-sector-chip.sector-abyss.is-locked,
+.v2-shell .v2-sector-chip.sector-abyss.active.is-locked,
 .v2-shell .v3-mode-btn:disabled,
 .v2-shell .v3-mode-btn.mode-final:disabled,
 .v2-shell .v3-mode-btn.mode-endless:disabled,
@@ -1389,7 +1409,9 @@
 }
 
 .v2-shell .v3-wreck-compartment-pin:disabled,
-.v2-shell .v2-wreck-hotspot:disabled {
+.v2-shell .v3-wreck-compartment-pin:disabled:hover,
+.v2-shell .v2-wreck-hotspot:disabled,
+.v2-shell .v2-wreck-hotspot:disabled:hover {
   background-color: var(--ts-off-bg);
   background-image: linear-gradient(180deg, #111a26 0%, #0c131d 100%);
   border: 1px dashed var(--ts-off-border);
@@ -1397,6 +1419,8 @@
   box-shadow: inset 0 2px 5px rgba(2, 6, 14, 0.78);
   opacity: 0.88;
   filter: saturate(0.2);
+  transform: translate(-50%, -50%);
+  cursor: not-allowed;
 }
 
 /* --------------------------------------------------------------------------
