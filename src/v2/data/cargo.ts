@@ -11,7 +11,7 @@ export type V2RegularCargoKind =
 /** Preserved v3.0 collectible relics (migrated & collectable in deep/elite encounters, ADR-02) */
 export type V2ExtendedRelicCargoKind = 'quantum_core' | 'cryo_amber' | 'obsidian_crown';
 
-export type V2MissionCargoKind = 'sealed_reactor' | 'escape_pod';
+export type V2MissionCargoKind = 'sealed_reactor' | 'escape_pod' | 'black_box';
 
 export type V2CargoKind = V2RegularCargoKind | V2ExtendedRelicCargoKind | V2MissionCargoKind;
 
@@ -172,6 +172,17 @@ export const V2_CARGO_DEFS: Record<string, V2CargoDef> = {
     isCollectible: false,
     isMissionItem: true,
     summary: '失联救援任务舱（1×2）· 携带期间每次跨层额外耗 1 燃料 · 不可出售',
+  },
+  'mission.black_box': {
+    defId: 'mission.black_box',
+    kind: 'black_box',
+    name: '加密黑匣记录仪',
+    shortName: '黑匣子',
+    shapeId: '1x2',
+    layer1BasePrice: 0,
+    isCollectible: false,
+    isMissionItem: true,
+    summary: '黑匣打捞委托件（1×2）· 无普通卖价 · 不可拆解，需带回港交付',
   },
 };
 

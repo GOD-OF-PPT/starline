@@ -7,15 +7,31 @@ import {
   type V2ArchetypeId,
   type V2EquipmentKind,
 } from '../data/equipment';
+import { getV3GadgetDef } from '../data/gadgets';
+import {
+  MAX_ENDLESS_THREAT,
+  V3_SECTORS,
+  getV3SectorDef,
+  isEndlessMutatorId,
+  rollEndlessMutators,
+} from '../data/sectors';
 import type { V2Rotation } from '../data/shapes';
 import { V2_SHIPS, type V2ShipId } from '../data/ships';
-import { createV2ContractInstance } from './contracts';
+import { isFinalCampaignMissionUnlocked, shouldTriggerRelicPitySignal } from './campaign';
+import { createV2ContractInstance, generateContractBonusObjective } from './contracts';
+import { getEffectiveShipLoadoutBudget, getEffectiveShipMaxHp } from './dismantle';
 import {
   createEmptyV2Bay,
   findFirstLegalV2Placement,
   validateV2Placement,
 } from './inventoryV2';
-import { createV2EquipmentInstance } from './itemCatalog';
+import { createV2EquipmentInstance, createV3GadgetInstance } from './itemCatalog';
+import {
+  getActiveRelicPassives,
+  getEffectiveMaxPresets,
+  getFacilityTier,
+  getStargateRelayStartingWallet,
+} from './progressionV2';
 import { createV2RngStreams } from './rngStreams';
 import { generateV2StarGraph } from './routeGenerator';
 import { buildTrialPrepareSlots, isKindAuthorizedByTrialBuild } from '../data/trialBuilds';
@@ -24,6 +40,7 @@ import {
   V2_RULES_VERSION,
   V2_SCHEMA_VERSION,
   V2_STARTING_FUEL,
+  type SectorId,
   type V2CargoBayState,
   type V2LoadoutPreset,
   type V2PlacedItem,
@@ -54,16 +71,36 @@ export interface V2PrepareValidation {
   readonly ownedInstancesUsed: readonly string[];
 }
 
+export interface V2PrepareModeOptions {
+  readonly isFinalCampaignRun?: boolean;
+  readonly endlessThreat?: number;
+  readonly endlessMutatorIds?: readonly string[];
+}
+
+/**
+ * Pure uint32 parser for Endless Challenge custom seed input (mirrors `?seed=<uint32>`).
+ * Returns null if blank or invalid.
+ */
+export function parseV3CustomSeedInput(raw: string | undefined | null): number | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const num = Number(trimmed);
+  if (!Number.isFinite(num) || !Number.isSafeInteger(num) || num < 0) return null;
+  return Math.min(0xffffffff, num) >>> 0;
+}
+
 /**
  * Builds a guaranteed-free, budget-legal starter loadout using unlocked common blueprints
  * so even a bankrupt player (0 credits, 0 warehouse items) can ALWAYS launch (§6.1 & AC12).
  */
 export function buildFreeFallbackPrepareSlots(
   shipId: V2ShipId,
-  blueprints: readonly V2EquipmentKind[]
+  blueprints: readonly V2EquipmentKind[],
+  budgetOverride?: number
 ): readonly V2PrepareSlotEntry[] {
   const ship = V2_SHIPS[shipId];
-  const budget = ship.loadoutBudget;
+  const budget = budgetOverride ?? ship.loadoutBudget;
   let usedBudget = 0;
   let tempBay: V2CargoBayState = createEmptyV2Bay(shipId);
   const out: V2PrepareSlotEntry[] = [];
@@ -111,9 +148,17 @@ export function validateV2PrepareLoadout(
   shipId: V2ShipId,
   crewId: V2CrewId | null,
   slots: readonly V2PrepareSlotEntry[],
-  trialBuildId: V2TrialBuildId | null = null
+  trialBuildId: V2TrialBuildId | null = null,
+  sectorId: SectorId = 'near_orbit',
+  options?: V2PrepareModeOptions
 ): V2PrepareValidation {
   const errors: string[] = [];
+  if (!Object.prototype.hasOwnProperty.call(V3_SECTORS, sectorId)) {
+    errors.push(`未知目标星区「${String(sectorId)}」`);
+  } else if (!profile.campaign.unlockedSectors.includes(sectorId)) {
+    const sector = getV3SectorDef(sectorId);
+    errors.push(`目标星区「${sector.name}」尚未解锁（${sector.unlockRequirementText}）`);
+  }
   if (!profile.unlockedShips.includes(shipId)) {
     errors.push(`舰船 ${V2_SHIPS[shipId]?.name ?? shipId} 尚未解锁`);
   }
@@ -121,19 +166,107 @@ export function validateV2PrepareLoadout(
     errors.push('所选船员尚未解锁');
   }
 
-  const ship = V2_SHIPS[shipId];
-  const maxBudget = ship.loadoutBudget;
+  // F17: Act III Final Campaign Mission domain gating
+  const isFinalCampaignRun = Boolean(options?.isFinalCampaignRun);
+  const rawThreat = options?.endlessThreat;
+  if (isFinalCampaignRun) {
+    const gate = isFinalCampaignMissionUnlocked(profile);
+    if (!gate.unlocked) {
+      errors.push(
+        `星门重启远征前置未满足：${gate.unmetReasons[0] ?? '请先完成第三幕前置目标'}`
+      );
+    }
+    if (sectorId !== 'stargate_abyss') {
+      errors.push('星门重启远征必须在「古代星门禁区」执行');
+    }
+    if (rawThreat !== undefined && rawThreat !== 0) {
+      errors.push('星门重启远征与无尽深渊不可同时启用');
+    }
+  }
+
+  // F18: Endless Abyss (威压 1..10) domain gating
+  if (rawThreat !== undefined && rawThreat !== 0) {
+    if (
+      typeof rawThreat !== 'number' ||
+      !Number.isFinite(rawThreat) ||
+      !Number.isInteger(rawThreat) ||
+      rawThreat < 1 ||
+      rawThreat > MAX_ENDLESS_THREAT
+    ) {
+      errors.push(`无尽深渊威压等级必须在 1–${MAX_ENDLESS_THREAT} 之间`);
+    } else if (!profile.campaign.endlessUnlocked) {
+      errors.push('无尽深渊尚未解锁（通关第三幕「星门重启远征」后解锁）');
+    } else {
+      const maxAllowed = Math.max(
+        1,
+        Math.min(MAX_ENDLESS_THREAT, Math.floor(profile.campaign.maxEndlessThreat))
+      );
+      if (rawThreat > maxAllowed) {
+        errors.push(`当前最高可选无尽深渊威压为 威压 ${maxAllowed}（需逐级通关解锁更高威压）`);
+      }
+    }
+  }
+
+  const maxBudget = getEffectiveShipLoadoutBudget(profile, shipId);
   let totalBudget = 0;
   const ownedUsedSet = new Set<string>();
   let tempBay = createEmptyV2Bay(shipId);
 
   for (let i = 0; i < slots.length; i++) {
     const slot = slots[i];
-    const def = V2_EQUIPMENT_DEFS[slot.definitionId];
-    if (!def) {
+    const eqDef = V2_EQUIPMENT_DEFS[slot.definitionId];
+    const gdDef = eqDef ? undefined : getV3GadgetDef(slot.definitionId);
+    if (!eqDef && !gdDef) {
       errors.push(`槽位 ${i + 1} 设备定义无效`);
       continue;
     }
+
+    if (gdDef) {
+      totalBudget += gdDef.budgetCost;
+      if (slot.origin === 'loan') {
+        errors.push(`战术消耗装置「${gdDef.name}」仅限自带库存，不可免费借用`);
+      } else {
+        if (trialBuildId !== null) {
+          errors.push(`全息战术模板不可与自有装置「${gdDef.name}」混搭`);
+        }
+        if (!slot.warehouseInstanceId) {
+          errors.push(`自有槽位 ${gdDef.name} 缺少真实库存实例 ID`);
+        } else {
+          const real = profile.equipmentWarehouse.find(
+            (w) => w.instanceId === slot.warehouseInstanceId
+          );
+          if (!real) {
+            errors.push(`库存中缺少自有装置「${gdDef.name}」`);
+          } else if (real.definitionId !== slot.definitionId) {
+            errors.push(`库存实例与槽位定义不匹配`);
+          } else if (ownedUsedSet.has(real.instanceId)) {
+            errors.push(`同一库存实例不可重复装配`);
+          } else {
+            ownedUsedSet.add(real.instanceId);
+          }
+        }
+      }
+
+      const chk = validateV2Placement(tempBay, slot.definitionId, slot.x, slot.y, slot.rotation);
+      if (!chk.valid) {
+        errors.push(`「${gdDef.name}」放置非法（${chk.reason}）`);
+      } else {
+        const dummy = createV3GadgetInstance({
+          instanceId: `chk_${i}`,
+          kind: gdDef.kind,
+          origin: 'owned',
+          acquiredDepth: 0,
+          location: 'bay',
+        });
+        tempBay = {
+          ...tempBay,
+          placed: [...tempBay.placed, { item: dummy, x: slot.x, y: slot.y, rotation: slot.rotation }],
+        };
+      }
+      continue;
+    }
+
+    const def = eqDef!;
     totalBudget += getEffectiveV2EquipmentBudgetCost(def, slot.origin);
 
     if (slot.origin === 'loan') {
@@ -142,14 +275,14 @@ export function validateV2PrepareLoadout(
       }
       if (trialBuildId !== null) {
         if (!isKindAuthorizedByTrialBuild(trialBuildId, def.kind)) {
-          errors.push(`试航方案为整套借用，不可混入方案外设备「${def.name}」`);
+          errors.push(`全息战术模板为整套借用，不可混入方案外设备「${def.name}」`);
         }
       } else if (!profile.blueprints.includes(def.kind)) {
         errors.push(`尚未解锁「${def.name}」普通蓝图，不可免费借用`);
       }
     } else {
       if (trialBuildId !== null) {
-        errors.push(`试航方案为整套借用，不可与自有设备「${def.name}」混搭`);
+        errors.push(`全息战术模板为整套借用，不可与自有设备「${def.name}」混搭`);
       }
       if (!slot.warehouseInstanceId) {
         errors.push(`自有槽位 ${def.name} 缺少真实库存实例 ID`);
@@ -232,6 +365,10 @@ export function launchV2Expedition(params: {
   readonly seed?: number;
   readonly allowImproved?: boolean;
   readonly maxLayers?: number;
+  readonly sectorId?: SectorId;
+  readonly endlessThreat?: number;
+  readonly endlessMutatorIds?: readonly string[];
+  readonly isFinalCampaignRun?: boolean;
 }): {
   readonly ok: boolean;
   readonly profile: V2ProfileState;
@@ -239,12 +376,20 @@ export function launchV2Expedition(params: {
   readonly errors: readonly string[];
 } {
   const trialBuildId = params.trialBuildId ?? null;
+  const isFinalCampaignRun = Boolean(params.isFinalCampaignRun);
+  const sectorId: SectorId = params.sectorId ?? 'near_orbit';
   const check = validateV2PrepareLoadout(
     params.profile,
     params.shipId,
     params.crewId,
     params.slots,
-    trialBuildId
+    trialBuildId,
+    sectorId,
+    {
+      isFinalCampaignRun,
+      endlessThreat: params.endlessThreat,
+      endlessMutatorIds: params.endlessMutatorIds,
+    }
   );
   if (!check.valid) {
     return { ok: false, profile: params.profile, run: null, errors: check.errors };
@@ -252,9 +397,28 @@ export function launchV2Expedition(params: {
 
   const tpl =
     V2_CONTRACT_TEMPLATES[params.contractTemplateId] ?? V2_CONTRACT_TEMPLATES.free_salvage;
-  const seed = (params.seed ?? createRandomSeed()) >>> 0;
+  const rawSeed = params.seed;
+  const seed =
+    typeof rawSeed === 'number' && Number.isFinite(rawSeed) && rawSeed >= 0
+      ? Math.min(0xffffffff, Math.floor(rawSeed)) >>> 0
+      : createRandomSeed() >>> 0;
+  const effectiveThreat = isFinalCampaignRun
+    ? 0
+    : Math.max(0, Math.min(MAX_ENDLESS_THREAT, Math.floor(params.endlessThreat ?? 0)));
+  const explicitValidMutators =
+    params.endlessMutatorIds && params.endlessMutatorIds.length > 0
+      ? Array.from(new Set(params.endlessMutatorIds.filter((id) => isEndlessMutatorId(id))))
+      : [];
+  const effectiveMutatorIds =
+    effectiveThreat >= 1
+      ? explicitValidMutators.length > 0
+        ? explicitValidMutators
+        : [...rollEndlessMutators(seed, effectiveThreat)]
+      : [];
+
   const runId = `v2run_${seed.toString(36)}_${params.profile.totalRuns + 1}`;
   const streams = createV2RngStreams(seed);
+  const pity = shouldTriggerRelicPitySignal(params.profile, sectorId);
 
   const generated = generateV2StarGraph({
     runId,
@@ -264,9 +428,24 @@ export function launchV2Expedition(params: {
     streams,
     allowImproved: params.allowImproved ?? true,
     maxLayers: params.maxLayers ?? 6,
+    sectorId,
+    endlessThreat: effectiveThreat,
+    isFinalCampaignRun,
+    guaranteedRelicDefId: pity.triggered ? pity.relicDefId : null,
+    researchLabTier: getFacilityTier(params.profile, 'research_lab'),
+    displayTier: getFacilityTier(params.profile, 'display'),
   });
 
-  const contract = createV2ContractInstance(tpl.templateId, generated.markedNodeIds, runId);
+  const bonusObjective = generateContractBonusObjective(tpl, seed);
+  const baseContract = createV2ContractInstance(
+    tpl.templateId,
+    generated.markedNodeIds,
+    runId,
+    bonusObjective
+  );
+  const contract = isFinalCampaignRun
+    ? { ...baseContract, name: '星门重启远征' }
+    : baseContract;
 
   // Atomically move selected owned items from warehouse into run bay, and mint loan items
   const usedOwnedIds = new Set<string>(check.ownedInstancesUsed);
@@ -277,7 +456,6 @@ export function launchV2Expedition(params: {
   const placed: V2PlacedItem[] = [];
   let loanSeq = 1;
   for (const slot of params.slots) {
-    const def = V2_EQUIPMENT_DEFS[slot.definitionId]!;
     if (slot.origin === 'owned' && slot.warehouseInstanceId) {
       const real = params.profile.equipmentWarehouse.find(
         (w) => w.instanceId === slot.warehouseInstanceId
@@ -289,6 +467,7 @@ export function launchV2Expedition(params: {
         rotation: slot.rotation,
       });
     } else {
+      const def = V2_EQUIPMENT_DEFS[slot.definitionId]!;
       const loanItem = createV2EquipmentInstance({
         instanceId: `${runId}_loan_${loanSeq++}`,
         kind: def.kind,
@@ -306,7 +485,18 @@ export function launchV2Expedition(params: {
     }
   }
 
-  const ship = V2_SHIPS[params.shipId];
+  const relicPassives = getActiveRelicPassives(params.profile);
+  const effectiveMaxHp = getEffectiveShipMaxHp(params.profile, params.shipId);
+  const crewMasteryTier = params.crewId
+    ? Math.max(0, Math.min(2, Math.floor(params.profile.crewMastery[params.crewId] ?? 0)))
+    : 0;
+  const navigatorFuelBonus = params.crewId === 'navigator' && crewMasteryTier >= 1 ? 1 : 0;
+  const startingFuel = Math.min(
+    V2_MAX_FUEL,
+    V2_STARTING_FUEL + navigatorFuelBonus + relicPassives.startingFuelBonus
+  );
+  const startingWallet = getStargateRelayStartingWallet(params.profile);
+
   const run: V2RunState = {
     runId,
     schemaVersion: V2_SCHEMA_VERSION,
@@ -320,11 +510,11 @@ export function launchV2Expedition(params: {
     shipId: params.shipId,
     crewId: params.crewId,
     primaryArchetype: params.primaryArchetype,
-    fuel: V2_STARTING_FUEL,
+    fuel: startingFuel,
     maxFuel: V2_MAX_FUEL,
-    hp: ship.maxHp,
-    maxHp: ship.maxHp,
-    wallet: 0,
+    hp: effectiveMaxHp,
+    maxHp: effectiveMaxHp,
+    wallet: startingWallet,
     graph: generated.graph,
     visitedNodeIds: [],
     currentNodeId: null,
@@ -344,6 +534,25 @@ export function launchV2Expedition(params: {
     activeEngineerOffer: null,
     navigatorFreeJumpUsed: false,
     settlementReason: null,
+    sectorId,
+    endlessThreat: effectiveThreat,
+    endlessMutatorIds: effectiveMutatorIds,
+    recentEquipmentKinds: [],
+    usedEventIds: [...generated.usedEventIds],
+    ...(bonusObjective ? { bonusObjective } : {}),
+    tacticalChargesMax: 1,
+    tacticalChargesUsed: 0,
+    salvagePartsEarned: 0,
+    isFinalCampaignRun,
+    crewMasteryTier,
+    defeatedBossIdsThisRun: [],
+    defeatedEnemyKindsThisRun: [],
+    activeWreck: null,
+    activeEvent: null,
+    discardedCountThisRun: 0,
+    wrecksDissectedThisRun: 0,
+    factionRepEarnedThisRun: {},
+    overchargeCellActive: false,
   };
 
   const nextProfile: V2ProfileState = {
@@ -370,14 +579,15 @@ export function saveV2LoadoutPreset(
     readonly slots: readonly V2PrepareSlotEntry[];
   }
 ): { readonly ok: boolean; readonly profile: V2ProfileState; readonly error?: string } {
+  const maxPresets = getEffectiveMaxPresets(profile);
   const existingIdx = input.presetId
     ? profile.loadoutPresets.findIndex((p) => p.presetId === input.presetId)
     : -1;
-  if (existingIdx < 0 && profile.loadoutPresets.length >= V2_MAX_SAVED_PRESETS) {
+  if (existingIdx < 0 && profile.loadoutPresets.length >= maxPresets) {
     return {
       ok: false,
       profile,
-      error: `最多保存 ${V2_MAX_SAVED_PRESETS} 套配装预设，请先覆盖或删除旧预设`,
+      error: `最多保存 ${maxPresets} 套配装预设，请先覆盖或删除旧预设`,
     };
   }
 
@@ -441,8 +651,9 @@ export function resolveV2PresetAgainstWarehouse(
 ): readonly V2ResolvedPresetSlot[] {
   const claimedOwnedIds = new Set<string>();
   return preset.slots.map((ps, idx) => {
-    const def = V2_EQUIPMENT_DEFS[ps.definitionId];
-    if (!def) {
+    const eqDef = V2_EQUIPMENT_DEFS[ps.definitionId];
+    const gdDef = eqDef ? undefined : getV3GadgetDef(ps.definitionId);
+    if (!eqDef && !gdDef) {
       return {
         presetSlot: ps,
         resolved: null,
@@ -451,7 +662,7 @@ export function resolveV2PresetAgainstWarehouse(
       };
     }
 
-    if (ps.preferOrigin === 'owned') {
+    if (ps.preferOrigin === 'owned' || gdDef) {
       const match = profile.equipmentWarehouse.find(
         (w) => w.definitionId === ps.definitionId && !claimedOwnedIds.has(w.instanceId)
       );
@@ -477,12 +688,12 @@ export function resolveV2PresetAgainstWarehouse(
         presetSlot: ps,
         resolved: null,
         missingOwned: true,
-        canSubstituteCommonLoan: profile.blueprints.includes(def.kind),
+        canSubstituteCommonLoan: Boolean(eqDef && profile.blueprints.includes(eqDef.kind)),
       };
     }
 
     // Loan slot
-    if (profile.blueprints.includes(def.kind) && def.quality === 'common') {
+    if (eqDef && profile.blueprints.includes(eqDef.kind) && eqDef.quality === 'common') {
       return {
         presetSlot: ps,
         resolved: {

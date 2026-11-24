@@ -1,6 +1,8 @@
+import type { V2CrewId } from '../data/crew';
+
 /**
- * Unified 1.5px stroke industrial sci-fi inline SVG icon kit (Phase C).
- * Replaces platform-inconsistent emojis across HUD, Base Station dock, Map, Events, and Modals.
+ * Unified 1.5px stroke industrial sci-fi inline SVG icon kit (Phase C + V3 M2).
+ * Replaces platform-inconsistent emojis across HUD, Base Station dock, Map, Events, Campaign, and Modals.
  */
 
 export type V2IconName =
@@ -32,7 +34,21 @@ export type V2IconName =
   | 'combat'
   | 'check'
   | 'bolt'
-  | 'grid';
+  | 'grid'
+  | 'campaign'
+  | 'comms'
+  | 'cryo'
+  | 'gravity'
+  | 'medal'
+  | 'chevronDown'
+  | 'chevronUp'
+  | 'target'
+  | 'boss'
+  | 'parts'
+  | 'cut'
+  | 'warning'
+  | 'faction'
+  | 'upgrade';
 
 const ICON_PATHS: Record<V2IconName, string> = {
   fuel: '<path d="M5 4h7a2 2 0 0 1 2 2v13H4V6a2 2 0 0 1 1-2Z"/><path d="M14 8h2l2 2v5a1.5 1.5 0 0 1-3 0v-3"/><path d="M7 10h4"/><path d="M3 19h12"/>',
@@ -64,9 +80,73 @@ const ICON_PATHS: Record<V2IconName, string> = {
   check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
   bolt: '<path d="M13 2 5 13h6l-1 9 9-12h-6l0-8Z"/>',
   grid: '<rect x="3.5" y="3.5" width="7" height="7" rx="1"/><rect x="13.5" y="3.5" width="7" height="7" rx="1"/><rect x="3.5" y="13.5" width="7" height="7" rx="1"/><rect x="13.5" y="13.5" width="7" height="7" rx="1"/>',
+  campaign: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5" opacity=".75"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/>',
+  comms: '<path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 3.5V16H6.5A2.5 2.5 0 0 1 4 13.5v-7Z"/><path d="M8.5 9.5h7M8.5 12.5h4.5"/>',
+  cryo: '<path d="M12 3v18M4.2 7.5l15.6 9M19.8 7.5l-15.6 9"/><path d="m10 5 2 2 2-2M10 19l2-2 2 2"/>',
+  gravity: '<circle cx="12" cy="12" r="2.5"/><ellipse cx="12" cy="12" rx="9" ry="4" transform="rotate(-24 12 12)"/><ellipse cx="12" cy="12" rx="9" ry="4" transform="rotate(24 12 12)" opacity=".65"/>',
+  medal: '<circle cx="12" cy="10" r="5.5"/><path d="M9 14.8 7.5 21l4.5-2.2L16.5 21 15 14.8"/><path d="m12 7.2.9 1.9 2 .3-1.5 1.4.4 2-1.8-.9-1.8.9.4-2-1.5-1.4 2-.3.9-1.9Z"/>',
+  chevronDown: '<path d="m6 9 6 6 6-6"/>',
+  chevronUp: '<path d="m6 15 6-6 6 6"/>',
+  target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/><path d="M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22"/>',
+  boss: '<path d="m12 2.5 3.5 4.2 5.5-1.2-2.2 5.4 3.2 4.6-5.6.5L12 21.5 7.6 16l-5.6-.5 3.2-4.6L3 5.5l5.5 1.2L12 2.5Z"/><circle cx="12" cy="12" r="2.6"/>',
+  parts: '<circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M4.7 6.2l2.1 1.4M17.2 16.4l2.1 1.4M2.8 12h2.6M18.6 12h2.6M4.7 17.8l2.1-1.4M17.2 7.6l2.1-1.4"/><circle cx="12" cy="12" r="6.8" stroke-dasharray="2.5 2.5" opacity=".6"/>',
+  cut: '<circle cx="6.5" cy="7" r="2.5"/><circle cx="6.5" cy="17" r="2.5"/><path d="M8.7 8.4 20 16M8.7 15.6 20 8"/><path d="M14.5 12h6.5" stroke-dasharray="2 2"/>',
+  warning: '<path d="M12 3.2 21 19.2H3L12 3.2Z"/><path d="M12 9.2v4.6"/><circle cx="12" cy="16.4" r=".8" fill="currentColor"/>',
+  faction: '<path d="M12 2.8 4.5 6.4v5.8c0 4.6 3.2 7.6 7.5 9 4.3-1.4 7.5-4.4 7.5-9V6.4L12 2.8Z"/><path d="m12 7.2 1.6 3.2 3.5.5-2.5 2.4.6 3.4L12 15.1l-3.2 1.6.6-3.4-2.5-2.4 3.5-.5L12 7.2Z"/>',
+  upgrade: '<path d="m6 14 6-6 6 6"/><path d="m6 19.5 6-6 6 6"/><path d="M12 3.5v2.5"/>',
 };
 
 export function svgIcon(name: V2IconName, size = 15, extraClass = ''): string {
   const cls = extraClass ? `v2-ico ${extraClass}` : 'v2-ico';
   return `<svg class="${cls}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name]}</svg>`;
+}
+
+/**
+ * Self-contained industrial sci-fi inline SVG portraits for the 3 named crew specialists:
+ * - engineer (林工): amber welding goggles, headset mic, technician collar
+ * - navigator (陆衡): cyan orbital astrolabe HUD eyepiece, high-collar flight jacket
+ * - salvager (苏岚): emerald-amber salvage visor & breather collar, shoulder lamp
+ * Zero external requests -> 0 failedAssets.
+ */
+export function crewPortraitSvg(crewId: V2CrewId, size = 36, extraClass = ''): string {
+  const cls = extraClass ? `v3-crew-portrait ${extraClass}` : 'v3-crew-portrait';
+  if (crewId === 'engineer') {
+    return `<svg class="${cls}" width="${size}" height="${size}" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+      <rect x="2" y="2" width="44" height="44" rx="10" fill="#152030" stroke="#F6B852" stroke-width="1.8"/>
+      <path d="M10 43c1.6-7.5 6.8-11 14-11s12.4 3.5 14 11" fill="#2A3B52" stroke="#F6B852" stroke-width="1.5"/>
+      <path d="M18 32.5 24 38l6-5.5" stroke="#F6B852" stroke-width="1.5" stroke-linejoin="round"/>
+      <circle cx="24" cy="21" r="8.5" fill="#E3C3A3" stroke="#6B8099" stroke-width="1.3"/>
+      <path d="M15.5 18.5c1.5-5.5 15.5-5.5 17 0" fill="#27364A"/>
+      <rect x="14.5" y="13.5" width="19" height="5" rx="2.5" fill="#1B2A3D" stroke="#F6B852" stroke-width="1.4"/>
+      <circle cx="20" cy="16" r="2.2" fill="#F6B852"/>
+      <circle cx="28" cy="16" r="2.2" fill="#F6B852"/>
+      <path d="M20.5 22.5h2M25.5 22.5h2M22 25.8c1.3.9 2.7.9 4 0" stroke="#223044" stroke-width="1.4" stroke-linecap="round"/>
+      <path d="M32.5 21v3.5l-4.5 1.8" stroke="#62D6DF" stroke-width="1.4" stroke-linecap="round"/>
+      <circle cx="27.5" cy="26.4" r="1.3" fill="#62D6DF"/>
+    </svg>`;
+  }
+  if (crewId === 'navigator') {
+    return `<svg class="${cls}" width="${size}" height="${size}" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+      <rect x="2" y="2" width="44" height="44" rx="10" fill="#132236" stroke="#62D6DF" stroke-width="1.8"/>
+      <circle cx="37" cy="11" r="4.5" stroke="#62D6DF" stroke-width="1.1" opacity="0.55"/>
+      <path d="M37 5.5v11M31.5 11h11" stroke="#62D6DF" stroke-width="0.9" opacity="0.45"/>
+      <path d="M10 43c1.8-7.8 6.8-11.2 14-11.2s12.2 3.4 14 11.2" fill="#1E354E" stroke="#62D6DF" stroke-width="1.5"/>
+      <path d="M16 34.5 24 31l8 3.5" stroke="#62D6DF" stroke-width="1.5" stroke-linejoin="round"/>
+      <circle cx="24" cy="21" r="8.3" fill="#DFC3A8" stroke="#6B8099" stroke-width="1.3"/>
+      <path d="M15.8 19c.6-6.2 7.2-9 12.6-7.2 2.4.8 3.7 2.8 4 5.8-3.4-2-10.2-2.6-16.6 1.4Z" fill="#1E2C3E"/>
+      <rect x="23.5" y="18.5" width="9.5" height="5" rx="1.8" fill="rgba(98,214,223,0.28)" stroke="#62D6DF" stroke-width="1.5"/>
+      <circle cx="27.5" cy="21" r="1.2" fill="#62D6DF"/>
+      <path d="M19.5 21.5h2M22.2 25.5c1.2.6 2.4.6 3.6 0" stroke="#223044" stroke-width="1.4" stroke-linecap="round"/>
+    </svg>`;
+  }
+  return `<svg class="${cls}" width="${size}" height="${size}" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+    <rect x="2" y="2" width="44" height="44" rx="10" fill="#14262D" stroke="#7AE582" stroke-width="1.8"/>
+    <path d="M10 43c1.8-7.4 6.8-11 14-11s12.2 3.6 14 11" fill="#233C3D" stroke="#7AE582" stroke-width="1.5"/>
+    <circle cx="34.5" cy="36.5" r="2.6" fill="#F6B852" stroke="#14262D" stroke-width="1.2"/>
+    <circle cx="24" cy="20.5" r="8.4" fill="#E6C6AA" stroke="#6B8099" stroke-width="1.3"/>
+    <path d="M15 19.5c.4-6.4 5.2-9.2 10.6-8.4 4.2.6 7.4 3.4 7.6 8.4-2.8-2.6-13.8-2.8-18.2 0Z" fill="#243546"/>
+    <path d="M15.5 18.8h17l-1.6 4.8h-13.8l-1.6-4.8Z" fill="rgba(122,229,130,0.25)" stroke="#7AE582" stroke-width="1.4"/>
+    <path d="M19 21.2h4M25 21.2h4" stroke="#7AE582" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M18.5 27.5h11l-1.4 3.5h-8.2l-1.4-3.5Z" fill="#2A404B" stroke="#7AE582" stroke-width="1.2"/>
+  </svg>`;
 }

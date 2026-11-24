@@ -1,16 +1,28 @@
 import { V2_CARGO_DEFS, computeV2CargoPrice, type V2CargoDef } from '../data/cargo';
 import {
   V2_EQUIPMENT_DEFS,
+  getV2EquipmentDefByKind,
   type V2EquipmentDef,
   type V2EquipmentKind,
   type V2Quality,
 } from '../data/equipment';
+import {
+  V3_GADGET_DEFS,
+  type V3GadgetDef,
+  type V3GadgetKind,
+} from '../data/gadgets';
 import type { V2ShapeId } from '../data/shapes';
-import type { V2ItemInstance, V2ItemLocation, V2ItemOrigin } from './types';
+import type {
+  V2ItemInstance,
+  V2ItemLocation,
+  V2ItemOrigin,
+  V2ProfileState,
+  V2RunState,
+} from './types';
 
 export interface V2UnifiedItemDef {
   readonly defId: string;
-  readonly category: 'equipment' | 'cargo' | 'mission';
+  readonly category: 'equipment' | 'cargo' | 'mission' | 'gadget';
   readonly name: string;
   readonly shortName: string;
   readonly shapeId: V2ShapeId;
@@ -20,11 +32,17 @@ export interface V2UnifiedItemDef {
   readonly relicId?: string;
   readonly equipmentDef?: V2EquipmentDef;
   readonly cargoDef?: V2CargoDef;
+  readonly gadgetDef?: V3GadgetDef;
+}
+
+function hasOwn(obj: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
 }
 
 export function getAnyV2ItemDef(defId: string): V2UnifiedItemDef | undefined {
-  const eq = V2_EQUIPMENT_DEFS[defId];
-  if (eq) {
+  if (typeof defId !== 'string') return undefined;
+  if (hasOwn(V2_EQUIPMENT_DEFS, defId)) {
+    const eq = V2_EQUIPMENT_DEFS[defId];
     return {
       defId: eq.defId,
       category: 'equipment',
@@ -37,8 +55,8 @@ export function getAnyV2ItemDef(defId: string): V2UnifiedItemDef | undefined {
       equipmentDef: eq,
     };
   }
-  const cg = V2_CARGO_DEFS[defId];
-  if (cg) {
+  if (hasOwn(V2_CARGO_DEFS, defId)) {
+    const cg = V2_CARGO_DEFS[defId];
     return {
       defId: cg.defId,
       category: cg.isMissionItem ? 'mission' : 'cargo',
@@ -52,6 +70,20 @@ export function getAnyV2ItemDef(defId: string): V2UnifiedItemDef | undefined {
       cargoDef: cg,
     };
   }
+  if (hasOwn(V3_GADGET_DEFS, defId)) {
+    const gd = V3_GADGET_DEFS[defId];
+    return {
+      defId: gd.defId,
+      category: 'gadget',
+      name: gd.name,
+      shortName: gd.shortName,
+      shapeId: gd.shapeId,
+      quality: 'common',
+      summary: gd.summary,
+      isCollectible: false,
+      gadgetDef: gd,
+    };
+  }
   return undefined;
 }
 
@@ -63,7 +95,11 @@ export function createV2EquipmentInstance(params: {
   readonly acquiredDepth: number;
   readonly location: V2ItemLocation;
 }): V2ItemInstance {
-  const def = V2_EQUIPMENT_DEFS[`equipment.${params.kind}.${params.quality}`];
+  const key = `equipment.${params.kind}.${params.quality}`;
+  if (!hasOwn(V2_EQUIPMENT_DEFS, key)) {
+    throw new Error(`Unknown V2 equipment defId: ${key}`);
+  }
+  const def = V2_EQUIPMENT_DEFS[key];
   return {
     instanceId: params.instanceId,
     definitionId: def.defId,
@@ -85,10 +121,10 @@ export function createV2CargoInstance(params: {
   readonly missionBinding?: string;
   readonly fixedValueOverride?: number;
 }): V2ItemInstance {
-  const def = V2_CARGO_DEFS[params.defId];
-  if (!def) {
-    throw new Error(`Unknown V2 cargo defId: ${params.defId}`);
+  if (typeof params.defId !== 'string' || !hasOwn(V2_CARGO_DEFS, params.defId)) {
+    throw new Error(`Unknown V2 cargo defId: ${String(params.defId)}`);
   }
+  const def = V2_CARGO_DEFS[params.defId];
   const isMission = def.isMissionItem;
   const origin: V2ItemOrigin = isMission ? 'mission' : params.origin;
   const fixedValue =
@@ -108,3 +144,129 @@ export function createV2CargoInstance(params: {
     location: params.location,
   };
 }
+
+export function createV3GadgetInstance(params: {
+  readonly instanceId: string;
+  readonly kind: V3GadgetKind;
+  readonly origin: 'owned' | 'loot';
+  readonly acquiredDepth: number;
+  readonly location: V2ItemLocation;
+}): V2ItemInstance {
+  const key = `gadget.${params.kind}`;
+  if (!hasOwn(V3_GADGET_DEFS, key)) {
+    throw new Error(`Unknown V3 gadget defId: ${key}`);
+  }
+  const def = V3_GADGET_DEFS[key];
+  return {
+    instanceId: params.instanceId,
+    definitionId: def.defId,
+    category: 'gadget',
+    quality: 'common',
+    origin: params.origin,
+    acquiredDepth: params.acquiredDepth,
+    fixedValue: def.fixedValue,
+    location: params.location,
+  };
+}
+
+/**
+ * Purely records known item definition IDs into `profile.seenItems`.
+ * Returns the exact original `profile` reference if no new valid defId is added.
+ */
+export function recordV2SeenItems(
+  profile: V2ProfileState,
+  defIds: readonly string[]
+): V2ProfileState {
+  if (defIds.length === 0) return profile;
+  const existing = new Set(profile.seenItems);
+  const additions: string[] = [];
+  for (const id of defIds) {
+    if (!existing.has(id) && getAnyV2ItemDef(id)) {
+      existing.add(id);
+      additions.push(id);
+    }
+  }
+  if (additions.length === 0) return profile;
+  return {
+    ...profile,
+    seenItems: [...profile.seenItems, ...additions],
+  };
+}
+
+/**
+ * Collects item definition IDs that are legitimately visible to the player in the current run state.
+ * Respects fog-of-war: NEVER leaks unpeeked/uncut wreck contents when crewId !== 'salvager'.
+ */
+export function collectVisibleV2DefIdsForRun(run: V2RunState): readonly string[] {
+  const seen = new Set<string>();
+
+  for (const p of run.bay.placed) {
+    seen.add(p.item.definitionId);
+  }
+  for (const s of run.bay.staging) {
+    seen.add(s.item.definitionId);
+  }
+
+  if (run.pendingReward) {
+    seen.add(run.pendingReward.equipmentOption.definitionId);
+    seen.add(run.pendingReward.cargoOption.definitionId);
+  }
+
+  if (run.activeEngineerOffer && !run.activeEngineerOffer.used) {
+    for (const kind of run.activeEngineerOffer.candidates) {
+      seen.add(getV2EquipmentDefByKind(kind, 'common').defId);
+    }
+  }
+
+  if (run.currentNodeId && hasOwn(run.graph.nodes, run.currentNodeId)) {
+    const node = run.graph.nodes[run.currentNodeId];
+    if (node) {
+      if (node.merchant && (run.phase === 'SHOP' || node.resolved)) {
+        for (const offer of node.merchant.offers) {
+          seen.add(offer.item.definitionId);
+        }
+      }
+      if (run.activeWreck && run.activeWreck.nodeId === node.nodeId) {
+        for (const spot of run.activeWreck.hotspots) {
+          if (run.crewId === 'salvager' || spot.cut) {
+            if (spot.rewardItem) {
+              seen.add(spot.rewardItem.definitionId);
+            }
+            if (spot.rewardItems) {
+              for (const it of spot.rewardItems) {
+                seen.add(it.definitionId);
+              }
+            }
+          }
+        }
+      } else if (node.wreck) {
+        if (run.crewId === 'salvager') {
+          seen.add(node.wreck.armoryItem.definitionId);
+          for (const cg of node.wreck.cargoItems) {
+            seen.add(cg.definitionId);
+          }
+        } else if (node.wreck.chosenRoom === 'armory') {
+          seen.add(node.wreck.armoryItem.definitionId);
+        } else if (node.wreck.chosenRoom === 'cargo') {
+          for (const cg of node.wreck.cargoItems) {
+            seen.add(cg.definitionId);
+          }
+        }
+      }
+      if (node.anomaly && (run.phase === 'ENCOUNTER' || node.resolved)) {
+        seen.add(node.anomaly.safeCargoItem.definitionId);
+        if (node.anomaly.chosenOption === 'breach') {
+          for (const cg of node.anomaly.breachCargoItems) {
+            seen.add(cg.definitionId);
+          }
+        }
+      }
+      if (node.distress && (run.phase === 'ENCOUNTER' || node.resolved)) {
+        seen.add(node.distress.haulCargoItem.definitionId);
+      }
+    }
+  }
+
+  return Array.from(seen);
+}
+

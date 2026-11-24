@@ -10,7 +10,13 @@ export type V2EquipmentKind =
   | 'hangar'
   | 'relay'
   | 'counter'
-  | 'flak';
+  | 'flak'
+  | 'coolant_vent'
+  | 'cargo_amp'
+  | 'emp_jammer'
+  | 'overdrive_core'
+  | 'salvage_grapple'
+  | 'salvo_pod';
 
 export type V2Quality = 'common' | 'improved';
 
@@ -59,21 +65,21 @@ export const V2_CONTRACT_FAMILY_UNLOCK_ORDER: readonly V2FamilyUnlockReward[] = 
   {
     family: 'heavy_kit',
     name: '重炮爆发体系',
-    unlockedKinds: ['heavy', 'capacitor'],
+    unlockedKinds: ['heavy', 'capacitor', 'coolant_vent', 'overdrive_core'],
     freeBlueprintKind: 'capacitor',
     giftMainKind: 'heavy',
   },
   {
     family: 'hangar_kit',
     name: '无人机编队体系',
-    unlockedKinds: ['hangar', 'relay'],
+    unlockedKinds: ['hangar', 'relay', 'salvo_pod'],
     freeBlueprintKind: 'relay',
     giftMainKind: 'hangar',
   },
   {
     family: 'counter_kit',
     name: '护盾反击与防空体系',
-    unlockedKinds: ['counter', 'flak'],
+    unlockedKinds: ['counter', 'flak', 'emp_jammer'],
     freeBlueprintKind: 'flak',
     giftMainKind: 'counter',
   },
@@ -105,6 +111,12 @@ export const V2_ALL_EQUIPMENT_KINDS: readonly V2EquipmentKind[] = [
   'relay',
   'counter',
   'flak',
+  'coolant_vent',
+  'cargo_amp',
+  'emp_jammer',
+  'overdrive_core',
+  'salvage_grapple',
+  'salvo_pod',
 ];
 
 interface BaseEquipmentSpec {
@@ -251,6 +263,84 @@ const BASE_SPECS: readonly BaseEquipmentSpec[] = [
     improvedSummary: '每轮对全部存活敌目标各造成 3 点伤害（克制蜂群）',
     commonBadge: '群2',
     improvedBadge: '群3',
+  },
+  {
+    kind: 'coolant_vent',
+    name: '冷却排热阀',
+    shortName: '排热',
+    shapeId: '1x2',
+    commonBudget: 2,
+    commonRecycle: 14,
+    family: 'heavy_kit',
+    commonSummary: '+4 护盾且每轮末回盾 +1（抵消低温衰减 1）；正交贴邻重炮/导弹舱时该武器每次 +2 伤',
+    improvedSummary: '+6 护盾且每轮末回盾 +2（抵消低温衰减 2）；正交贴邻重炮/导弹舱时该武器每次 +3 伤',
+    commonBadge: '盾4/回1',
+    improvedBadge: '盾6/回2',
+  },
+  {
+    kind: 'cargo_amp',
+    name: '货舱谐振仪',
+    shortName: '谐振',
+    shapeId: '1x1',
+    commonBudget: 1,
+    commonRecycle: 10,
+    family: 'core',
+    commonSummary: '舰核攻 +1；每正交贴邻 1 件货物/任务物额外 +1 舰核攻（上限 +3）与 +2 护盾',
+    improvedSummary: '舰核攻 +2；每正交贴邻 1 件货物/任务物额外 +2 舰核攻（上限 +5）与 +3 护盾',
+    commonBadge: '核+1/货联',
+    improvedBadge: '核+2/货联',
+  },
+  {
+    kind: 'emp_jammer',
+    name: 'EMP 干扰器',
+    shortName: '干扰',
+    shapeId: '1x2',
+    commonBudget: 2,
+    commonRecycle: 16,
+    family: 'counter_kit',
+    commonSummary: '每轮 2 伤并额外削敌盾 3；抵御敌 EMP 削盾 2；奇数轮削弱首名敌舰 1 点攻击（最低 1）',
+    improvedSummary: '每轮 3 伤并额外削敌盾 5；抵御敌 EMP 削盾 3；每轮削弱首名敌舰 1 点攻击（最低 1）',
+    commonBadge: 'EMP2/削3',
+    improvedBadge: 'EMP3/削5',
+  },
+  {
+    kind: 'overdrive_core',
+    name: '超频核心',
+    shortName: '超频',
+    shapeId: '2x2',
+    commonBudget: 3,
+    commonRecycle: 22,
+    family: 'heavy_kit',
+    commonSummary: '舰核攻 +2；正交贴邻武器获超频增幅（直击/重炮/干扰 +2 伤，机库/导弹/防空每发 +1 伤）',
+    improvedSummary: '舰核攻 +3；正交贴邻武器获超频增幅（直击/重炮/干扰 +3 伤，机库/导弹/防空每发 +2 伤）',
+    commonBadge: '核+2/增幅',
+    improvedBadge: '核+3/强增',
+  },
+  {
+    kind: 'salvage_grapple',
+    name: '磁力拆解爪',
+    shortName: '拆解爪',
+    shapeId: '1x2',
+    commonBudget: 2,
+    commonRecycle: 14,
+    family: 'core',
+    commonSummary: '每轮 2 伤；残骸初始稳定度 +10、风险切割船体伤 -1；战后与残骸切割额外 +2 精密零件',
+    improvedSummary: '每轮 3 伤；残骸初始稳定度 +18、风险切割船体伤 -2；战后与残骸切割额外 +4 精密零件',
+    commonBadge: '爪2/稳+10',
+    improvedBadge: '爪3/稳+18',
+  },
+  {
+    kind: 'salvo_pod',
+    name: '齐射导弹舱',
+    shortName: '导弹舱',
+    shapeId: '1x3',
+    commonBudget: 3,
+    commonRecycle: 22,
+    family: 'hangar_kit',
+    commonSummary: '每轮齐射 3 枚导弹（每枚 2 伤，独立索敌自动转火）；贴邻蓄能器或编队中继时发射数 +1',
+    improvedSummary: '每轮齐射 3 枚导弹（每枚 3 伤，独立索敌自动转火）；贴邻蓄能器或编队中继时发射数 +1',
+    commonBadge: '弹3×2',
+    improvedBadge: '弹3×3',
   },
 ];
 

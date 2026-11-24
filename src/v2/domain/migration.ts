@@ -11,6 +11,9 @@ import { getAnyV2ItemDef } from './itemCatalog';
 import {
   createFreshV2Profile,
   createInitialV2Relics,
+  createInitialV3FacilityTiers,
+  inferV3CampaignFromV2Profile,
+  inferV3CareerFromV2Profile,
   type V2StorageLike,
 } from './persistenceV2';
 import {
@@ -266,18 +269,25 @@ export function migrateV1ToV2SaveData(
     legacyAbyssalUnlocked,
   };
 
+  const migratedBuildings = {
+    ...baseProfile.buildings,
+    workbench: Boolean(prog.buildings.workbench) || prog.tutorialCompleted,
+    contract_hub: true, // §15: First V1 migration enables Contract Hub for free!
+    drydock: Boolean(prog.buildings.drydock),
+    drydock_tier2: false,
+    research_lab: Boolean(prog.buildings.display), // If V1 already had display, enable research_lab so display remains coherent
+    display: Boolean(prog.buildings.display),
+  };
+  const migratedCredits = prog.credits + settledOldRunCredits;
+  const migratedDeepest = Math.min(6, Math.max(0, prog.deepestNodeReached));
+  const migratedTutorialCompleted = Boolean(
+    prog.tutorialCompleted || prog.buildings.workbench || prog.totalExpeditions > 0
+  );
+
   const migratedProfile: V2ProfileState = {
     ...baseProfile,
-    credits: prog.credits + settledOldRunCredits,
-    buildings: {
-      ...baseProfile.buildings,
-      workbench: Boolean(prog.buildings.workbench) || prog.tutorialCompleted,
-      contract_hub: true, // §15: First V1 migration enables Contract Hub for free!
-      drydock: Boolean(prog.buildings.drydock),
-      drydock_tier2: false,
-      research_lab: Boolean(prog.buildings.display), // If V1 already had display, enable research_lab so display remains coherent
-      display: Boolean(prog.buildings.display),
-    },
+    credits: migratedCredits,
+    buildings: migratedBuildings,
     unlockedShips,
     unlockedCrew: ['engineer'],
     unlockedFamilies: ['core'],
@@ -287,9 +297,9 @@ export function migrateV1ToV2SaveData(
     relics,
     discoveredItems: Array.from(discoveredSet),
     seenItems: Array.from(discoveredSet),
-    deepestLayerReached: Math.min(6, Math.max(0, prog.deepestNodeReached)),
+    deepestLayerReached: migratedDeepest,
     totalRuns: prog.totalExpeditions,
-    tutorialCompleted: Boolean(prog.tutorialCompleted || prog.buildings.workbench || prog.totalExpeditions > 0),
+    tutorialCompleted: migratedTutorialCompleted,
     tutorialBonusClaimed: Boolean(prog.tutorialCompleted),
     settledRunIds: v1.activeExpedition ? [v1.activeExpedition.expeditionId] : [],
     selectedShipId:
@@ -299,6 +309,20 @@ export function migrateV1ToV2SaveData(
     selectedCrewId: 'engineer',
     selectedArchetype: 'laser',
     migrationRecord,
+    facilityTiers: createInitialV3FacilityTiers(migratedBuildings),
+    campaign: inferV3CampaignFromV2Profile({
+      tutorialCompleted: migratedTutorialCompleted,
+      totalRuns: prog.totalExpeditions,
+      buildings: migratedBuildings,
+      completedContractTypes: [],
+      deepestLayerReached: migratedDeepest,
+      relics,
+    }),
+    career: inferV3CareerFromV2Profile({
+      totalRuns: prog.totalExpeditions,
+      completedContractIds: [],
+      credits: migratedCredits,
+    }),
   };
 
   return {

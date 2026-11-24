@@ -1,0 +1,903 @@
+/* ==========================================================================
+   V3 Milestone M2: Mainline Campaign, 3 Star Sectors, Named Crew & Mastery
+   Strictly scoped to V2/V3 Shell (.v2-shell, .v3-*, .v3-campaign-modal).
+   Legacy V1 (?mode=v1) stays 100% isolated.
+   ========================================================================== */
+
+/* --- Base HUD Collapsible Campaign Banner --- */
+.v3-campaign-banner {
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: var(--radius-md, 10px);
+  background: rgba(16, 28, 46, 0.9);
+  border: 1px solid rgba(246, 184, 82, 0.44);
+  box-shadow: 0 6px 18px rgba(4, 10, 20, 0.45);
+  backdrop-filter: blur(6px);
+}
+
+.v3-campaign-banner.is-collapsed {
+  gap: 0;
+  padding: 5px 10px;
+}
+
+.v3-cb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.v3-cb-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid transparent;
+  background: rgba(246, 184, 82, 0.1);
+  color: #f6d38b;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.v3-cb-toggle:hover {
+  background: rgba(246, 184, 82, 0.18);
+  border-color: rgba(246, 184, 82, 0.4);
+}
+
+.v3-cb-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.v3-cb-chevron {
+  flex-shrink: 0;
+  display: inline-flex;
+  opacity: 0.85;
+}
+
+.v3-cb-open-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.v3-unread-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  background: #f6b852;
+  color: #111a29;
+}
+
+.v3-cb-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 2px;
+}
+
+.v3-cb-obj {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.v3-cb-obj strong {
+  font-size: 12.5px;
+  color: var(--text-primary, #e9edf2);
+}
+
+.v3-cb-obj small {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary, #afbdcd);
+}
+
+.v3-cb-progress-track {
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(110, 148, 192, 0.2);
+  overflow: hidden;
+}
+
+.v3-cb-progress-track > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #f6b852, #62d6df);
+}
+
+/* --- Non-Blocking Crew Radio Comms Strip in .banners-stack --- */
+.v3-comm-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: linear-gradient(90deg, rgba(20, 36, 56, 0.94), rgba(16, 28, 44, 0.9));
+  border: 1px solid rgba(98, 214, 223, 0.45);
+  box-shadow: 0 4px 14px rgba(5, 10, 20, 0.35);
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.v3-comm-banner-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.v3-comm-banner-head {
+  font-size: 12px;
+  font-weight: 700;
+  color: #62d6df;
+}
+
+.v3-comm-banner-text {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-primary, #e9edf2);
+}
+
+.v3-comm-banner-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* --- Prepare Sector Selector (All 3 Sectors + Env Rule Card) --- */
+.v2-shell .v2-sector-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.v2-shell .v2-sector-chip {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.v2-shell .v2-sector-chip.is-locked {
+  opacity: 0.68;
+  cursor: not-allowed;
+  border-style: dashed;
+  border-color: rgba(126, 152, 184, 0.34);
+  background: rgba(14, 22, 34, 0.65);
+}
+
+.v2-shell .v2-sector-chip.sector-frozen.active {
+  border-color: rgba(98, 214, 223, 0.85);
+  background: rgba(20, 56, 78, 0.72);
+}
+
+.v2-shell .v2-sector-chip.sector-abyss.active {
+  border-color: rgba(204, 154, 255, 0.85);
+  background: rgba(44, 28, 68, 0.72);
+}
+
+.v3-sector-env-card {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(15, 25, 40, 0.8);
+  border: 1px solid rgba(110, 148, 192, 0.32);
+  border-left: 3px solid #f6b852;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.v3-sector-env-card.env-cryo_ion {
+  border-left-color: #62d6df;
+  background: rgba(14, 34, 52, 0.82);
+}
+
+.v3-sector-env-card.env-gravity_tide {
+  border-left-color: #c9a0ff;
+  background: rgba(28, 22, 50, 0.82);
+}
+
+.v3-sec-env-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.v3-sec-env-head strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-primary, #e9edf2);
+}
+
+.v3-sec-env-tag {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(98, 214, 223, 0.14);
+  border: 1px solid rgba(98, 214, 223, 0.34);
+  color: #9be8ff;
+}
+
+.v3-sec-env-rule {
+  color: var(--text-secondary, #bfd0e3);
+  line-height: 1.4;
+}
+
+.v3-sec-env-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-secondary, #9db4ce);
+}
+
+.v3-pity-ready-pill {
+  color: #f6d38b;
+  font-weight: 700;
+}
+
+/* --- Prepare Named Crew Cards with SVG Portraits & Mastery --- */
+.v2-shell .v2-crew-row {
+  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+}
+
+.v3-crew-portrait {
+  flex-shrink: 0;
+  border-radius: 8px;
+  display: block;
+}
+
+.v2-shell .v2-crew-pill {
+  text-align: left;
+  padding: 7px 9px;
+  min-width: 0;
+}
+
+.v2-shell .v2-crew-pill.is-locked {
+  opacity: 0.7;
+  border-style: dashed;
+}
+
+.v3-crew-pill-inner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.v3-crew-pill-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.v3-crew-pill-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.v3-mastery-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #f6d38b;
+  background: rgba(246, 184, 82, 0.14);
+  border: 1px solid rgba(246, 184, 82, 0.36);
+  white-space: nowrap;
+}
+
+.v3-crew-perk-line {
+  font-size: 10.5px;
+  color: #62d6df;
+  line-height: 1.3;
+}
+
+/* --- In-Run Sector Modifier Strips, Relic Pity Banner & Combat Modifier --- */
+.v3-run-sector-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(16, 28, 44, 0.8);
+  border: 1px solid rgba(110, 148, 192, 0.32);
+  font-size: 12px;
+}
+
+.v3-run-sector-strip.env-cryo_ion {
+  border-color: rgba(98, 214, 223, 0.52);
+  background: rgba(14, 36, 54, 0.84);
+}
+
+.v3-run-sector-strip.env-gravity_tide {
+  border-color: rgba(201, 160, 255, 0.52);
+  background: rgba(30, 22, 52, 0.84);
+}
+
+.v3-sector-mod-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 700;
+  color: var(--text-primary, #e9edf2);
+}
+
+.v3-sector-mod-desc {
+  font-size: 11px;
+  color: var(--text-secondary, #b5c7dc);
+}
+
+.v3-relic-pity-banner {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(246, 184, 82, 0.14);
+  border: 1px solid rgba(246, 184, 82, 0.52);
+  color: #f9d98c;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.v3-dag-relic {
+  position: absolute;
+  bottom: -5px;
+  right: -5px;
+  padding: 0 4px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  background: #f6b852;
+  color: #111a29;
+  border: 1px solid #111a29;
+}
+
+.v3-badge-relic {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  background: rgba(246, 184, 82, 0.2);
+  border: 1px solid rgba(246, 184, 82, 0.55);
+  color: #f9d98c;
+}
+
+.v3-combat-env-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm, 8px);
+  font-size: 12px;
+  background: rgba(16, 28, 44, 0.8);
+  border: 1px solid rgba(110, 148, 192, 0.34);
+}
+
+.v3-combat-env-banner.env-cryo_ion {
+  border-color: rgba(98, 214, 223, 0.58);
+  background: rgba(14, 38, 56, 0.88);
+}
+
+.v3-combat-env-banner.env-gravity_tide {
+  border-color: rgba(201, 160, 255, 0.58);
+  background: rgba(34, 22, 56, 0.88);
+}
+
+.combat-pill.v3-env-pill {
+  border-color: rgba(98, 214, 223, 0.55);
+  color: #9be8ff;
+}
+
+.combat-pill.v3-env-pill.env-gravity_tide {
+  border-color: rgba(201, 160, 255, 0.6);
+  color: #dfc4ff;
+}
+
+/* --- Settlement Campaign Progress Card --- */
+.v3-settle-campaign-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(20, 34, 54, 0.82);
+  border: 1px solid rgba(246, 184, 82, 0.38);
+  font-size: 12px;
+}
+
+.v3-sc-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 700;
+  color: #f6d38b;
+}
+
+.v3-sc-line {
+  color: var(--text-primary, #e9edf2);
+}
+
+.v3-sc-pity {
+  font-size: 11px;
+  color: var(--text-secondary, #afbdcd);
+}
+
+/* --- Campaign Modal --- */
+.modal-card.v3-campaign-modal {
+  width: min(100%, 700px);
+}
+
+.v3-campaign-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.v3-campaign-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.v3-camp-summary-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.v3-cs-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(15, 25, 40, 0.78);
+  border: 1px solid rgba(110, 148, 192, 0.24);
+}
+
+.v3-cs-stat span {
+  font-size: 11px;
+  color: var(--text-secondary, #9db4ce);
+}
+
+.v3-cs-stat strong {
+  font-size: 14px;
+  color: var(--text-primary, #e9edf2);
+}
+
+.v3-act-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.v3-act-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 13px;
+  border-radius: var(--radius-md, 10px);
+  background: rgba(16, 28, 44, 0.8);
+  border: 1px solid rgba(110, 148, 192, 0.26);
+}
+
+.v3-act-card.is-active {
+  border-color: rgba(246, 184, 82, 0.72);
+  background: rgba(34, 42, 56, 0.86);
+}
+
+.v3-act-card.is-completed {
+  border-color: rgba(122, 229, 130, 0.42);
+}
+
+.v3-act-card.is-locked {
+  opacity: 0.78;
+  border-style: dashed;
+}
+
+.v3-act-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.v3-act-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.v3-act-title-wrap small {
+  font-size: 11.5px;
+  color: var(--text-secondary, #9db4ce);
+}
+
+.v3-act-status {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.v3-act-status.is-active {
+  background: rgba(246, 184, 82, 0.18);
+  color: #f6d38b;
+  border: 1px solid rgba(246, 184, 82, 0.48);
+}
+
+.v3-act-status.is-completed {
+  background: rgba(122, 229, 130, 0.15);
+  color: #7ae582;
+  border: 1px solid rgba(122, 229, 130, 0.4);
+}
+
+.v3-act-status.is-locked {
+  background: rgba(126, 152, 184, 0.14);
+  color: #9db4ce;
+  border: 1px solid rgba(126, 152, 184, 0.3);
+}
+
+.v3-act-brief {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-secondary, #bfd0e3);
+}
+
+.v3-act-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--text-secondary, #afbdcd);
+}
+
+.v3-act-milestones {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.v3-ms-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: rgba(24, 38, 58, 0.85);
+  border: 1px solid rgba(110, 148, 192, 0.28);
+  color: var(--text-secondary, #afbdcd);
+}
+
+.v3-ms-chip.done {
+  background: rgba(122, 229, 130, 0.14);
+  border-color: rgba(122, 229, 130, 0.42);
+  color: #9ef0a4;
+}
+
+.v3-act-lock-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: #f6c969;
+}
+
+.v3-climax-gate-card {
+  margin-top: 4px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(14, 22, 36, 0.82);
+  border: 1px solid rgba(201, 160, 255, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.v3-cg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+
+.v3-cg-pill {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(242, 117, 100, 0.15);
+  color: #f8a497;
+  border: 1px solid rgba(242, 117, 100, 0.36);
+}
+
+.v3-climax-gate-card.is-ready .v3-cg-pill {
+  background: rgba(122, 229, 130, 0.16);
+  color: #8ee896;
+  border-color: rgba(122, 229, 130, 0.45);
+}
+
+.v3-cg-checks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-secondary, #afbdcd);
+}
+
+.v3-cg-checks li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.v3-cg-checks li.is-met {
+  color: #9ef0a4;
+}
+
+.v3-pity-tracker-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(15, 25, 40, 0.74);
+  border: 1px solid rgba(110, 148, 192, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.v3-pity-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.v3-pity-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(22, 34, 52, 0.75);
+  border: 1px solid rgba(110, 148, 192, 0.24);
+  font-size: 11.5px;
+}
+
+.v3-pity-cell.is-ready {
+  border-color: rgba(246, 184, 82, 0.65);
+  color: #f9d98c;
+}
+
+.v3-pity-cell.is-locked {
+  opacity: 0.62;
+}
+
+/* --- Comms & Crew Tabs in Campaign Modal --- */
+.v3-comms-list,
+.v3-crew-roster-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.v3-comm-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(16, 28, 44, 0.8);
+  border: 1px solid rgba(110, 148, 192, 0.26);
+}
+
+.v3-comm-card.is-new {
+  border-color: rgba(98, 214, 223, 0.56);
+}
+
+.v3-comm-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.v3-comm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+
+.v3-comm-tag {
+  font-size: 11px;
+  color: #62d6df;
+}
+
+.v3-comm-text {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.48;
+  color: var(--text-primary, #e9edf2);
+}
+
+.v3-crew-roster-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px 13px;
+  border-radius: var(--radius-md, 10px);
+  background: rgba(16, 28, 44, 0.82);
+  border: 1px solid rgba(110, 148, 192, 0.28);
+}
+
+.v3-crew-roster-card.is-locked {
+  opacity: 0.78;
+  border-style: dashed;
+}
+
+.v3-cr-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.v3-cr-ident {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.v3-cr-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.v3-cr-role {
+  font-size: 11.5px;
+  color: var(--text-secondary, #9db4ce);
+}
+
+.v3-cr-bio {
+  font-size: 11.5px;
+  color: var(--text-secondary, #afbdcd);
+}
+
+.v3-cr-status {
+  font-size: 12px;
+  color: #62d6df;
+}
+
+.v3-cr-tiers {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.v3-cr-tier-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 9px;
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(13, 21, 34, 0.72);
+  border: 1px solid rgba(110, 148, 192, 0.2);
+  font-size: 11.5px;
+}
+
+.v3-cr-tier-row.is-reached {
+  border-color: rgba(122, 229, 130, 0.45);
+  background: rgba(18, 38, 36, 0.65);
+}
+
+.v3-tier-lvl {
+  font-weight: 700;
+  color: var(--text-primary, #e9edf2);
+}
+
+.v3-tier-perk {
+  color: #c9dae9;
+}
+
+.v3-tier-cond {
+  font-size: 10.5px;
+  color: var(--text-secondary, #9db4ce);
+}
+
+/* --- Responsive Safety (390x844 Mobile & 844x390 Short Landscape) --- */
+@media (max-width: 859px) {
+  .v2-shell .v2-sector-row,
+  .v2-shell .v2-crew-row {
+    grid-template-columns: 1fr;
+  }
+
+  .v3-camp-summary-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .v3-pity-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .v3-comm-banner {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-height: 500px) and (min-width: 600px) {
+  .v3-cb-obj small {
+    display: none;
+  }
+
+  .v3-campaign-banner {
+    padding: 5px 8px;
+    gap: 4px;
+  }
+}

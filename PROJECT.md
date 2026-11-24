@@ -1,343 +1,232 @@
-# PROJECT · 星际拆解站 V3「亲手改船」体验重铸
+# Project: 《星际拆解站：星门远征》 (`starline` V3 Full-Game Upgrade)
 
-> **文档状态**：执行指南 v1.0（2026-11-24）。基于提交 `8f43788`（分支 `docs/first-voyage-review-20261124`）。
-> **基线**：`npm test` 共 42/42 通过。V2 为默认入口，V1 保留回退。
-> **输入**：用户试玩反馈（美术不精致 / 不好玩 / 交互像工作台）、[首航体验与改版建议](output/design-review-20261124/design-review.md)，以及对 `src/` 的逐文件审计和规则引擎数值实验。
-> **用途**：后续所有优化任务按本文的里程碑、任务编号、验收标准和决策门槛执行。新需求先改本文，再写代码。
+> **User Request**: `"游戏主线不明确，玩法不完整；整个游戏比较像demo，请规划分析全方位完善游戏"` (`.agents/teamwork/ORIGINAL_REQUEST.md`)
+> **Baseline**: `main@084e781` (TypeScript 5.8 + Vite 6 + Phaser 3.90 + Vitest 3.2; 35,107 LOC across 62 files; 56 hand-painted WebP assets; V2 vertical slice + V1 `?mode=v1` preserved).
 
 ---
 
-## 1. 一句话目标
+## Architecture
 
-**在一艘装不下所有东西的小船上，玩家亲手决定拆什么、带什么、怎么接线；然后看见自己的船因为这些决定，用不同的方式打赢（或险些打输）下一站；最后把战利品带回港，亲眼看着基地因此改变。**
+### Core Architectural Principles
+1. **Pure Deterministic Domain Core (`src/v2/domain/`)**: All game rules, campaign state transitions, sector modifiers, multi-phase combat simulations, derelict dissection math, dismantling/refining, faction contracts, endings, and save migrations MUST remain 100% pure, immutable TypeScript with ZERO DOM/Phaser imports and deterministic salted PRNG streams (`rngStreams.ts`).
+2. **Single Source of Truth**: Pre-combat preview (`simulateV2Combat`), tactical delta (`tacticalDelta.ts`), live Phaser playback (`V2CombatScene.ts`), and settlement MUST execute the exact same pure simulation function — zero divergence between preview and actual execution.
+3. **Decoupled Modular UI (`src/v2/ui/screens/`, `src/v2/ui/modals/`, `src/v2/ui/styles/`)**: Decompose the 3,801-line `V2AppController.ts` God Controller into a thin state/lifecycle coordinator delegating rendering to screen modules, and split new V3 styling into `src/v2/ui/styles/*.css` imported by `src/main.ts` so parallel milestones have disjoint write ownership.
+4. **Asset Reuse & Visual Cohesion**: Maximize existing 56 hand-painted WebP assets (`sector_1..6.webp`, `event_*.webp`, unused `enemy_hulk.webp`, `boss_dreadnought.webp`, `boss_leviathan.webp`, 31 item icons, 5 modular ship hardpoints, 5 station layers) augmented with crisp inline SVG portraits/icons and procedural Phaser lighting/VFX/tints.
+5. **Backward Compatibility & Safety**:
+   - Preserve legacy V1 (`?mode=v1`) and V1 tests (`tests/rules.test.ts`, `tests/simulation.test.ts`) untouched.
+   - Automatic, non-destructive `V2 (schemaVersion: 2) -> V3 (schemaVersion: 3)` save migration keeping backup copies (`starline_save_backup_v2`) and mapping existing V2 progress to corresponding Campaign Acts.
+   - Preserve bankruptcy-proof free launch guarantee (free fallback loan + free fuel + Sector 1 contract always launchable at `0¤`).
+   - Git hygiene: `.agents/` MUST be added to `.gitignore` and NEVER committed to git.
 
-### 三条体验支柱（判断一切改动的标尺）
-
-| 支柱 | 玩家感受 | 反例（现状） |
-|---|---|---|
-| **P1 亲手改船** | 零件在手里、船舱就是舞台，放下时“咔哒”一声并亮起连线 | 船舱缩在右侧面板，只读阶段占大多数，放置后组件被重建，动效和音效都丢了 |
-| **P2 改船救了我** | 摆法和临场判断改变战斗结果，而且看得见是哪件设备立了功 | 战斗开打前结局已经精确公示，播放过程中无法干预，首战接不接电池结果一样 |
-| **P3 收获改变家园** | 带回的那一件货被吊臂卸下、点亮工位，并解锁新的玩法动作 | 成长主要是数字和装饰；三套流派按固定顺序赠送，玩家不能选 |
-
-### 设计原则
-
-1. **一屏一主角，一步一动作**：每个画面只有一个视觉主体（船、残骸或基地）和一个主操作，次操作不超过 2 个。
-2. **画面即操作**：好看的东西必须能点、能拖、会响应。不做只能看的播片，也不做和画面脱节的按钮。
-3. **默认给感觉，按需给数字**：第一层只显示威胁档位、↑↓趋势和联动标记；精确推演放进“详情”。
-4. **不做空确认**：没有决策内容的步骤一律由系统自动完成，但保留随时手动调整的入口。
-
----
-
-## 2. 诊断：三个问题的根因
-
-### 2.1「不好玩」：决策少、后果弱、没有风险
-
-| # | 根因 | 证据 |
-|---|---|---|
-| G1 | **战斗是播放已知结果**：开战时整场模拟就算完并锁定，过程中只能变速或跳过；航路卡、战前卡、装舱差值都精确到“几轮、剩几耐久” | [startV2CombatAtCurrentNode](src/v2/domain/combatV2.ts#L459)、[previewV2CombatNode](src/v2/domain/combatV2.ts#L343)、[航路预报文案](src/v2/ui/V2AppController.ts#L2364) |
-| G2 | **唯一的临场决策默认关闭**：精英战第 2 回合抉择藏在设置项 `eliteTacticExperiment` 后，默认值缺省为关 | [commitV2EliteTacticDecision](src/v2/domain/combatV2.ts#L521)、[settings 类型](src/domain/progression.ts#L26) |
-| G3 | **统治解**：一块电池给所有相邻激光加成，没有容量限制。“激光-电池-激光”夹心只需 5 预算、首日可借，在 13 种遭遇中最优或接近最优，并且是唯一能打赢第 6 层精英的构筑（6 轮 / 余 3）。T09 平衡测试没有覆盖这种组合 | [buildStatsV2 电池遍历](src/v2/domain/buildStatsV2.ts#L118-L140)、[T09 测试](tests/v2-rules.test.ts#L566) |
-| G4 | **目标策略形同虚设**：5 构筑 × 6 层 × 5 遭遇共 150 场，切换策略后只有 24 场的轮数或耐久变化，**胜负零变化**；单敌时也照样显示策略切换 | [selectTargetByPolicy](src/v2/domain/combatV2.ts#L39) |
-| G5 | **敌人同质**：所有敌人每轮伤害恒定，没有意图和行为变化 | [enemies.ts](src/v2/data/enemies.ts#L45-L155) |
-| G6 | **空间取舍极少**：整局模拟中，真正的空间冲突每局只有 0.18（救援）/ 0.20（勘测）/ 约 1（运输，几乎都来自反应堆）次；空整理每局 0.25–0.63 次 | [inventoryV2](src/v2/domain/inventoryV2.ts)、[cargo 数据](src/v2/data/cargo.ts) |
-| G7 | **零风险**：任何时刻免费安全返航，战败仍保底 40%，补血来源多（奖励 +10、废船 +8、求救 +10、商人）。只要绕开预报会输的战斗，360 局模拟零战败 | [initiateV2SafeReturnFromMap](src/v2/domain/encounter.ts#L825)、[战败 40%](src/v2/domain/settlementV2.ts#L136-L139) |
-| G8 | **成长只是数字**：设施只改数值或装饰，改变玩法的三套流派按固定顺序赠送；第一次有意义的升级大约在第 2 局后（约 15 分钟） | [固定解锁顺序](src/v2/domain/settlementV2.ts#L316-L339)、[facilities](src/v2/data/facilities.ts) |
-| G9 | **教学顺序错位**（与评审一致，已复核）：首战巡逻艇 15HP/2 攻，接线 7 伤和不接线 5 伤都是 3 轮、余 24；电池是预先摆好的；反应堆放在终点，之后自动结算；工程师技能被关闭 | [教学初始摆放](src/v2/data/tutorialV2.ts#L229-L295)、[终层自动结算](src/v2/domain/encounter.ts#L798)、[engineerSwapAvailable:false](src/v2/data/tutorialV2.ts#L329) |
-
-### 2.2「交互差，像工作台」：布局、重建、文字三重叠加
-
-| # | 根因 | 证据 |
-|---|---|---|
-| U1 | **固定的三块式骨架**：舞台卡 + 左表单 + 右只读船舱。航行阶段舞台只有 120–270px 高（航路阶段被压到 156/120px），整理阶段画布默认隐藏 | [app shell](src/v2/ui/V2AppController.ts#L565-L617)、[isArrangeSceneCollapsed](src/v2/ui/V2AppController.ts#L408-L412)、styles.css L4019-4036 / L5403-5412 |
-| U2 | **每次状态变化都整体重建**：`syncAll()` 重写 HUD、横幅、Phaser 舞台和两侧面板；船舱组件每次 `destroy()` 后重新创建 | [syncAll](src/v2/ui/V2AppController.ts#L641)、[mountV2CargoBay](src/v2/ui/V2AppController.ts#L3593-L3623) |
-| U3 | **重建直接吃掉手感**：放置后选中丢失；吸附回弹动画、接通供能音效**永远不会触发**；键盘焦点丢失；Phaser 场景被 `applyPlayback` 清空，**废船切割特效当帧被清除** | CargoGridV2 L225-234、L440；[applyPlayback](src/v2/scenes/V2CombatScene.ts#L553-L559)、[切割回调](src/v2/ui/V2AppController.ts#L1632-L1645) |
-| U4 | **纯确认步骤多**：一个战斗节点最少点 4 次，通常 5–6 次，其中 2–3 次没有决策（开始交火、空整理、跃迁）；5 个事件处理函数都无条件进入 `ARRANGE` | encounter.ts L274/350/412/647/760、[空整理页](src/v2/ui/V2AppController.ts#L3219-L3227) |
-| U5 | **同一信息重复表达**：航路上同一目的地有节点按钮、对比卡、跃迁大按钮三处；HUD 和面板里各有一个“展开舰体” | [renderMapPhase](src/v2/ui/V2AppController.ts#L2286) |
-| U6 | **数字墙**：4 个数值格（常规/构筑火力、护盾/反击…）、`预计胜 · 余 24HP (3轮)`、逐回合日志、每格售价、每件物品两个角标（借/自/拾/任、良/普） | CargoGridV2 L257-288、L481-507；[tacticalDelta 文案](src/v2/domain/tacticalDelta.ts#L192-L221) |
-| U7 | **系统替玩家解题**：推荐落点遍历所有位置和旋转并高亮最优格，玩家变成“照提示放”；免费配装预先摆好联动 | [findBestPlacementForItem](src/v2/domain/tacticalDelta.ts#L127)、`buildFreeFallbackPrepareSlots` |
-
-### 2.3「美术不精致」：手绘底子不差，表现层太粗糙
-
-| # | 根因 | 证据 |
-|---|---|---|
-| A1 | **受击时整船填白**：`setTintFill(0xffffff)`，且同一帧触发，双方同时变成白色剪影 | [V2CombatScene L1097 / L1123 / L537](src/v2/scenes/V2CombatScene.ts#L1093-L1129) |
-| A2 | **一回合只有一帧**：`executeRoundVisual` 把我方全部攻击、敌方攻击、护盾、反击、死亡放在同一帧执行，之后是近 950ms 的空白 | [executeRoundVisual](src/v2/scenes/V2CombatScene.ts#L769-L1023) |
-| A3 | **程序画的几何特效**：光束是单层直线，命中是空心圆，死亡只是变暗加一个圆环；V2 场景内零 tweens、零粒子、零混合模式；没有引擎尾焰（V1 有） | V2CombatScene L1282-1317、L1006-1019；V1 [CombatScene L547-562](src/scenes/CombatScene.ts#L547-L562) |
-| A4 | **主要素材分辨率不足**：舰船 512×256（2× 屏源/CSS 比 1.31），基地/背景/事件 1280×720（≈1.12），标题图在 1080p 下 <1；只有物品图标达标（2.29） | [asset_clarity_diagnostics](docs/reviews/2026-11-21-v2-polish/asset_clarity_diagnostics.json) |
-| A5 | **四种视觉语言混在一屏**：手绘厚涂、程序几何、扁平 DOM 卡片、细线 SVG。基地靠泊用侧视舰图硬旋转塞进轴测场景；外挂模块像贴纸 | [BaseScene 靠泊](src/scenes/BaseScene.ts#L664-L751)、`rebuildModuleSprites` |
-| A6 | **UI 是通用深色后台皮**：圆角 8/12 + 1px 线 + 系统字体；`clip-path` 0 处、纹理 0 处、`@keyframes` 仅 3 个。**美术规范 §8 本身就规定了这种圆角** | styles.css L1-27、L221-260、L468；[美术规范](docs/星际拆解站-美术制作与验收规范.md) |
-| A7 | **声音单薄**：V2 完全没有 BGM（`setTrack` 只在 V1 调用）；`creditTick` 全项目零调用；`click` 约 80 处，大部分操作听起来一样；敌方开火没有声音 | [soundEngine](src/audio/soundEngine.ts#L1-L23)、[V1 setTrack](src/ui/AppController.ts#L595) |
-
----
-
-## 3. 对《首航体验与改版建议》的审阅结论
-
-评审的主线判断**正确，予以采纳**：小船打捞 + 船舱构筑 + 可选冒险；先做一趟五分钟首航和一套完整美术切片，再用真人行为决定是否扩产；不转向自由飞行和手动射击。在此基础上补充和修正以下几点：
-
-| 评审观点 | 结论 | 补充或修正 |
-|---|---|---|
-| 首战改用 14HP 专属教学敌舰，让接线少挨一轮 | ✅ 采纳 | 另外**电池不再预先摆好**，而是从“手里”放下，玩家亲手完成第一次接线（S01） |
-| 反应堆移到倒数第二站，提供安全返航和风险支线 | ✅ 采纳 | 风险支线必须标明敌情和**具体奖励实物**（如导航仪），并且只有保留火力的船才能稳赢 |
-| 首航后优先推荐救援委托 | ⚠️ 有条件采纳 | 模拟显示救援的空间冲突只有 0.18 次/局，救援舱只有 1×2。直接推荐会很平淡，需要配合 D06 动态冲突生成，或者给救援配一个专门的取舍点 |
-| 保留自动战斗 | ⚠️ 修正 | 自动战斗可以保留，但“开战前精确公示结局 + 过程不可干预”是最大的无聊来源（G1、G2）。M4 引入**单键过载干预**（D01），并把默认预报降为威胁档位（S06） |
-| 船舱组件重建是“交互连续性问题，帧率待测” | ⚠️ 升级为阻断项 | 这不只是连续性问题：吸附动画、接通音效、切割特效**实际上永远不会出现**（U3）。不修好它，任何手感投入都会白做，所以列为 M0 第一项 |
-| 战术推荐改为可选的试验台 | ✅ 采纳 | 推荐落点只在玩家主动请求时显示；免费配装不再预先摆好联动 |
-| 美术优先做炮艇、残骸、船坞三处 | ✅ 采纳 | 补充 **UI 皮肤**（A6）和**声音**（A7），评审没有覆盖。同时修订美术规范 §8 的圆角条款 |
-| 8 人小样本观察、记录行为而不是问感受 | ✅ 采纳 | 补充**本地埋点**（M3-T01），自动统计首个有效操作用时、纯确认次数、再开一局率，减少人工记录误差 |
-| 评审未提及 | ➕ 新增 | 夹心统治解（G3）、目标策略零影响（G4）、零风险（G7）、成长不可选（G8）、V2 无 BGM（A7） |
-
----
-
-## 4. 目标体验
-
-### 4.1 新首航脚本（约 5 分钟，替换 [tutorialV2.ts](src/v2/data/tutorialV2.ts)）
-
-| 步 | 画面主体 | 玩家动作 | 系统反馈 | 教会什么 |
-|---|---|---|---|---|
-| 0 进站 | 基地全景，只亮一个工位 | 点“首航” | 其余设施的价格标签隐藏，只显示一个目标 | 这里是家，它很破 |
-| 1 装电池 | 船舱剖面占据主屏，手里拿着一块电池 | 拖到激光炮旁边 | 咔哒声，连线流光，舰体上的炮塔亮起，徽记显示“↑火力” | **相邻供能** |
-| 2 首战 | 战斗舞台，14HP 专属教学靶舰 | 观看；第 2 轮提示“点击过载”（M4 后启用） | 开火三拍，局部受击，2 轮击破 | **改船救了我**（不接线要 3 轮，并多挨一轮） |
-| 3 废船 | 残骸剖面，夹具发光 | 点夹具，切开 | 等离子描线，舱板弹开，零件按原形状飞进暂存区 | **画面即操作** |
-| 4 反应堆（倒数第二站） | 船舱已满，2×3 反应堆悬在舱口 | 选择舍弃哪件来腾出空间 | 实时显示“将损失：激光炮（火力 -5）/ 冷却罐（-18¤）” | **空间取舍** |
-| 5 分岔 | 星图上两个终点 | 安全回港，或者去“标明敌情 + 导航仪奖励”的支线 | 保留火力的船能稳赢支线；卸了炮的船预报显示“危险” | **刚才的取舍有后果** |
-| 6 返港 | 基地，吊臂卸下**那台反应堆** | 只在“出售还是收藏”时停一下 | 工作台通电，账单逐行跳数，叮一声 | **收获改变家园** |
-| 7 下一单 | 委托终端 | — | 推荐一单玩法不同、且带取舍点的委托 | 还有别的玩法 |
-
-### 4.2 屏幕结构（替换三块式骨架）
-
+### High-Level Data Flow
 ```
-┌──────────── 精简 HUD：耐久 · 燃料 · 任务进度 · ⋯ ────────────┐
-│                                                              │
-│      ShipStage（Phaser：背景 + 舰船/残骸/敌舰）              │
-│        └ HoldView（常驻 DOM 船舱剖面，与舰体对齐，           │
-│           航行时缩小只读，整理时推近可编辑）                 │
-│                                                              │
-│                         ┌── ContextDock：1 个主操作 + ≤2 次操作 ┐
-└─────────────────────────┴──────────────────────────────────────┘
-        详情抽屉（推演、敌舰数值、每格售价、规则）按需滑出
+User Input (DOM / Canvas / Keyboard)
+  │
+  ▼
+V2AppController (thin coordinator + persistence + soundEngine + PhaserHost + __STARLINE_INSPECT__)
+  ├── UI Screens (src/v2/ui/screens/*) & Modals (src/v2/ui/modals/*) & CargoGridV2
+  ├── PhaserHost ──► BaseScene (V2 diorama state) & V2CombatScene (multi-phase combat & hardpoints)
+  └── Pure Domain Engine (src/v2/domain/*) + Static Data (src/v2/data/*)
+        ├── campaign.ts (4-Act spine, chapters, endings, endless abyss)
+        ├── sectors.ts (3 sectors + environmental rules + pity relic signals)
+        ├── combatV2.ts (tactical commands, enemy intent cycles, 3 multi-phase bosses)
+        ├── routeGenerator.ts (sector-aware 6-layer DAG + pluggable enemy/event registries)
+        ├── encounter.ts + events.ts + dismantle.ts (multi-cut derelicts, 16+ event deck, scrap)
+        ├── factions.ts + contracts.ts (3 factions, rep ranks, 5 contract types + bonus goals)
+        ├── buildStatsV2.ts + inventoryV2.ts + loadout.ts (16 equipment, 4 gadgets, 4 ships, power cells)
+        ├── progressionV2.ts + settlementV2.ts (T1–T3 facilities, Stargate Relay, relic passives, career)
+        └── achievements.ts + persistenceV2.ts (18 achievements, 30-run ledger, V2->V3 migration)
 ```
 
-- 所有航行阶段的舞台都占视口 ≥ 60%（现状是 120–270px）。
-- 同一个 HoldView DOM 节点跨阶段常驻。物件只移动，不会消失后重新出现。
-- 移动端：舞台在上、Dock 在下，HoldView 推近时舞台变暗退后。
+---
 
-### 4.3 美术方向：「舰载工业终端」
+## Code Layout
 
-- **场景**：保留手绘厚涂工业风，统一光向（左上）和描边（外描边约 3 源 px `#0b121f`）。
-- **UI**：面板是钢框（45° 切角、铆钉、冷高光、暗边），信息区是 CRT 凹屏（扫描线 4–6%、荧光青琥珀色、等宽数字），按钮是实体按键（有侧面厚度，按下下沉，配咔哒声）。危险项加黄黑斑马条或护盖；禁用态做成“断电”，不只是降低透明度。
-- **特效**：ADD 混合的辉光、火星、碎屑；每次命中分“充能、开火、命中”三拍。
-- **声音**：每个核心交互都有可分辨的音色，加环境底噪和 BGM。
+- **Root & Config**:
+  - `.gitignore` — MUST include `.agents/` alongside `node_modules/`, `dist/`, `.DS_Store`, `*.log`, `coverage/`.
+  - `package.json`, `tsconfig.json`, `vite.config.ts`, `playwright.config.ts` (E2E Track).
+  - `PROJECT.md`, `TEST_INFRA.md` (E2E Track), `TEST_READY.md` (E2E Track).
+- **Shared Infrastructure (preserve V1 compatibility)**:
+  - `src/main.ts` — Mode router (`?mode=v1` vs default `v2`), imports V3 modular CSS.
+  - `src/assets/{itemArt,manifest}.ts`, `src/audio/soundEngine.ts`, `src/domain/{rng,tabLock,progression}.ts`, `src/data/buildings.ts`.
+  - `src/scenes/{PhaserHost,BaseScene}.ts`, `src/ui/{Modals,styles}.css|ts`.
+- **Legacy V1 (DO NOT BREAK)**:
+  - `src/data/{items,nodes,shapes,tutorial}.ts`, `src/domain/{buildStats,combat,economy,expedition,inventory,persistence}.ts`, `src/scenes/CombatScene.ts`, `src/ui/{AppController,CargoGrid}.ts`.
+- **V2/V3 Active Game**:
+  - `src/v2/data/`: `shapes.ts`, `ships.ts`, `crew.ts`, `equipment.ts`, `cargo.ts`, `contracts.ts`, `enemies.ts`, `facilities.ts`, `trialBuilds.ts`, `tutorialV2.ts`, `showcaseRun.ts`, plus new V3 modules: `campaign.ts`, `sectors.ts`, `bosses.ts`, `events.ts`, `factions.ts`, `gadgets.ts`, `achievements.ts`, `lore.ts`.
+  - `src/v2/domain/`: existing 16 pure modules + new V3 modules: `campaign.ts`, `dismantle.ts`, `events.ts`, `factions.ts`, `achievements.ts`.
+  - `src/v2/scenes/`: `V2CombatScene.ts`.
+  - `src/v2/ui/`: `V2AppController.ts` (thin coordinator), `CargoGridV2.ts`, `V2Modals.ts`, `icons.ts`, `screens/` (`TitleView.ts`, `BaseView.ts`, `PrepareView.ts`, `MapView.ts`, `CombatView.ts`, `WreckView.ts`, `EventView.ts`, `ShopView.ts`, `RewardView.ts`, `ArrangeView.ts`, `SettlementView.ts`, `EndingView.ts`), `modals/` (`CampaignModal.ts`, `ContractsModal.ts`, `WorkshopModal.ts`, `CareerModal.ts`), `styles/` (`v3-layout.css`, `v3-campaign.css`, `v3-combat.css`, `v3-dismantle.css`, `v3-endgame.css`).
+- **Tests**:
+  - Unit & Simulation (Vitest, `npm run test`): `tests/rules.test.ts`, `tests/simulation.test.ts`, `tests/v2-rules.test.ts`, `tests/v2-simulation.test.ts`, `tests/v2-polish.test.ts`, plus new suites `tests/v2-foundation.test.ts`, `tests/v2-campaign.test.ts`, `tests/v2-combat-boss.test.ts`, `tests/v2-dismantle-events.test.ts`, `tests/v2-station-buildcraft.test.ts`, `tests/v2-endgame.test.ts`.
+  - Opaque-Box E2E (Playwright + auto-detected Chromium, owned by E2E Testing Track): `playwright.config.ts`, `tests/e2e/**`.
+- **Build & Test Commands**:
+  - Install: `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install`
+  - Unit/Sim tests: `npm run test` (`vitest run`)
+  - Typecheck & Build: `npm run build` (`tsc --noEmit && vite build`)
+  - E2E tests: `npm run test:e2e` (defined by E2E Testing Track / `TEST_READY.md`)
 
 ---
 
-## 5. 技术方案
+## Feature Inventory
 
-### 5.1 渲染层改造（M0，所有后续工作的前提）
+Every feature discovered across all 3 Survey reports (Spec Miner + Explorer #1 + Explorer #2) is listed below and explicitly assigned to a milestone (0 unassigned):
 
-1. **船舱组件常驻**：`mountV2CargoBay` 改为只在节点不存在时创建，之后只调用 `cargoGrid.render(bay, editable, opts)`，回调改为 setter。整理阶段的 `onChange` 不再走 `syncAll`，只刷新 HUD、Dock 和船舱（V1 就是这么做的，见 [AppController L1173-1185](src/ui/AppController.ts#L1173-L1185)）。
-2. **Phaser 舞台去重**：`syncPhaserStage` 计算 `playbackKey`（舰船 + 背景 + 敌人 + 模式），key 不变就不调用 `showV2Stage`/`applyPlayback`，只调用 `updateV2ShipVisualSpec`。
-3. **阶段视图模块化**：新建 `src/v2/ui/phases/{Map,Encounter,Reward,Arrange,Wreck,Shop,Settlement,Prepare}View.ts`，统一接口 `mount(host) / update(run) / unmount()`。控制器只在 phase 切换时 mount/unmount。拆分顺序：Arrange → Map → Reward → Encounter → Settlement → Prepare。
-4. **推演按需计算**：`computeV2PlacementTacticalDelta` 按 `bayHash + itemId + zone` 缓存，只在选中项变化时计算，放进 `requestIdleCallback`。CargoGrid 内部拆成 board / items / overlay / inspector 四个子渲染，方向键只更新焦点类。
-5. **不引入 UI 框架**。允许写一个 ≤150 行的轻量 `view()` / `patch()` 工具和 FLIP 动画辅助。
-
-### 5.2 规则层改造原则
-
-- 预览和实战继续**同源、确定**。引入干预后，预览的含义是“不干预时的结果”，界面必须写明。干预序列 `interventions[]` 作为 `simulateV2Combat` 的输入，写入存档，刷新后可以重放。
-- 改规则必须提升 `V2_RULES_VERSION`，并提供存档迁移：进行中的航次按旧规则结算完，或者安全中止并返还。迁移和回退都要有测试。
-- 教学继续使用独立脚本和种子，不暗改正式随机。
-
-### 5.3 埋点（M3 前完成）
-
-在 `localStorage` 写一份 `starline_playtest_log`（可导出为 JSON，默认关闭，只在 `?playtest=1` 时开启），记录：阶段进入和离开的时间戳、每次点击的 `data-action` 及其是否属于“纯确认”、拖放次数和失败次数、返航或冒险的选择、结束后是否再开一局。
-
----
-
-## 6. 里程碑与任务
-
-> 规则：每个任务单独建分支、单独验收。每完成 3 个任务做一次首航全流程走查并截图。任务编号会出现在提交信息里，例如 `feat(S01): …`。
-
-### M0 · 地基：让手感“能存在”（约 1 周）
-
-| ID | 任务 | 主要文件 | 验收 |
-|---|---|---|---|
-| F01 | 船舱组件常驻，整理阶段局部刷新 | V2AppController `mountV2CargoBay`、CargoGridV2 | 计数器证明整理阶段 10 次拖放后组件实例数为 1；放置后选中保持；吸附动画、`energyLink` 音效、键盘焦点在整理阶段都能触发 |
-| F02 | Phaser 舞台按 playbackKey 去重 | V2AppController `syncPhaserStage`、PhaserHost、V2CombatScene `applyPlayback` | 废船切割特效完整播放（录屏可见）；整理阶段模块变化不重置敌舰和粒子 |
-| F03 | 推演缓存，CargoGrid 子渲染拆分 | tacticalDelta.ts、CargoGridV2 | 选中切换和方向键不再触发 `simulateV2Combat`（用测试打点验证） |
-| F04 | Arrange、Map 两个阶段拆成视图模块 | 新建 `src/v2/ui/phases/` | 行为与现状一致；新增阶段切换回归测试 |
-| F05 | 回归基线：阶段切换单测 + 首航 E2E 截图脚本 | `tests/`、`scripts/` | `npm test` 全绿；脚本可在 1366×768 和 390×844 下输出首航 10 张截图 |
-
-**门槛 G0**：F01–F05 完成，42 项既有测试和新增测试全部通过，否则不进入 M1/M2。
-
-### M1 · 首航垂直切片：玩法与交互（约 2 周）
-
-| ID | 任务 | 主要文件 | 验收 |
-|---|---|---|---|
-| S01 | 按 §4.1 重写首航：14HP 教学靶舰、电池从手里放、反应堆放在倒数第二站、终点前分岔、开启工程师换型 | tutorialV2.ts、encounter.ts | 规则测试：接线 2 轮 / 26 耐久，不接线 3 轮 / 24 耐久；卸炮后风险支线预报为“危险”，保炮为“稳”；反应堆发放后不会被自动跳过吞掉 |
-| S02 | 自动跳过空整理：新增 `shouldAutoSkipArrange(run)`（暂存区空、无任务物、无工程师或勘测机会时返回 MAP），在航路阶段也允许编辑船舱 | encounter.ts 中 5 个 resolve/pick 函数、`selectV2MapNode` | 空整理次数为 0；航路阶段可以拖动物件；任务物和换型机会不被跳过 |
-| S03 | 常驻舞台布局：ShipStage + HoldView + ContextDock，新增 `.v2-shell.phase-*` 布局，整理阶段默认展开舰体 | V2AppController、styles.css、[isArrangeSceneCollapsed](src/v2/ui/V2AppController.ts#L408) | 1366×768、390×844、844×390 三个尺寸下，航行阶段舞台 ≥ 60% 视口；HoldView 跨阶段保持同一个 DOM 节点 |
-| S04 | 航路合一：节点即卡片，跃迁按钮在卡片内；单敌时隐藏集火策略 | `renderMapPhase` | 同一目的地只有一处表达；跃迁只需 1 次点击 |
-| S05 | 战前合并：跃迁到战斗节点后 1.5 秒自动开打，可暂停 | `renderEncounterPhase` | 战斗节点纯确认点击 ≤ 1 |
-| S06 | 预报降精度：默认显示威胁档位（稳 / 吃力 / 危险 / 致命）和 ↑↓ 徽记；精确推演放进详情抽屉；4 个数值格压缩成一行图标 | V2AppController、tacticalDelta.ts、CargoGridV2 L257-288 | 第一层文案中不出现“余 xxHP (n轮)”；详情里仍可查到完整推演（**需先确认决策 D1**） |
-| S07 | 拖放手感：按抓取点偏移、物件吸附预览、拖动中实时预演将接通的连线、失败回弹、`energy-link-line` 流光，区分拿起 / 合法悬停 / 落位轻重 / 非法音效；推荐落点改为玩家主动请求才显示 | CargoGridV2、styles.css、soundEngine | 静音录屏时能看出合法与非法；遮屏只听声音能分辨拿起、落位、接通、非法 |
-| S08 | 废船直接操作：点夹具后切割（约 600ms，可跳过），零件剪影用 FLIP 飞进暂存区，然后才切换状态 | [renderWreckHotspotOverlay](src/v2/ui/V2AppController.ts#L1540)、V2CombatScene `triggerV2WreckCutFx` | 切割到入舱全程连贯；reducedMotion 下直接切换，信息不丢 |
-| S09 | 返港：吊臂卸下本次带回的**真实物品图**；只有一种去向的条目自动处理；账单逐行 `creditTick` 跳数 | BaseScene L664-751、`renderSettlementPhase` | 结算页按钮数 ≤ 需要决策的条目数 + 1 |
-| S10 | 首航后推荐一单玩法不同、带取舍点的委托 | V2AppController 推荐委托排序（约 L550）、contracts 数据 | 首航后首屏推荐不再是“再运一次反应堆” |
-
-### M2 · 首航垂直切片：美术与声音精修（约 2 周，可与 M1 后半并行）
-
-> 范围只限首航涉及的内容：1 艘炮艇、1 种敌舰、1 处残骸、1 个卸货点、首航用到的 UI 画面。
-
-| ID | 任务 | 主要文件 | 验收 |
-|---|---|---|---|
-| A01 | 局部受击替换整船填白：在命中点放 ADD 辉光，舰体只做轻暖色或亮度 40ms；护盾吸收时只闪护盾 | V2CombatScene L537 / L1097 / L1123 | 第 1 轮按 16ms 间隔逐帧截图，任一帧纯白像素 ≤ 舰体面积 30% |
-| A02 | 回合节拍化：用 `time.delayedCall` 排成充能 0ms → 开火 120ms → 命中 160–200ms → 回击 450ms，所有延时除以倍速；跳过时清空计时器 | `executeRoundVisual`、`skipPlayback` | 开火到命中 ≤ 200ms；每回合至少三拍 |
-| A03 | 三层光束（外辉 / 色层 / 白芯）、重炮曳光弹、枪口焰、火星和护盾碎片粒子、hitstop 40–80ms | V2CombatScene L1282-1317、`update` | 粒子单次 ≤ 24、同屏 ≤ 100；lowQuality 下关闭粒子 |
-| A04 | 死亡演出（错时爆炸、切成两半漂开、残骸）、血条掉血残影和刻度、伤害数字分级（普通 / 减甲 / 穿盾 / 反击）并错开位置 | V2CombatScene L753-767、L1006-1019、L1269-1279 | 伤害数字不再重叠 |
-| A05 | 引擎尾焰（从 V1 移植，使用 `engine` 挂点）和待机微转动 | V2CombatScene、manifest.ts | 每艘舰船都有尾焰 |
-| A06 | 炮艇重制为 1024×512 分层（舰体、炮座与炮管、自发光、2 级损伤），5 个外挂模块 512×256 并带接触阴影，1 种敌舰 1024×512（含解体切片） | public/assets/ships、modules，manifest.ts | 2× 屏源/CSS 比 ≥ 2.0；同屏描边粗细差 ≤ 1 档 |
-| A07 | 废船剖面 2560×1440 分层，三个舱室各有“夹具封闭 / 切开”两态和物件剪影层 | public/assets/events | 不看标签也能认出三个舱室 |
-| A08 | 基地：工作台和卸货点分层并有破旧 / 修复 / 工作三态，轴测版炮艇用于靠泊，吊臂拆成四段关节；叠层改为交叉淡入加扫描式点亮 | BaseScene、public/assets/base | 靠泊画面不再混用透视；同一件货在剖面、船舱、船坞三处都能凭轮廓认出 |
-| A09 | UI 皮肤 v1（钢框 / CRT 屏 / 实体键 / 铭牌 / 斑马条），只覆盖首航画面；修订美术规范 §8 的圆角条款 | styles.css tokens、美术规范 | 首航画面中功能性胶囊 pill 为 0；灰度截图下状态仍可区分 |
-| A10 | 声音：V2 接入 BGM 和环境底噪；新增拿起、重落位、切割、夹具弹开、吊臂伺服、收银、敌方开火音效；加总线、压缩器和音高随机 | soundEngine.ts、V2AppController | 20 个核心交互音色互不相同 |
-
-**门槛 G1**（内部走查）：在桌面和窄屏各走一遍首航，包括纯点选和纯键盘操作。§8 的技术指标和美术指标全部达标后，才能进入 M3。
-
-### M3 · 真人试玩门槛（约 1 周）
-
-| ID | 任务 | 验收 |
-|---|---|---|
-| T01 | 埋点（§5.3）和导出工具 | 能导出一份完整首航日志 |
-| T02 | 8 名新玩家，以当前 `8f43788` 为基线，两版交叉平衡先后顺序 | 有原始日志和观察记录 |
-| T03 | 试玩报告，写入 `docs/reviews/<date>-v3-slice/` | 含指标表、问题清单和“继续 / 迭代 / 转向”结论 |
-
-**门槛 G2（决定是否扩产）**：
-- ≥ 6/8 的玩家无需提示就能完成一次有后果的改装，并能说出下一战为什么不同；
-- 首个有效操作的中位用时 ≤ 60 秒；
-- 每个节点的纯确认点击 ≤ 1；
-- ≥ 4/8 的玩家结束后自愿再开一局。
-
-未达标时回到 M1/M2 迭代切片，**不启动 M5**。
-
-### M4 · 核心循环深化（约 3 周；D01–D03 可在 G1 后先做原型，正式合入以 G2 为准）
-
-| ID | 任务 | 主要文件 | 验收 |
-|---|---|---|---|
-| D01 | **战中过载**：每回合积 1 点能量，点舰上某个部件让它过载（激光连射、护盾爆发、重炮立刻开火）；过载电池时相邻部件一起受益。`simulateV2Combat` 增加 `interventions[]` 输入，复用精英战“提交后重算”的逻辑；默认开启，替代 `eliteTacticExperiment` | combatV2.ts、V2CombatScene、存档 | 干预可重放且确定；在“吃力 / 危险”档的战斗中，合理干预至少能改变 1 个档位 |
-| D02 | **敌人意图**：给敌人单位模板加意图时间表（蓄力、护航加盾、穿盾齐射），敌舰头顶显示下一轮意图；目标策略增加“锁定某个敌人” | enemies.ts、combatV2.ts | 150 场矩阵中，切换策略或锁定改变胜负的场次 ≥ 10% |
-| D03 | **供能容量和跨类联动**：普通电池只供 1 门炮，优良供 2 门；增加货物或跨类联动（如冷却罐贴重炮）；第一次触发时弹出“新联动！”并写入图鉴 | buildStatsV2.ts、equipment.ts、profile.discoveredItems | T09 加入夹心组合；没有任何单一构筑在 13 种遭遇中拿到超过 60% 的最优 |
-| D04 | **风险线**：只有信标节点免费返航（或返航消耗燃料），携带货物随层数升值，下调战败保底 | encounter.ts L825、settlementV2.ts | 模拟中“深入”策略的期望收益更高、方差也更大；战败率进入 10–25% 的目标区间（**需先确认决策 D2**） |
-| D05 | **再切一刀**：废船改为 3–5 个舱，每切一刀结构应力上升，坍塌会损失本船收获、扣耐久或引来巡逻（使用 events 随机流） | `resolveV2WreckChoice` | 刷新后结果不变；玩家可以在任意一刀后停手 |
-| D06 | **动态空间冲突**：按进入时的船舱状态生成废船和奖励掉落，用 `verifyV2SpatialConflict` 保证每局至少出现一道真正的取舍题 | routeGenerator.ts、inventoryV2.ts L518 | 每个标准委托每局真实冲突 ≥ 1 次 |
-| D07 | **奖励和成长**：战后三选一改为三件装备并标出能和舱内哪件联动，减少平白补血；流派解锁改为三选一；藏品提供被动效果 | settlementV2.ts L318、encounter.ts `pickV2CombatReward` | 第 1 局结束时玩家做出一次流派选择 |
-| D08 | **平衡回归**：更新 `v2-simulation` 和 `v2-rules` 测试，新增策略敏感度、冲突频率、统治解检测 | tests/ | 全部指标进入 CI |
-
-**门槛 G3**：D01–D03 完成后，平衡模拟证明不存在统治解，目标策略或干预对结果有实质影响；否则先修规则，不加新内容。
-
-### M5 · 扩产（只在 G2 通过后启动）
-
-- 其余 2 艘玩家舰、5 种敌舰、2 个 Boss 按 A06 规格重制；6 个星区背景和 4 个事件背景重制为 2560×1440 前景 / 远景两层；标题图 3840×2160。
-- 31 件物品统一描边和光向，重画风格偏离的件（旧引擎、反应堆、冷却罐），维修无人机单独出图。
-- UI 皮肤覆盖全部画面（整备、商店、设施、图鉴、设置）。
-- 其余阶段视图模块化（Encounter、Settlement、Shop、Prepare）。
-- 五个尺寸断点回归（360×640、390×844、430×932、844×390、1366×768）。
+| # | Feature | Description | Milestone | Source |
+|---|---------|-------------|-----------|--------|
+| F01 | Repo Hygiene & Tooling Baseline | Add `.agents/` to `.gitignore`, run `npm install` + install `@playwright/test` (`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`), verify baseline `42/42` Vitest + `tsc && vite build`. | M1 | Explorer #1 |
+| F02 | Save Schema V3 & Non-Destructive V2→V3 Migration | Bump `V2_SCHEMA_VERSION` to `3` with automatic backward-compatible `2 -> 3` upgrade in `persistenceV2.ts` (preserving backup & mapping existing progress to Campaign Acts), adding typed fields for campaign, sectors, crew mastery, factions, salvageParts, facility tiers, gadgets, career stats, run history, achievements, endings, and endless threat level. | M1 | Spec Miner, Explorer #1 |
+| F03 | Modular Screen/CSS Split & E2E Testability Contracts | Extract screen views (`src/v2/ui/screens/*`) and modular styles (`src/v2/ui/styles/*`) from `V2AppController.ts`/`styles.css`; add `?seed=<uint32>` deterministic seed forwarding, stable `data-testid`/`data-phase`/`data-screen`/`data-act` attributes, and strictly read-only `window.__STARLINE_INSPECT__()` getter. | M1 | Explorer #1, Explorer #2 |
+| F04 | V2 Bug Remediation & De-Demo Presentation | Wire `soundEngine.setTrack('base' \| 'expedition' \| 'boss')` + add `'boss'` BGM track; fix `restoreV2Relic` SFX (`'relicRestore'`); fix Codex `29/31` cap (100% attainable) + real `seenItems` ("见闻") tracking; fix empty locked deep contracts preview; wire `recentEquipmentKinds` anti-repeat guard; show Engineer Swap in `SHOP`; de-demo Title Screen (move "4 站精华试玩" & "经典模式" to secondary drawer); fix 1366×768 fold clipping (sticky Prepare/Settlement CTAs, collapsed loan rows, left-panel Arrange inspector, crisp high-contrast Star Map DAG arrows). | M1 | Spec Miner, Explorer #2 |
+| F05 | 4-Act Main Campaign (`星门重启计划`) & Quest Tracker | Implement Prologue + Acts I–III + Post-Game campaign state machine (`campaign.ts`), persistent collapsible Base HUD Mission Banner, full Campaign Roadmap / Story Comms modal, Act transition briefings, milestone reveal banners, and pity/guaranteed relic signal progression so players are never RNG-locked. | M2 | Spec Miner, Explorer #1, Explorer #2 |
+| F06 | 3 Distinct Star Sectors & Environmental Modifiers | Implement Sector 1 (`近轨残骸带`, `sector_1/2/4`), Sector 2 (`冰晶舰冢带`, `sector_4/5/3`, cryo/ion rule), and Sector 3 (`古代星门禁区`, `sector_3/5/6`, gravity tide rule) with sector selection, unlock gates, sector-specific loot/enemy/event weights, and deterministic environmental modifiers reflected in combat preview & execution. | M2 | Spec Miner, Explorer #1, Explorer #2 |
+| F07 | Named Crew Roster, SVG Portraits, Comms & Mastery | Upgrade 3 crew into named specialists (**林工**, **陆衡**, **苏岚**) with inline SVG portraits, reactive 1–2 line radio comms on boss/relic/chapter events (resolving "营救工程师" clash), and 3-tier Crew Mastery perks earned via expedition feats. | M2 | Spec Miner, Explorer #2 |
+| F08 | Active Tactical Command System (Default-ON) | Promote mid-combat tactical decisions out of hidden Settings into default-ON core gameplay with Command Charge (1 in regular/elite, 2 in Act Bosses): 3 universal orders (`火力过载`, `紧急护盾`, `聚焦校准`) + per-hull Signature Command; 100% deterministic preview/re-sim, reload-safe idempotency, Pure-Auto toggle preserved in Settings. | M3 | Spec Miner, Explorer #1, Explorer #2 |
+| F09 | Expanded Enemy Roster (8+ Regular) & Telegraphed Intents | Activate unused `enemy_hulk.webp` and expand regular/elite enemies to 8+ distinct types (Charging Artillery, Shield Regenerator, Drone Carrier, EMP Disruptor, Hull Rammer, etc.) with publicly telegraphed round-by-round intent cycles rendered in preview and combat HUD. | M3 | Spec Miner, Explorer #1, Explorer #2 |
+| F10 | 3 Multi-Phase Act Bosses | Replace the single cloned elite stat block with 3 mechanically unique multi-phase Act Bosses: Act I **铁砧号** (`enemy_hulk`, drone summons + heavy armor), Act II **铁壁无畏** (`boss_dreadnought`, shield overload + piercing charge beam), Act III **黑曜利维坦** (`boss_leviathan`, 3 phases: escorts → reactor exposure → final volley), with phase VFX/SFX and accurate deterministic preview. | M3 | Spec Miner, Explorer #1, Explorer #2 |
+| F11 | True "Dismantling (拆解)" Loop: Multi-Cut Derelicts & Scrap Refining | Upgrade Wrecks into press-your-luck **Derelict Dissection** with Structural Stability / Alarm Meter (safe 1st cut; optional greedy 2nd/3rd cuts with disclosed hull/fuel/ambush risk & lethal-cut guard); add **Dismantle → Salvage Parts (`精密零件`)** at Settlement & Workbench to **Upgrade Common → Improved**, craft modules, and tune hulls (protecting loan/mission items). | M4 | Spec Miner, Explorer #1, Explorer #2 |
+| F12 | 16+ Narrative & Tactical Sector Event Deck | Replace single-template Anomaly & Distress nodes with ≥16 distinct sci-fi salvage/dilemma events (black-box decode, black-market smuggler, drifting convoy, unstable reactor, rival scavengers, automated drydock, stargate echo, puzzle cache, etc.), crew-specific bonus options, non-repeating draw per run, and safe unaffordable fallbacks. | M4 | Spec Miner, Explorer #1, Explorer #2 |
+| F13 | 3 Orbital Factions, Reputation & Expanded Contracts | Introduce **星港行会**, **深空研究院**, and **自由拾荒团** with Rep Levels 1–3 & perks; add 2 new contract types (**清剿悬赏 / Bounty Hunt**, **黑匣打捞 / Derelict Extraction**) and **Optional Bonus Objectives** on contracts (e.g., HP ≥ 60% or 0 discards for +30% bonus). | M4 | Spec Miner, Explorer #1 |
+| F14 | Deepened Buildcraft: 6 New Modules, 4 Gadgets, 4th Flagship & Power Cells | Add 6 cross-archetype equipment modules (10 → 16: `coolant_vent`, `cargo_amp`, `emp_jammer`, `overdrive_core`, `salvage_grapple`, `salvo_pod`), 4 `1×1` consumable tactical gadgets (`repair_kit`, `overcharge_cell`, `jump_canister`, `cut_stabilizer`), 4th unlockable Flagship (`stargate_cruiser`, 5×5 irregular / 20 cells, budget 8), and highlighted **Hull Power Cells** on every ship grid. | M5 | Spec Miner, Explorer #1, Explorer #2 |
+| F15 | Upgradable Station Departments (T1–T3), Stargate Relay, Relic Passives & Economy Runway | Expand facilities to T1–T3 upgrades + new **星门通讯塔 (`stargate_relay`)**; grant all 4 restored Relics active station passives (`ancient_navigator` +1 fuel & full map reveal, `cryo_amber` +4 max HP, `quantum_core` +1 budget, `obsidian_crown` +1 boss tactical charge); expand meaningful progression sinks to ~4,500–6,000¤ + Salvage Parts; reconcile Trial Kits into in-universe Holodeck/Tactical Templates without cannibalizing Act I blueprint unlocks. | M5 | Spec Miner, Explorer #1, Explorer #2 |
+| F16 | Full V2 `BaseScene.ts` Orbital Station Diorama Parity | Decouple V2 station rendering from V1 `BaseProgression` adapter; render active berthed player ship on the landing pad; display visible diegetic upgrades/lighting for `contract_hub`, `research_lab`, `drydock_tier2`, facility tier progression, relic aura, and `stargate_relay`. | M5 | Spec Miner, Explorer #1, Explorer #2 |
+| F17 | Act III Climax Mission, 3 Campaign Endings & Victory Ceremony | Implement dedicated Act III final mission (`星门重启远征` culminating in 3-phase `黑曜利维坦`), climax narrative choice, Victory Ceremony & Epilogue screen with 3 distinct endings (`星门重燃`, `自由港湾`, `旧舰队继承者`), Ending Gallery, and non-destructive return to Base. | M6 | Spec Miner, Explorer #1, Explorer #2 |
+| F18 | Endless Abyss (`威压 1–10`), Career Ledger, Bestiary, Lore, 18 Achievements & Balance Matrix | Implement Post-Game Endless Abyss (`威压 1–10` + run mutators + seeded challenge), 30-run Career Ledger with real career stats, Enemy Bestiary & Boss Dossier, Story/Comms Archive, 18 Achievements/Medals with rewards, and full-game Vitest + Monte Carlo balance verification. | M6 | Spec Miner, Explorer #1 |
+| F19 | Independent Opaque-Box E2E Suite (Tiers 1–4) & Adversarial Hardening (Tier 5) | Build requirement-driven Playwright E2E infrastructure (`TEST_INFRA.md`, `playwright.config.ts`, `tests/e2e/**`, `TEST_READY.md`) covering Tiers 1–4 across desktop (`1366×768`) & mobile (`390×844`), pass 100% of E2E tests, then run Tier-5 white-box adversarial coverage hardening. | E2E Track + M7 | Project Pattern, Explorer #2 |
 
 ---
 
-## 7. 待决策事项（执行前由负责人确认）
+## Milestones
 
-| ID | 问题 | 选项 | 推荐 |
-|---|---|---|---|
-| D1 | 默认预报的精度 | a. 保持精确数字；b. 威胁档位 + 详情抽屉；c. 只显示档位 | **b**。保留规划精度，同时恢复悬念。V1 的“公开预测”支柱改写为“公开威胁，按需推演” |
-| D2 | 安全返航的代价 | a. 维持免费；b. 只在信标节点免费；c. 消耗 1 燃料 | **b**。制造“兑现还是继续推进”的决策线，同时保留安全出口 |
-| D3 | 战中干预的强度 | a. 不做；b. 每场 1 次；c. 每回合积能量 | 原型先做 **b**，试玩后再决定是否升级为 c |
-| D4 | 供能规则 | a. 维持无限供能；b. 容量制 | **b**，配合 D03 的跨类联动补偿乐趣 |
-| D5 | V1 与 V2 的去留 | a. 继续保留 V1 入口；b. M5 后下线 V1 | M5 前维持 **a** |
-
----
-
-## 8. 度量与验收总表
-
-| 类别 | 指标 | 现状 | 目标 |
-|---|---|---|---|
-| 交互 | 每个战斗节点的点击数 | 4–6 | ≤ 3 |
-| 交互 | 每个节点的纯确认点击 | 2–3 | ≤ 1 |
-| 交互 | 空整理次数 | 每局 0.25–1.25 | 0 |
-| 交互 | 航行阶段舞台占视口比例 | 120–270px | ≥ 60% |
-| 交互 | 整理阶段船舱组件重建次数 | 每次操作 1 次 | 0 |
-| 玩法 | 首战接线与不接线的差异 | 0 轮 | ≥ 1 轮 |
-| 玩法 | 每个标准委托每局的真实空间冲突 | 0.18–1 | ≥ 1 |
-| 玩法 | 策略或干预改变胜负的比例 | 0/150 | ≥ 10% |
-| 玩法 | 单一构筑在遭遇中最优的比例 | 夹心接近 100% | ≤ 60% |
-| 玩法 | 首次有意义的成长选择 | 约第 2 局后 | 第 1 局结算时 |
-| 美术 | 主要素材 2× 屏源/CSS 比 | 1.12–1.31 | ≥ 2.0 |
-| 美术 | 命中帧纯白像素占舰体面积 | 约 100% | ≤ 30% |
-| 美术 | 每回合表现节拍数 | 1 | ≥ 3 |
-| 美术 | 首航画面功能性胶囊 pill | 大量 | 0 |
-| 声音 | 核心交互可分辨音色数 | 少数（click 泛用） | 20 |
-| 声音 | V2 BGM | 无 | 有，可单独静音 |
-| 性能 | 中端手机帧率 | 未测 | 60fps；粒子单次 ≤ 24、同屏 ≤ 100 |
-| 体验 | §6 门槛 G2 的四项 | 未测 | 全部达标 |
+| # | Name | Scope | Dependencies | Status |
+|---|------|-------|--------------|--------|
+| E2E | E2E Testing Track | Opaque-box requirement-driven E2E test infrastructure (`TEST_INFRA.md`, `playwright.config.ts`, `tests/e2e/` Tiers 1–4) using auto-detected Chromium, publishing `TEST_READY.md`. | none (uses `@playwright/test` installed by M1) | DONE (`TEST_READY.md`, 33 files / 135 tests, 5/5 unanimous + Auditor CLEAN) |
+| M1 | Foundation, Schema V3, Screen Split & V2 Bug Fixes | F01, F02, F03, F04 — `.gitignore`, `npm install`, `@playwright/test`, `schemaVersion: 3` migration, screen/CSS split, E2E testability hooks, all V2 bug & layout fixes. | none | DONE (`tsc` 0 errors, Vitest 64/64, `vite build` pass, 5/5 unanimous + Auditor CLEAN) |
+| M2 | Mainline Campaign, 3 Star Sectors & Named Crew | F05, F06, F07 — 4-Act campaign engine, HUD tracker & modal, 3 sectors + env modifiers, pity-protected relic signals, named crew portraits/comms/mastery, pluggable `routeGenerator` registries. | M1 | DONE (`tsc` 0 errors, Vitest 88/88, `vite build` pass, 5/5 unanimous + Auditor CLEAN) |
+| M3 | Active Tactical Combat, Expanded Enemies & 3 Multi-Phase Bosses | F08, F09, F10 — Default-ON tactical command system + ship signatures, 8+ enemies with telegraphed round intents, 3 multi-phase Act Bosses (`铁砧号`, `铁壁无畏`, `黑曜利维坦`), VFX/SFX. | M1, M2 | DONE (`tsc` 0 errors, `vite build` 87 modules, Reviewer APPROVE + Auditor CLEAN; tests deferred to M7) |
+| M4 | True Dismantling Loop, 16+ Event Deck & Faction Contracts | F11, F12, F13 — Multi-cut press-your-luck derelict dissection, Salvage Parts dismantling & Common→Improved upgrades, 16+ crew-reactive event deck, 3 factions + rep + Bounty/Derelict contracts + bonus objectives. | M1, M2 | DONE (`tsc` 0 errors, `vite build` 94 modules, Reviewer APPROVE + Auditor CLEAN; tests deferred to M7) |
+| M5 | Buildcraft Expansion, Upgradable Station, Relic Passives & Diorama Parity | F14, F15, F16 — 6 new modules (16 total), 4 consumable gadgets, 4th Flagship (`星门巡洋舰`) + hull power cells, T1–T3 facilities + Stargate Relay + 4 active relic passives, Holodeck trial reconciliation, full V2 `BaseScene` diorama. | M1, M2, M4 | DONE (`tsc` 0 errors, `vite build` 96 modules, Reviewer APPROVE + Auditor CLEAN; tests deferred to M7) |
+| M6 | Climax Mission, 3 Endings, Endless Abyss, Career/Achievements & Balance | F17, F18 — Final `星门重启远征` mission, 3 endings + Victory Ceremony, Endless Abyss (`威压 1–10` + mutators + seed challenge), 30-run Career Ledger, Bestiary, Lore Archive, 18 Achievements, full balance matrix. | M2, M3, M4, M5 | DONE (`tsc` 0 errors, `vite build` 102 modules, Reviewer APPROVE + Auditor CLEAN; tests deferred to M7) |
+| M7 | Final Milestone: E2E Tiers 1–4 Pass & Tier 5 Adversarial Hardening | F19 — Phase 1: pass 100% of E2E Tiers 1–4 sequentially; Phase 2: white-box adversarial Tier-5 Challenger loop until zero remaining gaps; final whole-project Forensic Audit CLEAN. | M6, E2E (`TEST_READY.md`) | PLANNED |
 
 ---
 
-## 9. 约束与不做清单
+## Interface Contracts
 
-### 必须遵守
+### 1. Save Schema V3 & Migration (`src/v2/domain/types.ts` ↔ `persistenceV2.ts`)
+- `V2_SCHEMA_VERSION = 3`, `V2_RULES_VERSION = '3.0.0'`.
+- `loadV2Save()` MUST accept both `schemaVersion === 2` and `schemaVersion === 3`:
+  - On loading `schemaVersion === 2`, save a backup under `starline_save_backup_v2` (if not already backed up) and migrate non-destructively to `schemaVersion: 3`, preserving all V2 fields (`credits`, `buildings`, `unlockedShips`, `unlockedCrew`, `unlockedFamilies`, `blueprints`, `equipmentWarehouse`, `relics`, `discoveredItems`, `loadoutPresets`, `completedContractIds`, `totalRuns`, `tutorialCompleted`) and initializing V3 fields cleanly (inferring Campaign Act progress from existing facilities/contracts/relics).
+- Additive V3 fields on `V2ProfileState`:
+  ```ts
+  export type CampaignActId = 'prologue' | 'act1' | 'act2' | 'act3' | 'endless';
+  export type SectorId = 'near_orbit' | 'frozen_graveyard' | 'stargate_abyss';
+  export type FactionId = 'starport_guild' | 'deep_institute' | 'free_salvagers';
+  export type EndingId = 'stargate_reignited' | 'free_haven' | 'fleet_heir';
 
-- **确定性**：预览和实战同源；干预序列写入存档并可重放；刷新不重抽，结算幂等。
-- **版本化**：规则变化要提升 `V2_RULES_VERSION` 并提供迁移；`starline_save_v2` 和备份键保持可读，V1 回退入口保留到决策 D5 落地。
-- **统一入口**：所有不可逆动作继续经过只读窗口、弹层、阶段合法性和幂等 ID 的检查（`canMutate()`）。
-- **可达性**：reducedMotion 和 lowQuality 只削减表现，不削减信息；色觉障碍玩家可以靠接口形状、连线和标记判断。
-- **分辨率**：素材按“实际显示尺寸 × 2”验收，并更新 `asset_clarity_diagnostics`。
-- **证据**：每个任务交付时附上截图或录屏、测试结果，以及对应本文指标的测量值；不交付空按钮、假截图或只有配置没有接入的“完成”。
-- **技术栈**：继续使用 Phaser 3.90 + TypeScript + Vite，不引入 UI 框架。
+  export interface V3CampaignState {
+    currentAct: CampaignActId;
+    unlockedSectors: SectorId[];
+    completedMilestones: string[];
+    defeatedBossIds: string[];
+    readCommsIds: string[];
+    relicPityCounters: Record<string, number>;
+    endingsUnlocked: EndingId[];
+    finalMissionUnlocked: boolean;
+    endlessUnlocked: boolean;
+    maxEndlessThreat: number; // 0..10
+  }
 
-### 不做（至少到 G2 之前）
+  export interface V3CareerStats {
+    totalWins: number;
+    totalDefeats: number;
+    totalSafeReturns: number;
+    totalCreditsEarned: number;
+    totalSalvagePartsEarned: number;
+    totalBossesDefeated: number;
+    totalWrecksDissected: number;
+    totalItemsDismantled: number;
+    deepestEndlessCleared: number;
+  }
+  ```
+  Plus on `V2ProfileState`:
+  - `salvageParts: number` (default `0`)
+  - `facilityTiers: Record<string, number>` (default derived from `buildings`: `0 | 1 | 2 | 3`, includes `'stargate_relay'`)
+  - `campaign: V3CampaignState`
+  - `factionRep: Record<FactionId, number>` (0..300; Lv1=0, Lv2=100, Lv3=220)
+  - `crewMastery: Record<V2CrewId, number>` (tier `0 | 1 | 2`)
+  - `achievementsUnlocked: string[]`
+  - `defeatedEnemyKinds: string[]` (for Bestiary)
+  - `runHistory: V3RunHistoryEntry[]` (capped ring buffer max 30 entries)
+  - `career: V3CareerStats`
+- Additive V3 fields on `V2RunState`:
+  - `sectorId: SectorId` (default `'near_orbit'`)
+  - `endlessThreat?: number` (0 for campaign, 1..10 for Endless Abyss)
+  - `endlessMutatorIds?: string[]`
+  - `recentEquipmentKinds: string[]` (for L1–L3 anti-repeat guard)
+  - `usedEventIds: string[]` (non-repeating event deck per run)
+  - `bonusObjective?: { id: string; label: string; completed: boolean; rewardCredits: number }`
+  - `tacticalChargesMax: number` / `tacticalChargesUsed: number`
+  - `salvagePartsEarned: number`
+  - `isFinalCampaignRun?: boolean`
 
-- 自由飞行、手动瞄准或射击这类考验反应速度的玩法。
-- 新增节点类型、委托类型、货币或资源。
-- 全量素材重制（M5 之前只做切片）。
-- 用增加层数或提高赏金代替有记忆点的内容。
-- 用问卷里的“你觉得好玩吗”代替行为数据。
+### 2. E2E Testability & Observability Contract (`src/v2/ui/V2AppController.ts` ↔ `tests/e2e/**`)
+- **Deterministic Seed URL Parameter**:
+  - `?seed=<uint32>` parsed at startup; forwarded deterministically into `launchV2Expedition` (subsequent launches in the same browser session increment `seed + runIndex`).
+- **Strictly Read-Only Telemetry Getter** (ZERO mutator methods!):
+  ```ts
+  // Exposed on window.__STARLINE_INSPECT__ (read-only snapshot)
+  export interface StarlineInspectSnapshot {
+    mode: 'v1' | 'v2';
+    schemaVersion: number;
+    screen: 'title' | 'base' | 'prepare' | 'run' | 'ending';
+    phase: string | null; // 'MAP' | 'ENCOUNTER' | 'REWARD' | 'SHOP' | 'ARRANGE' | 'SETTLEMENT' | null
+    phaserScene: string | null; // 'BaseScene' | 'V2CombatScene' | 'CombatScene' | null
+    bgmTrack: string; // 'base' | 'expedition' | 'boss' | 'none'
+    campaignAct: string;
+    unlockedSectors: string[];
+    endingsUnlocked: string[];
+    credits: number;
+    salvageParts: number;
+    activeRun: {
+      runId: string;
+      seed: number;
+      sectorId: string;
+      contractId: string;
+      shipId: string;
+      crewId: string;
+      layer: number;
+      fuel: number;
+      hp: number;
+      maxHp: number;
+      wallet: number;
+      combatRound: number | null;
+      combatWaitingDecision: boolean;
+      wreckStability: number | null;
+      isFinalCampaignRun: boolean;
+      endlessThreat: number;
+    } | null;
+    failedAssets: string[];
+    modalOpen: boolean;
+  }
+  ```
+- **Stable DOM Attributes & `data-testid` Contract**:
+  - Root `.app-shell.v2-shell`: `data-screen`, `data-phase`, `data-act`, `data-sector`.
+  - Title Screen: `[data-testid="title-screen"]`, `[data-testid="btn-enter-station"]`, `[data-testid="btn-more-modes"]`.
+  - Base Screen: `[data-testid="base-screen"]`, `[data-testid="campaign-banner"]`, `[data-testid="btn-open-campaign"]`, `[data-testid="btn-open-contracts"]`, `[data-testid="btn-open-facilities"]`, `[data-testid="btn-open-warehouse"]`, `[data-testid="btn-open-relics"]`, `[data-testid="btn-open-codex"]`, `[data-testid="btn-open-career"]`, `[data-testid="btn-start-tutorial"]`, `[data-testid="btn-start-recommended"]`.
+  - Prepare Screen: `[data-testid="prepare-screen"]`, `[data-testid="sector-selector"]`, `[data-testid="ship-selector"]`, `[data-testid="crew-selector"]`, `[data-testid="btn-launch-expedition"]`.
+  - Map Screen: `[data-testid="map-screen"]`, `[data-testid="map-node-<id>"]`, `[data-testid="btn-jump-node"]`, `[data-testid="btn-safe-return"]`.
+  - Combat Screen: `[data-testid="combat-screen"]`, `[data-testid="btn-start-combat"]`, `[data-testid="combat-tactical-bar"]`, `[data-testid="tactical-order-<id>"]`, `[data-testid="btn-combat-skip"]`.
+  - Wreck/Event/Shop/Reward/Arrange/Settlement/Ending: `[data-testid="wreck-screen"]`, `[data-testid="wreck-stability"]`, `[data-testid="wreck-cut-<spot>"]`, `[data-testid="btn-wreck-extract"]`, `[data-testid="event-screen"]`, `[data-testid="event-choice-<index>"]`, `[data-testid="shop-screen"]`, `[data-testid="reward-screen"]`, `[data-testid="arrange-screen"]`, `[data-testid="btn-leave-arrange"]`, `[data-testid="settlement-screen"]`, `[data-testid="btn-confirm-settlement"]`, `[data-testid="ending-screen"]`, `[data-testid="ending-choice-<id>"]`, `[data-testid="btn-ending-continue"]`.
+  - Cargo Grid: `.cargo-cell[data-cx][data-cy]` (plus `data-power-cell="true"` for hull power cells in M5).
 
----
+### 3. Pluggable Sector/Encounter/Combat Registries (M2 ↔ M3 ↔ M4)
+- `routeGenerator.ts` (owned by M2 after M1) delegates enemy formation lookup to `buildSectorEnemyEncounter(sectorId, layer, kind, rng, endlessThreat)` in `src/v2/data/enemies.ts` (owned by M3) and delegates non-combat event payload lookup to `drawSectorEventPayload(sectorId, nodeType, usedEventIds, rng)` in `src/v2/data/events.ts` (owned by M4).
+- M2 provides clean default implementations/stubs for both hooks so M2 compiles and passes tests independently; M3 and M4 then upgrade their respective modules in parallel with ZERO file overlap.
 
-## 10. 执行规程
+### 4. BaseScene V2 Diorama Interface (`V2AppController.ts` ↔ `BaseScene.ts`)
+- M5 adds `setV2StationState(state: V2BaseDioramaState)` on `BaseScene` (`activeShipId`, `facilityTiers`, `restoredRelicIds`, `campaignAct`, `stargatePowered`) while preserving the existing V1 `setProgression()` method intact for `?mode=v1`.
 
-1. **开始前**：阅读本文、[首航评审](output/design-review-20261124/design-review.md)和[美术规范](docs/星际拆解站-美术制作与验收规范.md)；确认分支和未提交改动；`npm ci && npm test` 必须全绿。
-2. **分支**：`v3/<任务ID>-<简述>`，例如 `v3/F01-persistent-cargo-grid`；一个分支一个任务。
-3. **提交**：`<type>(<任务ID>): <说明>`，正文写明对应的指标和测量值。
-4. **验证**：每个任务完成后跑 `npm test` 和 `npm run build`，并附上 1366×768 与 390×844 两个尺寸的截图；涉及表现的任务附 reducedMotion 截图。
-5. **集成**：每 3 个任务走一次首航全流程，结果记入 `docs/reviews/<date>-v3-*/`。
-6. **文档**：设计变化先改本文（§4–§8）并递增版本号；历史报告不回改。
-7. **门槛**：G0–G3 未通过时，不进入下一阶段；遇到冲突以“三条体验支柱”为最终裁决依据。
-
----
-
-## 附录 A · 关键代码索引
-
-| 领域 | 位置 |
-|---|---|
-| 阶段状态机 | [types.ts `V2RunPhase`](src/v2/domain/types.ts#L272)、[encounter.ts](src/v2/domain/encounter.ts) |
-| 战斗模拟、预报、精英抉择 | [combatV2.ts](src/v2/domain/combatV2.ts#L98)（`simulateV2Combat` L98、预报 L343、开战 L459、精英抉择 L521、结算 L580） |
-| 相邻联动 | [buildStatsV2.ts](src/v2/domain/buildStatsV2.ts#L118) |
-| 推荐落点和参考敌舰 | [tacticalDelta.ts](src/v2/domain/tacticalDelta.ts#L53)（参考敌舰 L53、最佳落点 L127、差值 L229） |
-| 航路生成 | [routeGenerator.ts](src/v2/domain/routeGenerator.ts) |
-| 结算和解锁 | [settlementV2.ts](src/v2/domain/settlementV2.ts)（计算 L96、应用 L242、解锁 L316） |
-| 教学脚本 | [tutorialV2.ts](src/v2/data/tutorialV2.ts) |
-| 主控制器和刷新链 | [V2AppController.ts](src/v2/ui/V2AppController.ts#L641)（`syncAll` L641、`renderPanels` L1650、船舱挂载 L3593） |
-| 船舱交互 | [CargoGridV2.ts](src/v2/ui/CargoGridV2.ts) |
-| 战斗表现 | [V2CombatScene.ts](src/v2/scenes/V2CombatScene.ts#L769)（回合表现 L769、`update` L1025、光束 L1282） |
-| 基地表现 | [BaseScene.ts](src/scenes/BaseScene.ts#L664) |
-| 声音 | [soundEngine.ts](src/audio/soundEngine.ts) |
-| 视觉 token | [styles.css](src/ui/styles.css#L1-L27) |
-
-## 附录 B · 数值实验复现
-
-本文中的战斗矩阵和整局模拟，是在审计时用临时脚本直接调用真实规则函数完成的。脚本**没有提交到仓库**，复现时需要自行编写一个 `exp.ts`，然后用 Vite 自带的 esbuild 打包运行：
-
-```bash
-npx esbuild exp.ts --bundle --platform=node | node
-```
-
-`exp.ts` 从 `src/v2/domain/combatV2.ts` 和 `buildStatsV2.ts` 导入 `simulateV2Combat` 等函数，遍历构筑 × 层数 × 遭遇 × 策略，每格输出“轮数 / 剩余耐久 / 胜负”。D08 要求把这类实验固化为 `tests/` 中的平衡回归，届时以测试结果为准。
+### 5. Git Commit Hygiene Protocol (All Milestones)
+- `.agents/` MUST be in `.gitignore` (added in M1 first).
+- Every milestone sub-orchestrator stages ONLY its explicitly owned files (`git add -- <files>`) — NEVER `git add -A` or `git add .` — and commits upon passing its milestone gate so progress is preserved cleanly on `main`.

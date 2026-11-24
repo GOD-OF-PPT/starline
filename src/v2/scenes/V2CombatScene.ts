@@ -10,14 +10,22 @@ import { getShipHardpoints } from '../../assets/manifest';
 import { soundEngine } from '../../audio/soundEngine';
 import type { SectorBgIndex } from '../../data/nodes';
 import type { GameSettings } from '../../domain/progression';
+import type { V3EnemyIntent } from '../data/bosses';
 import type { V2EnemyUnitSpec } from '../data/enemies';
 import type { V2ShipId } from '../data/ships';
+import { getTacticalCommandLabel } from '../domain/combatV2';
 import type { V2ShipVisualSpec } from '../domain/shipVisualSpec';
-import type { V2CombatRoundLog, V2CombatSimulation } from '../domain/types';
+import type {
+  SectorId,
+  V2CombatRoundLog,
+  V2CombatSimulation,
+  V2CombatUnitSnapshot,
+} from '../domain/types';
 
 export interface V2StagePlayback {
   readonly shipId: V2ShipId;
   readonly shipVisualSpec?: V2ShipVisualSpec | null;
+  readonly sectorId?: SectorId;
   readonly sectorIndex: SectorBgIndex;
   readonly eventBackdrop: 'wreck' | 'merchant' | 'anomaly' | 'distress' | null;
   readonly units: readonly V2EnemyUnitSpec[];
@@ -93,6 +101,11 @@ interface EnemyVisualEntry {
   baseY: number;
   hp: number;
   maxHp: number;
+  shield: number;
+  maxShield: number;
+  phase: number;
+  isCharging: boolean;
+  baseTint: number | null;
   flashMs: number;
   recoilX: number;
   dead: boolean;
@@ -217,6 +230,7 @@ export class V2CombatScene extends Phaser.Scene {
       ['v2.ship.player.cannon_skiff', getPlayerShipImageUrl('cannon_skiff')],
       ['v2.ship.player.shield_cruiser', getPlayerShipImageUrl('shield_cruiser')],
       ['v2.ship.player.heavy_freighter', getPlayerShipImageUrl('heavy_freighter')],
+      ['v2.ship.player.stargate_cruiser', getPlayerShipImageUrl('stargate_cruiser')],
       ['ship.enemy.scout', getEnemyShipImageUrl('scout')],
       ['ship.enemy.interceptor', getEnemyShipImageUrl('interceptor')],
       ['ship.enemy.frigate', getEnemyShipImageUrl('frigate')],
@@ -342,8 +356,16 @@ export class V2CombatScene extends Phaser.Scene {
     const sim = this.playback.simulation;
     const pauseAt = this.playback.pauseAtRound ?? null;
 
+    // Guard before loop as well (e.g. Round-1 seeded pause with empty rounds array)
+    if (pauseAt !== null && this.nextRoundIdx + 1 === pauseAt) {
+      this.playbackActive = false;
+      this.decisionPaused = true;
+      this.playback.onPauseForDecision?.();
+      return;
+    }
+
     while (this.nextRoundIdx < sim.rounds.length) {
-      // Strictly respect unresolved Phase-D Elite Round-2 decision boundary!
+      // Strictly respect unresolved tactical decision boundary!
       if (pauseAt !== null && this.nextRoundIdx + 1 === pauseAt) {
         this.playbackActive = false;
         this.decisionPaused = true;
@@ -360,19 +382,178 @@ export class V2CombatScene extends Phaser.Scene {
     this.playback.onComplete?.();
   }
 
+  private getRoleBaseTint(unit: Pick<V2EnemyUnitSpec, 'enemyId' | 'name' | 'role' | 'isBoss'>): number | null {
+    if (unit.isBoss) return null;
+    const role = unit.role;
+    const idLower = unit.enemyId.toLowerCase();
+    if (role === 'artillery' || idLower.includes('artillery') || unit.name.includes('火炮')) return 0xffe0ad;
+    if (role === 'shield_regen' || idLower.includes('shield_regen') || unit.name.includes('自愈')) return 0xc7f5ff;
+    if (role === 'emp_disruptor' || idLower.includes('emp') || unit.name.includes('电磁')) return 0xe1ccff;
+    if (role === 'rammer' || idLower.includes('rammer') || unit.name.includes('冲撞')) return 0xffc6c6;
+    return null;
+  }
+
+  private formatCanvasIntentTag(
+    unit: Pick<V2EnemyUnitSpec, 'damagePerRound' | 'armor' | 'pierceRatio'>,
+    intent?: V3EnemyIntent,
+    shield = 0
+  ): { readonly text: string; readonly color: string; readonly isCharging: boolean } {
+    if (intent) {
+      const parts: string[] = [intent.shortLabel];
+      if (intent.damage > 0) parts.push(`攻${intent.damage}`);
+      if (intent.shieldGain && intent.shieldGain > 0 && !intent.shortLabel.includes('盾')) {
+        parts.push(`盾+${intent.shieldGain}`);
+      }
+      if (shield > 0) parts.push(`盾${shield}`);
+      const color =
+        intent.kind === 'charge'
+          ? '#F6B852'
+          : intent.kind === 'pierce_beam' || intent.kind === 'ram' || intent.kind === 'heavy_volley'
+          ? '#FF8AA8'
+          : intent.kind === 'shield_regen'
+          ? '#62D6DF'
+          : intent.kind === 'emp'
+          ? '#D6B8FF'
+          : intent.kind === 'summon'
+          ? '#7AE582'
+          : '#E9EDF2';
+      return {
+        text: parts.join(' · '),
+        color,
+        isCharging: intent.kind === 'charge',
+      };
+    }
+    const intentParts: string[] = [`攻${unit.damagePerRound}`];
+    if (unit.armor > 0) intentParts.push(`甲${unit.armor}`);
+    if (unit.pierceRatio > 0) intentParts.push(`穿${Math.round(unit.pierceRatio * 100)}%`);
+    if (shield > 0) intentParts.push(`盾${shield}`);
+    return {
+      text: intentParts.join(' · '),
+      color: unit.pierceRatio > 0 ? '#FFA3B8' : unit.armor > 0 ? '#F6B852' : '#E9EDF2',
+      isCharging: false,
+    };
+  }
+
+  private spawnEnemyVisualEntry(
+    unit: V2EnemyUnitSpec,
+    initialSnap?: V2CombatUnitSnapshot
+  ): EnemyVisualEntry {
+    const eKey = `ship.enemy.${unit.spriteArchetype}`;
+    const sprite = this.add
+      .image(0, 0, this.textures.exists(eKey) ? eKey : 'ship.enemy.scout')
+      .setOrigin(0.5, 0.5)
+      .setDepth(unit.isBoss ? 4 : 3);
+
+    const initShield = initialSnap?.shield ?? unit.initialShield ?? 0;
+    const initMaxShield = initialSnap?.maxShield ?? unit.maxShield ?? initShield;
+    const tag = this.formatCanvasIntentTag(unit, initialSnap?.nextIntent, initShield);
+
+    const intentTag = this.add
+      .text(0, 0, tag.text, {
+        fontFamily: 'system-ui, -apple-system, sans-serif',
+        fontSize: unit.isBoss ? '11px' : '10px',
+        fontStyle: 'bold',
+        color: tag.color,
+        backgroundColor: 'rgba(11, 18, 31, 0.84)',
+        padding: { left: 5, right: 5, top: 2, bottom: 2 },
+        resolution: 2,
+      })
+      .setOrigin(0.5, 0.5)
+      .setDepth(6);
+
+    const baseTint = this.getRoleBaseTint(unit);
+    if (baseTint !== null) {
+      sprite.setTint(baseTint);
+    }
+
+    const entry: EnemyVisualEntry = {
+      enemyId: unit.enemyId,
+      spec: unit,
+      sprite,
+      intentTag,
+      baseX: 0,
+      baseY: 0,
+      hp: initialSnap ? initialSnap.hp : unit.maxHp,
+      maxHp: initialSnap ? initialSnap.maxHp : unit.maxHp,
+      shield: initShield,
+      maxShield: initMaxShield,
+      phase: initialSnap?.currentPhase ?? 1,
+      isCharging: tag.isCharging,
+      baseTint,
+      flashMs: 0,
+      recoilX: 0,
+      dead: (initialSnap ? initialSnap.hp : unit.maxHp) <= 0,
+    };
+    this.enemies.push(entry);
+    return entry;
+  }
+
+  private syncEnemyRosterFromSnapshots(
+    snapshots: readonly V2CombatUnitSnapshot[],
+    animated = false
+  ): void {
+    let addedAny = false;
+    const newlyAdded: EnemyVisualEntry[] = [];
+    for (const snap of snapshots) {
+      let entry = this.enemies.find((e) => e.enemyId === snap.enemyId);
+      if (!entry && snap.hp > 0) {
+        const spec: V2EnemyUnitSpec = {
+          enemyId: snap.enemyId,
+          name: snap.name,
+          spriteArchetype: snap.spriteArchetype,
+          maxHp: snap.maxHp,
+          damagePerRound: snap.damagePerRound,
+          armor: snap.armor,
+          pierceRatio: snap.pierceRatio,
+          isBoss: snap.isBoss,
+        };
+        entry = this.spawnEnemyVisualEntry(spec, snap);
+        addedAny = true;
+        newlyAdded.push(entry);
+      }
+      if (!entry) continue;
+      entry.hp = snap.hp;
+      entry.shield = snap.shield ?? 0;
+      entry.maxShield = Math.max(entry.maxShield, snap.maxShield ?? entry.shield);
+      if (snap.currentPhase !== undefined) {
+        entry.phase = snap.currentPhase;
+      }
+      if (snap.hp <= 0) {
+        entry.dead = true;
+        entry.isCharging = false;
+        entry.sprite.setAlpha(0.18).setTint(0x4b5563);
+        entry.intentTag?.setVisible(false);
+      } else {
+        const tag = this.formatCanvasIntentTag(snap, snap.nextIntent, entry.shield);
+        entry.isCharging = tag.isCharging;
+        if (entry.intentTag?.scene) {
+          entry.intentTag.setText(tag.text).setColor(tag.color).setVisible(true);
+        }
+      }
+    }
+    if (addedAny) {
+      this.layoutEnemies();
+      if (animated) {
+        soundEngine.play('droneLaunch');
+        for (const spawned of newlyAdded) {
+          this.rings.push({
+            x: spawned.baseX,
+            y: spawned.baseY,
+            maxR: 28,
+            color: 0x7ae582,
+            life: 0.4,
+            maxLife: 0.4,
+          });
+          this.spawnPopup(spawned.baseX, spawned.baseY - 22, '增援抵达', '#7AE582');
+        }
+      }
+    }
+  }
+
   private syncUnitStatesToRound(log: V2CombatRoundLog): void {
     this.activeDronesCount = Object.values(log.droneCountsByHangar).reduce((a, b) => a + b, 0);
     this.heavyChargingCount = log.heavyChargingIds.length;
-    for (const snap of log.enemiesAfter) {
-      const entry = this.enemies.find((e) => e.enemyId === snap.enemyId);
-      if (!entry) continue;
-      entry.hp = snap.hp;
-      if (snap.hp <= 0) {
-        entry.dead = true;
-        entry.sprite.setAlpha(0.18).setTint(0x4b5563);
-        entry.intentTag?.setVisible(false);
-      }
-    }
+    this.syncEnemyRosterFromSnapshots(log.enemiesAfter, false);
   }
 
   private clearPopups(): void {
@@ -591,79 +772,158 @@ export class V2CombatScene extends Phaser.Scene {
     } else if (this.textures.exists(bgKey)) {
       this.bgImage.setTexture(bgKey);
     }
+    if (pb.eventBackdrop) {
+      this.bgImage.clearTint();
+    } else if (pb.sectorId === 'frozen_graveyard') {
+      this.bgImage.setTint(0xd8f3ff);
+    } else if (pb.sectorId === 'stargate_abyss') {
+      this.bgImage.setTint(0xddd0ff);
+    } else {
+      this.bgImage.clearTint();
+    }
 
     // Player ship sprite (hide on wreck backdrop so the 3 interactive hull compartments stay unobstructed!)
     const showPlayerShip = pb.eventBackdrop !== 'wreck';
-    const pKey = `v2.ship.player.${pb.shipId}`;
+    const rawKey = `v2.ship.player.${pb.shipId}`;
+    const pKey = this.textures.exists(rawKey) ? rawKey : 'v2.ship.player.shield_cruiser';
     if (!this.playerSprite || !this.playerSprite.scene) {
       this.playerSprite = this.add.image(0, 0, pKey).setOrigin(0.5, 0.5).setDepth(3);
-    } else if (this.textures.exists(pKey)) {
+    } else {
       this.playerSprite.setTexture(pKey);
     }
-    this.playerSprite.setVisible(showPlayerShip).setAlpha(1).clearTint();
+    this.playerSprite.setVisible(showPlayerShip).setAlpha(1);
+    if (pb.shipId === 'stargate_cruiser') {
+      this.playerSprite.setTint(0xe6f8ff);
+    } else {
+      this.playerSprite.clearTint();
+    }
 
     if (showPlayerShip) {
       this.rebuildModuleSprites();
     }
 
-    // Enemy unit sprites (1..4) + compact tactical intent pills
+    // Enemy unit sprites (1..5+) + dynamic tactical intent pills
+    const initSnaps = pb.simulation?.initialEnemies ?? [];
     for (const unit of pb.units) {
-      const eKey = `ship.enemy.${unit.spriteArchetype}`;
-      const sprite = this.add
-        .image(0, 0, this.textures.exists(eKey) ? eKey : 'ship.enemy.scout')
-        .setOrigin(0.5, 0.5)
-        .setDepth(unit.isBoss ? 4 : 3);
-
-      const intentParts: string[] = [`攻${unit.damagePerRound}`];
-      if (unit.armor > 0) intentParts.push(`甲${unit.armor}`);
-      if (unit.pierceRatio > 0) intentParts.push(`穿${Math.round(unit.pierceRatio * 100)}%`);
-
-      const intentTag = this.add
-        .text(0, 0, intentParts.join(' · '), {
-          fontFamily: 'system-ui, -apple-system, sans-serif',
-          fontSize: unit.isBoss ? '11px' : '10px',
-          fontStyle: 'bold',
-          color: unit.pierceRatio > 0 ? '#FFA3B8' : unit.armor > 0 ? '#F6B852' : '#E9EDF2',
-          backgroundColor: 'rgba(11, 18, 31, 0.82)',
-          padding: { left: 5, right: 5, top: 2, bottom: 2 },
-          resolution: 2,
-        })
-        .setOrigin(0.5, 0.5)
-        .setDepth(6);
-
-      this.enemies.push({
-        enemyId: unit.enemyId,
-        spec: unit,
-        sprite,
-        intentTag,
-        baseX: 0,
-        baseY: 0,
-        hp: unit.maxHp,
-        maxHp: unit.maxHp,
-        flashMs: 0,
-        recoilX: 0,
-        dead: false,
-      });
+      const initSnap = initSnaps.find((s) => s.enemyId === unit.enemyId);
+      this.spawnEnemyVisualEntry(unit, initSnap);
     }
 
-    // If resuming from Round >= 1 (e.g. after Elite Round-2 tactic choice), fast-sync Round 1 HP visuals
-    if (pb.simulation && this.nextRoundIdx > 0) {
-      const prevLog = pb.simulation.rounds[Math.min(this.nextRoundIdx - 1, pb.simulation.rounds.length - 1)];
-      if (prevLog) {
-        this.syncUnitStatesToRound(prevLog);
+    // If resuming from Round >= 1 (e.g. after tactical choice or reload), fast-sync unit roster, HP, shield, phase & summons
+    if (pb.simulation && this.nextRoundIdx > 0 && pb.simulation.rounds.length > 0) {
+      const targetIdx = Math.min(this.nextRoundIdx - 1, pb.simulation.rounds.length - 1);
+      for (let idx = 0; idx <= targetIdx; idx++) {
+        this.syncUnitStatesToRound(pb.simulation.rounds[idx]);
       }
     }
 
     this.layoutAll();
 
     if (pb.simulation) {
-      this.playbackActive = true;
-      this.roundTimerMs = this.nextRoundIdx > 0 ? 180 : 240;
-      if (this.nextRoundIdx === 0 && pb.units.some((u) => u.isBoss)) {
-        soundEngine.play('bossAlarm');
+      const pauseAt = pb.pauseAtRound ?? null;
+      if (pauseAt !== null && this.nextRoundIdx + 1 === pauseAt) {
+        // Immediate reload-safe or Round-1 pause guard (works even when simulation.rounds is empty!)
+        this.playbackActive = false;
+        this.decisionPaused = true;
+        pb.onPauseForDecision?.();
+      } else {
+        this.playbackActive = true;
+        this.roundTimerMs = this.nextRoundIdx > 0 ? 180 : 240;
+        if (this.nextRoundIdx === 0 && pb.units.some((u) => u.isBoss)) {
+          soundEngine.play('bossAlarm');
+        }
       }
     } else {
       this.playbackActive = false;
+    }
+  }
+
+  private layoutEnemies(): void {
+    const w = this.viewW;
+    const h = this.viewH;
+    const baseShipScale = Math.min((w * 0.34) / SHIP_TEX_W, (h * 0.46) / SHIP_TEX_H);
+
+    const n = this.enemies.length;
+    if (n === 1) {
+      const e = this.enemies[0];
+      e.baseX = w * 0.76;
+      e.baseY = h * 0.54;
+      const mult = e.spec.isBoss ? 1.16 : 1.0;
+      e.sprite.setScale(baseShipScale * mult).setPosition(e.baseX, e.baseY);
+    } else if (n === 2) {
+      const positions: [number, number][] = [
+        [w * 0.72, h * 0.40],
+        [w * 0.78, h * 0.68],
+      ];
+      this.enemies.forEach((e, idx) => {
+        const [ex, ey] = positions[idx];
+        e.baseX = ex;
+        e.baseY = ey;
+        const mult = e.spec.isBoss ? 1.04 : 0.72;
+        e.sprite.setScale(baseShipScale * mult).setPosition(ex, ey);
+      });
+    } else if (n === 3) {
+      const positions: [number, number, number][] = [
+        [w * 0.80, h * 0.54, 1.08],
+        [w * 0.62, h * 0.35, 0.54],
+        [w * 0.62, h * 0.73, 0.54],
+      ];
+      this.enemies.forEach((e, idx) => {
+        const [ex, ey, mult] = positions[idx] ?? [w * 0.74, h * 0.54, 0.62];
+        e.baseX = ex;
+        e.baseY = ey;
+        e.sprite.setScale(baseShipScale * mult).setPosition(ex, ey);
+      });
+    } else if (n === 4) {
+      const hasBoss = this.enemies.some((e) => e.spec.isBoss);
+      if (hasBoss) {
+        const bossEntry = this.enemies.find((e) => e.spec.isBoss)!;
+        const others = this.enemies.filter((e) => e !== bossEntry);
+        bossEntry.baseX = w * 0.82;
+        bossEntry.baseY = h * 0.54;
+        bossEntry.sprite.setScale(baseShipScale * 1.02).setPosition(bossEntry.baseX, bossEntry.baseY);
+        const ySlots = [h * 0.30, h * 0.54, h * 0.78];
+        others.forEach((e, idx) => {
+          e.baseX = w * 0.60;
+          e.baseY = ySlots[idx] ?? h * 0.54;
+          e.sprite.setScale(baseShipScale * 0.48).setPosition(e.baseX, e.baseY);
+        });
+      } else {
+        const positions: [number, number][] = [
+          [w * 0.63, h * 0.34],
+          [w * 0.82, h * 0.39],
+          [w * 0.63, h * 0.72],
+          [w * 0.82, h * 0.68],
+        ];
+        this.enemies.forEach((e, idx) => {
+          const [ex, ey] = positions[idx % positions.length];
+          e.baseX = ex;
+          e.baseY = ey;
+          e.sprite.setScale(baseShipScale * 0.52).setPosition(ex, ey);
+        });
+      }
+    } else if (n >= 5) {
+      const bossEntry = this.enemies.find((e) => e.spec.isBoss) ?? this.enemies[0];
+      const others = this.enemies.filter((e) => e !== bossEntry);
+      bossEntry.baseX = w * 0.82;
+      bossEntry.baseY = h * 0.54;
+      bossEntry.sprite
+        .setScale(baseShipScale * (bossEntry.spec.isBoss ? 1.0 : 0.72))
+        .setPosition(bossEntry.baseX, bossEntry.baseY);
+      const count = others.length;
+      others.forEach((e, idx) => {
+        const frac = count > 1 ? idx / (count - 1) : 0.5;
+        e.baseX = idx % 2 === 0 ? w * 0.58 : w * 0.66;
+        e.baseY = h * (0.28 + frac * 0.48);
+        e.sprite.setScale(baseShipScale * 0.44).setPosition(e.baseX, e.baseY);
+      });
+    }
+
+    for (const e of this.enemies) {
+      if (e.intentTag && e.intentTag.scene) {
+        const yOff = e.sprite.displayHeight * 0.52 + 10;
+        e.intentTag.setPosition(e.baseX, e.baseY - yOff).setVisible(!e.dead);
+      }
     }
   }
 
@@ -682,63 +942,13 @@ export class V2CombatScene extends Phaser.Scene {
     this.playerBaseY = hasCombatUnits ? h * 0.54 : h * 0.56;
 
     if (this.playerSprite && this.playerSprite.scene) {
-      const pScale = hasCombatUnits ? baseShipScale : baseShipScale * 1.15;
+      const flagshipMult = this.playback?.shipId === 'stargate_cruiser' ? 1.06 : 1.0;
+      const pScale = (hasCombatUnits ? baseShipScale : baseShipScale * 1.15) * flagshipMult;
       this.playerSprite.setScale(pScale).setPosition(this.playerBaseX, this.playerBaseY);
       this.layoutModules();
     }
 
-    // Layout 1..4 enemies cleanly without overlapping top/bottom HUD strips
-    const n = this.enemies.length;
-    if (n === 1) {
-      const e = this.enemies[0];
-      e.baseX = w * 0.76;
-      e.baseY = h * 0.54;
-      const mult = e.spec.isBoss ? 1.16 : 1.0;
-      e.sprite.setScale(baseShipScale * mult).setPosition(e.baseX, e.baseY);
-    } else if (n === 3) {
-      const positions: [number, number, number][] = [
-        [w * 0.80, h * 0.54, 1.10],
-        [w * 0.62, h * 0.34, 0.56],
-        [w * 0.62, h * 0.74, 0.56],
-      ];
-      this.enemies.forEach((e, idx) => {
-        const [ex, ey, mult] = positions[idx] ?? [w * 0.74, h * 0.54, 0.65];
-        e.baseX = ex;
-        e.baseY = ey;
-        e.sprite.setScale(baseShipScale * mult).setPosition(ex, ey);
-      });
-    } else if (n >= 4) {
-      const positions: [number, number][] = [
-        [w * 0.63, h * 0.34],
-        [w * 0.82, h * 0.39],
-        [w * 0.63, h * 0.72],
-        [w * 0.82, h * 0.68],
-      ];
-      this.enemies.forEach((e, idx) => {
-        const [ex, ey] = positions[idx % positions.length];
-        e.baseX = ex;
-        e.baseY = ey;
-        e.sprite.setScale(baseShipScale * 0.52).setPosition(ex, ey);
-      });
-    } else if (n === 2) {
-      const positions: [number, number][] = [
-        [w * 0.72, h * 0.38],
-        [w * 0.78, h * 0.70],
-      ];
-      this.enemies.forEach((e, idx) => {
-        const [ex, ey] = positions[idx];
-        e.baseX = ex;
-        e.baseY = ey;
-        e.sprite.setScale(baseShipScale * 0.74).setPosition(ex, ey);
-      });
-    }
-
-    for (const e of this.enemies) {
-      if (e.intentTag && e.intentTag.scene) {
-        const yOff = e.sprite.displayHeight * 0.52 + 10;
-        e.intentTag.setPosition(e.baseX, e.baseY - yOff).setVisible(!e.dead);
-      }
-    }
+    this.layoutEnemies();
   }
 
   private getSpritePoint(sprite: Phaser.GameObjects.Image, norm: { x: number; y: number }): { x: number; y: number } {
@@ -793,6 +1003,34 @@ export class V2CombatScene extends Phaser.Scene {
       this.spawnPopup(heavyMuzzle.x - 10, heavyMuzzle.y - 20, '重炮蓄能', '#F6B852');
     }
 
+    // Tactical command & hull signature activation cues
+    if (log.appliedTacticThisRound && log.appliedTacticThisRound !== 'normal') {
+      const cmd = log.appliedTacticThisRound;
+      const cmdLabel = getTacticalCommandLabel(cmd, pb.shipId);
+      if (cmd === 'emergency_shield' || cmd === 'emergency_defense') {
+        this.shieldArcLife = 0.58;
+        soundEngine.play('shieldOverload');
+        this.rings.push({ x: this.playerBaseX + 18, y: this.playerBaseY, maxR: 48, color: 0x62d6df, life: 0.42, maxLife: 0.42 });
+        this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 36, `${cmdLabel}！`, '#62D6DF');
+      } else if (cmd === 'focus_calibrate') {
+        soundEngine.play('tacticalOrder');
+        this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 36, '聚焦校准！', '#7AE582');
+      } else if (cmd === 'signature_heavy_freighter') {
+        this.shieldArcLife = 0.52;
+        soundEngine.play('repairPulse');
+        this.rings.push({ x: this.playerBaseX, y: this.playerBaseY, maxR: 46, color: 0x7ae582, life: 0.44, maxLife: 0.44 });
+        this.spawnPopup(this.playerBaseX + 12, this.playerBaseY - 36, `${cmdLabel} +5HP/+4盾`, '#7AE582');
+      } else if (cmd === 'signature_shield_cruiser') {
+        this.shieldArcLife = 0.56;
+        soundEngine.play('shieldOverload');
+        this.rings.push({ x: this.playerBaseX + 16, y: this.playerBaseY, maxR: 54, color: 0x62d6df, life: 0.46, maxLife: 0.46 });
+        this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 36, `${cmdLabel}！`, '#62D6DF');
+      } else if (cmd === 'signature_cannon_skiff' || cmd === 'signature_stargate_cruiser') {
+        soundEngine.play('tacticalOrder');
+        this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 36, `${cmdLabel}！`, '#F6B852');
+      }
+    }
+
     let playedLaser = false;
     let playedHeavy = false;
     let playedDrone = false;
@@ -810,6 +1048,10 @@ export class V2CombatScene extends Phaser.Scene {
       const ePt = this.getSpritePoint(target.sprite, getShipHardpoints(eKey).hit);
       target.flashMs = 110;
       target.recoilX = 6;
+
+      if (atk.shieldDamaged && atk.shieldDamaged > 0) {
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 26, color: 0x62d6df, life: 0.28, maxLife: 0.28 });
+      }
 
       if (atk.sourceKind === 'heavy') {
         if (!playedHeavy) {
@@ -860,6 +1102,65 @@ export class V2CombatScene extends Phaser.Scene {
           life: 0.25,
           maxLife: 0.25,
         });
+      } else if (atk.sourceKind === 'salvo') {
+        if (!playedDrone) {
+          soundEngine.play('droneLaunch');
+          playedDrone = true;
+        }
+        const laneOffset = ((this.beams.length % 5) - 2) * 10;
+        this.beams.push({
+          x1: heavyMuzzle.x,
+          y1: heavyMuzzle.y + laneOffset,
+          x2: ePt.x,
+          y2: ePt.y,
+          color: 0xf97316,
+          thickness: 3.0,
+          life: 0.28,
+          maxLife: 0.28,
+        });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 22, color: 0xfb923c, life: 0.24, maxLife: 0.24 });
+      } else if (atk.sourceKind === 'emp') {
+        if (!playedLaser) {
+          soundEngine.play('laserFire');
+          playedLaser = true;
+        }
+        this.beams.push({
+          x1: counterMuzzle.x,
+          y1: counterMuzzle.y,
+          x2: ePt.x,
+          y2: ePt.y,
+          color: 0xa78bfa,
+          thickness: 3.8,
+          life: 0.3,
+          maxLife: 0.3,
+        });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 32, color: 0xa78bfa, life: 0.34, maxLife: 0.34 });
+      } else if (atk.sourceKind === 'grapple') {
+        this.beams.push({
+          x1: pMuzzle.x,
+          y1: pMuzzle.y + 6,
+          x2: ePt.x,
+          y2: ePt.y,
+          color: 0x34d399,
+          thickness: 2.8,
+          life: 0.26,
+          maxLife: 0.26,
+        });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 18, color: 0x34d399, life: 0.22, maxLife: 0.22 });
+      } else if (atk.sourceInstanceId === 'gadget_overcharge_cell') {
+        soundEngine.play('heavyBlast');
+        this.beams.push({
+          x1: pMuzzle.x,
+          y1: pMuzzle.y,
+          x2: ePt.x,
+          y2: ePt.y,
+          color: 0xfacc15,
+          thickness: 5.5,
+          life: 0.36,
+          maxLife: 0.36,
+        });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 34, color: 0xfacc15, life: 0.34, maxLife: 0.34 });
+        this.spawnPopup(this.playerBaseX + 14, this.playerBaseY - 38, '过载电池爆发！', '#FACC15');
       } else if (atk.sourceKind === 'flak') {
         if (!playedFlak) {
           soundEngine.play('laserFire');
@@ -891,6 +1192,37 @@ export class V2CombatScene extends Phaser.Scene {
         });
         this.rings.push({ x: ePt.x, y: ePt.y, maxR: 30, color: 0xff9f43, life: 0.3, maxLife: 0.3 });
         this.spawnPopup(this.playerBaseX + 12, this.playerBaseY - 36, '火力过载！', '#FF9F43');
+      } else if (atk.sourceInstanceId === 'tactic_focus_calibrate') {
+        this.beams.push({
+          x1: pMuzzle.x,
+          y1: pMuzzle.y,
+          x2: ePt.x,
+          y2: ePt.y,
+          color: 0x7ae582,
+          thickness: 4,
+          life: 0.32,
+          maxLife: 0.32,
+        });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 34, color: 0x7ae582, life: 0.36, maxLife: 0.36 });
+      } else if (atk.sourceInstanceId.startsWith('tactic_sig_')) {
+        const isWave = atk.sourceInstanceId.includes('shield_cruiser') || atk.sourceInstanceId.includes('stargate');
+        const sigColor = atk.sourceInstanceId.includes('shield_cruiser')
+          ? 0x62d6df
+          : atk.sourceInstanceId.includes('stargate')
+          ? 0xc9a0ff
+          : 0xf6b852;
+        this.beams.push({
+          x1: pMuzzle.x,
+          y1: pMuzzle.y,
+          x2: ePt.x,
+          y2: ePt.y,
+          color: sigColor,
+          thickness: isWave ? 4.4 : 3.8,
+          jagged: isWave,
+          life: 0.34,
+          maxLife: 0.34,
+        });
+        this.rings.push({ x: ePt.x, y: ePt.y, maxR: 34, color: sigColor, life: 0.34, maxLife: 0.34 });
       } else {
         if (!playedLaser) {
           soundEngine.play('laserFire');
@@ -926,9 +1258,46 @@ export class V2CombatScene extends Phaser.Scene {
       }
     }
 
-    // Enemy attacks -> player shield/hull + armored/boss muzzle charge telegraph
+    // Boss Multi-Phase Transition VFX & SFX
+    if (log.bossPhaseTransitions && log.bossPhaseTransitions.length > 0) {
+      soundEngine.play('bossPhase');
+      if (!reduced) this.shakeTimerMs = Math.max(this.shakeTimerMs, 180);
+      for (const tr of log.bossPhaseTransitions) {
+        const bEntry = this.enemies.find((e) => e.enemyId === tr.enemyId);
+        if (bEntry) {
+          bEntry.phase = tr.toPhase;
+          this.rings.push({ x: bEntry.baseX, y: bEntry.baseY, maxR: 76, color: 0xf6b852, life: 0.56, maxLife: 0.56 });
+          this.rings.push({ x: bEntry.baseX, y: bEntry.baseY, maxR: 54, color: 0xff5c7a, life: 0.48, maxLife: 0.48 });
+          this.spawnPopup(bEntry.baseX, bEntry.baseY - 40, `阶段 P${tr.toPhase}！`, '#FFD791');
+        }
+      }
+    }
+
+    // Enemy shield regen / charge non-attack visual cues
+    if (log.enemyIntentsThisRound) {
+      let playedRegenSfx = false;
+      for (const item of log.enemyIntentsThisRound) {
+        const src = this.enemies.find((e) => e.enemyId === item.enemyId);
+        const afterSnap = log.enemiesAfter.find((e) => e.enemyId === item.enemyId);
+        if (!src || src.dead || !afterSnap || afterSnap.hp <= 0) continue;
+        if (item.intent.shieldGain && item.intent.shieldGain > 0) {
+          if (!playedRegenSfx) {
+            soundEngine.play('shieldOverload');
+            playedRegenSfx = true;
+          }
+          this.rings.push({ x: src.baseX, y: src.baseY, maxR: 34, color: 0x62d6df, life: 0.36, maxLife: 0.36 });
+          this.spawnPopup(src.baseX, src.baseY - 34, `敌盾 +${item.intent.shieldGain}`, '#62D6DF');
+        } else if (item.intent.kind === 'charge') {
+          this.rings.push({ x: src.baseX, y: src.baseY, maxR: 30, color: 0xf6b852, life: 0.38, maxLife: 0.38 });
+          this.spawnPopup(src.baseX, src.baseY - 34, item.intent.shortLabel, '#F6B852');
+        }
+      }
+    }
+
+    // Enemy attacks -> player shield/hull + distinct beam/EMP/ram VFX
     let totalHullDmg = 0;
     let totalPierce = 0;
+    let totalEmpDrained = 0;
     if (log.enemyAttacks.length > 0) {
       this.enemyChargeMs = 240;
     }
@@ -937,20 +1306,34 @@ export class V2CombatScene extends Phaser.Scene {
       if (src) {
         const eKey = `ship.enemy.${src.spec.spriteArchetype}`;
         const eMuz = this.getSpritePoint(src.sprite, getShipHardpoints(eKey).muzzle);
-        src.recoilX = 5;
+        src.recoilX = ea.intentKind === 'ram' ? -16 : 5;
+        const isHeavyBeam = ea.intentKind === 'pierce_beam' || ea.intentKind === 'heavy_volley';
+        const isEmp = ea.intentKind === 'emp' || (ea.empShieldDrained ?? 0) > 0;
         this.beams.push({
           x1: eMuz.x,
           y1: eMuz.y,
           x2: pHit.x,
           y2: pHit.y,
-          color: ea.pierceDamage > 0 ? 0xff7096 : 0xf27564,
-          thickness: ea.pierceDamage > 0 ? 3.5 : 2.5,
-          life: 0.26,
-          maxLife: 0.26,
+          color: isEmp ? 0xc9a0ff : isHeavyBeam ? 0xff4d6d : ea.pierceDamage > 0 ? 0xff7096 : 0xf27564,
+          thickness: isHeavyBeam ? 5.8 : isEmp ? 3.8 : ea.pierceDamage > 0 ? 3.5 : 2.5,
+          jagged: isEmp,
+          life: isHeavyBeam ? 0.38 : 0.28,
+          maxLife: isHeavyBeam ? 0.38 : 0.28,
         });
+        if (isHeavyBeam) {
+          this.rings.push({ x: pHit.x, y: pHit.y, maxR: 40, color: 0xff4d6d, life: 0.36, maxLife: 0.36 });
+          if (!reduced) this.shakeTimerMs = Math.max(this.shakeTimerMs, 140);
+        }
       }
       totalHullDmg += ea.hullDamage;
       totalPierce += ea.pierceDamage;
+      totalEmpDrained += ea.empShieldDrained ?? 0;
+    }
+
+    if (totalEmpDrained > 0) {
+      soundEngine.play('empDisrupt');
+      this.rings.push({ x: this.playerBaseX + 18, y: this.playerBaseY, maxR: 42, color: 0xc9a0ff, life: 0.38, maxLife: 0.38 });
+      this.spawnPopup(this.playerBaseX + 18, this.playerBaseY + 20, `EMP -${totalEmpDrained}盾`, '#D6B8FF');
     }
 
     if (log.shieldAbsorbedTotal > 0) {
@@ -997,25 +1380,23 @@ export class V2CombatScene extends Phaser.Scene {
       }
     }
 
-    // Update live enemy HP snapshots & trigger unit death shockwaves
+    // Sync live enemy HP, shields, dynamic intent pills, mid-combat summons & death shockwaves
+    const prevAliveIds = new Set(this.enemies.filter((e) => !e.dead).map((e) => e.enemyId));
+    this.syncEnemyRosterFromSnapshots(log.enemiesAfter, true);
     for (const snap of log.enemiesAfter) {
-      const entry = this.enemies.find((e) => e.enemyId === snap.enemyId);
-      if (!entry) continue;
-      const justDied = !entry.dead && snap.hp <= 0;
-      entry.hp = snap.hp;
-      if (justDied) {
-        entry.dead = true;
-        entry.sprite.setAlpha(0.18).setTint(0x4b5563);
-        entry.intentTag?.setVisible(false);
-        soundEngine.play('enemyDestroy');
-        this.rings.push({
-          x: entry.baseX,
-          y: entry.baseY,
-          maxR: entry.spec.isBoss ? 64 : 36,
-          color: 0xf6b852,
-          life: 0.45,
-          maxLife: 0.45,
-        });
+      if (snap.hp <= 0 && prevAliveIds.has(snap.enemyId)) {
+        const entry = this.enemies.find((e) => e.enemyId === snap.enemyId);
+        if (entry) {
+          soundEngine.play('enemyDestroy');
+          this.rings.push({
+            x: entry.baseX,
+            y: entry.baseY,
+            maxR: entry.spec.isBoss ? 64 : 36,
+            color: 0xf6b852,
+            life: 0.45,
+            maxLife: 0.45,
+          });
+        }
       }
     }
 
@@ -1033,14 +1414,14 @@ export class V2CombatScene extends Phaser.Scene {
       this.elapsed += dt;
     }
 
-    // Step combat playback with Phase-D Round-2 Elite pause support
+    // Step combat playback with multi-charge tactical pause support
     if (pb?.simulation && !this.externalPaused && !this.decisionPaused) {
       const intervalMs = 950 / speed;
       if (this.playbackActive) {
         this.roundTimerMs -= delta;
         if (this.roundTimerMs <= 0) {
           const pauseAt = pb.pauseAtRound ?? null;
-          if (pauseAt !== null && this.nextRoundIdx + 1 === pauseAt && this.nextRoundIdx < pb.simulation.rounds.length) {
+          if (pauseAt !== null && this.nextRoundIdx + 1 === pauseAt) {
             this.playbackActive = false;
             this.decisionPaused = true;
             pb.onPauseForDecision?.();
@@ -1124,6 +1505,8 @@ export class V2CombatScene extends Phaser.Scene {
       } else if (isDamaged) {
         const flicker = !reduced && Math.sin(this.elapsed * 18 + i * 3) > 0.72;
         e.sprite.setTint(flicker ? 0x8fa1b8 : 0xb6c0cf);
+      } else if (e.baseTint !== null) {
+        e.sprite.setTint(e.baseTint);
       } else {
         e.sprite.clearTint();
       }
@@ -1144,9 +1527,18 @@ export class V2CombatScene extends Phaser.Scene {
     // Starfield
     this.bgGraphics.clear();
     if (!lowQuality && pb?.eventBackdrop !== 'wreck') {
-      for (const st of this.stars) {
+      for (let idx = 0; idx < this.stars.length; idx++) {
+        const st = this.stars[idx];
         const sx = (((st.nx - (reduced ? 0 : this.elapsed * st.speed)) % 1) + 1) % 1;
-        this.bgGraphics.fillStyle(0xe9edf2, st.a);
+        const starColor =
+          pb?.sectorId === 'frozen_graveyard'
+            ? 0x9be8ff
+            : pb?.sectorId === 'stargate_abyss'
+            ? idx % 3 === 0
+              ? 0xf6b852
+              : 0xc9b3ff
+            : 0xe9edf2;
+        this.bgGraphics.fillStyle(starColor, st.a);
         this.bgGraphics.fillCircle(sx * this.viewW, st.ny * this.viewH, st.r);
       }
     }
@@ -1180,7 +1572,18 @@ export class V2CombatScene extends Phaser.Scene {
       }
     }
 
-    // Enemy Armored/Boss Pre-Fire Charge Core Telegraph
+    // Enemy Charge-Up Pulsing Halos & Pre-Fire Charge Core Telegraph
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      if (e.isCharging) {
+        const eMuz = this.getSpritePoint(e.sprite, getShipHardpoints(`ship.enemy.${e.spec.spriteArchetype}`).muzzle);
+        const pulse = reduced ? 0.72 : 0.45 + 0.45 * Math.sin(this.elapsed * 11);
+        this.fxGraphics.lineStyle(2.2, 0xf6b852, pulse);
+        this.fxGraphics.strokeCircle(eMuz.x, eMuz.y, e.spec.isBoss ? 16 : 11);
+        this.fxGraphics.fillStyle(0xff7096, pulse * 0.32);
+        this.fxGraphics.fillCircle(eMuz.x, eMuz.y, e.spec.isBoss ? 9 : 6);
+      }
+    }
     if (this.enemyChargeMs > 0) {
       const a = Math.min(1, this.enemyChargeMs / 240);
       for (const e of this.enemies) {
@@ -1265,13 +1668,20 @@ export class V2CombatScene extends Phaser.Scene {
       return true;
     });
 
-    // Enemy HP bars (shown for ALL combat enemies so battlefield stays readable without side tables!)
+    // Enemy HP & Shield bars (shown for ALL combat enemies)
     for (const e of this.enemies) {
       if (e.dead) continue;
       const barW = e.spec.isBoss ? 68 : this.enemies.length === 1 ? 56 : 38;
       const bx = e.baseX - barW / 2;
       const by = e.baseY + e.sprite.displayHeight * 0.46 + 4;
-      const pct = Math.max(0, Math.min(1, e.hp / e.maxHp));
+      const pct = Math.max(0, Math.min(1, e.hp / Math.max(1, e.maxHp)));
+      if (e.shield > 0) {
+        const sPct = Math.max(0, Math.min(1, e.shield / Math.max(1, e.maxShield, e.shield)));
+        this.fxGraphics.fillStyle(0x0b121f, 0.85);
+        this.fxGraphics.fillRoundedRect(bx - 1, by - 6, barW + 2, 5, 2);
+        this.fxGraphics.fillStyle(0x62d6df, 0.95);
+        this.fxGraphics.fillRoundedRect(bx, by - 5, barW * sPct, 3, 1.5);
+      }
       this.fxGraphics.fillStyle(0x0b121f, 0.88);
       this.fxGraphics.fillRoundedRect(bx - 1, by - 1, barW + 2, 7, 3);
       this.fxGraphics.fillStyle(e.spec.isBoss ? 0xf6b852 : 0xf27564, 0.95);

@@ -1,5 +1,13 @@
 import './ui/styles.css';
+import './v2/ui/styles/v3-layout.css';
+import './v2/ui/styles/v3-campaign.css';
+import './v2/ui/styles/v3-combat.css';
+import './v2/ui/styles/v3-dismantle.css';
+import './v2/ui/styles/v3-buildcraft.css';
+import './v2/ui/styles/v3-endgame.css';
+import { soundEngine } from './audio/soundEngine';
 import { AppController } from './ui/AppController';
+import { hasOpenModal } from './ui/Modals';
 import { V2AppController } from './v2/ui/V2AppController';
 
 const MODE_STORAGE_KEY = 'starline_active_mode';
@@ -58,6 +66,24 @@ const activeMode = resolveInitialMode();
 if (activeMode === 'v1') {
   const v1App = new AppController(mount);
   v1App.init();
+
+  // Read-only V1 telemetry shim without modifying legacy AppController.ts
+  window.__STARLINE_INSPECT__ = () => ({
+    mode: 'v1',
+    schemaVersion: 1,
+    screen: document.querySelector('.title-screen-backdrop') ? 'title' : 'base',
+    phase: null,
+    phaserScene: null,
+    bgmTrack: soundEngine.getCurrentTrack(),
+    campaignAct: 'prologue',
+    unlockedSectors: ['near_orbit'],
+    endingsUnlocked: [],
+    credits: 0,
+    salvageParts: 0,
+    activeRun: null,
+    failedAssets: [],
+    modalOpen: hasOpenModal(),
+  });
 
   // Lightweight non-intrusive return pill so players who roll back to V1 can jump back to V2 anytime
   const returnBtn = document.createElement('button');
