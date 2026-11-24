@@ -12,6 +12,14 @@ export interface ShipHardpoints {
   readonly shieldCenter: NormalizedPoint;
 }
 
+export interface ShipSplitSliceSpec {
+  /** Normalized X coordinate (0..1) where the hull splits into fore/aft halves on destruction */
+  readonly splitRatioX: number;
+  /** Optional future A06 dedicated split-half texture keys (used ONLY when loaded in Phaser texture cache) */
+  readonly foreHalfKey?: string;
+  readonly aftHalfKey?: string;
+}
+
 export interface AssetManifestEntry {
   readonly key: string;
   readonly version: string;
@@ -20,6 +28,7 @@ export interface AssetManifestEntry {
   readonly canvasHeight: number;
   readonly anchor: NormalizedPoint;
   readonly hardpoints?: ShipHardpoints;
+  readonly splitSlice?: ShipSplitSliceSpec;
   readonly source: string;
   readonly license: string;
 }
@@ -211,6 +220,7 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
       engine: { x: 0.08, y: 0.52 },
       shieldCenter: { x: 0.56, y: 0.50 },
     },
+    splitSlice: { splitRatioX: 0.50 },
     source: 'public/assets/ships/player_cannon_skiff.webp',
     license: 'Original Starline First-Party Illustrated',
   },
@@ -224,9 +234,10 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
     hardpoints: {
       muzzle: { x: 0.49, y: 0.19 },
       hit: { x: 0.60, y: 0.50 },
-      engine: { x: 0.08, y: 0.54 },
+      engine: { x: 0.10, y: 0.53 },
       shieldCenter: { x: 0.72, y: 0.52 },
     },
+    splitSlice: { splitRatioX: 0.50 },
     source: 'public/assets/ships/player_shield_cruiser.webp',
     license: 'Original Starline First-Party Illustrated',
   },
@@ -240,9 +251,10 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
     hardpoints: {
       muzzle: { x: 0.49, y: 0.19 },
       hit: { x: 0.60, y: 0.50 },
-      engine: { x: 0.08, y: 0.54 },
+      engine: { x: 0.10, y: 0.53 },
       shieldCenter: { x: 0.72, y: 0.52 },
     },
+    splitSlice: { splitRatioX: 0.50 },
     source: 'public/assets/ships/player_shield_cruiser.webp',
     license: 'Original Starline First-Party Illustrated',
   },
@@ -259,6 +271,7 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
       engine: { x: 0.91, y: 0.50 },
       shieldCenter: { x: 0.46, y: 0.50 },
     },
+    splitSlice: { splitRatioX: 0.50 },
     source: 'public/assets/ships/enemy_scout.webp',
     license: 'Original Starline First-Party Illustrated',
   },
@@ -275,6 +288,7 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
       engine: { x: 0.94, y: 0.48 },
       shieldCenter: { x: 0.48, y: 0.48 },
     },
+    splitSlice: { splitRatioX: 0.48 },
     source: 'public/assets/ships/enemy_interceptor.webp',
     license: 'Original Starline First-Party Illustrated',
   },
@@ -288,9 +302,10 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
     hardpoints: {
       muzzle: { x: 0.07, y: 0.53 },
       hit: { x: 0.48, y: 0.50 },
-      engine: { x: 0.91, y: 0.52 },
+      engine: { x: 0.87, y: 0.53 },
       shieldCenter: { x: 0.48, y: 0.50 },
     },
+    splitSlice: { splitRatioX: 0.50 },
     source: 'public/assets/ships/enemy_frigate.webp',
     license: 'Original Starline First-Party Illustrated',
   },
@@ -304,9 +319,10 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
     hardpoints: {
       muzzle: { x: 0.05, y: 0.50 },
       hit: { x: 0.48, y: 0.52 },
-      engine: { x: 0.94, y: 0.52 },
+      engine: { x: 0.87, y: 0.54 },
       shieldCenter: { x: 0.48, y: 0.52 },
     },
+    splitSlice: { splitRatioX: 0.52 },
     source: 'public/assets/ships/enemy_hulk.webp',
     license: 'Original Starline First-Party Illustrated',
   },
@@ -323,6 +339,7 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
       engine: { x: 0.93, y: 0.50 },
       shieldCenter: { x: 0.48, y: 0.50 },
     },
+    splitSlice: { splitRatioX: 0.50 },
     source: 'public/assets/ships/enemy_boss_dreadnought.webp',
     license: 'Original Starline First-Party Illustrated',
   },
@@ -339,6 +356,7 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
       engine: { x: 0.94, y: 0.50 },
       shieldCenter: { x: 0.48, y: 0.50 },
     },
+    splitSlice: { splitRatioX: 0.52 },
     source: 'public/assets/ships/enemy_boss_leviathan.webp',
     license: 'Original Starline First-Party Illustrated',
   },
@@ -641,6 +659,7 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
       engine: { x: 0.06, y: 0.50 },
       shieldCenter: { x: 0.55, y: 0.52 },
     },
+    splitSlice: { splitRatioX: 0.48 },
     source: 'public/assets/ships/player_heavy_freighter.webp',
     license: 'Original Starline First-Party Illustrated',
   },
@@ -738,8 +757,13 @@ export const ASSET_MANIFEST: Record<string, AssetManifestEntry> = {
   },
 };
 
+/** Strips optional V2 scene texture prefix ('v2.') so both 'ship.player.*' and 'v2.ship.player.*' resolve cleanly */
+export function normalizeShipManifestKey(textureKey: string): string {
+  return textureKey.startsWith('v2.') ? textureKey.slice(3) : textureKey;
+}
+
 export function getShipHardpoints(textureKey: string): ShipHardpoints {
-  const entry = ASSET_MANIFEST[textureKey];
+  const entry = ASSET_MANIFEST[textureKey] ?? ASSET_MANIFEST[normalizeShipManifestKey(textureKey)];
   if (!entry?.hardpoints) {
     return {
       muzzle: { x: 0.5, y: 0.5 },
@@ -749,4 +773,9 @@ export function getShipHardpoints(textureKey: string): ShipHardpoints {
     };
   }
   return entry.hardpoints;
+}
+
+export function getShipSplitSlice(textureKey: string): ShipSplitSliceSpec {
+  const entry = ASSET_MANIFEST[textureKey] ?? ASSET_MANIFEST[normalizeShipManifestKey(textureKey)];
+  return entry?.splitSlice ?? { splitRatioX: 0.5 };
 }

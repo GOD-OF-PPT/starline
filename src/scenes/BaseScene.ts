@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { getBaseLayerImageUrl, getPlayerShipImageUrl } from '../assets/itemArt';
+import { soundEngine } from '../audio/soundEngine';
 import { BUILDINGS, RELICS, RELIC_ORDER, type BuildingId } from '../data/buildings';
 import {
   DEFAULT_SETTINGS,
@@ -57,11 +58,244 @@ export interface ReturnDockingPlayback {
 const TEX_W = 1280;
 const TEX_H = 720;
 
+export type BaseOverlayKey = 'workbench' | 'display_empty' | 'display_relic' | 'drydock';
+
+export const BASE_OVERLAY_KEYS: readonly BaseOverlayKey[] = [
+  'workbench',
+  'display_empty',
+  'display_relic',
+  'drydock',
+] as const;
+
+export interface OverlayTransitionState {
+  readonly alpha: number;
+  readonly targetAlpha: 0 | 1;
+  readonly scanProgress: number;
+  readonly poweringUp: boolean;
+}
+
+export interface OverlayQuadrantBounds {
+  readonly nx0: number;
+  readonly ny0: number;
+  readonly nx1: number;
+  readonly ny1: number;
+  readonly accent: number;
+}
+
+/** Exact measured alpha bounding boxes of public/assets/base/overlay_*.webp (1280x720) */
+export const OVERLAY_QUADRANT_BOUNDS: Record<BaseOverlayKey, OverlayQuadrantBounds> = {
+  workbench: { nx0: 0.039, ny0: 0.121, nx1: 0.419, ny1: 0.694, accent: 0xf6b852 },
+  display_empty: { nx0: 0.339, ny0: 0.0, nx1: 0.671, ny1: 0.417, accent: 0x62d6df },
+  display_relic: { nx0: 0.339, ny0: 0.0, nx1: 0.671, ny1: 0.417, accent: 0xf6b852 },
+  drydock: { nx0: 0.59, ny0: 0.14, nx1: 0.962, ny1: 0.686, accent: 0x62d6df },
+};
+
+const OVERLAY_FADE_IN_SEC = 0.52;
+const OVERLAY_SCAN_SEC = 0.68;
+const OVERLAY_FADE_OUT_SEC = 0.4;
+
+/** Pure deterministic overlay cross-fade & bottom-to-top scanline stepper (zero Phaser Tween dependency) */
+export function stepOverlayTransition(
+  state: OverlayTransitionState,
+  dtSec: number,
+  reducedMotion: boolean
+): OverlayTransitionState {
+  if (reducedMotion) {
+    return {
+      alpha: state.targetAlpha,
+      targetAlpha: state.targetAlpha,
+      scanProgress: 1,
+      poweringUp: false,
+    };
+  }
+  const safeDt = Number.isFinite(dtSec) && dtSec > 0 ? dtSec : 0;
+  if (state.targetAlpha === 1) {
+    const nextAlpha = Math.min(1, state.alpha + safeDt / OVERLAY_FADE_IN_SEC);
+    if (state.poweringUp) {
+      const nextScan = Math.min(1, state.scanProgress + safeDt / OVERLAY_SCAN_SEC);
+      return {
+        alpha: nextAlpha,
+        targetAlpha: 1,
+        scanProgress: nextScan,
+        poweringUp: nextScan < 1,
+      };
+    }
+    return {
+      alpha: nextAlpha,
+      targetAlpha: 1,
+      scanProgress: 1,
+      poweringUp: false,
+    };
+  }
+
+  const nextAlpha = Math.max(0, state.alpha - safeDt / OVERLAY_FADE_OUT_SEC);
+  return {
+    alpha: nextAlpha,
+    targetAlpha: 0,
+    scanProgress: 1,
+    poweringUp: false,
+  };
+}
+
+export interface CranePoint2D {
+  readonly x: number;
+  readonly y: number;
+}
+
+export interface CraneSegment {
+  readonly name: 'turntable_mast' | 'lower_boom' | 'upper_jib' | 'hoist_trolley';
+  readonly from: CranePoint2D;
+  readonly to: CranePoint2D;
+}
+
+export interface ArticulatedCraneInput {
+  readonly base: CranePoint2D;
+  readonly target: CranePoint2D;
+  readonly scale: number;
+  readonly cableDrop?: number;
+  readonly swayX?: number;
+  readonly mode?: 'stowed' | 'idle' | 'docking';
+}
+
+export interface ArticulatedCranePose {
+  readonly turntable: CranePoint2D;
+  readonly shoulder: CranePoint2D;
+  readonly elbow: CranePoint2D;
+  readonly trolley: CranePoint2D;
+  readonly hook: CranePoint2D;
+  readonly segments: readonly [CraneSegment, CraneSegment, CraneSegment, CraneSegment];
+  readonly lowerBoomLength: number;
+  readonly upperJibLength: number;
+  readonly cableLength: number;
+  readonly mode: 'stowed' | 'idle' | 'docking';
+}
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function clampVal(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+/**
+ * Pure deterministic 4-joint / 5-vertex articulated crane inverse-kinematics solver:
+ * turntable (p0) -> shoulder (p1) -> elbow (p2) -> trolley (p3) -> hook (p4).
+ * Uses pure JS Law-of-Cosines IK with overhead elbow preference, smooth telescoping for
+ * long-range relic hoists, and close-range stow retraction (pure JS math, zero NaN).
+ */
+export function solveArticulatedCranePose(input: ArticulatedCraneInput): ArticulatedCranePose {
+  const s = Math.max(0.25, Number.isFinite(input.scale) ? input.scale : 1);
+  const mode = input.mode ?? 'idle';
+  const baseX = Number.isFinite(input.base.x) ? input.base.x : 0;
+  const baseY = Number.isFinite(input.base.y) ? input.base.y : 0;
+  const targetX = Number.isFinite(input.target.x) ? input.target.x : baseX;
+  const targetY = Number.isFinite(input.target.y) ? input.target.y : baseY;
+  const turntable: CranePoint2D = { x: baseX, y: baseY };
+
+  const mastHeight = (mode === 'stowed' ? 20 : 26) * s;
+  const slewLean = clampVal((targetX - turntable.x) * 0.08, -8 * s, 8 * s);
+  const shoulder: CranePoint2D = {
+    x: turntable.x + slewLean,
+    y: turntable.y - mastHeight,
+  };
+
+  const defaultDrop = mode === 'stowed' ? 12 * s : 26 * s;
+  const cableLength = Math.max(
+    10 * s,
+    Number.isFinite(input.cableDrop) ? (input.cableDrop as number) : defaultDrop
+  );
+  const trolley: CranePoint2D = {
+    x: targetX,
+    y: targetY - cableLength,
+  };
+  const swayX = Number.isFinite(input.swayX) ? (input.swayX ?? 0) : 0;
+  const hook: CranePoint2D = {
+    x: trolley.x + swayX,
+    y: targetY,
+  };
+
+  const nominal = (mode === 'stowed' ? 54 : 148) * s;
+  const dx = trolley.x - shoulder.x;
+  const dy = trolley.y - shoulder.y;
+  const dist = Math.hypot(dx, dy);
+
+  // Symmetric telescoping beyond 94% nominal reach (strictly C0 continuous at dist === maxReach)
+  const maxReach = nominal * 2 * 0.94;
+  const baseLength = dist > maxReach ? (dist / 0.94) * 0.5 : nominal;
+  const u = dist * 0.5;
+  const fullArch = Math.sqrt(Math.max(0, baseLength * baseLength - u * u));
+  // Smooth 3D turntable yaw foreshortening eliminates the planar 2-link elbow flip across dx = 0
+  // while keeping lowerBoomLength === upperJibLength and exact circle-intersection geometry everywhere.
+  const softYawRadius = 36 * s;
+  const signedYaw = dist < 1e-7 ? 0 : dx / Math.hypot(dx, dy, softYawRadius);
+  const arch = fullArch * Math.abs(signedYaw);
+  const lowerBoomLength = dist < 1e-7 ? Math.max(12 * s, nominal * 0.35) : Math.hypot(u, arch);
+  const upperJibLength = lowerBoomLength;
+
+  let elbow: CranePoint2D;
+  if (dist < 1e-7) {
+    const ux = -0.4;
+    const uy = -Math.sqrt(1 - ux * ux);
+    elbow = {
+      x: shoulder.x + lowerBoomLength * ux,
+      y: shoulder.y + lowerBoomLength * uy,
+    };
+  } else {
+    const mx = shoulder.x + 0.5 * dx;
+    const my = shoulder.y + 0.5 * dy;
+    // Closed-form overhead intersection (identical to min-Y circle candidate; C-infinity smooth across dx = 0):
+    // elbow.y = my - arch * (|dx| / dist) <= chordMidY <= max(shoulder.y, trolley.y) unconditionally.
+    elbow = {
+      x: mx + fullArch * signedYaw * (dy / dist),
+      y: my - fullArch * signedYaw * (dx / dist),
+    };
+  }
+
+  const segments: readonly [CraneSegment, CraneSegment, CraneSegment, CraneSegment] = [
+    { name: 'turntable_mast', from: turntable, to: shoulder },
+    { name: 'lower_boom', from: shoulder, to: elbow },
+    { name: 'upper_jib', from: elbow, to: trolley },
+    { name: 'hoist_trolley', from: trolley, to: hook },
+  ];
+
+  return {
+    turntable,
+    shoulder,
+    elbow,
+    trolley,
+    hook,
+    segments,
+    lowerBoomLength,
+    upperJibLength,
+    cableLength,
+    mode,
+  };
+}
+
+function createInitialOverlayStates(): Record<BaseOverlayKey, OverlayTransitionState> {
+  return {
+    workbench: { alpha: 0, targetAlpha: 0, scanProgress: 1, poweringUp: false },
+    display_empty: { alpha: 0, targetAlpha: 0, scanProgress: 1, poweringUp: false },
+    display_relic: { alpha: 0, targetAlpha: 0, scanProgress: 1, poweringUp: false },
+    drydock: { alpha: 0, targetAlpha: 0, scanProgress: 1, poweringUp: false },
+  };
+}
+
+function matchesRecentlyBuiltOverlay(key: BaseOverlayKey, recentlyBuiltId: string | null): boolean {
+  if (!recentlyBuiltId) return false;
+  if (key === 'workbench') return recentlyBuiltId === 'workbench' || recentlyBuiltId === 'research_lab';
+  if (key === 'display_empty' || key === 'display_relic') return recentlyBuiltId === 'display';
+  if (key === 'drydock') return recentlyBuiltId === 'drydock' || recentlyBuiltId === 'drydock_tier2';
+  return false;
+}
+
 /**
  * Illustrated Axonometric Orbital Salvage Station (V1 + Full V2/V3 Diorama Parity).
  * Preserves legacy V1 `setState()` / `setProgression()` 100% untouched for `?mode=v1`,
  * while providing native `setV2StationState(V2BaseDioramaState)` for active 4-hull berthed ship,
  * diegetic T1–T3 facility lighting, 4 orbiting restored relic halos, Act-aware space nebula,
+ * 4-joint articulated crane, smooth facility overlay cross-fade/scanline power-up,
  * and Stargate Relay portal rings & beacon beam.
  */
 export class BaseScene extends Phaser.Scene {
@@ -72,6 +306,7 @@ export class BaseScene extends Phaser.Scene {
   private onAssetError: ((key: string) => void) | null = null;
 
   private bgGraphics!: Phaser.GameObjects.Graphics;
+  private overlayScanGraphics!: Phaser.GameObjects.Graphics;
   private edgeMaskGraphics!: Phaser.GameObjects.Graphics;
   private v2StaticGraphics!: Phaser.GameObjects.Graphics;
   private animGraphics!: Phaser.GameObjects.Graphics;
@@ -105,10 +340,18 @@ export class BaseScene extends Phaser.Scene {
   private dpr = 1;
   private texturesReady = false;
 
+  // A08-code smooth overlay cross-fade + scanline power-up state
+  private overlayInitialized = false;
+  private overlayTransitions: Record<BaseOverlayKey, OverlayTransitionState> = createInitialOverlayStates();
+  private lastCranePose: ArticulatedCranePose | null = null;
+
   // F11 Return-to-port docking & unloading animation (pure presentation, zero payout authority)
   private dockingPlayback: ReturnDockingPlayback | null = null;
   private dockingElapsedMs = 0;
   private readonly dockingDurationMs = 1400;
+  private dockingServoStage: 0 | 1 | 2 = 0;
+  private servoClockMs = 0;
+  private lastCraneServoMs = -1000;
 
   constructor() {
     super({ key: 'BaseScene' });
@@ -178,6 +421,7 @@ export class BaseScene extends Phaser.Scene {
     this.dispEmptyOverlay = this.add.image(0, 0, 'base.overlay.display_empty').setOrigin(0.5, 0.5).setDepth(3.1).setVisible(false);
     this.dispRelicOverlay = this.add.image(0, 0, 'base.overlay.display_relic').setOrigin(0.5, 0.5).setDepth(3.2).setVisible(false);
     this.drydockOverlay = this.add.image(0, 0, 'base.overlay.drydock').setOrigin(0.5, 0.5).setDepth(3.3).setVisible(false);
+    this.overlayScanGraphics = this.add.graphics().setDepth(3.5);
     this.edgeMaskGraphics = this.add.graphics().setDepth(3.6);
     this.v2StaticGraphics = this.add.graphics().setDepth(3.8);
 
@@ -196,6 +440,12 @@ export class BaseScene extends Phaser.Scene {
       .setVisible(false);
 
     this.animGraphics = this.add.graphics().setDepth(6);
+    this.overlayInitialized = false;
+    this.overlayTransitions = createInitialOverlayStates();
+    this.lastCranePose = null;
+    this.dockingServoStage = 0;
+    this.servoClockMs = 0;
+    this.lastCraneServoMs = -1000;
     this.texturesReady = true;
 
     this.createInteractiveZones();
@@ -204,6 +454,14 @@ export class BaseScene extends Phaser.Scene {
     this.scale.on('resize', this.handleResize, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.texturesReady = false;
+      this.overlayInitialized = false;
+      this.overlayTransitions = createInitialOverlayStates();
+      this.lastCranePose = null;
+      this.dockingPlayback = null;
+      this.dockingElapsedMs = 0;
+      this.dockingServoStage = 0;
+      this.servoClockMs = 0;
+      this.lastCraneServoMs = -1000;
       this.hitZones = [];
       this.stargatePin = null;
       this.berthZone = null;
@@ -280,9 +538,41 @@ export class BaseScene extends Phaser.Scene {
     this.onAssetError = handler;
   }
 
+  updateSettings(settings: GameSettings): void {
+    if (this.v2State) {
+      this.v2State = { ...this.v2State, settings };
+    } else if (this.currentState) {
+      this.currentState = { ...this.currentState, settings };
+    }
+    if (settings.reducedMotion) {
+      for (const key of BASE_OVERLAY_KEYS) {
+        this.overlayTransitions[key] = stepOverlayTransition(this.overlayTransitions[key], 0, true);
+      }
+    }
+    if (this.scene?.isActive() && this.texturesReady) {
+      this.drawDynamicLayer();
+    }
+  }
+
+  /** Read-only snapshot of overlay cross-fade & scanline progress for deterministic testing */
+  getOverlayTransitionSnapshot(): Record<BaseOverlayKey, Readonly<OverlayTransitionState>> {
+    return {
+      workbench: { ...this.overlayTransitions.workbench },
+      display_empty: { ...this.overlayTransitions.display_empty },
+      display_relic: { ...this.overlayTransitions.display_relic },
+      drydock: { ...this.overlayTransitions.drydock },
+    };
+  }
+
+  /** Read-only snapshot of most recently solved 4-joint articulated crane pose */
+  getLastCranePose(): ArticulatedCranePose | null {
+    return this.lastCranePose;
+  }
+
   startReturnDocking(playback: ReturnDockingPlayback): void {
     this.dockingPlayback = playback;
     this.dockingElapsedMs = 0;
+    this.dockingServoStage = 0;
   }
 
   skipReturnDocking(): void {
@@ -290,9 +580,16 @@ export class BaseScene extends Phaser.Scene {
     const pb = this.dockingPlayback;
     this.dockingPlayback = null;
     this.dockingElapsedMs = 0;
+    this.dockingServoStage = 2;
     if (this.arrivalShipSprite) this.arrivalShipSprite.setVisible(false);
     pb.onProgress?.(1);
     pb.onFinish?.();
+  }
+
+  private triggerCraneServo(): void {
+    if (this.servoClockMs - this.lastCraneServoMs < 320) return;
+    this.lastCraneServoMs = this.servoClockMs;
+    soundEngine.play('craneServo');
   }
 
   update(_time: number, delta: number): void {
@@ -308,19 +605,46 @@ export class BaseScene extends Phaser.Scene {
     const dtMs = Math.min(elapsedMs, 50);
     const dt = dtMs / 1000;
     this.elapsed += dt;
+    this.servoClockMs += Math.min(elapsedMs, 500);
+
+    const settings = this.getActiveSettings();
+    const overlayDt = Math.min(elapsedMs, 250) / 1000;
+    for (const key of BASE_OVERLAY_KEYS) {
+      this.overlayTransitions[key] = stepOverlayTransition(
+        this.overlayTransitions[key],
+        overlayDt,
+        settings.reducedMotion
+      );
+    }
 
     if (this.buildCelebrateTimer > 0) {
       this.buildCelebrateTimer = Math.max(0, this.buildCelebrateTimer - dt);
     }
 
     if (this.dockingPlayback) {
+      const pb = this.dockingPlayback;
       this.dockingElapsedMs += Math.min(elapsedMs, 500);
       const p = Math.min(1, this.dockingElapsedMs / this.dockingDurationMs);
-      this.dockingPlayback.onProgress?.(p);
+      // Stage-gated crane servo audio during active crane unload (1–2 triggers max per docking, 0 idle/post-skip)
+      if (p >= 0.44 && this.dockingServoStage < 1) {
+        this.dockingServoStage = 1;
+        this.triggerCraneServo();
+      } else if (
+        p >= 0.74 &&
+        this.dockingServoStage < 2 &&
+        (pb.crateCount >= 3 || pb.hasKeptRelic)
+      ) {
+        this.dockingServoStage = 2;
+        this.triggerCraneServo();
+      }
       if (p >= 1) {
-        const pb = this.dockingPlayback;
         this.dockingPlayback = null;
+        this.dockingElapsedMs = 0;
+        this.dockingServoStage = 2;
         if (this.arrivalShipSprite) this.arrivalShipSprite.setVisible(false);
+      }
+      pb.onProgress?.(p);
+      if (p >= 1) {
         pb.onFinish?.();
       }
     }
@@ -590,11 +914,18 @@ export class BaseScene extends Phaser.Scene {
 
     this.drawSharedBackdropAndOverlays(L, st.campaignAct, stargateOn);
 
-    // Same-camera quadrant WebP overlays
-    this.wbOverlay.setVisible(wbTier >= 1 || labTier >= 1);
-    this.dispEmptyOverlay.setVisible(dispTier >= 1 && !anyRelicRestored);
-    this.dispRelicOverlay.setVisible(dispTier >= 1 && anyRelicRestored);
-    this.drydockOverlay.setVisible(dockTier >= 1);
+    // Same-camera quadrant WebP overlays (smooth cross-fade + scanline power-up)
+    const settings = this.getActiveSettings();
+    this.syncOverlayTargets(
+      {
+        workbench: wbTier >= 1 || labTier >= 1,
+        display_empty: dispTier >= 1 && !anyRelicRestored,
+        display_relic: dispTier >= 1 && anyRelicRestored,
+        drydock: dockTier >= 1,
+      },
+      st.recentlyBuiltId ?? null,
+      settings.reducedMotion
+    );
 
     // Diegetic V2 architectural structures, T1-T3 tier lights & mooring pad
     this.v2StaticGraphics.clear();
@@ -807,10 +1138,17 @@ export class BaseScene extends Phaser.Scene {
     const anyRelicRestored = relicSum.restoredCount > 0;
     const dockBuilt = progression.buildings.drydock;
 
-    this.wbOverlay.setVisible(wbBuilt);
-    this.dispEmptyOverlay.setVisible(dispBuilt && !anyRelicRestored);
-    this.dispRelicOverlay.setVisible(dispBuilt && anyRelicRestored);
-    this.drydockOverlay.setVisible(dockBuilt);
+    const settings = this.getActiveSettings();
+    this.syncOverlayTargets(
+      {
+        workbench: wbBuilt,
+        display_empty: dispBuilt && !anyRelicRestored,
+        display_relic: dispBuilt && anyRelicRestored,
+        drydock: dockBuilt,
+      },
+      this.currentState.recentlyBuiltId ?? null,
+      settings.reducedMotion
+    );
 
     if (this.berthedShipSprite?.scene) {
       this.berthedShipSprite.setVisible(false);
@@ -918,6 +1256,127 @@ export class BaseScene extends Phaser.Scene {
     this.drawDynamicLayer();
   }
 
+  private syncOverlayTargets(
+    targets: Record<BaseOverlayKey, boolean>,
+    recentlyBuiltId: string | null,
+    reducedMotion: boolean
+  ): void {
+    if (!this.overlayInitialized) {
+      for (const key of BASE_OVERLAY_KEYS) {
+        const wantOn = targets[key];
+        const animateInitialBuild = !reducedMotion && wantOn && matchesRecentlyBuiltOverlay(key, recentlyBuiltId);
+        this.overlayTransitions[key] = animateInitialBuild
+          ? { alpha: 0, targetAlpha: 1, scanProgress: 0, poweringUp: true }
+          : { alpha: wantOn ? 1 : 0, targetAlpha: wantOn ? 1 : 0, scanProgress: 1, poweringUp: false };
+      }
+      this.overlayInitialized = true;
+      return;
+    }
+
+    for (const key of BASE_OVERLAY_KEYS) {
+      const nextTarget: 0 | 1 = targets[key] ? 1 : 0;
+      const prev = this.overlayTransitions[key];
+      if (nextTarget === prev.targetAlpha) {
+        if (reducedMotion) {
+          this.overlayTransitions[key] = {
+            alpha: nextTarget,
+            targetAlpha: nextTarget,
+            scanProgress: 1,
+            poweringUp: false,
+          };
+        }
+        continue;
+      }
+
+      if (reducedMotion) {
+        this.overlayTransitions[key] = {
+          alpha: nextTarget,
+          targetAlpha: nextTarget,
+          scanProgress: 1,
+          poweringUp: false,
+        };
+      } else if (nextTarget === 1) {
+        this.overlayTransitions[key] = {
+          alpha: prev.alpha,
+          targetAlpha: 1,
+          scanProgress: 0,
+          poweringUp: true,
+        };
+      } else {
+        this.overlayTransitions[key] = {
+          alpha: prev.alpha,
+          targetAlpha: 0,
+          scanProgress: 1,
+          poweringUp: false,
+        };
+      }
+    }
+  }
+
+  private applyOverlayVisuals(L: ReturnType<BaseScene['getLayout']>, settings: GameSettings): void {
+    if (this.overlayScanGraphics) {
+      this.overlayScanGraphics.clear();
+    }
+
+    const pairs: readonly { readonly key: BaseOverlayKey; readonly img: Phaser.GameObjects.Image }[] = [
+      { key: 'workbench', img: this.wbOverlay },
+      { key: 'display_empty', img: this.dispEmptyOverlay },
+      { key: 'display_relic', img: this.dispRelicOverlay },
+      { key: 'drydock', img: this.drydockOverlay },
+    ];
+
+    for (const { key, img } of pairs) {
+      if (!img?.scene) continue;
+      const st = this.overlayTransitions[key];
+      const visible = st.alpha > 0.004;
+      img.setVisible(visible).setAlpha(st.alpha);
+
+      if (st.poweringUp && st.scanProgress < 1 && !settings.reducedMotion) {
+        const bounds = OVERLAY_QUADRANT_BOUNDS[key];
+        const ease = 1 - (1 - st.scanProgress) * (1 - st.scanProgress);
+        const normScanY = bounds.ny1 - (bounds.ny1 - bounds.ny0) * ease;
+        const cropTopPx = Math.max(0, Math.min(TEX_H - 1, Math.floor(normScanY * TEX_H)));
+        const cropH = Math.max(1, TEX_H - cropTopPx);
+        img.setCrop(0, cropTopPx, TEX_W, cropH);
+
+        if (this.overlayScanGraphics) {
+          const x0 = L.left + bounds.nx0 * L.imgW;
+          const x1 = L.left + bounds.nx1 * L.imgW;
+          const scanY = L.top + normScanY * L.imgH;
+          const botY = L.top + bounds.ny1 * L.imgH;
+          const fade = Math.sin(Math.min(1, st.scanProgress) * Math.PI);
+          const w = Math.max(4, x1 - x0);
+          const trailH = Math.min(28 * L.scale, Math.max(0, botY - scanY));
+
+          if (trailH > 1) {
+            this.overlayScanGraphics.fillStyle(bounds.accent, 0.16 * fade);
+            this.overlayScanGraphics.fillRect(x0, scanY, w, trailH);
+          }
+          // Glowing scanline sweep bar
+          this.overlayScanGraphics.lineStyle(Math.max(2, 3.2 * L.scale), bounds.accent, 0.88 * fade);
+          this.overlayScanGraphics.lineBetween(x0, scanY, x1, scanY);
+          this.overlayScanGraphics.lineStyle(Math.max(1, 1.4 * L.scale), 0xffffff, 0.78 * fade);
+          this.overlayScanGraphics.lineBetween(x0, scanY, x1, scanY);
+
+          // Subtle horizontal CRT scanlines & corner lock ticks (omitted in lowQuality)
+          if (!settings.lowQuality) {
+            const stepPx = Math.max(6, 10 * L.scale);
+            this.overlayScanGraphics.lineStyle(1, bounds.accent, 0.14 * fade);
+            for (let sy = scanY + stepPx; sy < botY; sy += stepPx) {
+              this.overlayScanGraphics.lineBetween(x0 + 4, sy, x1 - 4, sy);
+            }
+            const tick = Math.max(6, 10 * L.scale);
+            this.overlayScanGraphics.lineStyle(Math.max(1.5, 2 * L.scale), bounds.accent, 0.7 * fade);
+            this.overlayScanGraphics.lineBetween(x0, scanY - tick * 0.4, x0, scanY + tick * 0.4);
+            this.overlayScanGraphics.lineBetween(x1, scanY - tick * 0.4, x1, scanY + tick * 0.4);
+          }
+        }
+      } else {
+        img.setCrop();
+      }
+    }
+  }
+
   private drawDynamicLayer(): void {
     this.animGraphics.clear();
     if ((!this.currentState && !this.v2State) || !this.texturesReady) return;
@@ -925,6 +1384,8 @@ export class BaseScene extends Phaser.Scene {
     const L = this.getLayout();
     const s = L.scale;
     const t = settings.reducedMotion ? 0 : this.elapsed;
+
+    this.applyOverlayVisuals(L, settings);
 
     if (this.v2State) {
       this.drawV2DynamicLayer(L, s, t, settings);
@@ -1152,8 +1613,8 @@ export class BaseScene extends Phaser.Scene {
       }
 
       const p = (Math.sin(t * 0.8) + 1) * 0.5;
-      const botX = Phaser.Math.Linear(L.pt(0.36, 0.55).x, L.pt(0.62, 0.39).x, p);
-      const botY = Phaser.Math.Linear(L.pt(0.36, 0.55).y, L.pt(0.62, 0.39).y, p) + Math.sin(t * 4) * 2 * s;
+      const botX = lerp(L.pt(0.36, 0.55).x, L.pt(0.62, 0.39).x, p);
+      const botY = lerp(L.pt(0.36, 0.55).y, L.pt(0.62, 0.39).y, p) + Math.sin(t * 4) * 2 * s;
       this.animGraphics.fillStyle(0x060b14, 0.42);
       this.animGraphics.fillEllipse(botX, botY + 9 * s, 14 * s, 6 * s);
       this.animGraphics.fillStyle(0x88a0b8, 1);
@@ -1194,11 +1655,95 @@ export class BaseScene extends Phaser.Scene {
     });
   }
 
+  private renderArticulatedCrane(
+    pose: ArticulatedCranePose,
+    s: number,
+    activeLoad: boolean,
+    isRelicLoad: boolean
+  ): void {
+    const isStowed = pose.mode === 'stowed';
+    const baseDark = isStowed ? 0x1e2c3d : 0x26384d;
+    const boomColor = isStowed ? 0x495b70 : 0x7b93ad;
+    const jibColor = isStowed ? 0x5c7086 : 0xa8bfd6;
+    const accentColor = isStowed ? 0x5a6d82 : isRelicLoad ? 0x62d6df : 0xf6b852;
+
+    const { turntable, shoulder, elbow, trolley, hook } = pose;
+
+    // Turntable concrete/steel deck ring & bearing base (Joint 0)
+    this.animGraphics.fillStyle(0x0d1726, 0.9);
+    this.animGraphics.fillEllipse(turntable.x, turntable.y + 3 * s, 26 * s, 12 * s);
+    this.animGraphics.fillStyle(baseDark, 1);
+    this.animGraphics.fillCircle(turntable.x, turntable.y, Math.max(5, 8.5 * s));
+    this.animGraphics.lineStyle(Math.max(1.4, 2 * s), accentColor, isStowed ? 0.45 : 0.85);
+    this.animGraphics.strokeCircle(turntable.x, turntable.y, Math.max(5, 8.5 * s));
+
+    // Segment 1: Turntable Pedestal Mast (turntable -> shoulder)
+    this.animGraphics.lineStyle(Math.max(3.5, 6.2 * s), baseDark, 1);
+    this.animGraphics.lineBetween(turntable.x, turntable.y, shoulder.x, shoulder.y);
+    this.animGraphics.lineStyle(Math.max(1.8, 3.2 * s), boomColor, 0.95);
+    this.animGraphics.lineBetween(turntable.x, turntable.y, shoulder.x, shoulder.y);
+
+    // Segment 2: Lower Articulated Boom (shoulder -> elbow) + hydraulic piston strut
+    this.animGraphics.lineStyle(Math.max(3.4, 6.0 * s), 0x1a2738, 0.95);
+    this.animGraphics.lineBetween(shoulder.x, shoulder.y + 1.5 * s, elbow.x, elbow.y + 1.5 * s);
+    this.animGraphics.lineStyle(Math.max(2.6, 4.6 * s), boomColor, 0.98);
+    this.animGraphics.lineBetween(shoulder.x, shoulder.y, elbow.x, elbow.y);
+    const strutMidX = lerp(shoulder.x, elbow.x, 0.45);
+    const strutMidY = lerp(shoulder.y, elbow.y, 0.45);
+    this.animGraphics.lineStyle(Math.max(1.4, 2.2 * s), accentColor, isStowed ? 0.35 : 0.85);
+    this.animGraphics.lineBetween(turntable.x + (shoulder.x - turntable.x) * 0.4, turntable.y - 6 * s, strutMidX, strutMidY);
+
+    // Segment 3: Upper Articulated Jib (elbow -> trolley)
+    this.animGraphics.lineStyle(Math.max(2.6, 4.6 * s), 0x1a2738, 0.92);
+    this.animGraphics.lineBetween(elbow.x, elbow.y + 1.2 * s, trolley.x, trolley.y + 1.2 * s);
+    this.animGraphics.lineStyle(Math.max(2.0, 3.4 * s), jibColor, 0.98);
+    this.animGraphics.lineBetween(elbow.x, elbow.y, trolley.x, trolley.y);
+
+    // Segment 4: Hoist Trolley Cable & Magnetic Grapple (trolley -> hook)
+    this.animGraphics.lineStyle(Math.max(1.4, 2.0 * s), 0xd5e3f2, isStowed ? 0.55 : 0.92);
+    this.animGraphics.lineBetween(trolley.x, trolley.y, hook.x, hook.y);
+
+    // Bolted pivot bearings at shoulder (Joint 1), elbow (Joint 2), and trolley pulley (Joint 3)
+    this.animGraphics.fillStyle(baseDark, 1);
+    this.animGraphics.fillCircle(shoulder.x, shoulder.y, Math.max(3.2, 5.2 * s));
+    this.animGraphics.fillStyle(accentColor, isStowed ? 0.5 : 1);
+    this.animGraphics.fillCircle(shoulder.x, shoulder.y, Math.max(1.8, 2.8 * s));
+
+    this.animGraphics.fillStyle(baseDark, 1);
+    this.animGraphics.fillCircle(elbow.x, elbow.y, Math.max(3.4, 5.5 * s));
+    this.animGraphics.fillStyle(accentColor, isStowed ? 0.5 : 1);
+    this.animGraphics.fillCircle(elbow.x, elbow.y, Math.max(2.0, 3.2 * s));
+
+    this.animGraphics.fillStyle(baseDark, 1);
+    this.animGraphics.fillCircle(trolley.x, trolley.y, Math.max(2.8, 4.4 * s));
+    this.animGraphics.fillStyle(accentColor, isStowed ? 0.5 : 1);
+    this.animGraphics.fillCircle(trolley.x, trolley.y, Math.max(1.6, 2.4 * s));
+
+    // Twin magnetic grapple prongs at hook (Joint 4)
+    const clawW = Math.max(4, 6.5 * s);
+    const clawH = Math.max(3.5, 5.5 * s);
+    this.animGraphics.lineStyle(Math.max(1.6, 2.4 * s), jibColor, 0.95);
+    this.animGraphics.lineBetween(hook.x - clawW, hook.y + clawH, hook.x, hook.y - 1 * s);
+    this.animGraphics.lineBetween(hook.x + clawW, hook.y + clawH, hook.x, hook.y - 1 * s);
+    this.animGraphics.fillStyle(accentColor, activeLoad ? 0.98 : isStowed ? 0.45 : 0.85);
+    this.animGraphics.fillCircle(hook.x, hook.y, Math.max(2.2, 3.6 * s));
+    if (activeLoad) {
+      this.animGraphics.lineStyle(Math.max(1.2, 1.8 * s), accentColor, 0.65);
+      this.animGraphics.strokeCircle(hook.x, hook.y + 3 * s, Math.max(5.5, 9 * s));
+    }
+  }
+
   private drawDockingAndCelebration(
     L: ReturnType<BaseScene['getLayout']>,
     s: number,
     settings: GameSettings
   ): void {
+    const craneBase = L.pt(0.34, 0.57);
+    const wbActive = this.v2State
+      ? this.getV2Tier('workbench') >= 1 || this.getV2Tier('research_lab') >= 1
+      : Boolean(this.currentState?.progression.buildings.workbench);
+    const t = settings.reducedMotion ? 0 : this.elapsed;
+
     if (this.dockingPlayback) {
       const p = Math.min(1, this.dockingElapsedMs / this.dockingDurationMs);
       const dockPhase = Math.min(1, p / 0.48);
@@ -1209,15 +1754,15 @@ export class BaseScene extends Phaser.Scene {
         this.arrivalShipSprite.setTexture(shipKey);
       }
 
-      const curX = Phaser.Math.Linear(L.approachStart.x, L.padShip.x, easeOut);
-      const curY = Phaser.Math.Linear(L.approachStart.y, L.padShip.y - 8 * s, easeOut);
-      const shipScale = Phaser.Math.Linear(0.36, 0.25, easeOut) * s;
+      const curX = lerp(L.approachStart.x, L.padShip.x, easeOut);
+      const curY = lerp(L.approachStart.y, L.padShip.y - 8 * s, easeOut);
+      const shipScale = lerp(0.36, 0.25, easeOut) * s;
 
       this.arrivalShipSprite
         .setVisible(p < 0.95)
         .setPosition(curX, curY)
         .setScale(shipScale)
-        .setAngle(Phaser.Math.Linear(-22, -12, easeOut))
+        .setAngle(lerp(-22, -12, easeOut))
         .setAlpha(this.dockingPlayback.wasDefeat ? 0.85 : 1);
       if (this.v2State?.activeShipId === 'stargate_cruiser') {
         this.arrivalShipSprite.setTint(0xfff1cc);
@@ -1239,25 +1784,40 @@ export class BaseScene extends Phaser.Scene {
         }
       }
 
-      if (p >= 0.44 && p <= 0.96) {
+      let craneTarget: CranePoint2D;
+      let craneSwayX = 0;
+      let activeLoad = false;
+      let isRelicLoad = false;
+
+      if (p < 0.44) {
+        const approachFrac = clampVal(p / 0.44, 0, 1);
+        const slewEase = approachFrac * approachFrac * (3 - 2 * approachFrac);
+        const parkPt = L.pt(0.39, 0.56);
+        const pickPt = L.pt(0.505, 0.695);
+        craneTarget = {
+          x: lerp(parkPt.x, pickPt.x, slewEase),
+          y: lerp(parkPt.y, pickPt.y, slewEase),
+        };
+      } else if (p <= 0.96) {
         const unloadP = (p - 0.44) / 0.52;
         const crates = Math.min(5, Math.max(2, this.dockingPlayback.crateCount));
-        const craneBase = L.pt(0.34, 0.57);
         let leadGripX: number | null = null;
         let leadGripY: number | null = null;
+        let leadIsRelic = false;
 
         for (let i = 0; i < crates; i++) {
           const localP = Math.max(0, Math.min(1, unloadP * 1.45 - i * 0.13));
           if (localP <= 0 || localP >= 1) continue;
           const isRelicCrate = this.dockingPlayback.hasKeptRelic && i === crates - 1;
           const target = isRelicCrate ? L.display : L.workbench;
-          const cx = Phaser.Math.Linear(L.padShip.x, target.x, localP);
+          const cx = lerp(L.padShip.x, target.x, localP);
           const cy =
-            Phaser.Math.Linear(L.padShip.y - 12 * s, target.y, localP) -
+            lerp(L.padShip.y - 12 * s, target.y, localP) -
             Math.sin(localP * Math.PI) * 52 * s;
           if (leadGripX === null) {
             leadGripX = cx;
             leadGripY = cy;
+            leadIsRelic = isRelicCrate;
           }
           const sz = Math.max(6, 13 * s);
           this.animGraphics.fillStyle(isRelicCrate ? 0x62d6df : 0xf6b852, 1);
@@ -1267,27 +1827,72 @@ export class BaseScene extends Phaser.Scene {
         }
 
         if (leadGripX !== null && leadGripY !== null) {
-          const elbowX = (craneBase.x + leadGripX) * 0.5 - 12 * s;
-          const elbowY = Math.min(craneBase.y, leadGripY) - 44 * s;
-          this.animGraphics.fillStyle(0x2d3f54, 1);
-          this.animGraphics.fillCircle(craneBase.x, craneBase.y, Math.max(4, 7 * s));
-          this.animGraphics.lineStyle(Math.max(2.5, 4.4 * s), 0x7b93ad, 0.95);
-          this.animGraphics.lineBetween(craneBase.x, craneBase.y, elbowX, elbowY);
-          this.animGraphics.lineStyle(Math.max(2, 3.4 * s), 0xa8bfd6, 0.95);
-          this.animGraphics.lineBetween(elbowX, elbowY, leadGripX, leadGripY - 6 * s);
-          this.animGraphics.fillStyle(0xf6b852, 1);
-          this.animGraphics.fillCircle(elbowX, elbowY, Math.max(2.5, 4 * s));
-          this.animGraphics.fillCircle(leadGripX, leadGripY - 6 * s, Math.max(2.5, 4.2 * s));
+          craneTarget = { x: leadGripX, y: leadGripY - 6 * s };
+          craneSwayX = settings.reducedMotion ? 0 : Math.sin(unloadP * Math.PI * 4) * 3.5 * s;
+          activeLoad = true;
+          isRelicLoad = leadIsRelic;
+        } else {
+          craneTarget = L.pt(0.39, 0.54);
         }
+      } else {
+        const settleFrac = clampVal((p - 0.96) / 0.04, 0, 1);
+        craneTarget = {
+          x: lerp(L.workbench.x, L.pt(0.39, 0.55).x, settleFrac),
+          y: lerp(L.workbench.y, L.pt(0.39, 0.55).y, settleFrac),
+        };
       }
+
+      const dockingPose = solveArticulatedCranePose({
+        base: craneBase,
+        target: craneTarget,
+        scale: s,
+        cableDrop: activeLoad ? 24 * s : 28 * s,
+        swayX: craneSwayX,
+        mode: 'docking',
+      });
+      this.lastCranePose = dockingPose;
+      this.renderArticulatedCrane(dockingPose, s, activeLoad, isRelicLoad);
 
       if (p > 0.75) {
         const ringP = (p - 0.75) / 0.25;
         this.animGraphics.lineStyle(2.5, 0xf6b852, Math.max(0, 1 - ringP));
         this.animGraphics.strokeEllipse(L.padShip.x, L.padShip.y + 8 * s, (90 + ringP * 90) * s, (45 + ringP * 45) * s);
       }
-    } else if (this.arrivalShipSprite) {
-      this.arrivalShipSprite.setVisible(false);
+    } else {
+      if (this.arrivalShipSprite) {
+        this.arrivalShipSprite.setVisible(false);
+      }
+
+      // A08-code: Render 4-joint crane in idle state (stowed when worn; patrolling apron when repaired)
+      if (wbActive) {
+        const idleFrac = settings.reducedMotion ? 0.35 : (Math.sin(t * 0.48) + 1) * 0.5;
+        const leftPt = L.pt(0.285, 0.5);
+        const rightPt = L.pt(0.455, 0.625);
+        const idlePose = solveArticulatedCranePose({
+          base: craneBase,
+          target: {
+            x: lerp(leftPt.x, rightPt.x, idleFrac),
+            y: lerp(leftPt.y, rightPt.y, idleFrac),
+          },
+          scale: s,
+          cableDrop: 24 * s,
+          swayX: settings.reducedMotion ? 0 : Math.cos(t * 0.96) * 1.6 * s,
+          mode: 'idle',
+        });
+        this.lastCranePose = idlePose;
+        this.renderArticulatedCrane(idlePose, s, false, false);
+      } else {
+        const stowedPose = solveArticulatedCranePose({
+          base: craneBase,
+          target: L.pt(0.365, 0.555),
+          scale: s,
+          cableDrop: 12 * s,
+          swayX: 0,
+          mode: 'stowed',
+        });
+        this.lastCranePose = stowedPose;
+        this.renderArticulatedCrane(stowedPose, s, false, false);
+      }
     }
 
     if (this.buildCelebrateTimer > 0 && this.celebrateFacilityKey && !settings.reducedMotion) {
