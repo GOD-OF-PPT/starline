@@ -132,7 +132,7 @@ export function renderBaseHeroView(
         recTpl.spaceNote ? ` · ${recTpl.spaceNote}` : ''
       }</div>
         <div class="v2-cmd-actions">
-          <button type="button" class="btn btn-primary btn-launch-hero" id="v2-base-launch-rec" data-testid="btn-start-recommended" ${
+          <button type="button" class="btn btn-primary btn-launch-hero" id="v2-base-launch-rec" data-testid="btn-start-recommended" data-action="start-recommended" ${
             readOnly ? 'disabled' : ''
           }>${svgIcon('rocket', 16)} 接取并整备出航</button>
           <button type="button" class="btn btn-secondary" id="v2-base-all-contracts" data-testid="btn-open-contracts">全部委托</button>

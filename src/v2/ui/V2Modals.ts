@@ -395,6 +395,11 @@ export function openV2SettingsModal(
     readonly onSwitchToV1: () => void;
     readonly onOpenMigration?: () => void;
     readonly onResetV2Save: () => void;
+    readonly playtestTelemetry?: {
+      readonly enabled: boolean;
+      readonly onExport: () => string;
+      readonly onClear?: () => void;
+    };
   }
 ): void {
   let current: V2GameSettings = { ...settings };
@@ -478,6 +483,24 @@ export function openV2SettingsModal(
               <button type="button" class="btn btn-sm btn-secondary" id="v2-btn-rollback-v1">切换回经典模式</button>
             </div>
           </div>
+          ${
+            options.playtestTelemetry?.enabled
+              ? `<div class="setting-row" data-testid="playtest-telemetry-row">
+                  <div>
+                    <div class="setting-label">试玩日志导出 (Playtest)</div>
+                    <div class="setting-sub">仅本地记录当前试玩会话的阶段停留、交互与拖放数据（无网络上报）</div>
+                  </div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+                    <button type="button" class="btn btn-sm btn-secondary" id="v2-btn-export-playtest-log" data-testid="btn-export-playtest-log">导出试玩日志 (JSON)</button>
+                    ${
+                      options.playtestTelemetry.onClear
+                        ? `<button type="button" class="btn btn-sm btn-ghost" id="v2-btn-clear-playtest-log" data-testid="btn-clear-playtest-log">清空日志</button>`
+                        : ''
+                    }
+                  </div>
+                </div>`
+              : ''
+          }
           <div class="setting-row">
             <div>
               <div class="setting-label" style="color:var(--state-danger);">重置当前远航进度</div>
@@ -489,7 +512,7 @@ export function openV2SettingsModal(
           </div>
         </div>
         <div style="display:flex;justify-content:flex-end;margin-top:12px;">
-          <button type="button" class="btn btn-primary" id="v2-set-done">完成</button>
+          <button type="button" class="btn btn-primary" id="v2-set-done" data-action="close-modal">完成</button>
         </div>
       `;
 
@@ -535,6 +558,12 @@ export function openV2SettingsModal(
         }
         modal.close();
         options.onResetV2Save();
+      });
+      body.querySelector('#v2-btn-export-playtest-log')?.addEventListener('click', () => {
+        options.playtestTelemetry?.onExport();
+      });
+      body.querySelector('#v2-btn-clear-playtest-log')?.addEventListener('click', () => {
+        options.playtestTelemetry?.onClear?.();
       });
       body.querySelector('#v2-set-done')?.addEventListener('click', () => modal.close());
     };

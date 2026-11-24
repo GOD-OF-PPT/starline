@@ -167,6 +167,10 @@ import {
   type StarlineInspectSnapshot,
   type StarlineScreenId,
 } from './inspectSnapshot';
+import {
+  PlaytestTelemetryLogger,
+  isPlaytestParamEnabled,
+} from './playtestTelemetry';
 import { openV3CampaignModal, type CampaignModalTab } from './modals/CampaignModal';
 import { openV3CareerModal, type CareerModalTab } from './modals/CareerModal';
 import { ArrangePhaseView } from './screens/ArrangeView';
@@ -291,7 +295,9 @@ export class V2AppController {
   private readonly staticStageTracker = new V2StaticStageSyncTracker();
   private readonly preCombatAutoEngage: PreCombatAutoEngageController;
   private readonly settlementRollup = new SettlementBillRollupController();
+  private readonly playtestTelemetry: PlaytestTelemetryLogger;
   private settledRollupRunId: string | null = null;
+  private settledRunsCountInSession = 0;
   private unsubscribeModalOpen: (() => void) | null = null;
   private liveCombatRound = 0;
   private liveCombatPlayerHp = 30;
@@ -338,6 +344,13 @@ export class V2AppController {
     this.urlBaseSeed = parseDeterministicSeedParam(
       typeof window !== 'undefined' ? window.location.search : ''
     );
+    const playtestEnabled = isPlaytestParamEnabled(
+      typeof window !== 'undefined' ? window.location.search : ''
+    );
+    this.playtestTelemetry = new PlaytestTelemetryLogger({
+      enabled: playtestEnabled,
+      storage: playtestEnabled && typeof window !== 'undefined' ? window.localStorage : null,
+    });
     this.save = createFreshV2SaveData();
     this.v1Inspection = inspectV1SaveForMigration(window.localStorage);
 
@@ -497,6 +510,9 @@ export class V2AppController {
     window.__STARLINE_INSPECT__ = () => this.buildInspectSnapshot();
     window.addEventListener('resize', this.handleWindowResize);
     window.addEventListener('orientationchange', this.handleWindowResize);
+    if (this.playtestTelemetry.isEnabled()) {
+      this.mountEl.addEventListener('click', this.handlePlaytestMountClick);
+    }
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       document.addEventListener('visibilitychange', this.handleVisibilityChange);
     }
@@ -524,6 +540,9 @@ export class V2AppController {
     soundEngine.setTrack('none');
     window.removeEventListener('resize', this.handleWindowResize);
     window.removeEventListener('orientationchange', this.handleWindowResize);
+    if (this.playtestTelemetry.isEnabled()) {
+      this.mountEl.removeEventListener('click', this.handlePlaytestMountClick);
+    }
     if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
       document.removeEventListener('visibilitychange', this.handleVisibilityChange);
     }
@@ -915,10 +934,52 @@ export class V2AppController {
     }
   }
 
+  private readonly handlePlaytestMountClick = (ev: MouseEvent): void => {
+    if (!this.playtestTelemetry.isEnabled()) return;
+    const target = ev.target as HTMLElement | null;
+    if (!target) return;
+    const actionable = target.closest<HTMLElement>('[data-action], [data-testid], button');
+    if (!actionable) return;
+    const action =
+      actionable.dataset.action ||
+      actionable.dataset.testid ||
+      actionable.id ||
+      actionable.tagName.toLowerCase();
+    this.playtestTelemetry.recordClick(action, actionable.dataset.testid ?? null);
+  };
+
+  private computeTelemetryPhaseKey(): string {
+    const screen = this.computeCurrentScreen();
+    if (screen !== 'run') return screen;
+    const run = this.getCurrentRun();
+    if (!run) return screen;
+    if (run.phase === 'ENCOUNTER') {
+      const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
+      if (run.activeCombat) return 'ENCOUNTER:COMBAT_LIVE';
+      if (node?.combat) return 'ENCOUNTER:COMBAT_PRE';
+      if (node?.type === 'wreck') return 'ENCOUNTER:WRECK';
+      return `ENCOUNTER:${(node?.type ?? 'event').toUpperCase()}`;
+    }
+    return run.phase;
+  }
+
+  getPlaytestTelemetryExportJson(): string | null {
+    if (!this.playtestTelemetry.isEnabled()) return null;
+    return this.playtestTelemetry.exportJson();
+  }
+
   private syncAll(): void {
     this.v1Inspection = inspectV1SaveForMigration(window.localStorage);
     this.syncVisibleSeenItems();
     this.applyViewportClasses();
+    if (this.playtestTelemetry.isEnabled()) {
+      const run = this.getCurrentRun();
+      this.playtestTelemetry.recordPhase(this.computeTelemetryPhaseKey(), {
+        runId: run?.runId ?? null,
+        nodeId: run?.currentNodeId ?? null,
+        isTutorial: run?.isTutorial,
+      });
+    }
     soundEngine.setTrack(
       resolveV2BgmTrack({
         titleEntered: this.titleEntered,
@@ -1875,6 +1936,9 @@ export class V2AppController {
 
   private startTutorialRun(): void {
     if (!this.canMutate()) return;
+    if (this.settledRunsCountInSession > 0) {
+      this.playtestTelemetry.recordReplayStart(this.settledRunsCountInSession, 'tutorial');
+    }
     const run = createV2TutorialRun(`v2tut_${Date.now().toString(36)}`);
     this.save = { ...this.save, activeRun: run };
     this.activeDockingNotice = null;
@@ -2491,6 +2555,7 @@ export class V2AppController {
     this.settlementDispositions = {};
     this.selectedMapNodeId = null;
     this.showCombatLogDetails = false;
+    this.cancelInFlightWreckCut();
 
     const hasRelicSignal = Object.values(res.run.graph.nodes).some((n) => Boolean(n.hasRelicSignal));
     if (hasRelicSignal) {
@@ -2501,6 +2566,9 @@ export class V2AppController {
       this.triggerCrewComm('act3_start');
     }
 
+    if (this.settledRunsCountInSession > 0) {
+      this.playtestTelemetry.recordReplayStart(this.settledRunsCountInSession, 'expedition');
+    }
     this.persist();
     soundEngine.play('warpJump');
     this.syncAll();
@@ -2959,6 +3027,22 @@ export class V2AppController {
             this.selectedWreckHotspot = 'armory';
             this.showCombatLogDetails = false;
             const enteredNode = res.run.graph.nodes[nid];
+            if (this.playtestTelemetry.isEnabled()) {
+              const isSafeBeacon =
+                enteredNode?.eventId === 'tutorial_safe_beacon' ||
+                enteredNode?.eventState?.eventId === 'tutorial_safe_beacon';
+              const isRisk = Boolean(
+                enteredNode?.combat &&
+                  (enteredNode.type === 'elite' ||
+                    enteredNode.type === 'boss' ||
+                    enteredNode.hasRelicSignal ||
+                    enteredNode.layer >= cur.graph.maxLayers)
+              );
+              this.playtestTelemetry.recordBranchChoice(
+                nid,
+                isSafeBeacon ? 'safe_return' : isRisk ? 'risk_branch' : 'other'
+              );
+            }
             const bossId = enteredNode?.combat?.bossId ?? enteredNode?.bossId;
             if (bossId === 'boss_anvil') this.triggerCrewComm('act1_boss_intro');
             else if (bossId === 'boss_dreadnought') this.triggerCrewComm('act2_boss_intro');
@@ -2988,6 +3072,7 @@ export class V2AppController {
             if (!cur || cur.phase !== 'MAP') return;
             const res = initiateV2SafeReturnFromMap(cur);
             if (!res.ok) return this.showToast(res.error ?? '当前无法返航');
+            this.playtestTelemetry.recordBranchChoice(cur.currentNodeId, 'safe_return');
             this.settlementDispositions = {};
             this.setCurrentRun(res.run);
             soundEngine.play('returnDock');
@@ -3602,6 +3687,7 @@ export class V2AppController {
             this.campaignBannerCollapsed = false;
           }
           this.settlementDispositions = {};
+          this.settledRunsCountInSession += 1;
           this.persist();
 
           soundEngine.play(result.summary.contractCompleted ? 'contractDeliver' : 'returnDock');
@@ -3834,6 +3920,9 @@ export class V2AppController {
       onPrepareRemoveItem: opts.onPrepareRemove ? (id) => opts.onPrepareRemove?.(id) : undefined,
       getTacticalDelta: opts.getTacticalDelta,
       getInspectorHost: opts.getInspectorHost,
+      onDragAttempt: this.playtestTelemetry.isEnabled()
+        ? (attempt) => this.playtestTelemetry.recordDragAttempt(attempt)
+        : undefined,
     };
 
     const canReuse =
@@ -3999,6 +4088,20 @@ export class V2AppController {
     openV2SettingsModal(this.modalHostEl, this.save.settings, {
       readOnly: this.isReadOnlyTab,
       hasV1Save: this.v1Inspection.hasV1Save,
+      playtestTelemetry: this.playtestTelemetry.isEnabled()
+        ? {
+            enabled: true,
+            onExport: () => {
+              const json = this.playtestTelemetry.downloadJson();
+              this.showToast('已导出试玩日志 (JSON)。');
+              return json;
+            },
+            onClear: () => {
+              this.playtestTelemetry.clear();
+              this.showToast('已清空本地试玩日志。');
+            },
+          }
+        : undefined,
       onChange: (next) => {
         this.save = { ...this.save, settings: next };
         this.applySettingsEffects();

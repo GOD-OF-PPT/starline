@@ -53,6 +53,13 @@ export interface CargoGridV2Callbacks {
   ) => V2TacticalDelta | null;
   /** Optional external container for mounting the selected-item inspector (e.g. desktop left panel in ARRANGE) */
   readonly getInspectorHost?: () => HTMLElement | null;
+  /** Optional T01 playtest telemetry hook reporting pointer drag drop outcomes */
+  readonly onDragAttempt?: (attempt: {
+    readonly zone: 'grid' | 'staging';
+    readonly itemDefId: string;
+    readonly success: boolean;
+    readonly reason?: 'out_of_bounds' | 'disabled_cell' | 'overlap' | 'outside_board';
+  }) => void;
 }
 
 interface SelectedRef {
@@ -2305,7 +2312,21 @@ export class CargoGridV2Component {
     }
 
     if (drag.hoverOriginX !== null && drag.hoverOriginY !== null) {
+      const preCheck = validateV2Placement(
+        this.bay,
+        drag.item.definitionId,
+        drag.hoverOriginX,
+        drag.hoverOriginY,
+        drag.rotation,
+        drag.zone === 'grid' ? drag.item.instanceId : undefined
+      );
       const ok = this.tryPlaceSelectedAt(drag.hoverOriginX, drag.hoverOriginY);
+      this.callbacks.onDragAttempt?.({
+        zone: drag.zone,
+        itemDefId: drag.item.definitionId,
+        success: ok,
+        reason: ok ? undefined : preCheck.reason ?? 'overlap',
+      });
       if (ok) {
         if (drag.ghostEl) {
           drag.ghostEl.remove();
@@ -2318,6 +2339,12 @@ export class CargoGridV2Component {
         this.renderSynergySvg();
       }
     } else {
+      this.callbacks.onDragAttempt?.({
+        zone: drag.zone,
+        itemDefId: drag.item.definitionId,
+        success: false,
+        reason: 'outside_board',
+      });
       this.launchInvalidSpringBack(drag, false);
       this.updateSelectionAndDragClasses();
       this.updateCellVisualFocusAndPreview();

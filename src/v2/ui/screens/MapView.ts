@@ -1099,6 +1099,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
         const jumpBtnEl = document.createElement('button');
         jumpBtnEl.type = 'button';
         jumpBtnEl.dataset.jumpNode = rid;
+        jumpBtnEl.dataset.action = 'jump-node';
 
         footerEl.appendChild(jumpBtnEl);
         cardEl.appendChild(bodyEl);

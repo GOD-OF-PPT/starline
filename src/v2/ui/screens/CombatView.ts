@@ -812,7 +812,7 @@ export function renderCombatPreView(
         <div class="v3-precombat-cta-row">
           <button type="button" class="btn btn-primary btn-launch-hero v3-auto-engage-btn ${
             autoEngage?.status === 'countdown' ? 'is-countdown' : ''
-          }" id="v2-btn-start-combat" data-testid="btn-start-combat" data-auto-engage-status="${
+          }" id="v2-btn-start-combat" data-testid="btn-start-combat" data-action="start-combat" data-auto-engage-status="${
             autoEngage?.status ?? 'idle'
           }" data-auto-engage-remaining-ms="${Math.max(
             0,

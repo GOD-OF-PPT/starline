@@ -251,6 +251,7 @@ export class ArrangePhaseView implements PhaseView<ArrangeViewProps, ArrangeView
     leaveBtn.className = 'btn btn-primary btn-launch-hero';
     leaveBtn.id = 'v2-btn-leave-arrange';
     leaveBtn.dataset.testid = 'btn-leave-arrange';
+    leaveBtn.dataset.action = 'leave-arrange';
 
     const abortBtn = document.createElement('button');
     abortBtn.type = 'button';
