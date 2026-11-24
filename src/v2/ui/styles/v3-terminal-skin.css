@@ -106,6 +106,19 @@
     inset -1px 0 0 rgba(4, 10, 18, 0.65);
 }
 
+/* Industrial tone borders for Climax Ending cards (preserves v3-endgame.css tones at 0,3,0) */
+.v2-ending-host .v3-ending-card.tone-free_haven,
+.v3-ending-backdrop .v3-ending-card.tone-free_haven {
+  border-color: rgba(130, 230, 149, 0.65);
+  border-top-color: rgba(176, 246, 188, 0.85);
+}
+
+.v2-ending-host .v3-ending-card.tone-fleet_heir,
+.v3-ending-backdrop .v3-ending-card.tone-fleet_heir {
+  border-color: rgba(98, 214, 223, 0.65);
+  border-top-color: rgba(164, 242, 248, 0.85);
+}
+
 /* 45° chamfered major chassis panels (safe from child overflow clipping) */
 .v2-title-host .v2-title-card,
 .v2-title-backdrop .v2-title-card,
@@ -190,10 +203,63 @@
 .v2-modal-card .v2-gift-row,
 .v2-modal-card .v2-craft-row {
   border-radius: 2px;
-  border-color: var(--ts-steel-border);
   box-shadow:
     inset 0 1px 0 rgba(196, 222, 248, 0.1),
     inset 0 -1px 0 rgba(3, 8, 16, 0.72);
+}
+
+/* Explicit (0,3,0) industrial modal semantic state variants (never clobbered by base framing) */
+.v2-modal-card .v2-facility-card.built {
+  border-color: rgba(98, 214, 223, 0.62);
+  border-left: 3px solid var(--ts-phosphor-cyan);
+}
+
+.v2-modal-card .relic-card.restored {
+  border-color: rgba(246, 184, 82, 0.72);
+  border-left: 3px solid var(--ts-phosphor-amber);
+  background: rgba(246, 184, 82, 0.08);
+}
+
+.v2-modal-card .codex-card.seen {
+  border-color: rgba(98, 214, 223, 0.45);
+}
+
+.v2-modal-card .v3-act-card.is-active {
+  border-color: rgba(246, 184, 82, 0.78);
+  border-left: 3px solid var(--ts-phosphor-amber);
+  background: rgba(34, 42, 56, 0.88);
+}
+
+.v2-modal-card .v3-act-card.is-completed {
+  border-color: rgba(130, 230, 149, 0.52);
+  border-left: 3px solid var(--ts-phosphor-green);
+}
+
+.v2-modal-card .v3-pity-cell.is-ready {
+  border-color: rgba(246, 184, 82, 0.72);
+  color: #f9d98c;
+}
+
+.v2-modal-card .v3-bestiary-card.is-boss {
+  border-color: rgba(246, 184, 82, 0.55);
+  border-left: 3px solid var(--ts-phosphor-amber);
+  background: rgba(246, 184, 82, 0.07);
+}
+
+.v2-modal-card .v3-ending-gallery-card.is-unlocked {
+  border-color: rgba(246, 184, 82, 0.58);
+  border-left: 3px solid var(--ts-phosphor-amber);
+}
+
+.v2-modal-card .v3-achievement-item.is-claimable {
+  border-color: rgba(246, 184, 82, 0.75);
+  border-left: 3px solid var(--ts-phosphor-amber);
+  background: rgba(246, 184, 82, 0.09);
+}
+
+.v2-modal-card .v3-achievement-item.is-claimed {
+  border-color: rgba(130, 230, 149, 0.48);
+  border-left: 3px solid var(--ts-phosphor-green);
 }
 
 /* clip-path-UNSAFE containers: crisp 2px machined steel bevel, NO clip-path */
@@ -223,6 +289,28 @@
     inset 0 -2px 0 rgba(3, 8, 16, 0.75);
 }
 
+.v2-shell .v2-dag-node.visited {
+  opacity: 0.7;
+  border-style: dashed;
+}
+
+.v2-shell .v2-dag-node.current {
+  border-color: var(--ts-phosphor-cyan);
+  color: var(--ts-phosphor-cyan);
+  box-shadow:
+    inset 0 1px 0 rgba(162, 242, 248, 0.25),
+    0 0 0 1px rgba(98, 214, 223, 0.35);
+}
+
+.v2-shell .v2-dag-node.selected {
+  border: 2px solid var(--ts-phosphor-amber);
+  background: rgba(246, 184, 82, 0.22);
+  color: #fff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 238, 194, 0.38),
+    0 0 0 2px rgba(246, 184, 82, 0.38);
+}
+
 .v2-shell .v2-wreck-hotspot,
 .v2-shell .v3-wreck-compartment-pin {
   border-radius: 2px;
@@ -231,6 +319,17 @@
   box-shadow:
     inset 0 1px 0 rgba(198, 224, 248, 0.16),
     inset 0 -2px 0 rgba(3, 8, 16, 0.8);
+}
+
+/* Active wreck hotspot highlight (preserves translate(-50%, -50%) centering untouched) */
+.v2-shell .v2-wreck-hotspot.active:not(:disabled) {
+  border-color: var(--ts-phosphor-amber);
+  background: linear-gradient(180deg, rgba(84, 56, 18, 0.94) 0%, rgba(44, 28, 10, 0.96) 100%);
+  color: #fff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 236, 184, 0.35),
+    0 0 0 4px rgba(246, 184, 82, 0.28),
+    0 8px 20px rgba(0, 0, 0, 0.5);
 }
 
 .v2-drag-ghost .drag-ghost-subcell {
@@ -278,6 +377,20 @@
     inset 0 -1px 0 rgba(3, 8, 16, 0.72);
 }
 
+.v2-shell .v3-bonus-tracker-strip.is-met {
+  border-color: rgba(130, 230, 149, 0.55);
+  border-left: 3px solid var(--ts-phosphor-green);
+  background: rgba(122, 229, 130, 0.14);
+  color: #bdf4c1;
+}
+
+.v2-shell .v3-bonus-tracker-strip.is-failed {
+  border-color: rgba(242, 117, 100, 0.55);
+  border-left: 3px solid var(--ts-hazard-red);
+  background: rgba(242, 117, 100, 0.14);
+  color: #ffbab2;
+}
+
 .v2-ending-host .v3-ending-quote,
 .v3-ending-backdrop .v3-ending-quote,
 .v2-modal-card .v3-bc-art,
@@ -286,6 +399,8 @@
 .v2-modal-card .v2-trial-ico,
 .v2-shell .v3-crew-portrait,
 .v2-modal-card .v3-crew-portrait,
+.v2-ending-host .v3-crew-portrait,
+.v3-ending-backdrop .v3-crew-portrait,
 .v2-shell .v3-wreck-silhouette-layer,
 .v2-shell .v3-settle-thumb,
 .v2-shell .v2-enemy-chip,
@@ -344,6 +459,53 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Explicit (0,3,0) recessed CRT semantic variants */
+.v2-shell .v2-delta-strip.positive,
+.v2-modal-card .v2-delta-strip.positive {
+  border-left: 3px solid var(--ts-phosphor-cyan);
+}
+
+.v2-shell .v2-delta-strip.negative,
+.v2-modal-card .v2-delta-strip.negative {
+  border-left: 3px solid var(--ts-hazard-red);
+}
+
+.v2-shell .v3-wreck-stability-card.tone-warn {
+  border: 1.5px dashed rgba(246, 184, 82, 0.82);
+  border-left: 4px solid var(--ts-phosphor-amber);
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      var(--ts-crt-scan-amber) 0 1px,
+      transparent 1px 3px
+    ),
+    linear-gradient(180deg, rgba(36, 26, 10, 0.92) 0%, rgba(22, 16, 8, 0.9) 100%);
+}
+
+.v2-shell .v3-sector-env-card.env-cryo_ion {
+  border-left: 3px solid var(--ts-phosphor-cyan);
+  background-color: #0d2134;
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      var(--ts-crt-scan-cyan) 0 1px,
+      transparent 1px 3px
+    ),
+    linear-gradient(180deg, rgba(14, 36, 56, 0.9) 0%, rgba(10, 24, 38, 0.92) 100%);
+}
+
+.v2-shell .v3-sector-env-card.env-gravity_tide {
+  border-left: 3px solid #c9a0ff;
+  background-color: #1c1632;
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      rgba(201, 160, 255, 0.05) 0 1px,
+      transparent 1px 3px
+    ),
+    linear-gradient(180deg, rgba(30, 22, 54, 0.9) 0%, rgba(18, 14, 36, 0.92) 100%);
+}
+
 .v2-shell .v2-combat-event-ticker {
   border-radius: 0;
   clip-path: polygon(
@@ -369,7 +531,7 @@
 .v3-ending-backdrop .num,
 .v2-modal-card .num,
 .v2-modal-card .v3-stat-v,
-.v2-modal-card .v3-cstat-v {
+.v2-modal-card .v3-cstat-card strong {
   font-family: var(--ts-mono-font);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
@@ -628,6 +790,53 @@
   box-shadow: inset 0 1px 0 rgba(202, 226, 250, 0.14);
 }
 
+/* Explicit (0,3,0) interactive card hover & semantic states */
+.v2-shell .v2-dock-btn:hover:not(:disabled) {
+  border-color: var(--ts-phosphor-cyan);
+  border-top-color: #9ff0f6;
+  background: rgba(34, 54, 82, 0.92);
+}
+
+.v2-shell .v2-next-goal-pill.is-ready:not(:disabled) {
+  border-color: var(--ts-phosphor-cyan);
+  border-left: 4px solid var(--ts-phosphor-cyan);
+  box-shadow:
+    inset 0 1px 0 rgba(176, 246, 252, 0.25),
+    0 0 12px rgba(98, 214, 223, 0.2);
+}
+
+.v2-shell .v2-next-goal-pill:hover:not(:disabled) {
+  border-color: var(--ts-phosphor-amber);
+  border-top-color: #ffe2a4;
+}
+
+.v2-shell .v3-event-choice-btn.is-fallback:not(:disabled):not(.is-unaffordable):not(.is-locked) {
+  border-style: dashed;
+  border-color: rgba(154, 184, 216, 0.62);
+  border-bottom-width: 2px;
+  background: rgba(16, 26, 40, 0.84);
+}
+
+.v2-shell .v3-event-choice-btn.is-crew-bonus.is-matched:not(:disabled):not(.is-unaffordable):not(.is-locked) {
+  border-color: rgba(98, 214, 223, 0.78);
+  border-left: 4px solid var(--ts-phosphor-cyan);
+  background: rgba(18, 44, 62, 0.86);
+}
+
+.v2-shell .v3-wreck-cut-card.is-cut {
+  opacity: 0.76;
+  border-style: dashed;
+  border-color: rgba(110, 148, 192, 0.36);
+  border-bottom-width: 1px;
+  filter: saturate(0.35);
+}
+
+.v2-modal-card .v2-trial-card:hover:not(:disabled) {
+  border-color: var(--ts-phosphor-amber);
+  border-top-color: #ffe2a4;
+  background: rgba(246, 184, 82, 0.1);
+}
+
 .v2-shell .v2-dock-btn:active:not(:disabled),
 .v2-shell .v2-choice-pill:active:not(:disabled),
 .v2-shell .v2-crew-pill:active:not(:disabled),
@@ -732,16 +941,16 @@
 
 /* --------------------------------------------------------------------------
    5. Hazard Zebra Stripes & Safety Framing (Dangerous / Destructive / Lethal)
+      NOTE: Uses class-only specificity (0,3,0) — ZERO #id selectors so
+      powered-off :disabled rules cascade cleanly on #v2-btn-reset,
+      #v2-discard-ok, and #v2-rec-fresh (all carry .btn.btn-danger).
    -------------------------------------------------------------------------- */
 .v2-shell .btn.btn-danger,
 .v2-title-host .btn.btn-danger,
 .v2-title-backdrop .btn.btn-danger,
 .v2-ending-host .btn.btn-danger,
 .v3-ending-backdrop .btn.btn-danger,
-.v2-modal-card .btn.btn-danger,
-.v2-modal-card #v2-btn-reset,
-.v2-modal-card #v2-discard-ok,
-.v2-modal-card #v2-rec-fresh {
+.v2-modal-card .btn.btn-danger {
   color: #fff0ec;
   border: 2px double rgba(255, 146, 130, 0.92);
   border-bottom: 3px solid #4c1110;
@@ -760,10 +969,11 @@
 }
 
 .v2-shell .btn.btn-danger:hover:not(:disabled),
-.v2-modal-card .btn.btn-danger:hover:not(:disabled),
-.v2-modal-card #v2-btn-reset:hover:not(:disabled),
-.v2-modal-card #v2-discard-ok:hover:not(:disabled),
-.v2-modal-card #v2-rec-fresh:hover:not(:disabled) {
+.v2-title-host .btn.btn-danger:hover:not(:disabled),
+.v2-title-backdrop .btn.btn-danger:hover:not(:disabled),
+.v2-ending-host .btn.btn-danger:hover:not(:disabled),
+.v3-ending-backdrop .btn.btn-danger:hover:not(:disabled),
+.v2-modal-card .btn.btn-danger:hover:not(:disabled) {
   border-color: #ffb8ac;
   background-image:
     repeating-linear-gradient(
@@ -816,81 +1026,12 @@
 }
 
 /* --------------------------------------------------------------------------
-   6. Powered-Off Cold-Metal Disabled & Locked States
-      (NOT merely lowered opacity: unlit steel face, flat recessed bevel,
-      dashed metallic slot border, unpowered hatch, crisp muted gray ink)
-   -------------------------------------------------------------------------- */
-.v2-shell .btn:disabled,
-.v2-title-host .btn:disabled,
-.v2-title-backdrop .btn:disabled,
-.v2-ending-host .btn:disabled,
-.v3-ending-backdrop .btn:disabled,
-.v2-modal-card .btn:disabled,
-.v2-shell .btn[disabled],
-.v2-modal-card .btn[disabled],
-.v2-shell .v2-choice-pill:disabled,
-.v2-shell .v2-crew-pill:disabled,
-.v2-shell .v2-crew-pill.is-locked,
-.v2-shell .v2-sector-chip:disabled,
-.v2-shell .v2-sector-chip.is-locked,
-.v2-shell .v3-mode-btn:disabled,
-.v2-shell .v2-pool-btn:disabled,
-.v2-shell .v2-et-btn:disabled,
-.v2-shell .v2-reward-card:disabled,
-.v2-shell .v2-trial-mini-card:disabled,
-.v2-shell .v3-event-choice-btn:disabled,
-.v2-shell .v3-event-choice-btn.is-unaffordable,
-.v2-shell .v3-event-choice-btn.is-locked,
-.v2-shell .v3-threat-pills .v3-threat-pill:disabled,
-.v2-shell .v3-map-dest-card.is-locked,
-.v2-shell .v3-map-dest-card.is-blocked,
-.v2-shell .v3-cost-pill.is-blocked,
-.v2-ending-host .v3-ending-choice-card:disabled,
-.v3-ending-backdrop .v3-ending-choice-card:disabled,
-.v2-modal-card .v2-contract-card.is-locked,
-.v2-modal-card .codex-card.locked,
-.v2-modal-card .v3-act-card.is-locked,
-.v2-modal-card .v3-climax-gate-card.is-locked,
-.v2-modal-card .v3-pity-cell.is-locked,
-.v2-modal-card .v3-crew-roster-card.is-locked,
-.v2-modal-card .v3-bestiary-card.is-unseen,
-.v2-modal-card .v3-ending-gallery-card.is-locked,
-.v2-modal-card .v3-lore-card.is-locked,
-.v2-modal-card .v3-achievement-item.is-locked {
-  background-color: var(--ts-off-bg);
-  background-image:
-    repeating-linear-gradient(
-      135deg,
-      rgba(146, 174, 204, 0.045) 0 4px,
-      transparent 4px 8px
-    ),
-    linear-gradient(180deg, #121b28 0%, #0d141f 100%);
-  color: var(--ts-off-text);
-  border: 1px dashed var(--ts-off-border);
-  border-bottom-width: 1px;
-  box-shadow: inset 0 2px 5px rgba(2, 6, 14, 0.8);
-  opacity: 0.92;
-  filter: saturate(0.18);
-  transform: none;
-  cursor: not-allowed;
-}
-
-.v2-shell .v3-wreck-compartment-pin:disabled,
-.v2-shell .v2-wreck-hotspot:disabled {
-  background-color: var(--ts-off-bg);
-  background-image: linear-gradient(180deg, #111a26 0%, #0c131d 100%);
-  border: 1px dashed var(--ts-off-border);
-  color: var(--ts-off-text);
-  box-shadow: inset 0 2px 5px rgba(2, 6, 14, 0.78);
-  opacity: 0.88;
-  filter: saturate(0.2);
-}
-
-/* --------------------------------------------------------------------------
-   7. Zero Functional Capsule Pills Across ALL V2/V3 Screens & Modals
-      (Overrides ALL 55 functional 99px/999px pill/chip/track rules to
-      chamfered industrial nameplates, 1px recessed gauges, or 2px square chits.
-      ONLY <=10px decorative LEDs .hud-logo-dot and .v2-hotspot-ring stay round.)
+   6. Zero Functional Capsule Pills Across ALL V2/V3 Screens & Modals
+      (Overrides ALL functional 99px/999px pill/chip/track rules to chamfered
+      industrial nameplates, 1px recessed gauges, or 2px square chits.
+      ONLY <=10px decorative LEDs .hud-logo-dot and .v2-hotspot-ring stay round.
+      Powered-Off Disabled/Locked overrides live in Section 9 AFTER Sections 5–8
+      so no active/selected/hazard/variant rule can ever defeat powered-off metal!)
    -------------------------------------------------------------------------- */
 
 /* 7A. Chamfered Industrial Nameplates (border-radius: 0 + 4px 45° chamfer) */
@@ -1051,7 +1192,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   8. Dual-Use .v3-threat-pill Isolation (S06 Badges vs Endless 1-10 Buttons)
+   7. Dual-Use .v3-threat-pill Isolation (S06 Badges vs Endless 1-10 Buttons)
       CRITICAL: Never override display / cursor / min-height / white-space /
       padding on a bare .v2-shell .v3-threat-pill selector!
    -------------------------------------------------------------------------- */
@@ -1123,7 +1264,7 @@
   box-shadow: inset 0 1px 0 rgba(196, 222, 248, 0.14);
 }
 
-.v2-shell .v3-threat-pills .v3-threat-pill.active {
+.v2-shell .v3-threat-pills .v3-threat-pill.active:not(:disabled):not(.is-locked) {
   border: 2px solid var(--ts-phosphor-amber);
   border-bottom: 3px solid #6e480d;
   background: linear-gradient(180deg, #4b3818 0%, #2d210d 100%);
@@ -1134,20 +1275,20 @@
 }
 
 /* --------------------------------------------------------------------------
-   9. Grayscale & Colorblind Multi-Cue State Differentiation
+   8. Grayscale & Colorblind Multi-Cue State Differentiation
       Normal (1px solid) | Selected (2px solid + left phosphor bar) |
       Synergy (left cyan bar + inset glow) | Warning (dashed border) |
       Danger/Lethal (double border + hazard stripes) | Powered-Off (dashed + hatch)
    -------------------------------------------------------------------------- */
-.v2-shell .v2-choice-pill.active,
-.v2-shell .v2-crew-pill.active,
-.v2-shell .v2-sector-chip.active,
-.v2-shell .v3-mode-btn.active,
-.v2-shell .v2-trial-mini-card.active,
-.v2-shell .v3-map-dest-card.is-selected,
-.v2-shell .v3-wreck-cut-card.is-selected,
-.v2-ending-host .v3-ending-choice-card.is-selected,
-.v3-ending-backdrop .v3-ending-choice-card.is-selected {
+.v2-shell .v2-choice-pill.active:not(:disabled):not(.is-locked),
+.v2-shell .v2-crew-pill.active:not(:disabled):not(.is-locked),
+.v2-shell .v2-sector-chip.active:not(:disabled):not(.is-locked),
+.v2-shell .v3-mode-btn.active:not(:disabled):not(.is-locked),
+.v2-shell .v2-trial-mini-card.active:not(:disabled):not(.is-locked),
+.v2-shell .v3-map-dest-card.selected:not(:disabled):not(.is-locked):not(.is-blocked),
+.v2-shell .v3-wreck-cut-card.is-selected:not(:disabled):not(.is-locked):not(.is-cut),
+.v2-ending-host .v3-ending-choice-card.is-selected:not(:disabled):not(.is-locked),
+.v3-ending-backdrop .v3-ending-choice-card.is-selected:not(:disabled):not(.is-locked) {
   border: 2px solid var(--ts-phosphor-amber);
   border-left-width: 4px;
   box-shadow:
@@ -1166,17 +1307,106 @@
   border-color: rgba(246, 184, 82, 0.78);
 }
 
-.v2-shell .v2-placed-item.is-synergy .placed-subcell,
-.v2-modal-card .v2-placed-item.is-synergy .placed-subcell,
+.v2-shell .v2-placed-item.synergy-active .placed-subcell,
+.v2-modal-card .v2-placed-item.synergy-active .placed-subcell,
+.v2-shell .v2-placed-item.power-cell-boosted .placed-subcell,
+.v2-modal-card .v2-placed-item.power-cell-boosted .placed-subcell,
 .v2-shell .v3-power-boost-chip,
 .v2-modal-card .v3-power-boost-chip {
   border-left: 3px solid var(--ts-phosphor-cyan);
 }
 
 /* --------------------------------------------------------------------------
+   9. Powered-Off Cold-Metal Disabled & Locked States
+      (Placed strictly AFTER Sections 5–8 so NO active/selected/hazard/variant
+      rule can ever override powered-off disabled/locked cold metal!)
+   -------------------------------------------------------------------------- */
+.v2-shell .btn:disabled,
+.v2-title-host .btn:disabled,
+.v2-title-backdrop .btn:disabled,
+.v2-ending-host .btn:disabled,
+.v3-ending-backdrop .btn:disabled,
+.v2-modal-card .btn:disabled,
+.v2-shell .btn[disabled],
+.v2-modal-card .btn[disabled],
+.v2-shell .v2-dock-btn:disabled,
+.v2-shell .v2-next-goal-pill:disabled,
+.v2-shell .v2-choice-pill:disabled,
+.v2-shell .v2-crew-pill:disabled,
+.v2-shell .v2-crew-pill.is-locked,
+.v2-shell .v2-sector-chip:disabled,
+.v2-shell .v2-sector-chip.is-locked,
+.v2-shell .v2-sector-chip.sector-frozen:disabled,
+.v2-shell .v2-sector-chip.sector-abyss:disabled,
+.v2-shell .v3-mode-btn:disabled,
+.v2-shell .v3-mode-btn.mode-final:disabled,
+.v2-shell .v3-mode-btn.mode-endless:disabled,
+.v2-shell .v2-pool-btn:disabled,
+.v2-shell .v2-et-btn:disabled,
+.v2-shell .v3-tactical-options .v2-et-btn:disabled,
+.v2-shell .v3-tactical-options .v2-et-btn.is-signature:disabled,
+.v2-shell .v2-reward-card:disabled,
+.v2-shell .v2-trial-mini-card:disabled,
+.v2-shell .v3-event-choice-btn:disabled,
+.v2-shell .v3-event-choice-btn.is-unaffordable,
+.v2-shell .v3-event-choice-btn.is-locked,
+.v2-shell .v3-threat-pills .v3-threat-pill:disabled,
+.v2-shell .v3-map-dest-card.is-locked,
+.v2-shell .v3-map-dest-card.is-blocked,
+.v2-shell .v3-map-dest-card.selected.is-locked,
+.v2-shell .v3-map-dest-card.selected.is-blocked,
+.v2-shell .v3-wreck-cut-card:disabled,
+.v2-shell .v3-cost-pill.is-blocked,
+.v2-ending-host .v3-ending-choice-card:disabled,
+.v3-ending-backdrop .v3-ending-choice-card:disabled,
+.v2-modal-card .v2-trial-card:disabled,
+.v2-modal-card .v2-contract-card.is-locked,
+.v2-modal-card .codex-card.locked,
+.v2-modal-card .v3-act-card.is-locked,
+.v2-modal-card .v3-climax-gate-card.is-locked,
+.v2-modal-card .v3-pity-cell.is-locked,
+.v2-modal-card .v3-crew-roster-card.is-locked,
+.v2-modal-card .v3-bestiary-card.is-unseen,
+.v2-modal-card .v3-ending-gallery-card.is-locked,
+.v2-modal-card .v3-lore-card.is-locked,
+.v2-modal-card .v3-achievement-item.is-locked {
+  background-color: var(--ts-off-bg);
+  background-image:
+    repeating-linear-gradient(
+      135deg,
+      rgba(146, 174, 204, 0.045) 0 4px,
+      transparent 4px 8px
+    ),
+    linear-gradient(180deg, #121b28 0%, #0d141f 100%);
+  color: var(--ts-off-text);
+  border: 1px dashed var(--ts-off-border);
+  border-bottom-width: 1px;
+  box-shadow: inset 0 2px 5px rgba(2, 6, 14, 0.8);
+  opacity: 0.92;
+  filter: saturate(0.18);
+  transform: none;
+  cursor: not-allowed;
+}
+
+.v2-shell .v3-wreck-compartment-pin:disabled,
+.v2-shell .v2-wreck-hotspot:disabled {
+  background-color: var(--ts-off-bg);
+  background-image: linear-gradient(180deg, #111a26 0%, #0c131d 100%);
+  border: 1px dashed var(--ts-off-border);
+  color: var(--ts-off-text);
+  box-shadow: inset 0 2px 5px rgba(2, 6, 14, 0.78);
+  opacity: 0.88;
+  filter: saturate(0.2);
+}
+
+/* --------------------------------------------------------------------------
    10. Reduced Motion Compliance
        Supports BOTH body.reduced-motion AND @media (prefers-reduced-motion: reduce)
        strictly scoped to V2/V3 roots (zero Legacy V1 side-effects).
+       NOTE: transform: none !important is strictly scoped to interactive controls
+       ONLY — NEVER applied to layout-centered pins (.v3-wreck-compartment-pin,
+       .v2-wreck-hotspot) or .v2-combat-event-ticker so translate(-50%, -50%)
+       centering stays intact!
    -------------------------------------------------------------------------- */
 body.reduced-motion .v2-shell .btn,
 body.reduced-motion .v2-title-host .btn,
@@ -1206,6 +1436,7 @@ body.reduced-motion .v2-shell .enemy-intent-badge,
 body.reduced-motion .v2-shell .v3-stability-fill,
 body.reduced-motion .v2-shell .v3-auto-engage-progress,
 body.reduced-motion .v2-shell .synergy-overlay-svg .energy-link-line,
+body.reduced-motion .v2-modal-card .synergy-overlay-svg .energy-link-line,
 body.reduced-motion .v2-drag-ghost,
 body.reduced-motion .v3-wreck-flip-ghost {
   animation: none !important;
@@ -1214,6 +1445,49 @@ body.reduced-motion .v3-wreck-flip-ghost {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* Complete V2/V3-scoped animation & transition suppression (matches styles.css:1303
+     without leaking into Legacy V1 ?mode=v1) */
+  .v2-shell,
+  .v2-shell *,
+  .v2-shell *::before,
+  .v2-shell *::after,
+  .v2-title-host,
+  .v2-title-host *,
+  .v2-title-host *::before,
+  .v2-title-host *::after,
+  .v2-title-backdrop,
+  .v2-title-backdrop *,
+  .v2-title-backdrop *::before,
+  .v2-title-backdrop *::after,
+  .v2-ending-host,
+  .v2-ending-host *,
+  .v2-ending-host *::before,
+  .v2-ending-host *::after,
+  .v3-ending-backdrop,
+  .v3-ending-backdrop *,
+  .v3-ending-backdrop *::before,
+  .v3-ending-backdrop *::after,
+  .v2-modal-host,
+  .v2-modal-host *,
+  .v2-modal-host *::before,
+  .v2-modal-host *::after,
+  .v2-modal-backdrop,
+  .v2-modal-backdrop *,
+  .v2-modal-backdrop *::before,
+  .v2-modal-backdrop *::after,
+  .v2-modal-card,
+  .v2-modal-card *,
+  .v2-modal-card *::before,
+  .v2-modal-card *::after,
+  .v2-drag-ghost,
+  .v2-drag-ghost *,
+  .v3-wreck-flip-ghost,
+  .v3-wreck-flip-ghost * {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  /* Targeted transform suppression strictly on interactive controls & non-centered motion nodes */
   .v2-shell .btn,
   .v2-title-host .btn,
   .v2-title-backdrop .btn,
@@ -1236,12 +1510,6 @@ body.reduced-motion .v3-wreck-flip-ghost {
   .v2-ending-host .v3-ending-choice-card,
   .v3-ending-backdrop .v3-ending-choice-card,
   .v2-modal-card .v2-trial-card,
-  .v2-shell .hud-logo-dot,
-  .v2-shell .v2-hotspot-ring,
-  .v2-shell .enemy-intent-badge,
-  .v2-shell .v3-stability-fill,
-  .v2-shell .v3-auto-engage-progress,
-  .v2-shell .synergy-overlay-svg .energy-link-line,
   .v2-shell .v2-placed-item.invalid-shake,
   .v2-shell .v2-staging-card.invalid-shake,
   .v2-shell .v2-settle-totals .v2-mig-row.is-rollup-pending,
@@ -1250,8 +1518,6 @@ body.reduced-motion .v3-wreck-flip-ghost {
   .v2-shell.phase-voyage.is-hold-zoomed .scene-card.v3-ship-stage,
   .v2-drag-ghost,
   .v3-wreck-flip-ghost {
-    animation: none !important;
-    transition: none !important;
     transform: none !important;
   }
 
