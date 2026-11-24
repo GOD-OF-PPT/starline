@@ -6,7 +6,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // CargoGridV2Component, tacticalDelta, ArrangePhaseView, MapPhaseView execute!)
 // ---------------------------------------------------------------------------
 
-const { MockPhaserScene, MockPhaserGame, phaserTestHarness } = vi.hoisted(() => {
+const { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, phaserTestHarness } = vi.hoisted(() => {
+const MOCK_SCENE_STATUS = {
+  PENDING: 0,
+  INIT: 1,
+  START: 2,
+  LOADING: 3,
+  CREATING: 4,
+  RUNNING: 5,
+  PAUSED: 6,
+  SLEEPING: 7,
+  SHUTDOWN: 8,
+  DESTROYED: 9,
+} as const;
+
 interface MockListener {
   readonly fn: (...args: unknown[]) => void;
   readonly ctx: unknown;
@@ -266,13 +279,19 @@ class MockPhaserScene {
     zone: (x: number, y: number, w: number, h: number) =>
       new MockDisplayObject(this, x, y).setSize(w, h),
   };
-  sys: { isActive: () => boolean };
+  sys: {
+    isActive: () => boolean;
+    settings: { status: number };
+  };
   scene: { isActive: () => boolean };
 
   constructor(config?: { readonly key?: string }) {
     this.sceneKey = config?.key ?? 'Scene';
     const isActive = () => Boolean(this.game?.scene.isActive(this.sceneKey));
-    this.sys = { isActive };
+    this.sys = {
+      isActive,
+      settings: { status: MOCK_SCENE_STATUS.PENDING },
+    };
     this.scene = { isActive };
   }
 
@@ -284,6 +303,7 @@ class MockPhaserScene {
 const phaserTestHarness = {
   autoReady: true,
   lastGame: null as MockPhaserGame | null,
+  deferCreateKeys: new Set<string>(),
 };
 
 class MockPhaserGame {
@@ -330,22 +350,42 @@ class MockPhaserGame {
       this.startedScenes.push({ key, data });
       const target = this.sceneMap.get(key);
       if (!target) return;
+      // Mirror real Phaser 3.90 SceneManager.start guard: silently drops start() during START..CREATING
+      if (
+        target.sys.settings.status >= MOCK_SCENE_STATUS.START &&
+        target.sys.settings.status <= MOCK_SCENE_STATUS.CREATING
+      ) {
+        return;
+      }
       if (this.activeScenes.has(key)) {
         this.activeScenes.delete(key);
+        target.sys.settings.status = MOCK_SCENE_STATUS.SHUTDOWN;
         target.events.emit('shutdown');
       }
-      this.activeScenes.add(key);
       target.scale.width = this.scale.width;
       target.scale.height = this.scale.height;
+      target.sys.settings.status = MOCK_SCENE_STATUS.INIT;
       target.init?.(data);
+      target.sys.settings.status = MOCK_SCENE_STATUS.LOADING;
       target.preload?.();
-      target.create?.();
+      if (phaserTestHarness.deferCreateKeys.has(key)) {
+        return;
+      }
+      this.finishPreload(key);
     },
     stop: (key: string) => {
-      if (!this.activeScenes.has(key)) return;
-      this.activeScenes.delete(key);
       const target = this.sceneMap.get(key);
-      target?.events.emit('shutdown');
+      const isLiveOrStarting =
+        this.activeScenes.has(key) ||
+        (target !== undefined &&
+          target.sys.settings.status >= MOCK_SCENE_STATUS.INIT &&
+          target.sys.settings.status <= MOCK_SCENE_STATUS.RUNNING);
+      if (!isLiveOrStarting) return;
+      this.activeScenes.delete(key);
+      if (target) {
+        target.sys.settings.status = MOCK_SCENE_STATUS.SHUTDOWN;
+        target.events.emit('shutdown');
+      }
     },
   };
 
@@ -384,18 +424,27 @@ class MockPhaserGame {
     return this.sceneMap.get(key) as T | undefined;
   }
 
+  finishPreload(key: string): void {
+    const target = this.sceneMap.get(key);
+    if (!target || target.sys.settings.status !== MOCK_SCENE_STATUS.LOADING) return;
+    target.sys.settings.status = MOCK_SCENE_STATUS.CREATING;
+    this.activeScenes.add(key);
+    target.create?.();
+    target.sys.settings.status = MOCK_SCENE_STATUS.RUNNING;
+  }
+
   emitReady(): void {
     this.events.emit('ready');
   }
 
   destroy(_removeCanvas?: boolean): void {
-    for (const key of [...this.activeScenes]) {
+    for (const key of [...this.sceneMap.keys()]) {
       this.scene.stop(key);
     }
   }
 }
 
-  return { MockPhaserScene, MockPhaserGame, phaserTestHarness };
+  return { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, phaserTestHarness };
 });
 
 type MockPhaserSceneInstance = InstanceType<typeof MockPhaserScene>;
@@ -405,7 +454,10 @@ vi.mock('phaser', () => ({
     AUTO: 0,
     Scale: { NONE: 0, NO_CENTER: 0 },
     Core: { Events: { READY: 'ready' } },
-    Scenes: { Events: { SHUTDOWN: 'shutdown' } },
+    Scenes: {
+      ...MOCK_SCENE_STATUS,
+      Events: { SHUTDOWN: 'shutdown' },
+    },
     Scene: MockPhaserScene,
     Game: MockPhaserGame,
   },
@@ -420,9 +472,14 @@ import { DEFAULT_SETTINGS } from '../src/domain/progression';
 import { PhaserHost } from '../src/scenes/PhaserHost';
 import { buildEncounterUnits } from '../src/v2/data/enemies';
 import { createV2TutorialRun } from '../src/v2/data/tutorialV2';
+import { simulateV2Combat } from '../src/v2/domain/combatV2';
 import { selectV2MapNode } from '../src/v2/domain/encounter';
 import { launchV2Expedition, buildFreeFallbackPrepareSlots } from '../src/v2/domain/loadout';
-import { createV2EquipmentInstance, createV3GadgetInstance } from '../src/v2/domain/itemCatalog';
+import {
+  createV2CargoInstance,
+  createV2EquipmentInstance,
+  createV3GadgetInstance,
+} from '../src/v2/domain/itemCatalog';
 import { createFreshV2SaveData, persistV2SaveData } from '../src/v2/domain/persistenceV2';
 import { deriveV2ShipVisualSpec } from '../src/v2/domain/shipVisualSpec';
 import {
@@ -1276,6 +1333,7 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
   beforeEach(() => {
     phaserTestHarness.autoReady = true;
     phaserTestHarness.lastGame = null;
+    phaserTestHarness.deferCreateKeys.clear();
     clearTacticalDeltaCache();
     dom = installFakeDom();
   });
@@ -1743,6 +1801,205 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
 
       host.destroy();
     });
+
+    it('PhaserHost guards mid-preload V2CombatScene against Phaser 3.90 start() drop, applies live combat handoff on preload finish, and stops LOADING scene on mode switch', async () => {
+      phaserTestHarness.deferCreateKeys.add('V2CombatScene');
+      const container = dom.document.createElement('div');
+      dom.document.body.appendChild(container);
+      const host = new PhaserHost(container as unknown as HTMLElement);
+      await flushMicrotasks();
+
+      const game = phaserTestHarness.lastGame!;
+      const scene = game.getScene<MockPhaserSceneInstance>('V2CombatScene') as unknown as V2CombatScene &
+        MockPhaserSceneInstance;
+      const bay = buildArrangeBay();
+      const emptySpec = deriveV2ShipVisualSpec({
+        shipId: 'cannon_skiff',
+        placed: [],
+        staging: [],
+        discardedThisArrange: [],
+      });
+      const armedSpec = deriveV2ShipVisualSpec(bay);
+      const units = buildEncounterUnits('patrol', 1, 'preload_e1');
+
+      // Different enemy names with identical stats MUST yield distinct playbackKeys (role fallback tint)
+      const renamedUnits = units.map((u) => ({ ...u, name: '火炮哨兵' }));
+      expect(
+        buildV2StaticStagePlaybackKey({
+          mode: 'pre_combat',
+          runId: 'run_preload',
+          nodeId: 'L1A',
+          shipId: 'cannon_skiff',
+          sectorId: 'near_orbit',
+          sectorIndex: 1,
+          eventBackdrop: null,
+          units,
+        })
+      ).not.toBe(
+        buildV2StaticStagePlaybackKey({
+          mode: 'pre_combat',
+          runId: 'run_preload',
+          nodeId: 'L1A',
+          shipId: 'cannon_skiff',
+          sectorId: 'near_orbit',
+          sectorIndex: 1,
+          eventBackdrop: null,
+          units: renamedUnits,
+        })
+      );
+
+      const preCombatKey = buildV2StaticStagePlaybackKey({
+        mode: 'pre_combat',
+        runId: 'run_preload',
+        nodeId: 'L1A',
+        shipId: 'cannon_skiff',
+        sectorId: 'near_orbit',
+        sectorIndex: 1,
+        eventBackdrop: null,
+        units,
+      });
+
+      host.showV2Stage({
+        playbackKey: preCombatKey,
+        shipId: 'cannon_skiff',
+        shipVisualSpec: emptySpec,
+        sectorId: 'near_orbit',
+        sectorIndex: 1,
+        eventBackdrop: null,
+        units,
+        simulation: null,
+        settings: DEFAULT_SETTINGS,
+      });
+
+      const v2Starts = () => game.startedScenes.filter((s) => s.key === 'V2CombatScene').length;
+      expect(scene.sys.settings.status).toBe(MOCK_SCENE_STATUS.LOADING);
+      expect(game.scene.isActive('V2CombatScene')).toBe(false);
+      expect(host.isV2StageMode()).toBe(true);
+      expect(v2Starts()).toBe(1);
+
+      // Same-key static update while still LOADING deduplicates without calling scene.start again
+      host.showV2Stage({
+        playbackKey: preCombatKey,
+        shipId: 'cannon_skiff',
+        shipVisualSpec: armedSpec,
+        sectorId: 'near_orbit',
+        sectorIndex: 1,
+        eventBackdrop: null,
+        units,
+        simulation: null,
+        settings: DEFAULT_SETTINGS,
+      });
+      expect(v2Starts()).toBe(1);
+
+      // Rapid live-combat launch (T5-01 scenario) while still LOADING MUST NOT call scene.start() again
+      const sim = simulateV2Combat({
+        resultId: 'preload_live_sim',
+        bay,
+        startingHp: 30,
+        maxHp: 30,
+        units,
+        targetPolicy: 'weakest',
+        sectorId: 'near_orbit',
+      });
+      const onComplete = vi.fn();
+      host.showV2Stage({
+        shipId: 'cannon_skiff',
+        shipVisualSpec: armedSpec,
+        sectorId: 'near_orbit',
+        sectorIndex: 1,
+        eventBackdrop: null,
+        units,
+        simulation: sim,
+        settings: DEFAULT_SETTINGS,
+        onComplete,
+      });
+      expect(v2Starts()).toBe(1);
+      expect(scene.sys.settings.status).toBe(MOCK_SCENE_STATUS.LOADING);
+
+      // When preload completes, create() runs live combat simulation cleanly (NOT frozen on pre_combat!)
+      game.finishPreload('V2CombatScene');
+      expect(scene.sys.settings.status).toBe(MOCK_SCENE_STATUS.RUNNING);
+      expect(game.scene.isActive('V2CombatScene')).toBe(true);
+      const snap = scene.getStagePresentationSnapshot();
+      expect(snap.appliedPlaybackKey).toBeNull();
+      expect(snap.enemyCount).toBe(units.length);
+      expect(snap.moduleCount).toBeGreaterThan(0);
+
+      host.skipCombatPlayback();
+      expect(onComplete).toHaveBeenCalledTimes(1);
+
+      // Switch to V2 Base, then re-enter LOADING V2CombatScene and immediately switch back to V2 Base:
+      // in-flight LOADING V2CombatScene MUST be stopped cleanly!
+      const dioramaState = {
+        activeShipId: 'cannon_skiff' as const,
+        facilityTiers: { contract_hub: 1, research_lab: 0, drydock_tier2: 0, stargate_relay: 0 },
+        restoredRelicIds: [],
+        campaignAct: 'act1' as const,
+        stargatePowered: false,
+      };
+      host.showV2Base(dioramaState);
+      expect(scene.sys.settings.status).toBe(MOCK_SCENE_STATUS.SHUTDOWN);
+      expect(game.scene.isActive('BaseScene')).toBe(true);
+
+      host.showV2Stage({
+        playbackKey: preCombatKey,
+        shipId: 'cannon_skiff',
+        shipVisualSpec: armedSpec,
+        sectorId: 'near_orbit',
+        sectorIndex: 1,
+        eventBackdrop: null,
+        units,
+        simulation: null,
+        settings: DEFAULT_SETTINGS,
+      });
+      expect(scene.sys.settings.status).toBe(MOCK_SCENE_STATUS.LOADING);
+      expect(v2Starts()).toBe(2);
+
+      host.showV2Base(dioramaState);
+      expect(scene.sys.settings.status).toBe(MOCK_SCENE_STATUS.SHUTDOWN);
+      expect(game.scene.isActive('BaseScene')).toBe(true);
+
+      host.destroy();
+    });
+
+    it('PhaserHost recovers cleanly when V2CombatScene is externally stopped and showV2Stage is called with the same playbackKey', async () => {
+      const container = dom.document.createElement('div');
+      dom.document.body.appendChild(container);
+      const host = new PhaserHost(container as unknown as HTMLElement);
+      await flushMicrotasks();
+
+      const game = phaserTestHarness.lastGame!;
+      const spec = deriveV2ShipVisualSpec(buildArrangeBay());
+      const staticPb: V2StagePlayback = {
+        playbackKey: 'arrange|run_ext_stop|L1A|cannon_skiff|near_orbit|1|none|none',
+        shipId: 'cannon_skiff',
+        shipVisualSpec: spec,
+        sectorId: 'near_orbit',
+        sectorIndex: 1,
+        eventBackdrop: null,
+        units: [],
+        simulation: null,
+        settings: DEFAULT_SETTINGS,
+      };
+
+      host.showV2Stage(staticPb);
+      expect(host.isV2StageMode()).toBe(true);
+      expect(game.scene.isActive('V2CombatScene')).toBe(true);
+      expect(game.startedScenes.filter((s) => s.key === 'V2CombatScene')).toHaveLength(1);
+
+      // External stop transitions scene to SHUTDOWN -> isV2StageMode() MUST immediately report false
+      game.scene.stop('V2CombatScene');
+      expect(game.scene.isActive('V2CombatScene')).toBe(false);
+      expect(host.isV2StageMode()).toBe(false);
+
+      // Calling showV2Stage with the identical static playbackKey MUST bypass dedup and restart scene!
+      host.showV2Stage(staticPb);
+      expect(game.startedScenes.filter((s) => s.key === 'V2CombatScene')).toHaveLength(2);
+      expect(game.scene.isActive('V2CombatScene')).toBe(true);
+      expect(host.isV2StageMode()).toBe(true);
+
+      host.destroy();
+    });
   });
 
   // =========================================================================
@@ -1986,6 +2243,561 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
       expect(deltaEl).not.toBeNull();
       expect(deltaEl.textContent).toContain('FRESH_BAY_B');
       expect(deltaEl.textContent).not.toContain('STALE_BAY_A');
+
+      grid.destroy();
+    });
+
+    it('clones cached V2TacticalDelta values so caller mutations never poison deltaCache (equipment + recommendedSpot, non-equipment, and grid parity)', () => {
+      clearTacticalDeltaCache();
+      const run = buildArrangeRun();
+      const bay = run.bay;
+      const stagingItem = bay.staging[0].item;
+      const eqParams = {
+        run,
+        bay,
+        startingHp: 30,
+        maxHp: 30,
+        targetPolicy: 'weakest' as const,
+        item: stagingItem,
+        zone: 'staging' as const,
+        sectorId: 'near_orbit' as const,
+        crewId: 'engineer' as const,
+        crewMasteryTier: 0,
+        stargateRelayTier: 0,
+      };
+
+      const d1 = computeV2PlacementTacticalDelta(eqParams);
+      expect(d1.recommendedSpot).toBeDefined();
+      const origSynergy = d1.synergyLine;
+      const origCombat = d1.combatDeltaLine;
+      const origSpot = { ...d1.recommendedSpot! };
+      const simsAfterMiss = getTacticalDeltaCacheStats().simulationCalls;
+
+      // Mutate returned miss object & nested recommendedSpot
+      (d1 as { synergyLine: string }).synergyLine = 'POISON_MISS';
+      (d1 as { combatDeltaLine: string }).combatDeltaLine = 'POISON_COMBAT';
+      (d1.recommendedSpot as { x: number; y: number }).x = 999;
+      (d1.recommendedSpot as { x: number; y: number }).y = 888;
+
+      const d2 = computeV2PlacementTacticalDelta(eqParams);
+      expect(getTacticalDeltaCacheStats().deltaHits).toBe(1);
+      expect(getTacticalDeltaCacheStats().simulationCalls).toBe(simsAfterMiss);
+      expect(d2).not.toBe(d1);
+      expect(d2.recommendedSpot).not.toBe(d1.recommendedSpot);
+      expect(d2.synergyLine).toBe(origSynergy);
+      expect(d2.combatDeltaLine).toBe(origCombat);
+      expect(d2.recommendedSpot).toStrictEqual(origSpot);
+
+      // Mutate returned hit object & nested recommendedSpot
+      (d2 as { synergyLine: string }).synergyLine = 'POISON_HIT';
+      (d2.recommendedSpot as { x: number }).x = 777;
+
+      const d3 = computeV2PlacementTacticalDelta(eqParams);
+      expect(getTacticalDeltaCacheStats().deltaHits).toBe(2);
+      expect(d3).not.toBe(d2);
+      expect(d3.recommendedSpot).not.toBe(d2.recommendedSpot);
+      expect(d3.synergyLine).toBe(origSynergy);
+      expect(d3.recommendedSpot).toStrictEqual(origSpot);
+
+      // Non-equipment item (cargo) miss/hit clone isolation & shape parity
+      const cargoItem = createV2CargoInstance({
+        instanceId: 'cargo_clone_1',
+        defId: 'cargo.data_box',
+        origin: 'loot',
+        acquiredDepth: 1,
+        location: 'staging',
+      });
+      const nonEqParams = { ...eqParams, item: cargoItem };
+      const c1 = computeV2PlacementTacticalDelta(nonEqParams);
+      const origSpace = c1.spaceLine;
+      expect('recommendedSpot' in c1).toBe(false);
+      (c1 as { spaceLine: string }).spaceLine = 'POISON_NON_EQ';
+
+      const c2 = computeV2PlacementTacticalDelta(nonEqParams);
+      expect(c2).not.toBe(c1);
+      expect(c2.spaceLine).toBe(origSpace);
+      expect('recommendedSpot' in c2).toBe(false);
+      (c2 as { spaceLine: string }).spaceLine = 'POISON_NON_EQ_HIT';
+
+      const c3 = computeV2PlacementTacticalDelta(nonEqParams);
+      expect(c3).not.toBe(c2);
+      expect(c3.spaceLine).toBe(origSpace);
+
+      // Grid item without recommendedSpot has identical own-property shape across miss & hit
+      const gridParams = { ...eqParams, item: bay.placed[0].item, zone: 'grid' as const };
+      const g1 = computeV2PlacementTacticalDelta(gridParams);
+      const g2 = computeV2PlacementTacticalDelta(gridParams);
+      expect(g2).not.toBe(g1);
+      expect(g2).toStrictEqual(g1);
+      expect('recommendedSpot' in g1).toBe(false);
+      expect('recommendedSpot' in g2).toBe(false);
+    });
+
+    it('enforces bounded LRU eviction (> 256 entries) on both deltaCache and bestPlacementCache', () => {
+      clearTacticalDeltaCache();
+      const run = buildArrangeRun();
+      const bay = run.bay;
+
+      // 1) deltaCache bounded LRU (256 cap) using zero-sim cargo items
+      const mkCargo = (val: number) =>
+        createV2CargoInstance({
+          instanceId: `cargo_lru_${val}`,
+          defId: 'cargo.data_box',
+          origin: 'loot',
+          acquiredDepth: 1,
+          location: 'staging',
+          fixedValueOverride: val,
+        });
+      const queryCargo = (val: number) =>
+        computeV2PlacementTacticalDelta({
+          run,
+          bay,
+          startingHp: 30,
+          maxHp: 30,
+          targetPolicy: 'weakest',
+          item: mkCargo(val),
+          zone: 'staging',
+        });
+
+      queryCargo(1); // K1 (miss #1)
+      queryCargo(2); // K2 (miss #2)
+      queryCargo(1); // Promote K1 to MRU (hit #1)
+      expect(getTacticalDeltaCacheStats().deltaHits).toBe(1);
+
+      // Insert 255 more distinct keys (total 257 > 256) -> K2 MUST be evicted, K1 MUST survive
+      for (let v = 3; v <= 257; v += 1) {
+        queryCargo(v);
+      }
+      expect(getTacticalDeltaCacheStats().deltaSize).toBe(256);
+
+      const beforeK1 = getTacticalDeltaCacheStats();
+      queryCargo(1);
+      const afterK1 = getTacticalDeltaCacheStats();
+      expect(afterK1.deltaHits).toBe(beforeK1.deltaHits + 1);
+      expect(afterK1.deltaMisses).toBe(beforeK1.deltaMisses);
+
+      queryCargo(2);
+      const afterK2 = getTacticalDeltaCacheStats();
+      expect(afterK2.deltaMisses).toBe(afterK1.deltaMisses + 1);
+      expect(afterK2.deltaSize).toBe(256);
+
+      // 2) bestPlacementCache bounded LRU (256 cap) using completely full 16/16 cannon_skiff bay (0 sims per call)
+      clearTacticalDeltaCache();
+      const fullPlaced = [];
+      for (let y = 0; y < 4; y += 1) {
+        for (let x = 0; x < 4; x += 1) {
+          fullPlaced.push({
+            item: createV3GadgetInstance({
+              instanceId: `gd_full_${x}_${y}`,
+              kind: 'repair_kit',
+              origin: 'owned',
+              acquiredDepth: 0,
+              location: 'bay',
+            }),
+            x,
+            y,
+            rotation: 0 as const,
+          });
+        }
+      }
+      const fullBay: V2CargoBayState = {
+        shipId: 'cannon_skiff',
+        placed: fullPlaced,
+        staging: [],
+        discardedThisArrange: [],
+      };
+      const units = buildEncounterUnits('armored', 1, 'lru_best');
+      const probeItem = bay.staging[0].item;
+
+      expect(findBestPlacementForItem(fullBay, probeItem, 1, 30, 'weakest', units)).toBeNull();
+      expect(findBestPlacementForItem(fullBay, probeItem, 2, 30, 'weakest', units)).toBeNull();
+      // Promote startingHp=1 to MRU
+      expect(findBestPlacementForItem(fullBay, probeItem, 1, 30, 'weakest', units)).toBeNull();
+      expect(getTacticalDeltaCacheStats().bestPlacementHits).toBe(1);
+
+      for (let hp = 3; hp <= 257; hp += 1) {
+        findBestPlacementForItem(fullBay, probeItem, hp, 30, 'weakest', units);
+      }
+      expect(getTacticalDeltaCacheStats().bestPlacementSize).toBe(256);
+
+      const beforeBestK1 = getTacticalDeltaCacheStats();
+      findBestPlacementForItem(fullBay, probeItem, 1, 30, 'weakest', units);
+      const afterBestK1 = getTacticalDeltaCacheStats();
+      expect(afterBestK1.bestPlacementHits).toBe(beforeBestK1.bestPlacementHits + 1);
+      expect(afterBestK1.bestPlacementMisses).toBe(beforeBestK1.bestPlacementMisses);
+
+      findBestPlacementForItem(fullBay, probeItem, 2, 30, 'weakest', units);
+      const afterBestK2 = getTacticalDeltaCacheStats();
+      expect(afterBestK2.bestPlacementMisses).toBe(afterBestK1.bestPlacementMisses + 1);
+      expect(afterBestK2.bestPlacementSize).toBe(256);
+    });
+
+    it('preserves active pendingDeltaHandle when a stale out-of-order requestIdleCallback fires', () => {
+      const mount = dom.document.createElement('div');
+      dom.document.body.appendChild(mount);
+
+      const bayA = buildArrangeBay();
+      const bayB: V2CargoBayState = {
+        ...bayA,
+        placed: [{ ...bayA.placed[0], x: 2, y: 0 }],
+      };
+      const bayC: V2CargoBayState = {
+        ...bayA,
+        placed: [{ ...bayA.placed[0], x: 3, y: 0 }],
+      };
+
+      const provider = vi.fn(() => ({
+        synergyLine: 'LIVE_DELTA',
+        combatDeltaLine: 'LIVE_COMBAT',
+        spaceLine: 'LIVE_SPACE',
+        positiveImpact: true,
+      }));
+
+      // Scenario 1: stale job1 runs out-of-order, then destroy() MUST still cancel job2
+      const grid1 = new CargoGridV2Component(mount as unknown as HTMLElement, {
+        onBayChange: () => {},
+        getTacticalDelta: provider,
+      });
+      grid1.render(bayA, true);
+      const job1 = dom.window.idleQueue[0];
+      grid1.render(bayB, true);
+      const job2 = dom.window.idleQueue[1];
+      expect(job1.cancelled).toBe(true);
+      expect(job2.cancelled).toBe(false);
+
+      // Fire stale job1 out-of-order — MUST NOT clobber job2's pendingDeltaHandle
+      job1.cb();
+      expect(provider).toHaveBeenCalledTimes(0);
+
+      grid1.destroy();
+      expect(job2.cancelled).toBe(true);
+
+      // Scenario 2: stale job runs out-of-order, then render(bayC) MUST still cancel active job & flush bayC cleanly
+      dom.window.idleQueue.length = 0;
+      const mount2 = dom.document.createElement('div');
+      dom.document.body.appendChild(mount2);
+      const grid2 = new CargoGridV2Component(mount2 as unknown as HTMLElement, {
+        onBayChange: () => {},
+        getTacticalDelta: provider,
+      });
+      grid2.render(bayA, true);
+      const jA = dom.window.idleQueue[0];
+      grid2.render(bayB, true);
+      const jB = dom.window.idleQueue[1];
+      expect(jA.cancelled).toBe(true);
+      expect(jB.cancelled).toBe(false);
+
+      jA.cb();
+      expect(provider).toHaveBeenCalledTimes(0);
+
+      grid2.render(bayC, true);
+      expect(jB.cancelled).toBe(true);
+      const jC = dom.window.idleQueue[2];
+      expect(jC.cancelled).toBe(false);
+
+      dom.window.flushIdleCallbacks();
+      expect(provider).toHaveBeenCalledTimes(1);
+      expect(mount2.querySelector('[data-testid="tactical-delta"]')?.textContent).toContain('LIVE_DELTA');
+
+      grid2.destroy();
+    });
+
+    it('clears keyboard carrying .preview-valid/.preview-invalid and cell marks on grid blur without DOM rebuilds or delta calls', async () => {
+      const mount = dom.document.createElement('div');
+      dom.document.body.appendChild(mount);
+      const outsideBtn = dom.document.createElement('button');
+      outsideBtn.type = 'button';
+      dom.document.body.appendChild(outsideBtn);
+
+      const deltaSpy = vi.fn(() => ({
+        synergyLine: 'DELTA',
+        combatDeltaLine: 'COMBAT',
+        spaceLine: 'SPACE',
+        positiveImpact: true,
+      }));
+      const grid = new CargoGridV2Component(mount as unknown as HTMLElement, {
+        onBayChange: () => {},
+        getTacticalDelta: deltaSpy,
+      });
+
+      // Part 1: valid carrying preview on cannon_skiff clears cleanly on blur
+      grid.render(buildArrangeBay(), true);
+      dom.window.flushIdleCallbacks();
+      const cells = mount.querySelectorAll('.cargo-cell');
+      expect(cells).toHaveLength(16);
+
+      const cell00 = mount.querySelector('.cargo-cell[data-cx="0"][data-cy="0"]')!;
+      cell00.focus();
+      dom.window.dispatchEvent(new FakeEvent('keydown', { key: 'Enter' }));
+      dom.window.dispatchEvent(new FakeEvent('keydown', { key: 'ArrowRight' }));
+      expect(mount.querySelectorAll('.cargo-cell.preview-valid')).toHaveLength(2);
+      expect(mount.querySelectorAll('.cargo-cell[data-mark-state="valid"]')).toHaveLength(2);
+
+      deltaSpy.mockClear();
+      outsideBtn.focus();
+      await flushMicrotasks();
+
+      expect(mount.querySelectorAll('.cargo-cell.kb-focused')).toHaveLength(0);
+      expect(mount.querySelectorAll('.cargo-cell.preview-valid')).toHaveLength(0);
+      expect(mount.querySelectorAll('.cargo-cell.preview-invalid')).toHaveLength(0);
+      expect(mount.querySelectorAll('.cargo-cell[data-mark-state="valid"]')).toHaveLength(0);
+      expect(mount.querySelectorAll('.cargo-cell[data-mark-state="invalid"]')).toHaveLength(0);
+      expect(deltaSpy).toHaveBeenCalledTimes(0);
+      const cellsAfterBlur = mount.querySelectorAll('.cargo-cell');
+      expect(cellsAfterBlur).toHaveLength(cells.length);
+      for (let i = 0; i < cells.length; i += 1) {
+        expect(cellsAfterBlur[i]).toBe(cells[i]);
+      }
+
+      // Part 2: invalid carrying preview overlapping occupied power cell (1,2) & bulkhead (2,4) on stargate_cruiser
+      const cruiserBay: V2CargoBayState = {
+        shipId: 'stargate_cruiser',
+        placed: [
+          {
+            item: createV2EquipmentInstance({
+              instanceId: 'eq_cruiser_laser',
+              kind: 'laser',
+              quality: 'common',
+              origin: 'owned',
+              acquiredDepth: 0,
+              location: 'bay',
+            }),
+            x: 2,
+            y: 1,
+            rotation: 0,
+          },
+          {
+            item: createV2EquipmentInstance({
+              instanceId: 'eq_cruiser_bat',
+              kind: 'battery',
+              quality: 'common',
+              origin: 'owned',
+              acquiredDepth: 0,
+              location: 'bay',
+            }),
+            x: 1,
+            y: 2,
+            rotation: 0,
+          },
+        ],
+        staging: [],
+        discardedThisArrange: [],
+      };
+      grid.render(cruiserBay, true);
+      dom.window.flushIdleCallbacks();
+
+      const cruiserCells = mount.querySelectorAll('.cargo-cell');
+      expect(cruiserCells).toHaveLength(25);
+      const powerCell12 = mount.querySelector('.cargo-cell[data-cx="1"][data-cy="2"]')!;
+      const bulkhead24 = mount.querySelector('.cargo-cell[data-cx="2"][data-cy="4"]')!;
+      expect(powerCell12.dataset.markState).toBe('power');
+      expect(bulkhead24.dataset.markState).toBe('bulkhead');
+
+      // Pick up laser at (2,1) and move left to (1,1) -> overlaps battery on power cell (1,2) -> invalid!
+      mount.querySelector('.cargo-cell[data-cx="2"][data-cy="1"]')!.focus();
+      dom.window.dispatchEvent(new FakeEvent('keydown', { key: 'Enter' }));
+      dom.window.dispatchEvent(new FakeEvent('keydown', { key: 'ArrowLeft' }));
+      expect(mount.querySelectorAll('.cargo-cell.preview-invalid').length).toBeGreaterThan(0);
+      expect(powerCell12.dataset.markState).toBe('invalid');
+
+      deltaSpy.mockClear();
+      outsideBtn.focus();
+      await flushMicrotasks();
+
+      expect(mount.querySelectorAll('.cargo-cell.preview-invalid')).toHaveLength(0);
+      expect(mount.querySelectorAll('.cargo-cell[data-mark-state="invalid"]')).toHaveLength(0);
+      expect(powerCell12.dataset.markState).toBe('power');
+      expect(bulkhead24.dataset.markState).toBe('bulkhead');
+      expect(deltaSpy).toHaveBeenCalledTimes(0);
+
+      // Re-focus at (1,1) (still carrying), move right+down+down to (2,3) -> overlaps bulkhead (2,4) -> invalid!
+      mount.querySelector('.cargo-cell[data-cx="2"][data-cy="3"]')!.focus();
+      expect(bulkhead24.classList.contains('preview-invalid')).toBe(true);
+      expect(bulkhead24.dataset.markState).toBe('bulkhead');
+
+      outsideBtn.focus();
+      await flushMicrotasks();
+      expect(mount.querySelectorAll('.cargo-cell.preview-invalid')).toHaveLength(0);
+      expect(bulkhead24.dataset.markState).toBe('bulkhead');
+      expect(powerCell12.dataset.markState).toBe('power');
+      expect(deltaSpy).toHaveBeenCalledTimes(0);
+
+      grid.destroy();
+    });
+
+    it('re-renders selected inspector when item origin, category, or fixedValue changes on the same instanceId', () => {
+      // Case 1: without getTacticalDelta (placed item origin changes loan -> owned on same instanceId)
+      const mount1 = dom.document.createElement('div');
+      dom.document.body.appendChild(mount1);
+      const grid1 = new CargoGridV2Component(mount1 as unknown as HTMLElement, {
+        onBayChange: () => {},
+      });
+      const baseBay = buildArrangeBay();
+      grid1.render(baseBay, true);
+
+      const board1 = mount1.querySelector('.v2-cargo-board')!;
+      const p00 = cellCenterPoint(4, 4, 0, 0);
+      board1.dispatchEvent(
+        new FakeEvent('pointerdown', {
+          bubbles: true,
+          button: 0,
+          pointerType: 'mouse',
+          clientX: p00.x,
+          clientY: p00.y,
+        })
+      );
+      dom.window.dispatchEvent(
+        new FakeEvent('pointerup', { bubbles: true, button: 0, clientX: p00.x, clientY: p00.y })
+      );
+
+      expect(mount1.querySelector('.v2-origin-chip.origin-loan')?.textContent).toContain('借用');
+
+      const ownedLaserBay: V2CargoBayState = {
+        ...baseBay,
+        placed: [
+          {
+            ...baseBay.placed[0],
+            item: { ...baseBay.placed[0].item, origin: 'owned' },
+          },
+        ],
+      };
+      grid1.render(ownedLaserBay, true);
+      const ownedChip = mount1.querySelector('.v2-origin-chip.origin-owned');
+      expect(ownedChip).not.toBeNull();
+      expect(ownedChip!.textContent).toContain('自有');
+      expect(mount1.querySelector('.v2-origin-chip.origin-loan')).toBeNull();
+      grid1.destroy();
+
+      // Case 2: with getTacticalDelta (staging item mutates origin & fixedValue on same instanceId)
+      const mount2 = dom.document.createElement('div');
+      dom.document.body.appendChild(mount2);
+      const deltaProvider = vi.fn((item: V2CargoBayState['staging'][number]['item']) => ({
+        synergyLine: `SYN:${item.origin}`,
+        combatDeltaLine: `VAL:${item.fixedValue}`,
+        spaceLine: `CAT:${item.category}`,
+        positiveImpact: true,
+      }));
+      const grid2 = new CargoGridV2Component(mount2 as unknown as HTMLElement, {
+        onBayChange: () => {},
+        getTacticalDelta: deltaProvider,
+      });
+
+      const stagingBay1: V2CargoBayState = {
+        ...baseBay,
+        staging: [
+          {
+            ...baseBay.staging[0],
+            item: { ...baseBay.staging[0].item, origin: 'loot', fixedValue: 30 },
+          },
+        ],
+      };
+      grid2.render(stagingBay1, true);
+      dom.window.flushIdleCallbacks();
+      expect(deltaProvider).toHaveBeenCalledTimes(1);
+      expect(mount2.querySelector('.v2-origin-chip.origin-loot')?.textContent).toContain('拾获 · 可出售/入库');
+      expect(mount2.querySelector('[data-testid="tactical-delta"]')?.textContent).toContain('VAL:30');
+
+      const stagingBay2: V2CargoBayState = {
+        ...stagingBay1,
+        staging: [
+          {
+            ...stagingBay1.staging[0],
+            item: { ...stagingBay1.staging[0].item, origin: 'owned', fixedValue: 95 },
+          },
+        ],
+      };
+      grid2.render(stagingBay2, true);
+      // Inspector immediately updates origin & value before idle completes, and schedules a fresh delta
+      expect(mount2.querySelector('.v2-origin-chip.origin-owned')?.textContent).toContain('自有');
+      expect(mount2.querySelector('.inspector-desc')?.textContent).toContain('95¤');
+
+      dom.window.flushIdleCallbacks();
+      expect(deltaProvider).toHaveBeenCalledTimes(2);
+      const freshDelta = mount2.querySelector('[data-testid="tactical-delta"]')!;
+      expect(freshDelta.textContent).toContain('SYN:owned');
+      expect(freshDelta.textContent).toContain('VAL:95');
+
+      // Mutating category on the same instanceId (e.g. equipment -> gadget) also refreshes inspector badge
+      const stagingBay3: V2CargoBayState = {
+        ...stagingBay2,
+        staging: [
+          {
+            ...stagingBay2.staging[0],
+            item: {
+              ...stagingBay2.staging[0].item,
+              definitionId: 'gadget.repair_kit',
+              category: 'gadget',
+            },
+          },
+        ],
+      };
+      grid2.render(stagingBay3, true);
+      expect(mount2.querySelector('.v2-quality-chip')?.textContent).toContain('一次性装置');
+      dom.window.flushIdleCallbacks();
+      expect(mount2.querySelector('[data-testid="tactical-delta"]')?.textContent).toContain('CAT:gadget');
+
+      grid2.destroy();
+    });
+
+    it('cancels active pointer drag cleanly on Escape without leaving ghost, dragging-source, or hover preview', () => {
+      const mount = dom.document.createElement('div');
+      dom.document.body.appendChild(mount);
+      const onBayChange = vi.fn();
+      const grid = new CargoGridV2Component(mount as unknown as HTMLElement, {
+        onBayChange,
+      });
+      grid.render(buildArrangeBay(), true);
+
+      // Start dragging placed laser from (0,0) to (2,0)
+      const board = mount.querySelector('.v2-cargo-board')!;
+      const startPt = cellCenterPoint(4, 4, 0, 0);
+      const movePt = cellCenterPoint(4, 4, 2, 0);
+
+      board.dispatchEvent(
+        new FakeEvent('pointerdown', {
+          bubbles: true,
+          button: 0,
+          pointerType: 'mouse',
+          clientX: startPt.x,
+          clientY: startPt.y,
+        })
+      );
+      dom.window.dispatchEvent(
+        new FakeEvent('pointermove', {
+          bubbles: true,
+          clientX: movePt.x,
+          clientY: movePt.y,
+        })
+      );
+
+      expect(dom.document.body.querySelector('.drag-ghost')).not.toBeNull();
+      expect(mount.querySelectorAll('.dragging-source')).toHaveLength(1);
+      expect(mount.querySelectorAll('.cargo-cell.preview-valid')).toHaveLength(2);
+
+      // Press Escape mid-drag -> ghost, dragging-source, and previews MUST all clear immediately
+      const escDuringDrag = new FakeEvent('keydown', { key: 'Escape' });
+      dom.window.dispatchEvent(escDuringDrag);
+      expect(escDuringDrag.defaultPrevented).toBe(true);
+      expect(dom.document.body.querySelector('.drag-ghost')).toBeNull();
+      expect(mount.querySelectorAll('.dragging-source')).toHaveLength(0);
+      expect(mount.querySelectorAll('.cargo-cell.preview-valid')).toHaveLength(0);
+      expect(mount.querySelectorAll('.cargo-cell.preview-invalid')).toHaveLength(0);
+
+      // Subsequent pointerup MUST NOT commit any move
+      dom.window.dispatchEvent(
+        new FakeEvent('pointerup', {
+          bubbles: true,
+          button: 0,
+          clientX: movePt.x,
+          clientY: movePt.y,
+        })
+      );
+      expect(onBayChange).toHaveBeenCalledTimes(0);
+
+      // Pressing Escape when completely idle (no drag, no carrying, no selection) MUST NOT preventDefault
+      const escIdle = new FakeEvent('keydown', { key: 'Escape' });
+      dom.window.dispatchEvent(escIdle);
+      expect(escIdle.defaultPrevented).toBe(false);
 
       grid.destroy();
     });
@@ -2386,6 +3198,217 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
 
       controller2.destroy();
       expect(mapUnmountSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('ArrangePhaseView renders fallback 核心炮 pill on initial mount and remount with unarmed bay, and transitions unarmed -> armed -> unarmed cleanly', () => {
+      const host = dom.document.createElement('div');
+      dom.document.body.appendChild(host);
+
+      const batteryOnly = createV2EquipmentInstance({
+        instanceId: 'eq_unarmed_bat_1',
+        kind: 'battery',
+        quality: 'common',
+        origin: 'owned',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const armedLaser = createV2EquipmentInstance({
+        instanceId: 'eq_armed_laser_1',
+        kind: 'laser',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+
+      const baseRun = buildArrangeRun();
+      const unarmedRun: V2RunState = {
+        ...baseRun,
+        bay: { ...baseRun.bay, placed: [{ item: batteryOnly, x: 0, y: 0, rotation: 0 }], staging: [] },
+      };
+      const emptyBayRun: V2RunState = {
+        ...baseRun,
+        bay: { ...baseRun.bay, placed: [], staging: [] },
+      };
+      const armedRun: V2RunState = {
+        ...baseRun,
+        bay: { ...baseRun.bay, placed: [{ item: armedLaser, x: 0, y: 0, rotation: 0 }], staging: [] },
+      };
+
+      expect(deriveV2ShipVisualSpec(unarmedRun.bay).mountSummaryTags).toEqual([]);
+      expect(deriveV2ShipVisualSpec(emptyBayRun.bay).mountSummaryTags).toEqual([]);
+      expect(deriveV2ShipVisualSpec(armedRun.bay).mountSummaryTags.length).toBeGreaterThan(0);
+
+      const actions = {
+        onToggleShipPreview: vi.fn(),
+        onEngineerSwap: vi.fn(),
+        onSurveyScan: vi.fn(),
+        onUseGadget: vi.fn(),
+        onAbortContract: vi.fn(),
+        onLeaveArrange: vi.fn(),
+      };
+
+      const view = new ArrangePhaseView();
+      view.mount(host as unknown as HTMLElement);
+
+      // 1. Initial mount with unarmed (battery-only) bay MUST render fallback 核心炮 pill
+      view.update({ run: unarmedRun, readOnly: false, sceneCollapsed: false }, actions);
+      const initialPills = host.querySelectorAll('.v2-mount-pill');
+      expect(initialPills).toHaveLength(1);
+      expect(initialPills[0].classList.contains('muted')).toBe(true);
+      expect(initialPills[0].textContent).toBe('核心炮');
+
+      // 2. Repeated update with unchanged unarmed bay performs 0 redundant innerHTML writes
+      const pillsHost = initialPills[0].parentElement!;
+      pillsHost.resetInnerHtmlWriteCount();
+      view.update({ run: unarmedRun, readOnly: false, sceneCollapsed: false }, actions);
+      expect(pillsHost.innerHtmlWriteCount).toBe(0);
+      expect(host.querySelectorAll('.v2-mount-pill')).toHaveLength(1);
+
+      // 3. Unarmed -> Armed renders real weapon mount pill (non-muted)
+      view.update({ run: armedRun, readOnly: false, sceneCollapsed: false }, actions);
+      const armedPills = host.querySelectorAll('.v2-mount-pill');
+      expect(armedPills).toHaveLength(1);
+      expect(armedPills[0].classList.contains('muted')).toBe(false);
+      expect(armedPills[0].textContent).toContain('脉冲炮塔');
+
+      // 4. Armed -> Unarmed (empty bay) restores fallback 核心炮 pill
+      view.update({ run: emptyBayRun, readOnly: false, sceneCollapsed: false }, actions);
+      const backUnarmedPills = host.querySelectorAll('.v2-mount-pill');
+      expect(backUnarmedPills).toHaveLength(1);
+      expect(backUnarmedPills[0].classList.contains('muted')).toBe(true);
+      expect(backUnarmedPills[0].textContent).toBe('核心炮');
+
+      // 5. Armed -> unmount() -> mount() -> update(unarmed) MUST render fallback 核心炮 pill
+      view.update({ run: armedRun, readOnly: false, sceneCollapsed: false }, actions);
+      view.unmount();
+      view.mount(host as unknown as HTMLElement);
+      view.update({ run: unarmedRun, readOnly: false, sceneCollapsed: false }, actions);
+      const remountPills = host.querySelectorAll('.v2-mount-pill');
+      expect(remountPills).toHaveLength(1);
+      expect(remountPills[0].classList.contains('muted')).toBe(true);
+      expect(remountPills[0].textContent).toBe('核心炮');
+
+      view.unmount();
+    });
+
+    it('MapPhaseView toggles optional banner slots cleanly with null keys and blocks stale clicks on detached jumpBtn', () => {
+      const host = dom.document.createElement('div');
+      dom.document.body.appendChild(host);
+
+      const baseRun = createV2TutorialRun('run_map_slots_test');
+      const onJumpNode = vi.fn();
+      const actions = {
+        onSelectNode: vi.fn(),
+        onJumpNode,
+        onToggleMobileMap: vi.fn(),
+        onSafeReturn: vi.fn(),
+        onAbortContract: vi.fn(),
+        onUseGadget: vi.fn(),
+      };
+
+      const view = new MapPhaseView();
+      view.mount(host as unknown as HTMLElement);
+
+      // 1. Initial mount with inactive optional banners -> all 5 slots MUST stay display:none with 0 children
+      view.update(
+        {
+          run: baseRun,
+          readOnly: false,
+          selectedMapNodeId: 'L1A',
+          mobileMapShowFull: true,
+          isCompactViewport: false,
+          pureAutoCombat: false,
+          fullMapReveal: false,
+        },
+        actions
+      );
+      const slotNames = [
+        'final-mission',
+        'endless',
+        'navigator-reveal',
+        'bonus-tracker',
+        'relic-signal',
+      ] as const;
+      for (const slot of slotNames) {
+        const el = host.querySelector(`[data-slot="${slot}"]`)!;
+        expect(el).not.toBeNull();
+        expect(el.style.display).toBe('none');
+        expect(el.children).toHaveLength(0);
+      }
+
+      // Activate final-mission + navigator-reveal -> slots switch to display:contents with children
+      view.update(
+        {
+          run: { ...baseRun, isFinalCampaignRun: true },
+          readOnly: false,
+          selectedMapNodeId: 'L1A',
+          mobileMapShowFull: true,
+          isCompactViewport: false,
+          pureAutoCombat: false,
+          fullMapReveal: true,
+        },
+        actions
+      );
+      const finalSlot = host.querySelector('[data-slot="final-mission"]')!;
+      const navSlot = host.querySelector('[data-slot="navigator-reveal"]')!;
+      expect(finalSlot.style.display).toBe('contents');
+      expect(finalSlot.children.length).toBeGreaterThan(0);
+      expect(navSlot.style.display).toBe('contents');
+      expect(navSlot.children.length).toBeGreaterThan(0);
+
+      // Deactivate back -> slots cleanly return to display:none with 0 children
+      view.update(
+        {
+          run: baseRun,
+          readOnly: false,
+          selectedMapNodeId: 'L1A',
+          mobileMapShowFull: true,
+          isCompactViewport: false,
+          pureAutoCombat: false,
+          fullMapReveal: false,
+        },
+        actions
+      );
+      expect(finalSlot.style.display).toBe('none');
+      expect(finalSlot.children).toHaveLength(0);
+      expect(navSlot.style.display).toBe('none');
+      expect(navSlot.children).toHaveLength(0);
+
+      // 2. Capture jumpBtnRef while L1A is reachable, then move to terminal node L3A (0 reachable nodes)
+      const jumpBtnRef = host.querySelector('[data-testid="btn-jump-node"]')!;
+      expect(jumpBtnRef).not.toBeNull();
+      expect(jumpBtnRef.disabled).toBe(false);
+      expect(jumpBtnRef.dataset.jumpNode).toBe('L1A');
+
+      const terminalRun: V2RunState = {
+        ...baseRun,
+        currentNodeId: 'L3A',
+        visitedNodeIds: ['L1A', 'L2A', 'L3A'],
+      };
+      view.update(
+        {
+          run: terminalRun,
+          readOnly: false,
+          selectedMapNodeId: null,
+          mobileMapShowFull: true,
+          isCompactViewport: false,
+          pureAutoCombat: false,
+          fullMapReveal: false,
+        },
+        actions
+      );
+
+      expect(host.querySelector('[data-testid="btn-jump-node"]')).toBeNull();
+      expect(jumpBtnRef.disabled).toBe(true);
+      expect(jumpBtnRef.dataset.jumpNode).toBeUndefined();
+
+      // Even if a stale caller forces disabled=false and clicks the detached node, handleJump MUST NOT fire!
+      jumpBtnRef.disabled = false;
+      jumpBtnRef.click();
+      expect(onJumpNode).toHaveBeenCalledTimes(0);
+
+      view.unmount();
     });
   });
 });
