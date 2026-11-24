@@ -562,13 +562,60 @@
     padding: 8px 10px;
   }
 
-  .v2-shell #v2-btn-start-combat {
+  .v2-shell #v2-btn-start-combat,
+  .v2-shell .v3-pause-auto-btn {
     min-height: 48px;
   }
 
   .v2-shell .v3-boss-phase-hud {
     padding: 5px 8px;
   }
+}
+
+/* --- Pre-Combat Auto-Engage Countdown Row (S05) --- */
+.v2-shell .v3-precombat-cta-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+.v2-shell .v3-auto-engage-btn {
+  position: relative;
+  overflow: hidden;
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.v2-shell .v3-auto-engage-progress {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 0;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.14), rgba(98, 214, 223, 0.34));
+  transition: width 95ms linear;
+}
+
+.v2-shell .v3-auto-engage-btn-content {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.v2-shell .v3-pause-auto-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  padding: 0 12px;
+}
+
+.v2-shell .v3-pause-auto-btn.is-paused {
+  border-color: rgba(246, 184, 82, 0.65);
+  color: #f6d38b;
 }
 
 /* --- Short Landscape Mobile (844x390) --- */
@@ -586,5 +633,10 @@
 
 /* --- Reduced Motion Compliance --- */
 body.reduced-motion .v2-shell .enemy-intent-badge.intent-charge {
+  animation: none;
+}
+
+body.reduced-motion .v2-shell .v3-auto-engage-progress {
+  transition: none;
   animation: none;
 }

@@ -16,6 +16,7 @@ import {
 } from '../../domain/contracts';
 import { canUseV3GadgetInRun, getReachableNextNodeIds } from '../../domain/encounter';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
+import { classifyV2CombatThreat, type V2CombatThreatTier } from '../../domain/tacticalDelta';
 import type { V2MapNode, V2RunState } from '../../domain/types';
 import { svgIcon } from '../icons';
 import { NODE_TYPE_META, type PhaseView } from './screenTypes';
@@ -46,6 +47,18 @@ interface NodeForecastSummary {
   readonly cls: string;
   readonly detail: string;
   readonly traitBadge?: string;
+  readonly threatTier?: V2CombatThreatTier;
+  readonly threatLabel?: '稳' | '吃力' | '危险' | '致命';
+  readonly relicRewardName?: string;
+}
+
+interface DestCardRefs {
+  readonly cardEl: HTMLDivElement;
+  readonly bodyEl: HTMLDivElement;
+  readonly footerEl: HTMLDivElement;
+  readonly jumpBtnEl: HTMLButtonElement;
+  bodyKey: string | null;
+  jumpKey: string | null;
 }
 
 function describeNodeForecast(
@@ -78,15 +91,35 @@ function describeNodeForecast(
       )
       .join(' + ');
     const effectiveBounty = getEffectiveV2CombatBounty(run, n.combat.bounty);
+    const threat = pv
+      ? classifyV2CombatThreat(
+          { outcome: pv.outcome, playerFinalHp: pv.finalPlayerHpAfterRepair },
+          run.maxHp
+        )
+      : { tier: 'danger' as const, label: '危险' as const, riskClass: 'risk' as const };
+    const relicRewardDef =
+      n.hasRelicSignal && n.relicSignalDefId ? getAnyV2ItemDef(n.relicSignalDefId) : null;
+    const relicRewardNote = relicRewardDef ? ` · 奖励实物：${relicRewardDef.name}` : '';
     const brief =
       pv?.outcome === 'victory'
-        ? `${tacticPrefix}预计胜 · 余 ${pv.finalPlayerHpAfterRepair}HP (${pv.roundsCount}轮) · +${effectiveBounty}¤`
-        : `${tacticPrefix}高危战败风险 (${pv?.roundsCount ?? '?'}轮) · +${effectiveBounty}¤`;
+        ? `${tacticPrefix}[${threat.label}] 余 ${pv.finalPlayerHpAfterRepair}HP (${pv.roundsCount}轮) · +${effectiveBounty}¤`
+        : `${tacticPrefix}[${threat.label}] 高危战败风险 (${pv?.roundsCount ?? '?'}轮) · +${effectiveBounty}¤`;
     return {
       brief,
-      cls: pv?.outcome === 'victory' ? 'ok' : 'risk',
-      detail: unitBrief,
+      cls: threat.riskClass,
+      detail: `${unitBrief}${relicRewardNote}`,
       traitBadge,
+      threatTier: threat.tier,
+      threatLabel: threat.label,
+      relicRewardName: relicRewardDef?.name,
+    };
+  }
+  if (n.eventState?.eventId === 'tutorial_safe_beacon' || n.eventId === 'tutorial_safe_beacon') {
+    return {
+      brief: '安全回港 · 零战斗风险交付密封反应堆',
+      cls: 'ok',
+      detail: '直接接驳回收信标返回拆解站',
+      traitBadge: '安全回港',
     };
   }
   if (n.type === 'wreck') {
@@ -118,9 +151,13 @@ function describeNodeForecast(
 }
 
 /**
- * Stateful Star Map PhaseView (F04 / PROJECT.md § Interface Contracts #6).
- * Preserves `.v2-dag-scroll` scroll offsets, node & compare-card DOM identity, focus,
- * and enforces strictly <= 1 DOM element per `[data-testid="map-node-<id>"]`.
+ * Stateful Star Map PhaseView (F04 + S04 / PROJECT.md § Interface Contracts #6 & #7).
+ * - Eliminates 3x duplication (no separate compare grid or bottom jump button).
+ * - Renders ONE unified destination card (`[data-testid="map-node-<id>"]`) per reachable node
+ *   with an inline 1-click jump button (`[data-jump-node="<id>"]`, carrying `[data-testid="btn-jump-node"]`
+ *   strictly on the selected card).
+ * - Preserves `.v2-dag-scroll` scroll offsets, card DOM identity, focus, zero listener leaks,
+ *   and strictly <= 1 DOM element per `[data-testid="map-node-<id>"]`.
  */
 export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
   private hostEl: HTMLElement | null = null;
@@ -150,6 +187,14 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
   private gadgetBtnsWrapEl: HTMLElement | null = null;
   private readonly gadgetBtns = new Map<string, HTMLButtonElement>();
 
+  // Unified Reachable Destination Deck (S04)
+  private destDeckEl: HTMLElement | null = null;
+  private destDeckHeadEl: HTMLElement | null = null;
+  private destGridEl: HTMLElement | null = null;
+  private emptyHintEl: HTMLElement | null = null;
+  private readonly destCards = new Map<string, DestCardRefs>();
+
+  // Compact Route Overview Strip
   private mobileToggleSlotEl: HTMLElement | null = null;
   private mobileToggleBarEl: HTMLElement | null = null;
   private mobileToggleLabelEl: HTMLElement | null = null;
@@ -167,23 +212,17 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
   private renderedMobileStructureKey: string | null = null;
   private lastEdgesKey: string | null = null;
 
-  private readonly nodeButtons = new Map<string, HTMLButtonElement>();
-  private readonly nodeButtonInnerKeys = new Map<string, string>();
-
-  private selectedDeckEl: HTMLElement | null = null;
-  private emptyHintEl: HTMLElement | null = null;
-  private compareGridEl: HTMLElement | null = null;
-  private jumpBtnEl: HTMLButtonElement | null = null;
-  private lastJumpBtnKey: string | null = null;
-  private readonly compareCards = new Map<string, HTMLButtonElement>();
-  private readonly compareCardContentKeys = new Map<string, string>();
+  private readonly overviewNodeButtons = new Map<string, HTMLButtonElement>();
+  private readonly overviewNodeInnerKeys = new Map<string, string>();
+  private readonly routeWaypoints = new Map<string, HTMLSpanElement>();
 
   private footerEl: HTMLElement | null = null;
   private safeReturnBtn: HTMLButtonElement | null = null;
+  private safeReturnLabelEl: HTMLSpanElement | null = null;
   private abortBtn: HTMLButtonElement | null = null;
 
   private latestActions: MapViewActions | null = null;
-  private latestEffectiveSelectedId: string | null = null;
+  private latestHasStagedItems = false;
   private readonly latestReachableSet = new Set<string>();
 
   private readonly handleRootClick = (ev: MouseEvent): void => {
@@ -191,23 +230,53 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     const target = ev.target as HTMLElement | null;
     if (!target) return;
 
-    const selectBtn = target.closest<HTMLButtonElement>('[data-select-node]');
-    if (selectBtn) {
-      if (selectBtn.disabled) return;
-      const nid = selectBtn.dataset.selectNode;
+    // 1. Check inline 1-click jump button FIRST (prevents double-fire with parent card's data-select-node!)
+    const jumpBtn = target.closest<HTMLButtonElement>('[data-jump-node]');
+    if (jumpBtn) {
+      if (!this.rootEl.contains(jumpBtn) || jumpBtn.disabled || this.latestHasStagedItems) {
+        return;
+      }
+      const nid = jumpBtn.dataset.jumpNode;
+      if (nid && this.latestReachableSet.has(nid)) {
+        this.latestActions.onJumpNode(nid);
+      }
+      return;
+    }
+
+    // 2. Clicking card body selects node without jumping
+    const selectCard = target.closest<HTMLElement>('[data-select-node]');
+    if (selectCard) {
+      if (!this.rootEl.contains(selectCard)) return;
+      if ((selectCard as HTMLButtonElement).disabled) return;
+      const nid = selectCard.dataset.selectNode;
       if (nid && this.latestReachableSet.has(nid)) {
         this.latestActions.onSelectNode(nid);
       }
       return;
     }
 
+    // 3. Map gadgets bar
     const gadgetBtn = target.closest<HTMLButtonElement>('[data-use-gadget]');
     if (gadgetBtn) {
-      if (gadgetBtn.disabled) return;
+      if (!this.rootEl.contains(gadgetBtn) || gadgetBtn.disabled) return;
       const iid = gadgetBtn.dataset.useGadget;
       if (iid) {
         this.latestActions.onUseGadget?.(iid);
       }
+    }
+  };
+
+  private readonly handleRootKeyDown = (ev: KeyboardEvent): void => {
+    if (!this.rootEl || !this.latestActions) return;
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    const target = ev.target as HTMLElement | null;
+    if (!target || target.tagName === 'BUTTON') return;
+    const selectCard = target.closest<HTMLElement>('[data-select-node]');
+    if (!selectCard || selectCard !== target || !this.rootEl.contains(selectCard)) return;
+    const nid = selectCard.dataset.selectNode;
+    if (nid && this.latestReachableSet.has(nid)) {
+      ev.preventDefault();
+      this.latestActions.onSelectNode(nid);
     }
   };
 
@@ -216,16 +285,14 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.latestActions.onToggleMobileMap();
   };
 
-  private readonly handleJump = (): void => {
-    if (!this.rootEl || !this.jumpBtnEl || this.jumpBtnEl.disabled || !this.latestActions) return;
-    const nid = this.latestEffectiveSelectedId;
-    if (nid && this.latestReachableSet.has(nid)) {
-      this.latestActions.onJumpNode(nid);
-    }
-  };
-
   private readonly handleSafeReturn = (): void => {
-    if (!this.rootEl || !this.safeReturnBtn || this.safeReturnBtn.disabled || !this.latestActions) {
+    if (
+      !this.rootEl ||
+      !this.safeReturnBtn ||
+      this.safeReturnBtn.disabled ||
+      this.latestHasStagedItems ||
+      !this.latestActions
+    ) {
       return;
     }
     this.latestActions.onSafeReturn();
@@ -254,7 +321,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     rootEl.className = 'v3-screen-root';
     rootEl.dataset.testid = 'map-screen';
 
-    // Header
+    // 1. Header
     const header = document.createElement('div');
     header.className = 'panel-header';
     const h2 = document.createElement('h2');
@@ -280,7 +347,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     header.appendChild(sub);
     rootEl.appendChild(header);
 
-    // Sector modifier strip
+    // 2. Sector modifier strip
     const sectorStripEl = document.createElement('div');
     sectorStripEl.className = 'v3-run-sector-strip';
     sectorStripEl.dataset.testid = 'sector-modifier-badge';
@@ -292,7 +359,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     sectorStripEl.appendChild(sectorDescEl);
     rootEl.appendChild(sectorStripEl);
 
-    // 5 optional banner slots (display: none when empty so zero flex gaps!)
+    // 3. 5 optional banner slots (display: none when empty so zero flex gaps!)
     const makeOptionalSlot = (name: string): HTMLElement => {
       const slot = document.createElement('div');
       slot.dataset.slot = name;
@@ -306,7 +373,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     const bonusTrackerSlotEl = makeOptionalSlot('bonus-tracker');
     const relicSignalSlotEl = makeOptionalSlot('relic-signal');
 
-    // Optional Map Gadgets slot
+    // 4. Optional Map Gadgets slot
     const gadgetSlotEl = document.createElement('div');
     gadgetSlotEl.dataset.slot = 'map-gadgets';
     gadgetSlotEl.style.display = 'none';
@@ -322,7 +389,19 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     gadgetBarEl.appendChild(gadgetBtnsWrapEl);
     rootEl.appendChild(gadgetSlotEl);
 
-    // Optional Mobile Toggle slot
+    // 5. PRIMARY — Unified Reachable Destination Deck (S04)
+    const destDeckEl = document.createElement('div');
+    destDeckEl.className = 'v3-map-dest-deck';
+    const destDeckHeadEl = document.createElement('div');
+    destDeckHeadEl.className = 'v3-map-dest-head';
+    const destGridEl = document.createElement('div');
+    destGridEl.className = 'v3-map-dest-grid';
+    const emptyHintEl = document.createElement('div');
+    emptyHintEl.className = 'v2-empty-hint';
+    emptyHintEl.textContent = '已抵达最深层，点击下方免费安全返航完成结算！';
+    rootEl.appendChild(destDeckEl);
+
+    // 6. Optional Mobile Toggle slot
     const mobileToggleSlotEl = document.createElement('div');
     mobileToggleSlotEl.dataset.slot = 'mobile-toggle';
     mobileToggleSlotEl.style.display = 'none';
@@ -338,14 +417,14 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     mobileToggleBarEl.appendChild(mobileToggleBtn);
     rootEl.appendChild(mobileToggleSlotEl);
 
-    // Graph slot (holds EITHER desktop DAG OR mobile focus — NEVER both!)
+    // 7. Compact Non-Duplicating Route Overview Strip (holds EITHER desktop DAG OR mobile preview — NEVER both!)
     const graphSlotEl = document.createElement('div');
     graphSlotEl.dataset.slot = 'map-graph';
     graphSlotEl.style.display = 'contents';
     rootEl.appendChild(graphSlotEl);
 
     const desktopDagBoxEl = document.createElement('div');
-    desktopDagBoxEl.className = 'v2-dag-box v2-dag-hero';
+    desktopDagBoxEl.className = 'v2-dag-box v2-dag-hero v3-route-overview';
     const dagScrollEl = document.createElement('div');
     dagScrollEl.className = 'v2-dag-scroll';
     const dagStageEl = document.createElement('div');
@@ -362,21 +441,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     const mobileFocusEl = document.createElement('div');
     mobileFocusEl.className = 'v2-map-mobile-focus';
 
-    // Selected node deck
-    const selectedDeckEl = document.createElement('div');
-    selectedDeckEl.className = 'v2-selected-node-deck';
-    const emptyHintEl = document.createElement('div');
-    emptyHintEl.className = 'v2-empty-hint';
-    emptyHintEl.textContent = '已抵达最深层，点击下方免费安全返航完成结算！';
-    const compareGridEl = document.createElement('div');
-    compareGridEl.className = 'v2-map-compare-grid';
-    const jumpBtnEl = document.createElement('button');
-    jumpBtnEl.type = 'button';
-    jumpBtnEl.className = 'btn btn-primary btn-launch-hero';
-    jumpBtnEl.dataset.testid = 'btn-jump-node';
-    rootEl.appendChild(selectedDeckEl);
-
-    // Footer actions
+    // 8. Footer actions
     const footerEl = document.createElement('div');
     footerEl.className = 'v2-map-footer-actions';
     const safeReturnBtn = document.createElement('button');
@@ -384,7 +449,14 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     safeReturnBtn.className = 'btn btn-secondary';
     safeReturnBtn.id = 'v2-btn-safe-return';
     safeReturnBtn.dataset.testid = 'btn-safe-return';
-    safeReturnBtn.innerHTML = `${svgIcon('beacon', 14)} 免费安全返航`;
+    const safeReturnIconEl = document.createElement('span');
+    safeReturnIconEl.style.display = 'contents';
+    safeReturnIconEl.innerHTML = `${svgIcon('beacon', 14)} `;
+    const safeReturnLabelEl = document.createElement('span');
+    safeReturnLabelEl.style.display = 'contents';
+    safeReturnLabelEl.textContent = '免费安全返航';
+    safeReturnBtn.appendChild(safeReturnIconEl);
+    safeReturnBtn.appendChild(safeReturnLabelEl);
 
     const abortBtn = document.createElement('button');
     abortBtn.type = 'button';
@@ -395,10 +467,10 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     footerEl.appendChild(safeReturnBtn);
     rootEl.appendChild(footerEl);
 
-    // Attach listeners ONCE
+    // Attach delegated listeners ONCE (zero per-card listeners!)
     rootEl.addEventListener('click', this.handleRootClick);
+    rootEl.addEventListener('keydown', this.handleRootKeyDown);
     mobileToggleBtn.addEventListener('click', this.handleMobileToggle);
-    jumpBtnEl.addEventListener('click', this.handleJump);
     safeReturnBtn.addEventListener('click', this.handleSafeReturn);
     abortBtn.addEventListener('click', this.handleAbort);
 
@@ -419,6 +491,10 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.gadgetSlotEl = gadgetSlotEl;
     this.gadgetBarEl = gadgetBarEl;
     this.gadgetBtnsWrapEl = gadgetBtnsWrapEl;
+    this.destDeckEl = destDeckEl;
+    this.destDeckHeadEl = destDeckHeadEl;
+    this.destGridEl = destGridEl;
+    this.emptyHintEl = emptyHintEl;
     this.mobileToggleSlotEl = mobileToggleSlotEl;
     this.mobileToggleBarEl = mobileToggleBarEl;
     this.mobileToggleLabelEl = mobileToggleLabelEl;
@@ -429,12 +505,9 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.svgHostEl = svgHostEl;
     this.dagGridEl = dagGridEl;
     this.mobileFocusEl = mobileFocusEl;
-    this.selectedDeckEl = selectedDeckEl;
-    this.emptyHintEl = emptyHintEl;
-    this.compareGridEl = compareGridEl;
-    this.jumpBtnEl = jumpBtnEl;
     this.footerEl = footerEl;
     this.safeReturnBtn = safeReturnBtn;
+    this.safeReturnLabelEl = safeReturnLabelEl;
     this.abortBtn = abortBtn;
     this.lastSectorId = null;
     this.lastFinalMissionKey = null;
@@ -446,8 +519,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.renderedDesktopStructureKey = null;
     this.renderedMobileStructureKey = null;
     this.lastEdgesKey = null;
-    this.lastJumpBtnKey = null;
-    this.latestEffectiveSelectedId = null;
+    this.latestHasStagedItems = false;
   }
 
   private syncHtmlSlot(
@@ -471,41 +543,43 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     return nextKey;
   }
 
-  private getOrUpdateNodeButton(
+  private detachDestCard(rid: string, refs: DestCardRefs): void {
+    refs.jumpBtnEl.disabled = true;
+    refs.jumpBtnEl.removeAttribute('data-jump-node');
+    refs.jumpBtnEl.removeAttribute('data-testid');
+    refs.cardEl.remove();
+    this.destCards.delete(rid);
+  }
+
+  private getOrUpdateOverviewButton(
     run: V2RunState,
     n: V2MapNode,
     compact: boolean,
-    reachableSet: ReadonlySet<string>,
-    effectiveSelectedId: string | null,
     fullMapReveal: boolean
   ): HTMLButtonElement {
-    let btn = this.nodeButtons.get(n.nodeId);
+    let btn = this.overviewNodeButtons.get(n.nodeId);
     if (!btn) {
       btn = document.createElement('button');
       btn.type = 'button';
-      btn.dataset.selectNode = n.nodeId;
       btn.dataset.testid = `map-node-${n.nodeId}`;
-      this.nodeButtons.set(n.nodeId, btn);
+      this.overviewNodeButtons.set(n.nodeId, btn);
     }
 
     const meta = NODE_TYPE_META[n.type];
     const visited = run.visitedNodeIds.includes(n.nodeId);
     const isCur = run.currentNodeId === n.nodeId;
-    const isNext = reachableSet.has(n.nodeId);
-    const isSelected = effectiveSelectedId === n.nodeId;
 
     const nextClass = `v2-dag-node ${meta.cls}${visited ? ' visited' : ''}${
       isCur ? ' current' : ''
-    }${isNext ? ' reachable' : ''}${isSelected ? ' selected' : ''}`;
+    }`;
     if (btn.className !== nextClass) {
       btn.className = nextClass;
     }
-    const nextReachableAttr = isNext ? 'true' : 'false';
-    if (btn.dataset.reachable !== nextReachableAttr) {
-      btn.dataset.reachable = nextReachableAttr;
+    if (btn.dataset.reachable !== 'false') {
+      btn.dataset.reachable = 'false';
     }
-    if (btn.disabled !== !isNext) {
-      btn.disabled = !isNext;
+    if (!btn.disabled) {
+      btn.disabled = true;
     }
 
     const intelTitle = fullMapReveal
@@ -521,19 +595,41 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
 
     const innerKey = `${n.type}:${compact ? 1 : 0}:${n.contractMarker ? 1 : 0}:${
       n.hasSupportGuarantee ? 1 : 0
-    }:${n.hasRelicSignal ? 1 : 0}`;
-    if (this.nodeButtonInnerKeys.get(n.nodeId) !== innerKey) {
-      this.nodeButtonInnerKeys.set(n.nodeId, innerKey);
+    }:${n.hasRelicSignal ? 1 : 0}:${run.isTutorial ? 1 : 0}`;
+    if (this.overviewNodeInnerKeys.get(n.nodeId) !== innerKey) {
+      this.overviewNodeInnerKeys.set(n.nodeId, innerKey);
       btn.innerHTML = `
-        <span class="v2-dag-icon">${svgIcon(meta.icon, compact ? 15 : 16)}</span>
+        <span class="v2-dag-icon">${svgIcon(meta.icon, compact ? 14 : 15)}</span>
         <span class="v2-dag-name">${meta.label}</span>
         ${n.contractMarker ? `<span class="v2-dag-star" aria-label="委托目标">${svgIcon('star', 11)}</span>` : ''}
         ${n.hasSupportGuarantee ? `<span class="v2-dag-sup">配</span>` : ''}
-        ${n.hasRelicSignal ? `<span class="v3-dag-relic" title="保底遗物信号">遗</span>` : ''}
+        ${n.hasRelicSignal ? `<span class="v3-dag-relic" title="${run.isTutorial ? '稀有遗物信号' : '保底遗物信号'}">遗</span>` : ''}
       `;
     }
 
     return btn;
+  }
+
+  private getOrUpdateRouteWaypoint(
+    n: V2MapNode,
+    effectiveSelectedId: string | null
+  ): HTMLSpanElement {
+    let wp = this.routeWaypoints.get(n.nodeId);
+    if (!wp) {
+      wp = document.createElement('span');
+      wp.dataset.routeWaypoint = n.nodeId;
+      this.routeWaypoints.set(n.nodeId, wp);
+    }
+    const isSelected = effectiveSelectedId === n.nodeId;
+    const nextCls = `v3-route-waypoint${isSelected ? ' selected' : ''}`;
+    if (wp.className !== nextCls) {
+      wp.className = nextCls;
+    }
+    const label = `${n.lane === 0 ? 'A线' : 'B线'} · 下一跳`;
+    if (wp.textContent !== label) {
+      wp.textContent = label;
+    }
+    return wp;
   }
 
   update(props: MapViewProps, actions: MapViewActions): void {
@@ -556,6 +652,9 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.latestReachableSet.clear();
     for (const rid of reachableIds) this.latestReachableSet.add(rid);
 
+    const hasStagedItems = run.bay.staging.length > 0;
+    this.latestHasStagedItems = hasStagedItems;
+
     const fuelInfo = computeV2JumpFuelCost(run);
     const canJump = run.fuel >= fuelInfo.totalCost;
 
@@ -563,7 +662,6 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       selectedMapNodeId && this.latestReachableSet.has(selectedMapNodeId)
         ? selectedMapNodeId
         : reachableIds[0] ?? null;
-    this.latestEffectiveSelectedId = effectiveSelectedId;
 
     // Header
     if (this.contractTitleEl) {
@@ -648,12 +746,13 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     );
 
     const activeBonus = run.bonusObjective ?? run.contract.bonusObjective ?? null;
+    const hasDiscardedAny =
+      (run.discardedCountThisRun ?? 0) > 0 || run.bay.discardedThisArrange.length > 0;
     const bonusKey =
       activeBonus && !run.isTutorial
         ? (() => {
             const currentlyMet = evaluateRunBonusObjective(run, 'safe_return');
-            const failedDiscard =
-              activeBonus.id === 'bonus_no_discard' && (run.discardedCountThisRun ?? 0) > 0;
+            const failedDiscard = activeBonus.id === 'bonus_no_discard' && hasDiscardedAny;
             return `${activeBonus.id}:${activeBonus.label}:${activeBonus.rewardCredits}:${
               failedDiscard ? 'f' : currentlyMet ? 'm' : 'p'
             }`;
@@ -665,8 +764,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       this.lastBonusTrackerKey,
       () => {
         const currentlyMet = evaluateRunBonusObjective(run, 'safe_return');
-        const failedDiscard =
-          activeBonus!.id === 'bonus_no_discard' && (run.discardedCountThisRun ?? 0) > 0;
+        const failedDiscard = activeBonus!.id === 'bonus_no_discard' && hasDiscardedAny;
         const statusCls = failedDiscard ? 'is-failed' : currentlyMet ? 'is-met' : 'is-pending';
         const statusText = failedDiscard ? '已失格' : currentlyMet ? '当前满足' : '进行中';
         return `<div class="v3-bonus-tracker-strip ${statusCls}" data-testid="bonus-objective-tracker">
@@ -677,7 +775,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     );
 
     const allNodes = Object.values(run.graph.nodes);
-    const relicSignalNodes = allNodes.filter((n) => Boolean(n.hasRelicSignal));
+    const relicSignalNodes = run.isTutorial ? [] : allNodes.filter((n) => Boolean(n.hasRelicSignal));
     const relicSignalTarget = relicSignalNodes[0] ?? null;
     const relicSignalKey = relicSignalTarget
       ? `${relicSignalTarget.nodeId}:${relicSignalTarget.layer}:${relicSignalTarget.lane}:${
@@ -703,13 +801,48 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     // Map Gadgets bar
     this.reconcileGadgetBar(run, readOnly, actions);
 
-    // Mobile toggle bar
+    // STRICT PRUNE-BEFORE-ATTACH ORDERING (zero transient duplicate data-testids!)
+    // 1. Prune nodes that no longer exist in the current graph
+    for (const [rid, refs] of this.destCards.entries()) {
+      if (!run.graph.nodes[rid] || !this.latestReachableSet.has(rid)) {
+        this.detachDestCard(rid, refs);
+      }
+    }
+    for (const [nid, btn] of this.overviewNodeButtons.entries()) {
+      if (!run.graph.nodes[nid] || this.latestReachableSet.has(nid)) {
+        btn.remove();
+        this.overviewNodeButtons.delete(nid);
+        this.overviewNodeInnerKeys.delete(nid);
+      }
+    }
+    for (const [nid, wp] of this.routeWaypoints.entries()) {
+      if (!run.graph.nodes[nid] || !this.latestReachableSet.has(nid)) {
+        wp.remove();
+        this.routeWaypoints.delete(nid);
+      }
+    }
+
+    // 2. Reconcile Unified Reachable Destination Deck (ONE card per reachable node + inline 1-click jump)
+    this.reconcileDestinationDeck(
+      run,
+      reachableIds,
+      effectiveSelectedId,
+      fuelInfo,
+      canJump,
+      hasStagedItems,
+      readOnly,
+      pureAutoCombat,
+      bonusBossCharges,
+      stargateRelayTier
+    );
+
+    // 3. Mobile toggle bar
     const layers = Array.from({ length: run.graph.maxLayers }, (_, i) => i + 1);
     const currentLayerNum = run.currentNodeId ? run.graph.nodes[run.currentNodeId]?.layer ?? 0 : 0;
-    const focusLayers = [currentLayerNum + 1, currentLayerNum + 2].filter(
+    const upcomingLayers = [currentLayerNum + 2].filter(
       (ly) => ly >= 1 && ly <= run.graph.maxLayers
     );
-    const showMobileToggle = isCompactViewport && focusLayers.length > 0;
+    const showMobileToggle = isCompactViewport && run.graph.maxLayers > 1;
     if (
       this.mobileToggleSlotEl &&
       this.mobileToggleBarEl &&
@@ -721,11 +854,11 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
           this.mobileToggleSlotEl.appendChild(this.mobileToggleBarEl);
         }
         this.mobileToggleSlotEl.style.display = 'contents';
-        const lblText = mobileMapShowFull ? `完整 ${run.graph.maxLayers} 层航图` : '接下来 2 层预览';
+        const lblText = mobileMapShowFull ? `完整 ${run.graph.maxLayers} 层航路总览` : '后续航路预告';
         if (this.mobileToggleLabelEl.textContent !== lblText) {
           this.mobileToggleLabelEl.textContent = lblText;
         }
-        const btnText = mobileMapShowFull ? '切回近 2 层' : `展开完整 ${run.graph.maxLayers} 层`;
+        const btnText = mobileMapShowFull ? '收起总览' : `展开完整 ${run.graph.maxLayers} 层`;
         if (this.mobileToggleBtn.textContent !== btnText) {
           this.mobileToggleBtn.textContent = btnText;
         }
@@ -737,43 +870,21 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       }
     }
 
-    // Prune stale nodeButtons from previous runs/graphs
-    for (const [nid, btn] of this.nodeButtons.entries()) {
-      if (!run.graph.nodes[nid]) {
-        btn.remove();
-        this.nodeButtons.delete(nid);
-        this.nodeButtonInnerKeys.delete(nid);
-      }
-    }
-
-    // Reconcile Graph (strictly 1 DOM element per [data-testid="map-node-<id>"]!)
-    const useMobileFocus = isCompactViewport && !mobileMapShowFull && focusLayers.length > 0;
+    // 4. Reconcile Compact Non-Duplicating Route Overview Strip
+    const useMobileFocus = isCompactViewport && !mobileMapShowFull && run.graph.maxLayers > 1;
     this.reconcileGraph(
       run,
       allNodes,
       layers,
       currentLayerNum,
-      focusLayers,
+      upcomingLayers,
       useMobileFocus,
       reachableIds,
       effectiveSelectedId,
       fullMapReveal
     );
 
-    // Reconcile Selected Node Deck (compare cards + jump button)
-    this.reconcileSelectedDeck(
-      run,
-      reachableIds,
-      effectiveSelectedId,
-      fuelInfo,
-      canJump,
-      readOnly,
-      pureAutoCombat,
-      bonusBossCharges,
-      stargateRelayTier
-    );
-
-    // Footer actions
+    // 5. Footer actions
     const canAbort =
       run.contract.status === 'active' &&
       run.contract.type !== 'free' &&
@@ -781,7 +892,14 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       !isContractReadyForDelivery(run, 'safe_return');
 
     if (this.safeReturnBtn) {
-      this.safeReturnBtn.disabled = readOnly;
+      this.safeReturnBtn.disabled = readOnly || hasStagedItems;
+      this.safeReturnBtn.title = hasStagedItems
+        ? `请先处理暂存区 ${run.bay.staging.length} 件物品再返航`
+        : '免费呼叫回收信标安全返航';
+      const nextSafeLabel = hasStagedItems ? '免费安全返航（需清空暂存区）' : '免费安全返航';
+      if (this.safeReturnLabelEl && this.safeReturnLabelEl.textContent !== nextSafeLabel) {
+        this.safeReturnLabelEl.textContent = nextSafeLabel;
+      }
     }
     if (this.footerEl && this.abortBtn) {
       if (canAbort) {
@@ -850,18 +968,219 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     });
   }
 
+  private reconcileDestinationDeck(
+    run: V2RunState,
+    reachableIds: readonly string[],
+    effectiveSelectedId: string | null,
+    fuelInfo: ReturnType<typeof computeV2JumpFuelCost>,
+    canJump: boolean,
+    hasStagedItems: boolean,
+    readOnly: boolean,
+    pureAutoCombat: boolean,
+    bonusBossCharges: number,
+    stargateRelayTier: number
+  ): void {
+    if (!this.destDeckEl || !this.destDeckHeadEl || !this.destGridEl || !this.emptyHintEl) return;
+
+    if (reachableIds.length === 0) {
+      if (this.destDeckHeadEl.parentNode === this.destDeckEl) {
+        this.destDeckEl.removeChild(this.destDeckHeadEl);
+      }
+      if (this.destGridEl.parentNode === this.destDeckEl) {
+        this.destDeckEl.removeChild(this.destGridEl);
+      }
+      if (this.emptyHintEl.parentNode !== this.destDeckEl) {
+        this.destDeckEl.appendChild(this.emptyHintEl);
+      }
+      return;
+    }
+
+    if (this.emptyHintEl.parentNode === this.destDeckEl) {
+      this.destDeckEl.removeChild(this.emptyHintEl);
+    }
+
+    const firstNode = run.graph.nodes[reachableIds[0]];
+    const nextLayer = firstNode?.layer ?? 1;
+    const headText = `下一跳航路 · 第 ${nextLayer}/${run.graph.maxLayers} 层（点击卡片按钮一键跃迁）`;
+    if (this.destDeckHeadEl.textContent !== headText) {
+      this.destDeckHeadEl.textContent = headText;
+    }
+    if (this.destDeckHeadEl.parentNode !== this.destDeckEl) {
+      this.destDeckEl.insertBefore(this.destDeckHeadEl, this.destGridEl.parentNode === this.destDeckEl ? this.destGridEl : null);
+    }
+
+    const canActuallyJump = !readOnly && canJump && !hasStagedItems;
+
+    // Remove btn-jump-node testid from non-selected cards FIRST so never >1 exists transiently
+    for (const [rid, refs] of this.destCards.entries()) {
+      if (rid !== effectiveSelectedId) {
+        refs.jumpBtnEl.removeAttribute('data-testid');
+      }
+    }
+
+    const orderedCards: HTMLDivElement[] = [];
+    for (const rid of reachableIds) {
+      const rn = run.graph.nodes[rid];
+      if (!rn) continue;
+      const rm = NODE_TYPE_META[rn.type];
+      const fc = describeNodeForecast(run, rn, pureAutoCombat, bonusBossCharges, stargateRelayTier);
+      const active = rid === effectiveSelectedId;
+
+      let refs = this.destCards.get(rid);
+      if (!refs) {
+        const cardEl = document.createElement('div');
+        cardEl.tabIndex = 0;
+        cardEl.dataset.testid = `map-node-${rid}`;
+        cardEl.dataset.selectNode = rid;
+        cardEl.dataset.reachable = 'true';
+
+        const bodyEl = document.createElement('div');
+        bodyEl.className = 'v3-map-card-body';
+
+        const footerEl = document.createElement('div');
+        footerEl.className = 'v3-map-card-footer';
+
+        const jumpBtnEl = document.createElement('button');
+        jumpBtnEl.type = 'button';
+        jumpBtnEl.dataset.jumpNode = rid;
+
+        footerEl.appendChild(jumpBtnEl);
+        cardEl.appendChild(bodyEl);
+        cardEl.appendChild(footerEl);
+
+        refs = { cardEl, bodyEl, footerEl, jumpBtnEl, bodyKey: null, jumpKey: null };
+        this.destCards.set(rid, refs);
+      }
+
+      const nextCardClass = `v3-map-dest-card ${rm.cls} reachable${active ? ' selected' : ''}${
+        canActuallyJump ? '' : ' is-blocked'
+      }`;
+      if (refs.cardEl.className !== nextCardClass) {
+        refs.cardEl.className = nextCardClass;
+      }
+      refs.cardEl.dataset.reachable = 'true';
+      refs.cardEl.dataset.canJump = canActuallyJump ? 'true' : 'false';
+
+      const bodyKey = [
+        rn.type,
+        rn.lane,
+        fuelInfo.totalCost,
+        canJump ? 1 : 0,
+        rn.contractMarker ? 1 : 0,
+        rn.hasRelicSignal ? 1 : 0,
+        run.isTutorial ? 1 : 0,
+        fc.relicRewardName ?? '',
+        fc.traitBadge ?? '',
+        fc.threatTier ?? '',
+        fc.threatLabel ?? '',
+        rn.hasSupportGuarantee ? run.primaryArchetype : '',
+        fuelInfo.navigatorDiscountApplied ? 1 : 0,
+        fuelInfo.rescueSurcharge,
+        fc.cls,
+        fc.brief,
+        fc.detail,
+      ].join('|');
+
+      if (refs.bodyKey !== bodyKey) {
+        refs.bodyKey = bodyKey;
+        const relicBadgeHtml = rn.hasRelicSignal
+          ? `<span class="v3-badge-relic">${svgIcon('museum', 10)} ${
+              fc.relicRewardName
+                ? `奖励实物：${fc.relicRewardName}`
+                : run.isTutorial
+                ? '稀有遗物信号'
+                : '保底遗物信号'
+            }</span>`
+          : '';
+        const threatBadgeHtml =
+          rn.combat && fc.threatLabel && fc.threatTier
+            ? `<span class="v3-threat-pill threat-${fc.threatTier}">${fc.threatLabel}</span>`
+            : '';
+        refs.bodyEl.innerHTML = `
+          <div class="v2-mc-head">
+            <span class="v2-mc-head-left">${svgIcon(rm.icon, 14)} ${rn.lane === 0 ? 'A线' : 'B线'} · ${rm.label}</span>
+            <span class="v2-fuel-tag ${canJump ? '' : 'no-fuel'}" title="本次跃迁消耗 ${fuelInfo.totalCost} 燃料">${svgIcon('fuel', 11)} ${fuelInfo.totalCost} 油</span>
+          </div>
+          <div class="v2-mc-tags v3-map-intent-tags">
+            ${rn.contractMarker ? `<span class="v2-badge-contract">${svgIcon('star', 10)} 委托目标</span>` : ''}
+            ${relicBadgeHtml}
+            ${threatBadgeHtml}
+            ${fc.traitBadge ? `<span class="v3-badge-intent">${fc.traitBadge}</span>` : ''}
+            ${
+              rn.hasSupportGuarantee
+                ? `<span class="v2-badge-support">${V2_ARCHETYPE_LABELS[run.primaryArchetype].supportName}保底</span>`
+                : ''
+            }
+            ${fuelInfo.navigatorDiscountApplied ? `<span class="v2-badge-info">首跳省油</span>` : ''}
+            ${fuelInfo.rescueSurcharge > 0 ? `<span class="v2-badge-warn">救生舱+1油</span>` : ''}
+          </div>
+          <div class="v2-mc-forecast ${fc.cls}">${fc.brief}</div>
+          <div class="v3-map-card-detail">${fc.detail}</div>
+        `;
+      }
+
+      // Inline 1-click jump button (strictly 1 [data-testid="btn-jump-node"] on selected card)
+      refs.jumpBtnEl.dataset.jumpNode = rid;
+      if (active) {
+        refs.jumpBtnEl.dataset.testid = 'btn-jump-node';
+      } else {
+        refs.jumpBtnEl.removeAttribute('data-testid');
+      }
+      refs.jumpBtnEl.disabled = !canActuallyJump;
+      const nextBtnClass = `btn btn-sm v3-map-card-jump-btn ${
+        active ? 'btn-primary' : 'btn-secondary'
+      }`;
+      if (refs.jumpBtnEl.className !== nextBtnClass) {
+        refs.jumpBtnEl.className = nextBtnClass;
+      }
+
+      const jumpKey = `${hasStagedItems ? run.bay.staging.length : 0}:${canJump ? 1 : 0}:${
+        fuelInfo.totalCost
+      }:${run.fuel}:${readOnly ? 1 : 0}`;
+      if (refs.jumpKey !== jumpKey) {
+        refs.jumpKey = jumpKey;
+        if (hasStagedItems) {
+          refs.jumpBtnEl.textContent = `请先清空暂存区 (${run.bay.staging.length})`;
+        } else if (!canJump) {
+          refs.jumpBtnEl.textContent = `燃料不足（需 ${fuelInfo.totalCost} / 现有 ${run.fuel}）`;
+        } else {
+          refs.jumpBtnEl.innerHTML = `${svgIcon('rocket', 14)} 跃迁前往（${fuelInfo.totalCost} 油）`;
+        }
+      }
+
+      orderedCards.push(refs.cardEl);
+    }
+
+    orderedCards.forEach((cardEl, idx) => {
+      const currentChild = this.destGridEl!.children[idx] as HTMLElement | undefined;
+      if (currentChild !== cardEl) {
+        this.destGridEl!.insertBefore(cardEl, currentChild ?? null);
+      }
+    });
+
+    if (this.destGridEl.parentNode !== this.destDeckEl) {
+      this.destDeckEl.appendChild(this.destGridEl);
+    }
+  }
+
   private reconcileGraph(
     run: V2RunState,
     allNodes: readonly V2MapNode[],
     layers: readonly number[],
     currentLayerNum: number,
-    focusLayers: readonly number[],
+    upcomingLayers: readonly number[],
     useMobileFocus: boolean,
     reachableIds: readonly string[],
     effectiveSelectedId: string | null,
     fullMapReveal: boolean
   ): void {
-    if (!this.graphSlotEl || !this.desktopDagBoxEl || !this.svgHostEl || !this.dagGridEl || !this.mobileFocusEl) {
+    if (
+      !this.graphSlotEl ||
+      !this.desktopDagBoxEl ||
+      !this.svgHostEl ||
+      !this.dagGridEl ||
+      !this.mobileFocusEl
+    ) {
       return;
     }
 
@@ -879,7 +1198,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
         this.graphSlotEl.appendChild(this.mobileFocusEl);
       }
 
-      const mobileStructKey = `${run.runId}|${currentLayerNum}|${focusLayers
+      const mobileStructKey = `${run.runId}|${currentLayerNum}|r=${reachableIds.join(',')}|u=${upcomingLayers
         .map((ly) => {
           const a = nodeBySlot.get(`${ly}:0`);
           const b = nodeBySlot.get(`${ly}:1`);
@@ -887,66 +1206,55 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
         })
         .join(';')}`;
 
-      if (this.renderedGraphMode !== 'mobile' || this.renderedMobileStructureKey !== mobileStructKey) {
+      if (
+        this.renderedGraphMode !== 'mobile' ||
+        this.renderedMobileStructureKey !== mobileStructKey
+      ) {
         this.mobileFocusEl.innerHTML = '';
-        for (const ly of focusLayers) {
-          const layerEl = document.createElement('div');
-          layerEl.className = 'v2-mmf-layer';
-          const headEl = document.createElement('div');
-          headEl.className = 'v2-mmf-layer-head';
-          headEl.textContent = `第 ${ly} 层${ly === currentLayerNum + 1 ? '（下一步可达）' : '（后续预告）'}`;
-          const nodesWrap = document.createElement('div');
-          nodesWrap.className = 'v2-mmf-nodes';
+        if (upcomingLayers.length === 0) {
+          const hint = document.createElement('div');
+          hint.className = 'v2-empty-hint';
+          hint.textContent = '已临近终层，可从上方航路卡片直接跃迁';
+          this.mobileFocusEl.appendChild(hint);
+        } else {
+          for (const ly of upcomingLayers) {
+            const layerEl = document.createElement('div');
+            layerEl.className = 'v2-mmf-layer';
+            const headEl = document.createElement('div');
+            headEl.className = 'v2-mmf-layer-head';
+            headEl.textContent = `第 ${ly} 层（后续预告）`;
+            const nodesWrap = document.createElement('div');
+            nodesWrap.className = 'v2-mmf-nodes';
 
-          const laneA = nodeBySlot.get(`${ly}:0`);
-          const laneB = nodeBySlot.get(`${ly}:1`);
-          for (const laneNode of [laneA, laneB]) {
-            if (laneNode) {
-              nodesWrap.appendChild(
-                this.getOrUpdateNodeButton(
-                  run,
-                  laneNode,
-                  true,
-                  this.latestReachableSet,
-                  effectiveSelectedId,
-                  fullMapReveal
-                )
-              );
-            } else {
-              const spacer = document.createElement('div');
-              spacer.className = 'v2-dag-spacer';
-              nodesWrap.appendChild(spacer);
+            const laneA = nodeBySlot.get(`${ly}:0`);
+            const laneB = nodeBySlot.get(`${ly}:1`);
+            for (const laneNode of [laneA, laneB]) {
+              if (laneNode && !this.latestReachableSet.has(laneNode.nodeId)) {
+                nodesWrap.appendChild(
+                  this.getOrUpdateOverviewButton(run, laneNode, true, fullMapReveal)
+                );
+              } else {
+                const spacer = document.createElement('div');
+                spacer.className = 'v2-dag-spacer';
+                nodesWrap.appendChild(spacer);
+              }
             }
-          }
 
-          layerEl.appendChild(headEl);
-          layerEl.appendChild(nodesWrap);
-          this.mobileFocusEl.appendChild(layerEl);
+            layerEl.appendChild(headEl);
+            layerEl.appendChild(nodesWrap);
+            this.mobileFocusEl.appendChild(layerEl);
+          }
         }
         this.renderedMobileStructureKey = mobileStructKey;
       } else {
-        for (const ly of focusLayers) {
+        for (const ly of upcomingLayers) {
           const laneA = nodeBySlot.get(`${ly}:0`);
           const laneB = nodeBySlot.get(`${ly}:1`);
-          if (laneA) {
-            this.getOrUpdateNodeButton(
-              run,
-              laneA,
-              true,
-              this.latestReachableSet,
-              effectiveSelectedId,
-              fullMapReveal
-            );
+          if (laneA && !this.latestReachableSet.has(laneA.nodeId)) {
+            this.getOrUpdateOverviewButton(run, laneA, true, fullMapReveal);
           }
-          if (laneB) {
-            this.getOrUpdateNodeButton(
-              run,
-              laneB,
-              true,
-              this.latestReachableSet,
-              effectiveSelectedId,
-              fullMapReveal
-            );
+          if (laneB && !this.latestReachableSet.has(laneB.nodeId)) {
+            this.getOrUpdateOverviewButton(run, laneB, true, fullMapReveal);
           }
         }
       }
@@ -955,7 +1263,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       return;
     }
 
-    // Desktop DAG mode: detach mobile focus FIRST so zero duplicate testids can exist
+    // Desktop / Mobile Expanded Route Overview: detach mobile focus FIRST
     if (this.mobileFocusEl.parentNode === this.graphSlotEl) {
       this.graphSlotEl.removeChild(this.mobileFocusEl);
     }
@@ -1030,7 +1338,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       </svg>`;
     }
 
-    const desktopStructKey = `${run.runId}|${layers
+    const desktopStructKey = `${run.runId}|r=${reachableIds.join(',')}|${layers
       .map((ly) => {
         const a = nodeBySlot.get(`${ly}:0`);
         const b = nodeBySlot.get(`${ly}:1`);
@@ -1038,7 +1346,10 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       })
       .join(';')}`;
 
-    if (this.renderedGraphMode !== 'desktop' || this.renderedDesktopStructureKey !== desktopStructKey) {
+    if (
+      this.renderedGraphMode !== 'desktop' ||
+      this.renderedDesktopStructureKey !== desktopStructKey
+    ) {
       this.dagGridEl.innerHTML = '';
       for (const layer of layers) {
         const colEl = document.createElement('div');
@@ -1053,16 +1364,13 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
         const laneB = nodeBySlot.get(`${layer}:1`);
         for (const laneNode of [laneA, laneB]) {
           if (laneNode) {
-            pairEl.appendChild(
-              this.getOrUpdateNodeButton(
-                run,
-                laneNode,
-                false,
-                this.latestReachableSet,
-                effectiveSelectedId,
-                fullMapReveal
-              )
-            );
+            if (this.latestReachableSet.has(laneNode.nodeId)) {
+              pairEl.appendChild(this.getOrUpdateRouteWaypoint(laneNode, effectiveSelectedId));
+            } else {
+              pairEl.appendChild(
+                this.getOrUpdateOverviewButton(run, laneNode, false, fullMapReveal)
+              );
+            }
           } else {
             const spacer = document.createElement('div');
             spacer.className = 'v2-dag-spacer';
@@ -1077,165 +1385,32 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       this.renderedDesktopStructureKey = desktopStructKey;
     } else {
       for (const n of allNodes) {
-        this.getOrUpdateNodeButton(
-          run,
-          n,
-          false,
-          this.latestReachableSet,
-          effectiveSelectedId,
-          fullMapReveal
-        );
+        if (this.latestReachableSet.has(n.nodeId)) {
+          this.getOrUpdateRouteWaypoint(n, effectiveSelectedId);
+        } else {
+          this.getOrUpdateOverviewButton(run, n, false, fullMapReveal);
+        }
       }
     }
 
     this.renderedGraphMode = 'desktop';
   }
 
-  private reconcileSelectedDeck(
-    run: V2RunState,
-    reachableIds: readonly string[],
-    effectiveSelectedId: string | null,
-    fuelInfo: ReturnType<typeof computeV2JumpFuelCost>,
-    canJump: boolean,
-    readOnly: boolean,
-    pureAutoCombat: boolean,
-    bonusBossCharges: number,
-    stargateRelayTier: number
-  ): void {
-    if (!this.selectedDeckEl || !this.emptyHintEl || !this.compareGridEl || !this.jumpBtnEl) return;
-
-    const selNode = effectiveSelectedId ? run.graph.nodes[effectiveSelectedId] ?? null : null;
-    if (!selNode) {
-      if (this.compareGridEl.parentNode === this.selectedDeckEl) {
-        this.selectedDeckEl.removeChild(this.compareGridEl);
-      }
-      if (this.jumpBtnEl.parentNode === this.selectedDeckEl) {
-        this.selectedDeckEl.removeChild(this.jumpBtnEl);
-      }
-      this.jumpBtnEl.disabled = true;
-      this.jumpBtnEl.removeAttribute('data-jump-node');
-      if (this.emptyHintEl.parentNode !== this.selectedDeckEl) {
-        this.selectedDeckEl.appendChild(this.emptyHintEl);
-      }
-      return;
-    }
-
-    if (this.emptyHintEl.parentNode === this.selectedDeckEl) {
-      this.selectedDeckEl.removeChild(this.emptyHintEl);
-    }
-
-    if (reachableIds.length > 0) {
-      // Prune stale compare cards
-      for (const [rid, card] of this.compareCards.entries()) {
-        if (!this.latestReachableSet.has(rid)) {
-          card.remove();
-          this.compareCards.delete(rid);
-          this.compareCardContentKeys.delete(rid);
-        }
-      }
-
-      const orderedCards: HTMLButtonElement[] = [];
-      for (const rid of reachableIds) {
-        const rn = run.graph.nodes[rid];
-        if (!rn) continue;
-        const rm = NODE_TYPE_META[rn.type];
-        const fc = describeNodeForecast(run, rn, pureAutoCombat, bonusBossCharges, stargateRelayTier);
-        const active = rid === selNode.nodeId;
-
-        let card = this.compareCards.get(rid);
-        if (!card) {
-          card = document.createElement('button');
-          card.type = 'button';
-          card.className = 'v2-map-compare-card';
-          card.dataset.selectNode = rid;
-          card.dataset.testid = `map-compare-${rid}`;
-          this.compareCards.set(rid, card);
-        }
-        card.classList.toggle('selected', active);
-
-        const contentKey = [
-          rn.type,
-          rn.lane,
-          fuelInfo.totalCost,
-          canJump ? 1 : 0,
-          rn.contractMarker ? 1 : 0,
-          rn.hasRelicSignal ? 1 : 0,
-          fc.traitBadge ?? '',
-          rn.hasSupportGuarantee ? run.primaryArchetype : '',
-          fuelInfo.navigatorDiscountApplied ? 1 : 0,
-          fuelInfo.rescueSurcharge,
-          fc.cls,
-          fc.brief,
-          fc.detail,
-        ].join('|');
-
-        if (this.compareCardContentKeys.get(rid) !== contentKey) {
-          this.compareCardContentKeys.set(rid, contentKey);
-          card.innerHTML = `
-            <div class="v2-mc-head">
-              <span class="v2-mc-head-left">${svgIcon(rm.icon, 14)} ${rn.lane === 0 ? 'A线' : 'B线'} · ${rm.label}</span>
-              <span class="v2-fuel-tag ${canJump ? '' : 'no-fuel'}" title="本次跃迁消耗 ${fuelInfo.totalCost} 燃料">${svgIcon('fuel', 11)} ${fuelInfo.totalCost} 燃料</span>
-            </div>
-            <div class="v2-mc-tags v3-map-intent-tags">
-              ${rn.contractMarker ? `<span class="v2-badge-contract">${svgIcon('star', 10)} 委托目标</span>` : ''}
-              ${rn.hasRelicSignal ? `<span class="v3-badge-relic">${svgIcon('museum', 10)} 保底遗物信号</span>` : ''}
-              ${fc.traitBadge ? `<span class="v3-badge-intent">${fc.traitBadge}</span>` : ''}
-              ${
-                rn.hasSupportGuarantee
-                  ? `<span class="v2-badge-support">${V2_ARCHETYPE_LABELS[run.primaryArchetype].supportName}保底</span>`
-                  : ''
-              }
-              ${fuelInfo.navigatorDiscountApplied ? `<span class="v2-badge-info">首跳省油</span>` : ''}
-              ${fuelInfo.rescueSurcharge > 0 ? `<span class="v2-badge-warn">救生舱+1油</span>` : ''}
-            </div>
-            <div class="v2-mc-forecast ${fc.cls}">${fc.brief}</div>
-            <small style="color:var(--text-secondary);font-size:11px;">${fc.detail}</small>
-          `;
-        }
-        orderedCards.push(card);
-      }
-
-      orderedCards.forEach((card, idx) => {
-        const currentChild = this.compareGridEl!.children[idx] as HTMLElement | undefined;
-        if (currentChild !== card) {
-          this.compareGridEl!.insertBefore(card, currentChild ?? null);
-        }
-      });
-
-      if (this.compareGridEl.parentNode !== this.selectedDeckEl) {
-        this.selectedDeckEl.insertBefore(this.compareGridEl, this.jumpBtnEl.parentNode === this.selectedDeckEl ? this.jumpBtnEl : null);
-      }
-    } else if (this.compareGridEl.parentNode === this.selectedDeckEl) {
-      this.selectedDeckEl.removeChild(this.compareGridEl);
-    }
-
-    const selMeta = NODE_TYPE_META[selNode.type];
-    this.jumpBtnEl.dataset.jumpNode = selNode.nodeId;
-    this.jumpBtnEl.disabled = readOnly || !canJump;
-    const jumpKey = `${canJump ? 1 : 0}:${selNode.nodeId}:${selNode.layer}:${selNode.lane}:${selNode.type}`;
-    if (jumpKey !== this.lastJumpBtnKey) {
-      this.lastJumpBtnKey = jumpKey;
-      this.jumpBtnEl.innerHTML = canJump
-        ? `${svgIcon('rocket', 15)} 跃迁至第 ${selNode.layer} 层 ${selNode.lane === 0 ? 'A线' : 'B线'} · ${selMeta.label}`
-        : '燃料不足 · 请免费安全返航';
-    }
-    if (this.jumpBtnEl.parentNode !== this.selectedDeckEl) {
-      this.selectedDeckEl.appendChild(this.jumpBtnEl);
-    }
-  }
-
   unmount(): void {
     this.rootEl?.removeEventListener('click', this.handleRootClick);
+    this.rootEl?.removeEventListener('keydown', this.handleRootKeyDown);
     this.mobileToggleBtn?.removeEventListener('click', this.handleMobileToggle);
-    this.jumpBtnEl?.removeEventListener('click', this.handleJump);
     this.safeReturnBtn?.removeEventListener('click', this.handleSafeReturn);
     this.abortBtn?.removeEventListener('click', this.handleAbort);
 
+    for (const [rid, refs] of this.destCards.entries()) {
+      this.detachDestCard(rid, refs);
+    }
     this.rootEl?.remove();
-    this.nodeButtons.clear();
-    this.nodeButtonInnerKeys.clear();
-    this.compareCards.clear();
-    this.compareCardContentKeys.clear();
+    this.overviewNodeButtons.clear();
+    this.overviewNodeInnerKeys.clear();
+    this.routeWaypoints.clear();
+    this.destCards.clear();
     this.gadgetBtns.clear();
     this.latestReachableSet.clear();
 
@@ -1260,6 +1435,10 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.gadgetSlotEl = null;
     this.gadgetBarEl = null;
     this.gadgetBtnsWrapEl = null;
+    this.destDeckEl = null;
+    this.destDeckHeadEl = null;
+    this.destGridEl = null;
+    this.emptyHintEl = null;
     this.mobileToggleSlotEl = null;
     this.mobileToggleBarEl = null;
     this.mobileToggleLabelEl = null;
@@ -1274,16 +1453,12 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.renderedDesktopStructureKey = null;
     this.renderedMobileStructureKey = null;
     this.lastEdgesKey = null;
-    this.selectedDeckEl = null;
-    this.emptyHintEl = null;
-    this.compareGridEl = null;
-    this.jumpBtnEl = null;
-    this.lastJumpBtnKey = null;
     this.footerEl = null;
     this.safeReturnBtn = null;
+    this.safeReturnLabelEl = null;
     this.abortBtn = null;
     this.latestActions = null;
-    this.latestEffectiveSelectedId = null;
+    this.latestHasStagedItems = false;
   }
 }
 

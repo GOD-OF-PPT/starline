@@ -141,9 +141,9 @@ export function openV3ContractsModal(
             <div class="v2-contract-card">
               <div class="v2-contract-head">
                 <span class="v2-contract-name">首航教学航次</span>
-                <span class="v2-contract-reward num">3 层示范</span>
+                <span class="v2-contract-reward num">4 层首航</span>
               </div>
-              <div class="v2-contract-desc">重温 2×3 密封反应堆装舱冲突、旋转拼装与免费安全返航。</div>
+              <div class="v2-contract-desc">重温装电池联动、残骸切割、2×3 密封反应堆空间取舍与终层抉择。</div>
               <div class="v2-contract-foot">
                 <button type="button" class="btn btn-sm btn-secondary" id="v2-modal-start-tut" ${
                   options.readOnly ? 'disabled' : ''

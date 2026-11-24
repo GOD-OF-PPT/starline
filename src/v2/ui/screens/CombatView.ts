@@ -28,6 +28,383 @@ import type {
 import { svgIcon } from '../icons';
 import { NODE_TYPE_META } from './screenTypes';
 
+export const PRE_COMBAT_AUTO_ENGAGE_MS = 1500;
+export const PRE_COMBAT_TICK_MS = 100;
+
+export type PreCombatAutoEngageStatus = 'idle' | 'countdown' | 'paused' | 'engaged';
+export type PreCombatPauseReason =
+  | 'manual'
+  | 'policy'
+  | 'gadget'
+  | 'details'
+  | 'modal'
+  | 'hidden'
+  | 'readonly';
+
+export interface PreCombatAutoEngageSnapshot {
+  readonly status: PreCombatAutoEngageStatus;
+  readonly nodeKey: string | null;
+  readonly durationMs: number;
+  readonly remainingMs: number;
+  readonly pauseReason: PreCombatPauseReason | null;
+}
+
+export interface PreCombatAutoEngageSyncContext {
+  readonly eligible: boolean;
+  readonly nodeKey: string | null;
+  readonly canMutate: boolean;
+  readonly modalOpen: boolean;
+  readonly hidden: boolean;
+}
+
+export interface PreCombatAutoEngageOptions {
+  readonly durationMs?: number;
+  readonly tickMs?: number;
+  readonly onEngage: (nodeKey: string, source: 'timer' | 'manual') => boolean;
+  readonly onChange?: (snapshot: PreCombatAutoEngageSnapshot) => void;
+  readonly isLiveEligible?: (nodeKey: string) => {
+    readonly eligible: boolean;
+    readonly canMutate: boolean;
+    readonly modalOpen: boolean;
+    readonly hidden: boolean;
+  };
+  readonly now?: () => number;
+  readonly setTimeoutFn?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  readonly clearTimeoutFn?: (handle: ReturnType<typeof setTimeout>) => void;
+  readonly setIntervalFn?: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
+  readonly clearIntervalFn?: (handle: ReturnType<typeof setInterval>) => void;
+}
+
+/**
+ * Deterministic, RAF-free pre-combat 1.5s auto-engage state machine (S05).
+ * Strictly idempotent against timer vs manual click races, safe under `vi.useFakeTimers()`,
+ * and auto-pauses cleanly on pause click, policy/gadget/details/modal/hidden/readonly events.
+ */
+export class PreCombatAutoEngageController {
+  private readonly durationMs: number;
+  private readonly tickMs: number;
+  private readonly onEngage: (nodeKey: string, source: 'timer' | 'manual') => boolean;
+  private readonly onChange?: (snapshot: PreCombatAutoEngageSnapshot) => void;
+  private readonly isLiveEligible?: PreCombatAutoEngageOptions['isLiveEligible'];
+  private readonly now: () => number;
+  private readonly setTimeoutFn: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  private readonly clearTimeoutFn: (handle: ReturnType<typeof setTimeout>) => void;
+  private readonly setIntervalFn: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
+  private readonly clearIntervalFn: (handle: ReturnType<typeof setInterval>) => void;
+
+  private status: PreCombatAutoEngageStatus = 'idle';
+  private nodeKey: string | null = null;
+  private engagedNodeKey: string | null = null;
+  private pauseReason: PreCombatPauseReason | null = null;
+  private startedAtMs = 0;
+  private remainingMs: number;
+  private timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  private intervalHandle: ReturnType<typeof setInterval> | null = null;
+
+  constructor(options: PreCombatAutoEngageOptions) {
+    this.durationMs = Math.max(50, Math.floor(options.durationMs ?? PRE_COMBAT_AUTO_ENGAGE_MS));
+    this.tickMs = Math.max(16, Math.floor(options.tickMs ?? PRE_COMBAT_TICK_MS));
+    this.remainingMs = this.durationMs;
+    this.onEngage = options.onEngage;
+    this.onChange = options.onChange;
+    this.isLiveEligible = options.isLiveEligible;
+    this.now = options.now ?? (() => Date.now());
+    this.setTimeoutFn = options.setTimeoutFn ?? ((fn, ms) => globalThis.setTimeout(fn, ms));
+    this.clearTimeoutFn = options.clearTimeoutFn ?? ((h) => globalThis.clearTimeout(h));
+    this.setIntervalFn = options.setIntervalFn ?? ((fn, ms) => globalThis.setInterval(fn, ms));
+    this.clearIntervalFn = options.clearIntervalFn ?? ((h) => globalThis.clearInterval(h));
+  }
+
+  getSnapshot(): PreCombatAutoEngageSnapshot {
+    return {
+      status: this.status,
+      nodeKey: this.nodeKey,
+      durationMs: this.durationMs,
+      remainingMs: this.remainingMs,
+      pauseReason: this.pauseReason,
+    };
+  }
+
+  private clearTimers(): void {
+    if (this.timeoutHandle !== null) {
+      this.clearTimeoutFn(this.timeoutHandle);
+      this.timeoutHandle = null;
+    }
+    if (this.intervalHandle !== null) {
+      this.clearIntervalFn(this.intervalHandle);
+      this.intervalHandle = null;
+    }
+  }
+
+  private resolveBlockReason(ctx: {
+    readonly canMutate: boolean;
+    readonly modalOpen: boolean;
+    readonly hidden: boolean;
+  }): PreCombatPauseReason {
+    if (ctx.modalOpen) return 'modal';
+    if (ctx.hidden) return 'hidden';
+    return 'readonly';
+  }
+
+  private startCountdown(): void {
+    this.clearTimers();
+    this.status = 'countdown';
+    this.pauseReason = null;
+    this.startedAtMs = this.now();
+    this.remainingMs = this.durationMs;
+    this.timeoutHandle = this.setTimeoutFn(() => this.handleTimerDone(), this.durationMs);
+    this.intervalHandle = this.setIntervalFn(() => this.handleTick(), this.tickMs);
+  }
+
+  private handleTick(): void {
+    if (this.status !== 'countdown' || !this.nodeKey) {
+      this.clearTimers();
+      return;
+    }
+    if (this.isLiveEligible) {
+      const live = this.isLiveEligible(this.nodeKey);
+      if (!live.eligible) {
+        this.reset();
+        this.onChange?.(this.getSnapshot());
+        return;
+      }
+      if (!live.canMutate || live.modalOpen || live.hidden) {
+        this.pause(this.resolveBlockReason(live));
+        return;
+      }
+    }
+    this.remainingMs = Math.max(0, this.durationMs - (this.now() - this.startedAtMs));
+    this.onChange?.(this.getSnapshot());
+  }
+
+  private handleTimerDone(): void {
+    this.clearTimers();
+    if (this.status !== 'countdown' || !this.nodeKey || this.engagedNodeKey === this.nodeKey) {
+      return;
+    }
+    const targetKey = this.nodeKey;
+    if (this.isLiveEligible) {
+      const live = this.isLiveEligible(targetKey);
+      if (!live.eligible) {
+        this.reset();
+        this.onChange?.(this.getSnapshot());
+        return;
+      }
+      if (!live.canMutate || live.modalOpen || live.hidden) {
+        this.status = 'paused';
+        this.pauseReason = this.resolveBlockReason(live);
+        this.remainingMs = this.durationMs;
+        this.onChange?.(this.getSnapshot());
+        return;
+      }
+    }
+    this.status = 'engaged';
+    this.engagedNodeKey = targetKey;
+    this.remainingMs = 0;
+    this.pauseReason = null;
+    this.onChange?.(this.getSnapshot());
+
+    const ok = this.onEngage(targetKey, 'timer');
+    if (!ok && this.nodeKey === targetKey) {
+      this.status = 'paused';
+      this.pauseReason = 'manual';
+      this.engagedNodeKey = null;
+      this.remainingMs = this.durationMs;
+      this.onChange?.(this.getSnapshot());
+    }
+  }
+
+  sync(ctx: PreCombatAutoEngageSyncContext): PreCombatAutoEngageSnapshot {
+    if (!ctx.eligible || !ctx.nodeKey) {
+      this.reset();
+      return this.getSnapshot();
+    }
+
+    if (this.nodeKey !== ctx.nodeKey) {
+      this.clearTimers();
+      this.nodeKey = ctx.nodeKey;
+      this.engagedNodeKey = null;
+      if (!ctx.canMutate || ctx.modalOpen || ctx.hidden) {
+        this.status = 'paused';
+        this.pauseReason = this.resolveBlockReason(ctx);
+        this.remainingMs = this.durationMs;
+      } else {
+        this.startCountdown();
+      }
+      return this.getSnapshot();
+    }
+
+    // Same pre-combat node re-render: preserve active countdown OR paused state without clobbering!
+    if (this.status === 'countdown') {
+      if (!ctx.canMutate || ctx.modalOpen || ctx.hidden) {
+        this.clearTimers();
+        this.status = 'paused';
+        this.pauseReason = this.resolveBlockReason(ctx);
+      } else {
+        this.remainingMs = Math.max(0, this.durationMs - (this.now() - this.startedAtMs));
+      }
+    }
+    return this.getSnapshot();
+  }
+
+  pause(reason: PreCombatPauseReason): boolean {
+    if (this.status !== 'countdown' || !this.nodeKey) {
+      return false;
+    }
+    this.clearTimers();
+    this.status = 'paused';
+    this.pauseReason = reason;
+    this.onChange?.(this.getSnapshot());
+    return true;
+  }
+
+  resume(): boolean {
+    if (this.status !== 'paused' || !this.nodeKey) {
+      return false;
+    }
+    if (this.isLiveEligible) {
+      const live = this.isLiveEligible(this.nodeKey);
+      if (!live.eligible) {
+        this.reset();
+        this.onChange?.(this.getSnapshot());
+        return false;
+      }
+      if (!live.canMutate || live.modalOpen || live.hidden) {
+        return false;
+      }
+    }
+    this.startCountdown();
+    this.onChange?.(this.getSnapshot());
+    return true;
+  }
+
+  togglePause(): boolean {
+    if (this.status === 'countdown') {
+      return this.pause('manual');
+    }
+    if (this.status === 'paused') {
+      return this.resume();
+    }
+    return false;
+  }
+
+  engageNow(): boolean {
+    if (!this.nodeKey || this.status === 'engaged' || this.engagedNodeKey === this.nodeKey) {
+      this.clearTimers();
+      return false;
+    }
+    const targetKey = this.nodeKey;
+    if (this.isLiveEligible) {
+      const live = this.isLiveEligible(targetKey);
+      if (!live.eligible) {
+        this.reset();
+        this.onChange?.(this.getSnapshot());
+        return false;
+      }
+      if (!live.canMutate || live.modalOpen) {
+        if (this.status === 'countdown') {
+          this.pause(this.resolveBlockReason(live));
+        }
+        return false;
+      }
+    }
+    this.clearTimers();
+    this.status = 'engaged';
+    this.engagedNodeKey = targetKey;
+    this.remainingMs = 0;
+    this.pauseReason = null;
+    this.onChange?.(this.getSnapshot());
+
+    const ok = this.onEngage(targetKey, 'manual');
+    if (!ok && this.nodeKey === targetKey) {
+      this.status = 'paused';
+      this.pauseReason = 'manual';
+      this.engagedNodeKey = null;
+      this.remainingMs = this.durationMs;
+      this.onChange?.(this.getSnapshot());
+    }
+    return ok;
+  }
+
+  markEngaged(nodeKey: string): void {
+    this.clearTimers();
+    this.nodeKey = nodeKey;
+    this.engagedNodeKey = nodeKey;
+    this.status = 'engaged';
+    this.remainingMs = 0;
+    this.pauseReason = null;
+  }
+
+  reset(): void {
+    this.clearTimers();
+    this.nodeKey = null;
+    this.engagedNodeKey = null;
+    this.status = 'idle';
+    this.pauseReason = null;
+    this.remainingMs = this.durationMs;
+  }
+
+  destroy(): void {
+    this.reset();
+  }
+}
+
+function formatAutoEngageStartLabel(snapshot: PreCombatAutoEngageSnapshot | undefined): string {
+  if (snapshot && snapshot.status === 'countdown') {
+    const secs = Math.max(0, snapshot.remainingMs / 1000).toFixed(1);
+    return `开始交火（${secs}s 后自动交火）`;
+  }
+  return '开始交火';
+}
+
+function computeAutoEngageProgressPct(snapshot: PreCombatAutoEngageSnapshot | undefined): number {
+  if (!snapshot || snapshot.status !== 'countdown' || snapshot.durationMs <= 0) {
+    return 0;
+  }
+  const elapsed = Math.max(0, snapshot.durationMs - snapshot.remainingMs);
+  return Math.max(0, Math.min(100, Math.round((elapsed / snapshot.durationMs) * 100)));
+}
+
+/**
+ * In-place non-destructive DOM patcher for 100ms countdown ticks (zero innerHTML rewrites!).
+ */
+export function updateCombatPreAutoEngageUi(
+  leftPanelEl: HTMLElement,
+  snapshot: PreCombatAutoEngageSnapshot,
+  readOnly: boolean
+): void {
+  const startBtn = leftPanelEl.querySelector<HTMLButtonElement>('[data-testid="btn-start-combat"]');
+  if (startBtn) {
+    startBtn.dataset.autoEngageStatus = snapshot.status;
+    startBtn.dataset.autoEngageRemainingMs = String(Math.max(0, Math.round(snapshot.remainingMs)));
+    startBtn.classList.toggle('is-countdown', snapshot.status === 'countdown');
+    const progressEl = startBtn.querySelector<HTMLElement>('[data-slot="auto-engage-progress"]');
+    if (progressEl) {
+      progressEl.style.width = `${computeAutoEngageProgressPct(snapshot)}%`;
+    }
+    const labelEl = startBtn.querySelector<HTMLElement>('[data-slot="auto-engage-label"]');
+    const nextLabel = formatAutoEngageStartLabel(snapshot);
+    if (labelEl && labelEl.textContent !== nextLabel) {
+      labelEl.textContent = nextLabel;
+    }
+  }
+
+  const pauseBtn = leftPanelEl.querySelector<HTMLButtonElement>(
+    '[data-testid="btn-pause-auto-combat"]'
+  );
+  if (pauseBtn) {
+    const isCountdown = snapshot.status === 'countdown';
+    const isPaused = snapshot.status === 'paused';
+    pauseBtn.disabled = readOnly || snapshot.status === 'engaged' || snapshot.status === 'idle';
+    pauseBtn.setAttribute('aria-pressed', isPaused ? 'true' : 'false');
+    pauseBtn.classList.toggle('is-paused', isPaused);
+    const nextPauseText = isCountdown ? '暂停 / 调整' : '继续自动交火';
+    if (pauseBtn.textContent !== nextPauseText) {
+      pauseBtn.textContent = nextPauseText;
+    }
+  }
+}
+
 export interface CombatPreViewProps {
   readonly run: V2RunState;
   readonly node: V2MapNode;
@@ -36,12 +413,14 @@ export interface CombatPreViewProps {
   readonly pureAutoCombat: boolean;
   readonly bonusBossCharges?: number;
   readonly stargateRelayTier?: number;
+  readonly autoEngage?: PreCombatAutoEngageSnapshot;
 }
 
 export interface CombatPreViewActions {
   readonly onSelectPolicy: (policy: V2TargetPolicy) => void;
   readonly onToggleLog: () => void;
   readonly onUseGadget?: (instanceId: string) => void;
+  readonly onTogglePauseAutoEngage?: () => void;
   readonly onStartCombat: () => void;
 }
 
@@ -106,6 +485,7 @@ export function renderCombatPreView(
     pureAutoCombat,
     bonusBossCharges = 0,
     stargateRelayTier = 0,
+    autoEngage,
   } = props;
   if (!node.combat) return;
 
@@ -294,17 +674,21 @@ export function renderCombatPreView(
           ${rosterHtml}
         </div>
 
-        <div class="v2-policy-box">
-          <span class="v2-prep-label">集火策略</span>
-          <div style="display:flex;gap:8px;margin-top:6px;">
-            <button type="button" class="btn btn-sm ${
-              run.targetPolicy === 'weakest' ? 'btn-primary' : 'btn-secondary'
-            }" data-policy="weakest" ${readOnly ? 'disabled' : ''}>优先最弱</button>
-            <button type="button" class="btn btn-sm ${
-              run.targetPolicy === 'highest_threat' ? 'btn-primary' : 'btn-secondary'
-            }" data-policy="highest_threat" ${readOnly ? 'disabled' : ''}>优先最大威胁</button>
-          </div>
-        </div>
+        ${
+          node.combat.units.length > 1
+            ? `<div class="v2-policy-box">
+                <span class="v2-prep-label">集火策略</span>
+                <div style="display:flex;gap:8px;margin-top:6px;">
+                  <button type="button" class="btn btn-sm ${
+                    run.targetPolicy === 'weakest' ? 'btn-primary' : 'btn-secondary'
+                  }" data-policy="weakest" ${readOnly ? 'disabled' : ''}>优先最弱</button>
+                  <button type="button" class="btn btn-sm ${
+                    run.targetPolicy === 'highest_threat' ? 'btn-primary' : 'btn-secondary'
+                  }" data-policy="highest_threat" ${readOnly ? 'disabled' : ''}>优先最大威胁</button>
+                </div>
+              </div>`
+            : ''
+        }
 
         ${
           pv
@@ -360,9 +744,32 @@ export function renderCombatPreView(
       </div>
 
       <div class="v3-sticky-cta-footer">
-        <button type="button" class="btn btn-primary btn-launch-hero" id="v2-btn-start-combat" data-testid="btn-start-combat" ${
-          readOnly ? 'disabled' : ''
-        }>${svgIcon('combat', 16)} 开始交火</button>
+        <div class="v3-precombat-cta-row">
+          <button type="button" class="btn btn-primary btn-launch-hero v3-auto-engage-btn ${
+            autoEngage?.status === 'countdown' ? 'is-countdown' : ''
+          }" id="v2-btn-start-combat" data-testid="btn-start-combat" data-auto-engage-status="${
+            autoEngage?.status ?? 'idle'
+          }" data-auto-engage-remaining-ms="${Math.max(
+            0,
+            Math.round(autoEngage?.remainingMs ?? PRE_COMBAT_AUTO_ENGAGE_MS)
+          )}" ${readOnly ? 'disabled' : ''}>
+            <span class="v3-auto-engage-progress" data-slot="auto-engage-progress" style="width:${computeAutoEngageProgressPct(
+              autoEngage
+            )}%"></span>
+            <span class="v3-auto-engage-btn-content">${svgIcon('combat', 16)}<span data-slot="auto-engage-label">${formatAutoEngageStartLabel(
+              autoEngage
+            )}</span></span>
+          </button>
+          <button type="button" class="btn btn-secondary v3-pause-auto-btn ${
+            autoEngage?.status === 'paused' ? 'is-paused' : ''
+          }" id="v2-btn-pause-auto-combat" data-testid="btn-pause-auto-combat" aria-pressed="${
+            autoEngage?.status === 'paused' ? 'true' : 'false'
+          }" ${
+            readOnly || !autoEngage || autoEngage.status === 'engaged' || autoEngage.status === 'idle'
+              ? 'disabled'
+              : ''
+          }>${autoEngage?.status === 'countdown' ? '暂停 / 调整' : '继续自动交火'}</button>
+        </div>
       </div>
     </div>
   `;
@@ -380,6 +787,9 @@ export function renderCombatPreView(
   });
 
   leftPanelEl.querySelector('#v2-toggle-log')?.addEventListener('click', actions.onToggleLog);
+  leftPanelEl
+    .querySelector('#v2-btn-pause-auto-combat')
+    ?.addEventListener('click', () => actions.onTogglePauseAutoEngage?.());
   leftPanelEl.querySelector('#v2-btn-start-combat')?.addEventListener('click', actions.onStartCombat);
 }
 

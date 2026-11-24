@@ -16,7 +16,6 @@ import { getV3GadgetDef } from '../data/gadgets';
 import { getV3SectorDef } from '../data/sectors';
 import { calculateV2BuildStats } from './buildStatsV2';
 import {
-  canPerformSurveyAtCurrentNode,
   computeV2JumpFuelCost,
   freezeRunBonusObjectiveForSettlement,
   grantContractObjectiveItemsForNode,
@@ -26,8 +25,12 @@ import {
   buildFallbackEventStateFromLegacyNode,
   computeNextStipendSpent,
   evaluateV2EventOption,
+  hasActiveEngineerOffer,
+  isAtTerminalLayer,
   maybeCreateEngineerSwapOffer,
+  resolvePostEncounterPhase,
   resolveV2EventOption,
+  shouldAutoSkipArrange,
 } from './events';
 import {
   getEffectiveMerchantEquipmentPrice,
@@ -48,7 +51,15 @@ import type {
   V2WreckState,
 } from './types';
 
-export { evaluateV2EventOption, maybeCreateEngineerSwapOffer, resolveV2EventOption };
+export {
+  evaluateV2EventOption,
+  hasActiveEngineerOffer,
+  isAtTerminalLayer,
+  maybeCreateEngineerSwapOffer,
+  resolvePostEncounterPhase,
+  resolveV2EventOption,
+  shouldAutoSkipArrange,
+};
 
 export interface V2ActionOutcome {
   readonly ok: boolean;
@@ -68,12 +79,6 @@ export function getReachableNextNodeIds(run: V2RunState): readonly string[] {
   }
   const cur = run.graph.nodes[run.currentNodeId];
   return cur ? cur.nextNodeIds : [];
-}
-
-export function isAtTerminalLayer(run: V2RunState): boolean {
-  if (!run.currentNodeId) return false;
-  const cur = run.graph.nodes[run.currentNodeId];
-  return Boolean(cur && cur.layer >= run.graph.maxLayers);
 }
 
 
@@ -199,6 +204,13 @@ export function selectV2MapNode(
     activeEvent = node.eventState ?? buildFallbackEventStateFromLegacyNode(run, node);
   }
 
+  const nextDiscardedCount =
+    (run.discardedCountThisRun ?? 0) + run.bay.discardedThisArrange.length;
+  const cleanBay =
+    run.bay.discardedThisArrange.length > 0
+      ? { ...run.bay, discardedThisArrange: [] }
+      : run.bay;
+
   return {
     ok: true,
     run: {
@@ -208,6 +220,8 @@ export function selectV2MapNode(
       navigatorFreeJumpUsed: run.navigatorFreeJumpUsed || fuelCalc.navigatorDiscountApplied,
       currentNodeId: targetNodeId,
       visitedNodeIds: [...run.visitedNodeIds, targetNodeId],
+      bay: cleanBay,
+      discardedCountThisRun: nextDiscardedCount,
       phase: nextPhase,
       activeCombat: null,
       overchargeCellActive: false,
@@ -390,6 +404,12 @@ export function cutV2WreckHotspot(
   if (!node || node.type !== 'wreck') {
     return { ok: false, run, error: '当前节点不是漂流残骸' };
   }
+  if (node.resolved) {
+    return { ok: false, run, error: '该残骸节点已结算' };
+  }
+  if (run.hp <= 0) {
+    return { ok: false, run, error: '船体耐久归零，无法继续切割残骸' };
+  }
   if (node.combat || run.activeCombat) {
     return { ok: false, run, error: '当前存在敌舰伏击，请先处理战斗' };
   }
@@ -411,7 +431,7 @@ export function cutV2WreckHotspot(
   const spot = wreck.hotspots.find((h) => h.spotId === spotId)!;
   const grappleBonusParts = calculateV2BuildStats(run.bay).bonusSalvagePartsPerCut;
   const totalSpotParts = Math.max(0, spot.rewardParts ?? 0) + grappleBonusParts;
-  let nextHp = Math.max(1, run.hp - evalRes.effectiveHullDamage);
+  let nextHp = Math.max(0, run.hp - evalRes.effectiveHullDamage);
   let nextFuel = Math.max(0, run.fuel - evalRes.effectiveFuelCost);
   let nextWallet = run.wallet + Math.max(0, spot.rewardCredits ?? 0);
   let nextParts = (run.salvagePartsEarned ?? 0) + totalSpotParts;
@@ -606,6 +626,10 @@ export function extractV2Wreck(run: V2RunState): V2ActionOutcome {
   if (run.activeWreck?.ambushTriggered || node.combat) {
     return { ok: false, run, error: '敌舰伏击尚未清除，无法直接撤离' };
   }
+  const claimKey = `wreck_extract_${node.nodeId}`;
+  if (node.resolved || run.activeWreck?.extracted || run.claimedEventIds.includes(claimKey)) {
+    return { ok: false, run, error: '该残骸节点已结算' };
+  }
 
   const cutsMade = run.activeWreck?.cutsMade ?? 0;
   const updatedNode: V2MapNode = {
@@ -617,6 +641,7 @@ export function extractV2Wreck(run: V2RunState): V2ActionOutcome {
     ...run,
     activeWreck: null,
     wrecksDissectedThisRun: (run.wrecksDissectedThisRun ?? 0) + (cutsMade > 0 ? 1 : 0),
+    claimedEventIds: [...run.claimedEventIds, claimKey],
     graph: {
       ...run.graph,
       nodes: { ...run.graph.nodes, [node.nodeId]: updatedNode },
@@ -624,19 +649,7 @@ export function extractV2Wreck(run: V2RunState): V2ActionOutcome {
   };
 
   nextRun = grantContractObjectiveItemsForNode(nextRun, updatedNode);
-
-  const shouldArrange =
-    nextRun.bay.staging.length > 0 || canPerformSurveyAtCurrentNode(nextRun).canSurvey;
-  if (shouldArrange) {
-    nextRun = { ...nextRun, phase: 'ARRANGE' };
-  } else if (isAtTerminalLayer(nextRun)) {
-    nextRun = freezeRunBonusObjectiveForSettlement(
-      { ...nextRun, phase: 'SETTLEMENT', settlementReason: 'safe_return' },
-      'safe_return'
-    );
-  } else {
-    nextRun = { ...nextRun, phase: 'MAP' };
-  }
+  nextRun = resolvePostEncounterPhase(nextRun);
 
   return { ok: true, run: nextRun };
 }
@@ -695,7 +708,7 @@ export function resolveV2WreckChoice(
     if (repairGain <= 0) {
       return { ok: false, run, error: '船体耐久已满，可改选抽取燃料或其他舱室' };
     }
-    nextHp = run.hp + repairGain;
+    nextHp = run.hp <= 0 ? 0 : run.hp + repairGain;
   }
 
   const updatedNode: V2MapNode = {
@@ -717,7 +730,6 @@ export function resolveV2WreckChoice(
     fuel: nextFuel,
     hp: nextHp,
     bay: nextBay,
-    phase: 'ARRANGE',
     claimedEventIds: [...run.claimedEventIds, claimKey],
     recentEquipmentKinds: nextRecentKinds,
     graph: {
@@ -730,6 +742,7 @@ export function resolveV2WreckChoice(
     nextRun = maybeCreateEngineerSwapOffer(nextRun, acquiredEq, unlockedFamilies);
   }
   nextRun = maybeGrantContractObjectiveItems(nextRun, updatedNode);
+  nextRun = resolvePostEncounterPhase(nextRun);
 
   return { ok: true, run: nextRun };
 }
@@ -794,7 +807,6 @@ export function resolveV2AnomalyChoice(
     fuel: nextFuel,
     hp: nextHp,
     bay: nextBay,
-    phase: 'ARRANGE',
     claimedEventIds: [...run.claimedEventIds, claimKey],
     graph: {
       ...run.graph,
@@ -803,6 +815,7 @@ export function resolveV2AnomalyChoice(
   };
 
   nextRun = maybeGrantContractObjectiveItems(nextRun, updatedNode);
+  nextRun = resolvePostEncounterPhase(nextRun);
   return { ok: true, run: nextRun };
 }
 
@@ -840,7 +853,7 @@ export function resolveV2DistressChoice(
       };
     }
     nextFuel -= node.distress.rescueFuelCost;
-    nextHp = Math.min(run.maxHp, run.hp + node.distress.repairAmount);
+    nextHp = run.hp <= 0 ? 0 : Math.min(run.maxHp, run.hp + node.distress.repairAmount);
   } else {
     nextBay = addV2ItemToStaging(nextBay, node.distress.haulCargoItem, 0);
   }
@@ -856,7 +869,6 @@ export function resolveV2DistressChoice(
     fuel: nextFuel,
     hp: nextHp,
     bay: nextBay,
-    phase: 'ARRANGE',
     claimedEventIds: [...run.claimedEventIds, claimKey],
     graph: {
       ...run.graph,
@@ -865,6 +877,7 @@ export function resolveV2DistressChoice(
   };
 
   nextRun = maybeGrantContractObjectiveItems(nextRun, updatedNode);
+  nextRun = resolvePostEncounterPhase(nextRun);
   return { ok: true, run: nextRun };
 }
 
@@ -1118,12 +1131,20 @@ export function sellV2ItemToMerchant(
     return { ok: false, run, error: '该物品无可售价值' };
   }
 
+  const nextEngineerOffer =
+    run.activeEngineerOffer &&
+    !run.activeEngineerOffer.used &&
+    run.activeEngineerOffer.targetInstanceId === instanceId
+      ? { ...run.activeEngineerOffer, used: true }
+      : run.activeEngineerOffer;
+
   return {
     ok: true,
     run: {
       ...run,
       wallet: run.wallet + payout,
       bay: removeV2ItemById(run.bay, instanceId),
+      activeEngineerOffer: nextEngineerOffer,
       transactionIds: [...run.transactionIds, transactionId],
     },
   };
@@ -1140,13 +1161,13 @@ export function finishV2MerchantVisit(run: V2RunState): V2ActionOutcome {
   const updatedNode: V2MapNode = { ...node, resolved: true };
   let nextRun: V2RunState = {
     ...run,
-    phase: 'ARRANGE',
     graph: {
       ...run.graph,
       nodes: { ...run.graph.nodes, [node.nodeId]: updatedNode },
     },
   };
   nextRun = maybeGrantContractObjectiveItems(nextRun, updatedNode);
+  nextRun = resolvePostEncounterPhase(nextRun);
   return { ok: true, run: nextRun };
 }
 
@@ -1269,7 +1290,7 @@ export function pickV2CombatReward(
   } else if (choice === 'cargo') {
     nextBay = addV2ItemToStaging(nextBay, run.pendingReward.cargoOption, 0);
   } else {
-    nextHp = Math.min(run.maxHp, run.hp + run.pendingReward.repairAmount);
+    nextHp = run.hp <= 0 ? 0 : Math.min(run.maxHp, run.hp + run.pendingReward.repairAmount);
   }
 
   // Restore any loot stashed during a wreck ambush encounter back into staging!
@@ -1291,7 +1312,6 @@ export function pickV2CombatReward(
     ...run,
     hp: nextHp,
     bay: nextBay,
-    phase: 'ARRANGE',
     activeWreck: nextActiveWreck,
     wrecksDissectedThisRun: nextWrecksDissected,
     pendingReward: { ...run.pendingReward, chosen: choice },
@@ -1306,6 +1326,7 @@ export function pickV2CombatReward(
     nextRun = maybeCreateEngineerSwapOffer(nextRun, acquiredEq, unlockedFamilies);
   }
   nextRun = maybeGrantContractObjectiveItems(nextRun, updatedNode);
+  nextRun = resolvePostEncounterPhase(nextRun);
   return { ok: true, run: nextRun };
 }
 
@@ -1314,7 +1335,7 @@ export function pickV2CombatReward(
  * - Requires staging to be completely cleared
  * - Expires any unused Engineer swap offer (§6.2)
  * - Accumulates discardedCountThisRun and clears discard undo stack
- * - At terminal layer (Layer 6 or Tutorial Layer 3), automatically transitions to safe-return SETTLEMENT!
+ * - At terminal layer (Layer 6 or Tutorial Layer 4), automatically transitions to safe-return SETTLEMENT!
  */
 export function finishV2ArrangeAndProceed(
   run: V2RunState,

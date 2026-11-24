@@ -74,6 +74,49 @@ export function getAvailableContractBoard(profile: V2ProfileState): {
   };
 }
 
+export const V2_RECOMMENDED_STANDARD_ORDER = [
+  'rescue_std',
+  'survey_std',
+  'bounty_std',
+  'derelict_std',
+  'transport_std',
+] as const;
+
+/**
+ * Pure post-first-voyage contract recommender (S10):
+ * Prioritizes `rescue_std` (distinct Escape Pod +1 fuel/jump tradeoff, unlocked & 0¤-launchable)
+ * over `transport_std` (already experienced in the first-voyage tutorial), then advances through
+ * remaining uncompleted standard contracts before deep-tier contracts once unlocked.
+ */
+export function pickRecommendedV2ContractId(
+  profile: V2ProfileState,
+  board: ReturnType<typeof getAvailableContractBoard> = getAvailableContractBoard(profile)
+): string {
+  const rankMap = new Map<string, number>(
+    V2_RECOMMENDED_STANDARD_ORDER.map((id, idx) => [id, idx])
+  );
+  const orderedStandard = [...board.standardTemplates].sort((a, b) => {
+    const ra = rankMap.get(a.templateId) ?? V2_RECOMMENDED_STANDARD_ORDER.length;
+    const rb = rankMap.get(b.templateId) ?? V2_RECOMMENDED_STANDARD_ORDER.length;
+    return ra - rb;
+  });
+
+  const nextStd = orderedStandard.find(
+    (c) => !profile.completedContractIds.includes(c.templateId)
+  );
+  if (nextStd) return nextStd.templateId;
+
+  if (board.deepUnlocked) {
+    const nextDeep = board.deepTemplates.find(
+      (c) => !profile.completedContractIds.includes(c.templateId)
+    );
+    if (nextDeep) return nextDeep.templateId;
+    return board.deepTemplates[0]?.templateId ?? 'rescue_std';
+  }
+
+  return orderedStandard[0]?.templateId ?? 'rescue_std';
+}
+
 interface BonusObjectiveSpec {
   readonly id: string;
   readonly label: string;

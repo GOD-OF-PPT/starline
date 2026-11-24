@@ -1076,7 +1076,10 @@ describe('M4 F13: All 5 Formal Contract Types & Frozen +30% Optional Bonus Objec
         graph: {
           ...dRun.graph,
           nodes: Object.fromEntries(
-            Object.entries(dRun.graph.nodes).map(([k, v]) => [k, { ...v, resolved: true }])
+            Object.entries(dRun.graph.nodes).map(([k, v]) => [
+              k,
+              k === derelictTargetId ? { ...v, resolved: false } : { ...v, resolved: true },
+            ])
           ),
         },
       },

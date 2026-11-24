@@ -103,16 +103,17 @@ export function renderBaseHeroView(
     campaignObjective: camp,
   } = props;
   const relicSum = getV2RelicSummary(p);
-  const recTpl = V2_CONTRACT_TEMPLATES[recommendedContractId] ?? V2_CONTRACT_TEMPLATES.transport_std;
+  const recTpl = V2_CONTRACT_TEMPLATES[recommendedContractId] ?? V2_CONTRACT_TEMPLATES.rescue_std;
 
+  const isTutorialFocus = !p.tutorialCompleted;
   const dockingHtml = renderDockingNoticeHtml(activeDockingNotice);
 
-  const commandCardHtml = !p.tutorialCompleted
+  const commandCardHtml = isTutorialFocus
     ? `
       <div class="v2-base-cmd-card">
         <div class="v2-cmd-eyebrow">${svgIcon('star', 13)} 推荐首航</div>
         <div class="v2-cmd-title">首航教学 · 2×3 密封反应堆</div>
-        <div class="v2-cmd-desc">3 层示范航路，亲手体验空间取舍、旋转拼装与安全返航，完成后免费解锁工作台并奖 +40¤。</div>
+        <div class="v2-cmd-desc">4 层首航教学：亲手装电池接通激光炮、切开残骸、取舍 2×3 密封反应堆，完成后免费通电工作台并奖 +40¤。</div>
         <div class="v2-cmd-actions">
           <button type="button" class="btn btn-primary btn-launch-hero" id="v2-base-start-tut" data-testid="btn-start-tutorial" ${
             readOnly ? 'disabled' : ''
@@ -127,7 +128,9 @@ export function renderBaseHeroView(
         recTpl.rewardCredits > 0 ? `+${recTpl.rewardCredits}¤` : '自由打捞'
       }</div>
         <div class="v2-cmd-title">${recTpl.name}</div>
-        <div class="v2-cmd-desc">${recTpl.gameplayNote}</div>
+        <div class="v2-cmd-desc">${recTpl.gameplayNote}${
+        recTpl.spaceNote ? ` · ${recTpl.spaceNote}` : ''
+      }</div>
         <div class="v2-cmd-actions">
           <button type="button" class="btn btn-primary btn-launch-hero" id="v2-base-launch-rec" data-testid="btn-start-recommended" ${
             readOnly ? 'disabled' : ''
@@ -179,55 +182,71 @@ export function renderBaseHeroView(
         </div>`
       : '';
 
-  const utilityDockHtml = `
-    <div class="v2-base-utility-col">
-      ${campaignBannerHtml}
-      ${activeRelicStripHtml}
+  const nextGoalHtml = isTutorialFocus
+    ? ''
+    : `
       <button type="button" class="v2-next-goal-pill ${nextGoal.ready ? 'is-ready' : ''}" id="v2-base-next-goal">
         <span class="v2-goal-k">${nextGoal.ready ? '下一步就绪' : '下一个基地目标'}</span>
         <strong>${nextGoal.title}</strong>
         <small>${nextGoal.detail}</small>
       </button>
+    `;
+
+  const utilityDockHtml = `
+    <div class="v2-base-utility-col">
+      ${campaignBannerHtml}
+      ${activeRelicStripHtml}
+      ${nextGoalHtml}
       <div class="v2-station-dock" role="toolbar" aria-label="空间站功能区">
         <button type="button" class="v2-dock-btn" id="v2-dock-wh" data-testid="btn-open-warehouse">
           ${svgIcon('warehouse', 17)}
           <span>设备工坊</span>
-          <small class="num">${p.equipmentWarehouse.length}/${warehouseCap} · ${p.salvageParts}零件${
-    p.pendingGiftQueue.length > 0 ? ` +${p.pendingGiftQueue.length}` : ''
-  }</small>
+          ${
+            isTutorialFocus
+              ? ''
+              : `<small class="num">${p.equipmentWarehouse.length}/${warehouseCap} · ${p.salvageParts}零件${
+                  p.pendingGiftQueue.length > 0 ? ` +${p.pendingGiftQueue.length}` : ''
+                }</small>`
+          }
         </button>
         <button type="button" class="v2-dock-btn" id="v2-dock-fac" data-testid="btn-open-facilities">
           ${svgIcon('wrench', 17)}
           <span>设施扩建</span>
-          <small class="num">${p.unlockedShips.length}/${V2_SHIP_ORDER.length} 舰</small>
+          ${isTutorialFocus ? '' : `<small class="num">${p.unlockedShips.length}/${V2_SHIP_ORDER.length} 舰</small>`}
         </button>
         <button type="button" class="v2-dock-btn" id="v2-dock-relics" data-testid="btn-open-relics">
           ${svgIcon('museum', 17)}
           <span>藏品馆</span>
-          <small class="num">${relicSum.restoredCount}/${relicSum.totalCount}</small>
+          ${isTutorialFocus ? '' : `<small class="num">${relicSum.restoredCount}/${relicSum.totalCount}</small>`}
         </button>
         <button type="button" class="v2-dock-btn" id="v2-dock-codex" data-testid="btn-open-codex">
           ${svgIcon('book', 17)}
           <span>图鉴</span>
-          <small class="num">${p.blueprints.length}/${V2_ALL_EQUIPMENT_KINDS.length} 蓝图</small>
+          ${isTutorialFocus ? '' : `<small class="num">${p.blueprints.length}/${V2_ALL_EQUIPMENT_KINDS.length} 蓝图</small>`}
         </button>
         <button type="button" class="v2-dock-btn" id="v2-dock-career" data-testid="btn-open-career">
           ${
-            claimableAchCount > 0
+            !isTutorialFocus && claimableAchCount > 0
               ? `<span class="v3-dock-badge-dot" aria-label="可领取成就">${claimableAchCount}</span>`
               : ''
           }
           ${svgIcon('medal', 17)}
           <span>生涯档案</span>
-          <small class="num">${p.achievementsUnlocked.length}/18 成就</small>
+          ${isTutorialFocus ? '' : `<small class="num">${p.achievementsUnlocked.length}/18 成就</small>`}
         </button>
       </div>
     </div>
   `;
 
   overlayEl.innerHTML = `
-    <div class="v3-overlay-screen v2-base-screen-root" data-testid="base-screen">
-      <div class="scene-stage-tag">${svgIcon('beacon', 13)} 星际拆解站 · 点击站内设施或下方指令泊位管理</div>
+    <div class="v3-overlay-screen v2-base-screen-root ${
+      isTutorialFocus ? 'is-tutorial-focus' : ''
+    }" data-testid="base-screen" data-tutorial-focus="${isTutorialFocus ? 'true' : 'false'}">
+      <div class="scene-stage-tag">${svgIcon('beacon', 13)} ${
+    isTutorialFocus
+      ? '星际拆解站 · 首航待命，点击下方启动首航教学'
+      : '星际拆解站 · 点击站内设施或下方指令泊位管理'
+  }</div>
       <div data-slot="docking-notice">${dockingHtml}</div>
       <div class="v2-base-hero-hud">
         ${commandCardHtml}

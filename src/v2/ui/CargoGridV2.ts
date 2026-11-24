@@ -27,7 +27,12 @@ import {
   validateV2Placement,
 } from '../domain/inventoryV2';
 import { getAnyV2ItemDef } from '../domain/itemCatalog';
-import { computeV2BayHash, type V2TacticalDelta } from '../domain/tacticalDelta';
+import {
+  computeV2BayHash,
+  computeV2ItemSacrificePreview,
+  summarizeV2MissionSacrificeOptions,
+  type V2TacticalDelta,
+} from '../domain/tacticalDelta';
 import type {
   V2CargoBayState,
   V2ItemInstance,
@@ -1284,6 +1289,24 @@ export class CargoGridV2Component {
       this.lastStats !== null &&
       this.lastStats.powerCellBoostedIds.includes(sel.item.instanceId);
     const hasPrepareRemove = Boolean(this.callbacks.onPrepareRemoveItem);
+    let sacrificeText = '';
+    if (editable && !this.prepareMode && this.bay) {
+      if (sel.zone === 'grid' && sel.item.category !== 'mission') {
+        const pv = computeV2ItemSacrificePreview(this.bay, sel.item.instanceId);
+        if (pv) {
+          sacrificeText = `若舍弃，将损失：${pv.fullLabel}`;
+        }
+      } else if (
+        sel.zone === 'staging' &&
+        (sel.item.category === 'mission' || sel.item.origin === 'mission')
+      ) {
+        const missionSummary = summarizeV2MissionSacrificeOptions(this.bay);
+        if (missionSummary?.needsSpace && missionSummary.summaryText) {
+          sacrificeText = `腾舱${missionSummary.summaryText}`;
+        }
+      }
+    }
+
     const deltaKeyPart = delta
       ? `${delta.positiveImpact ? 1 : 0}|${delta.synergyLine}|${delta.combatDeltaLine}|${delta.spaceLine}|${
           delta.recommendedSpot
@@ -1295,7 +1318,7 @@ export class CargoGridV2Component {
       sel.item.quality
     }:${sel.item.origin}:${sel.item.fixedValue}|e=${editable ? 1 : 0}|pm=${
       this.prepareMode ? 1 : 0
-    }|pr=${hasPrepareRemove ? 1 : 0}|pb=${isSelectedPowerBoosted ? 1 : 0}|d=${deltaKeyPart}`;
+    }|pr=${hasPrepareRemove ? 1 : 0}|pb=${isSelectedPowerBoosted ? 1 : 0}|d=${deltaKeyPart}|sac=${sacrificeText}`;
     if (this.lastInspectorStateKey === stateKey) return;
     this.lastInspectorStateKey = stateKey;
     box.style.display = '';
@@ -1311,6 +1334,10 @@ export class CargoGridV2Component {
       : `<div class="inspector-desc">${def.summary}${
           sel.item.fixedValue > 0 ? ` · 回收估价 <strong>${sel.item.fixedValue}¤</strong>` : ''
         }</div>`;
+
+    const sacrificeHtml = sacrificeText
+      ? `<div class="v2-sacrifice-preview" data-testid="sacrifice-preview">${sacrificeText}</div>`
+      : '';
 
     box.innerHTML = `
       <div class="inspector-main">
@@ -1335,6 +1362,7 @@ export class CargoGridV2Component {
             }
           </div>
           ${deltaHtml}
+          ${sacrificeHtml}
         </div>
       </div>
       ${

@@ -129,11 +129,11 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
     expect(enter.ok).toBe(true);
     run = { ...enter.run, hp: 20 };
 
-    // Reactor fuel grants +2 fuel (8 -> 10)
+    // Reactor fuel grants +2 fuel (8 -> 10) and auto-skips empty ARRANGE directly to MAP (S02)
     const fuelRes = resolveV2WreckChoice(run, 'reactor_fuel', ['core']);
     expect(fuelRes.ok).toBe(true);
     expect(fuelRes.run.fuel).toBe(10);
-    expect(fuelRes.run.phase).toBe('ARRANGE');
+    expect(fuelRes.run.phase).toBe('MAP');
     expect(fuelRes.run.graph.nodes['L1B'].wreck?.chosenRoom).toBe('reactor_fuel');
 
     // Re-claiming same wreck is rejected (idempotent)
@@ -149,10 +149,11 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
     const refusedFuel = resolveV2WreckChoice(fullFuelRun, 'reactor_fuel', ['core']);
     expect(refusedFuel.ok).toBe(false);
 
-    // Reactor repair grants +8 HP (20 -> 28)
+    // Reactor repair grants +8 HP (20 -> 28) and auto-skips empty ARRANGE directly to MAP (S02)
     const repairRes = resolveV2WreckChoice(run, 'reactor_repair', ['core']);
     expect(repairRes.ok).toBe(true);
     expect(repairRes.run.hp).toBe(28);
+    expect(repairRes.run.phase).toBe('MAP');
     expect(repairRes.run.graph.nodes['L1B'].wreck?.chosenRoom).toBe('reactor_repair');
   });
 

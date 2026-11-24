@@ -12,8 +12,10 @@ import * as combatV2 from './combatV2';
 import { getReachableNextNodeIds } from './encounter';
 import {
   areV2PlacedItemsAdjacent,
+  findFirstLegalV2Placement,
   removeV2ItemById,
   validateV2Placement,
+  verifyV2SpatialConflict,
 } from './inventoryV2';
 import { getAnyV2ItemDef } from './itemCatalog';
 import type {
@@ -760,4 +762,321 @@ export function computeV2PlacementTacticalDelta(params: {
     positiveImpact: cmp.positive || currentLinks.length > 0,
   };
   return cacheAndReturnDelta(eqCacheKey, gridResult);
+}
+
+export type V2CombatThreatTier = 'steady' | 'strained' | 'danger' | 'lethal';
+
+export interface V2CombatThreatClassification {
+  readonly tier: V2CombatThreatTier;
+  readonly label: '稳' | '吃力' | '危险' | '致命';
+  readonly riskClass: 'ok' | 'warn' | 'risk';
+}
+
+/**
+ * Pure qualitative combat threat tier classifier shared across Map route forecasts,
+ * first-voyage fork warnings (S01), and Layer-1 threat badges (S06).
+ */
+export function classifyV2CombatThreat(
+  sim: { readonly outcome: 'victory' | 'defeat'; readonly playerFinalHp: number },
+  maxHp: number
+): V2CombatThreatClassification {
+  if (sim.outcome !== 'victory' || sim.playerFinalHp <= 0) {
+    return { tier: 'lethal', label: '致命', riskClass: 'risk' };
+  }
+  const ratio = sim.playerFinalHp / Math.max(1, maxHp);
+  if (ratio < 0.35) {
+    return { tier: 'danger', label: '危险', riskClass: 'risk' };
+  }
+  if (ratio < 0.6) {
+    return { tier: 'strained', label: '吃力', riskClass: 'warn' };
+  }
+  return { tier: 'steady', label: '稳', riskClass: 'ok' };
+}
+
+export interface V2ItemSacrificePreview {
+  readonly instanceId: string;
+  readonly name: string;
+  readonly freedCells: number;
+  readonly firepowerLoss: number;
+  readonly shieldLoss: number;
+  readonly repairLoss: number;
+  readonly valueLoss: number;
+  readonly impactSummary: string;
+  readonly fullLabel: string;
+}
+
+export interface V2MissionSacrificeSummary {
+  readonly missionItemName: string;
+  readonly needsSpace: boolean;
+  readonly needsRearrangeOnly: boolean;
+  readonly options: readonly V2ItemSacrificePreview[];
+  readonly summaryText: string;
+}
+
+function getEffectiveFirepowerForSacrifice(
+  stats: ReturnType<typeof calculateV2BuildStats>
+): number {
+  let total = stats.nominalRound1SingleDmg;
+  for (const h of stats.heavies) {
+    if (!h.firesOnOddRounds) {
+      total += Math.round(h.baseDamage / 2);
+    }
+  }
+  return total;
+}
+
+function buildSacrificePreviewFromStatsDelta(
+  item: V2ItemInstance,
+  name: string,
+  freedCells: number,
+  statsBefore: ReturnType<typeof calculateV2BuildStats>,
+  statsAfter: ReturnType<typeof calculateV2BuildStats>
+): V2ItemSacrificePreview {
+  const firepowerLoss = Math.max(
+    0,
+    getEffectiveFirepowerForSacrifice(statsBefore) - getEffectiveFirepowerForSacrifice(statsAfter)
+  );
+  const shieldLoss = Math.max(0, statsBefore.effectiveShield - statsAfter.effectiveShield);
+  const repairLoss = Math.max(0, statsBefore.effectiveRepair - statsAfter.effectiveRepair);
+  const valueLoss =
+    item.origin === 'loot' || item.origin === 'owned' ? Math.max(0, item.fixedValue) : 0;
+
+  const parts: string[] = [];
+  if (firepowerLoss > 0) parts.push(`火力 -${firepowerLoss}`);
+  if (shieldLoss > 0) parts.push(`护盾 -${shieldLoss}`);
+  if (repairLoss > 0) parts.push(`维修 -${repairLoss}`);
+  if (valueLoss > 0) parts.push(`-${valueLoss}¤`);
+  if (parts.length === 0) {
+    parts.push(item.origin === 'loan' ? '借用 · 0¤' : '0¤');
+  }
+
+  const impactSummary = parts.join('，');
+  return {
+    instanceId: item.instanceId,
+    name,
+    freedCells,
+    firepowerLoss,
+    shieldLoss,
+    repairLoss,
+    valueLoss,
+    impactSummary,
+    fullLabel: `${name}（${impactSummary}）`,
+  };
+}
+
+/**
+ * Pure real-time sacrifice preview for a currently placed cargo bay item (S01).
+ * Evaluates exact firepower / shield / repair / credit loss if discarded.
+ */
+export function computeV2ItemSacrificePreview(
+  bay: V2CargoBayState,
+  instanceId: string
+): V2ItemSacrificePreview | null {
+  const placed = bay.placed.find((p) => p.item.instanceId === instanceId);
+  if (!placed) return null;
+  const def = getAnyV2ItemDef(placed.item.definitionId);
+  if (!def) return null;
+  const freedCells = V2_SHAPES[def.shapeId].cells.length;
+  const statsBefore = calculateV2BuildStats(bay);
+  const statsAfter = calculateV2BuildStats(removeV2ItemById(bay, instanceId));
+  return buildSacrificePreviewFromStatsDelta(
+    placed.item,
+    def.name,
+    freedCells,
+    statsBefore,
+    statsAfter
+  );
+}
+
+/**
+ * Pure real-time mission-item spatial conflict sacrifice summary (S01 Step 4).
+ * When a mission item (e.g. 2x3 Sealed Reactor) sits in staging and cannot fit directly,
+ * uses the exact bitmask conflict solver to enumerate concrete sacrifice losses (`将损失：...`).
+ */
+export function summarizeV2MissionSacrificeOptions(
+  bay: V2CargoBayState
+): V2MissionSacrificeSummary | null {
+  const missionStaged = bay.staging.find(
+    (s) => s.item.category === 'mission' || s.item.origin === 'mission'
+  );
+  if (!missionStaged) return null;
+  const missionDef = getAnyV2ItemDef(missionStaged.item.definitionId);
+  if (!missionDef) return null;
+
+  const directSpot = findFirstLegalV2Placement(bay, missionStaged.item.definitionId);
+  if (directSpot !== null) {
+    return {
+      missionItemName: missionDef.name,
+      needsSpace: false,
+      needsRearrangeOnly: false,
+      options: [],
+      summaryText: '',
+    };
+  }
+
+  const placedWithShapes = bay.placed
+    .map((p) => {
+      const d = getAnyV2ItemDef(p.item.definitionId);
+      return d ? { id: p.item.instanceId, shapeId: d.shapeId, item: p.item } : null;
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null);
+
+  const conflict = verifyV2SpatialConflict(
+    bay.shipId,
+    placedWithShapes.map((x) => ({ id: x.id, shapeId: x.shapeId })),
+    missionDef.shapeId
+  );
+
+  if (conflict.allFitTogether) {
+    return {
+      missionItemName: missionDef.name,
+      needsSpace: false,
+      needsRearrangeOnly: true,
+      options: [],
+      summaryText: '',
+    };
+  }
+
+  const feasibleSet = new Set(conflict.feasibleSingleDiscardIds);
+  const candidatePool =
+    feasibleSet.size > 0
+      ? bay.placed.filter(
+          (p) => p.item.category !== 'mission' && feasibleSet.has(p.item.instanceId)
+        )
+      : bay.placed.filter((p) => p.item.category !== 'mission');
+
+  const previews = candidatePool
+    .map((p) => computeV2ItemSacrificePreview(bay, p.item.instanceId))
+    .filter((pv): pv is V2ItemSacrificePreview => pv !== null)
+    .sort((a, b) => {
+      const aCombat = a.firepowerLoss * 10 + a.shieldLoss * 4 + a.repairLoss * 4;
+      const bCombat = b.firepowerLoss * 10 + b.shieldLoss * 4 + b.repairLoss * 4;
+      if (bCombat !== aCombat) return bCombat - aCombat;
+      if (b.valueLoss !== a.valueLoss) return b.valueLoss - a.valueLoss;
+      if (b.freedCells !== a.freedCells) return b.freedCells - a.freedCells;
+      return a.instanceId.localeCompare(b.instanceId);
+    });
+
+  const summaryText =
+    previews.length > 0 ? `将损失：${previews.map((o) => o.fullLabel).join(' / ')}` : '';
+
+  return {
+    missionItemName: missionDef.name,
+    needsSpace: true,
+    needsRearrangeOnly: false,
+    options: previews,
+    summaryText,
+  };
+}
+
+/**
+ * Summarizes real-time loss of items currently in `bay.discardedThisArrange` (undoable before leaving).
+ */
+export function summarizeV2DiscardedSacrifices(bay: V2CargoBayState): string {
+  if (bay.discardedThisArrange.length === 0) return '';
+
+  // Collect union of grid cells originally occupied by all grid-zone discarded items
+  const originalGridCells = new Set<string>();
+  for (const rec of bay.discardedThisArrange) {
+    if (rec.previousLocation.zone !== 'grid') continue;
+    const def = getAnyV2ItemDef(rec.item.definitionId);
+    if (!def) continue;
+    for (const c of getV2OccupiedCells(
+      def.shapeId,
+      rec.previousLocation.x,
+      rec.previousLocation.y,
+      rec.previousLocation.rotation
+    )) {
+      originalGridCells.add(`${c.x},${c.y}`);
+    }
+  }
+
+  // Keep currently placed items that do not overlap any discarded item's original footprint
+  const basePlaced = bay.placed.filter((p) => {
+    const pd = getAnyV2ItemDef(p.item.definitionId);
+    if (!pd) return true;
+    return !getV2OccupiedCells(pd.shapeId, p.x, p.y, p.rotation).some((c) =>
+      originalGridCells.has(`${c.x},${c.y}`)
+    );
+  });
+
+  // Reconstruct pre-discard bay by re-inserting all grid-zone discarded items
+  let runningBay: V2CargoBayState = { ...bay, placed: [...basePlaced] };
+  const reinsertedIds = new Set<string>();
+  for (const rec of bay.discardedThisArrange) {
+    if (rec.previousLocation.zone !== 'grid') continue;
+    const def = getAnyV2ItemDef(rec.item.definitionId);
+    if (!def) continue;
+    const loc = rec.previousLocation;
+    const check = validateV2Placement(
+      runningBay,
+      rec.item.definitionId,
+      loc.x,
+      loc.y,
+      loc.rotation
+    );
+    if (check.valid) {
+      runningBay = {
+        ...runningBay,
+        placed: [
+          ...runningBay.placed,
+          {
+            item: { ...rec.item, location: 'bay' },
+            x: loc.x,
+            y: loc.y,
+            rotation: loc.rotation,
+          },
+        ],
+      };
+      reinsertedIds.add(rec.item.instanceId);
+    } else {
+      const fallback = findFirstLegalV2Placement(runningBay, rec.item.definitionId);
+      if (fallback) {
+        runningBay = {
+          ...runningBay,
+          placed: [
+            ...runningBay.placed,
+            {
+              item: { ...rec.item, location: 'bay' },
+              x: fallback.x,
+              y: fallback.y,
+              rotation: fallback.rotation,
+            },
+          ],
+        };
+        reinsertedIds.add(rec.item.instanceId);
+      }
+    }
+  }
+
+  // Replay discards sequentially in original discard order (telescoping stats delta)
+  const labels: string[] = [];
+  for (const rec of bay.discardedThisArrange) {
+    const def = getAnyV2ItemDef(rec.item.definitionId);
+    if (!def) continue;
+    const cells = V2_SHAPES[def.shapeId].cells.length;
+    if (rec.previousLocation.zone === 'grid' && reinsertedIds.has(rec.item.instanceId)) {
+      const statsBefore = calculateV2BuildStats(runningBay);
+      const nextRunningBay = removeV2ItemById(runningBay, rec.item.instanceId);
+      const statsAfter = calculateV2BuildStats(nextRunningBay);
+      const pv = buildSacrificePreviewFromStatsDelta(
+        rec.item,
+        def.name,
+        cells,
+        statsBefore,
+        statsAfter
+      );
+      labels.push(pv.fullLabel);
+      runningBay = nextRunningBay;
+    } else {
+      const val =
+        rec.item.origin === 'loot' || rec.item.origin === 'owned'
+          ? Math.max(0, rec.item.fixedValue)
+          : 0;
+      labels.push(
+        `${def.name}（${val > 0 ? `-${val}¤` : rec.item.origin === 'loan' ? '借用 · 0¤' : '0¤'}）`
+      );
+    }
+  }
+  return labels.length > 0 ? `将损失：${labels.join(' / ')}` : '';
 }
