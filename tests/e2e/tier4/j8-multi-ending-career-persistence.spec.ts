@@ -125,7 +125,13 @@ test.describe('Tier 4 · J8: Multi-Ending Collection + Seeded Endless Challenge 
     // =========================================================================
     // Step 4: Full Browser Context Restart — verify Career, Run History, Bestiary & 2/3 Ending Gallery
     // =========================================================================
-    const freshCtx = await browser.newContext({ viewport: { width: 1366, height: 768 } });
+    const origin = new URL(page.url()).origin;
+    await page.close();
+
+    const freshCtx = await browser.newContext({
+      baseURL: origin,
+      viewport: { width: 1366, height: 768 },
+    });
     const freshPage = await freshCtx.newPage();
     const freshMonitor = attachZeroErrorMonitors(freshPage);
     const freshApp = createAppDriver(freshPage);

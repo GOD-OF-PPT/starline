@@ -94,7 +94,7 @@ async function resolveCurrentNodeToMapOrSettlement(
       const arrangeScreen = app.byTestId(TEST_IDS.ARRANGE_SCREEN);
       const leaveBtn = app.byTestId(TEST_IDS.BTN_LEAVE_ARRANGE);
       // Select staging card first so live CargoGridV2 renders #btn-v2-discard, resolving any spatial conflict cleanly
-      const stagingCards = arrangeScreen.locator(
+      const stagingCards = page.locator(
         '.v2-staging-card, .staging-card, [data-testid^="staging-item"]',
       );
       let discardGuard = 0;

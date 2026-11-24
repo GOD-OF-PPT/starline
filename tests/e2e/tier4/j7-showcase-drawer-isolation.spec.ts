@@ -78,7 +78,7 @@ async function advanceShowcaseStation(
     } else if (snap.phase === 'ARRANGE') {
       const arrangeScreen = app.byTestId(TEST_IDS.ARRANGE_SCREEN);
       const leaveBtn = app.byTestId(TEST_IDS.BTN_LEAVE_ARRANGE);
-      const stagingCards = arrangeScreen.locator(
+      const stagingCards = page.locator(
         '.v2-staging-card, .staging-card, [data-testid^="staging-item"]',
       );
       let discardGuard = 0;
