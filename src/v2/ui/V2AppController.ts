@@ -2769,17 +2769,19 @@ export class V2AppController {
 
     this.mountV2CargoBay(run.bay, !readOnly, {
       title: '商人节点船舱整理',
-      getTacticalDelta: (item, zone) =>
-        computeV2PlacementTacticalDelta({
-          run,
-          bay: run.bay,
-          startingHp: run.hp,
-          maxHp: run.maxHp,
-          targetPolicy: run.targetPolicy,
+      getTacticalDelta: (item, zone) => {
+        const activeRun = this.getCurrentRun() ?? run;
+        return computeV2PlacementTacticalDelta({
+          run: activeRun,
+          bay: activeRun.bay,
+          startingHp: activeRun.hp,
+          maxHp: activeRun.maxHp,
+          targetPolicy: activeRun.targetPolicy,
           item,
           zone,
           stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
-        }),
+        });
+      },
       onChange: (nextBay) => {
         if (!this.canMutate()) return;
         const curRun = this.getCurrentRun();
@@ -2892,17 +2894,19 @@ export class V2AppController {
           ? this.arrangePhaseView.getInspectorSlot() ??
             this.leftPanelEl.querySelector<HTMLElement>('#v3-arrange-inspector-slot')
           : null,
-      getTacticalDelta: (item, zone) =>
-        computeV2PlacementTacticalDelta({
-          run,
-          bay: run.bay,
-          startingHp: run.hp,
-          maxHp: run.maxHp,
-          targetPolicy: run.targetPolicy,
+      getTacticalDelta: (item, zone) => {
+        const activeRun = this.getCurrentRun() ?? run;
+        return computeV2PlacementTacticalDelta({
+          run: activeRun,
+          bay: activeRun.bay,
+          startingHp: activeRun.hp,
+          maxHp: activeRun.maxHp,
+          targetPolicy: activeRun.targetPolicy,
           item,
           zone,
           stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
-        }),
+        });
+      },
       onChange: (nextBay) => {
         if (!this.canMutate()) return;
         const curRun = this.getCurrentRun();

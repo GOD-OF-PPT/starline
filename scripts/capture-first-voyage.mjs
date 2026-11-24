@@ -4,7 +4,14 @@ import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
+
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
+const DEFAULT_SEED = 20261121;
+const DEFAULT_PORT = 4181;
+const MAX_STDERR_CHARS = 8_192;
 
 const CHROMIUM_EXECUTABLE_CANDIDATES = [
   '/usr/bin/chromium',
@@ -54,23 +61,53 @@ function resolveChromiumExecutablePath(envPath = process.env.CHROMIUM_PATH) {
   return undefined;
 }
 
+function parseSeedValue(raw, fallback) {
+  if (raw === undefined || raw === null) return fallback;
+  const trimmed = String(raw).trim();
+  if (!/^\d+$/.test(trimmed)) return fallback;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || !Number.isSafeInteger(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return Math.min(0xffffffff, parsed) >>> 0;
+}
+
+function parsePortValue(raw, fallback) {
+  if (raw === undefined || raw === null) return fallback;
+  const trimmed = String(raw).trim();
+  if (!/^\d+$/.test(trimmed)) return fallback;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    return fallback;
+  }
+  return parsed;
+}
+
 function parseArgs(argv) {
   const opts = {
     outDir: process.env.CAPTURE_OUT_DIR || 'output/first-voyage-capture',
-    seed: Number(process.env.CAPTURE_SEED || '20261121') >>> 0,
+    seed: parseSeedValue(process.env.CAPTURE_SEED, DEFAULT_SEED),
     viewports: ['desktop', 'mobile'],
     reducedMotion: process.env.CAPTURE_REDUCED_MOTION === '1',
     preview: process.env.CAPTURE_USE_PREVIEW === '1',
     url: process.env.CAPTURE_URL || '',
-    port: Number(process.env.CAPTURE_PORT || '4181'),
+    port: parsePortValue(process.env.CAPTURE_PORT, DEFAULT_PORT),
   };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--out-dir' && argv[i + 1]) {
       opts.outDir = argv[++i];
-    } else if (arg === '--seed' && argv[i + 1]) {
-      opts.seed = Number(argv[++i]) >>> 0;
+    } else if (arg === '--seed' && argv[i + 1] !== undefined) {
+      const rawSeed = argv[++i];
+      const parsedSeed = parseSeedValue(rawSeed, Number.NaN);
+      if (Number.isFinite(parsedSeed)) {
+        opts.seed = parsedSeed;
+      } else {
+        console.warn(
+          `[capture-first-voyage] Invalid --seed "${rawSeed}"; keeping seed ${opts.seed}`
+        );
+      }
     } else if (arg === '--viewports' && argv[i + 1]) {
       opts.viewports = argv[++i]
         .split(',')
@@ -82,8 +119,16 @@ function parseArgs(argv) {
       opts.preview = true;
     } else if (arg === '--url' && argv[i + 1]) {
       opts.url = argv[++i];
-    } else if (arg === '--port' && argv[i + 1]) {
-      opts.port = Number(argv[++i]);
+    } else if (arg === '--port' && argv[i + 1] !== undefined) {
+      const rawPort = argv[++i];
+      const parsedPort = parsePortValue(rawPort, Number.NaN);
+      if (Number.isFinite(parsedPort)) {
+        opts.port = parsedPort;
+      } else {
+        console.warn(
+          `[capture-first-voyage] Invalid --port "${rawPort}"; keeping port ${opts.port}`
+        );
+      }
     }
   }
 
@@ -93,41 +138,168 @@ function parseArgs(argv) {
   return opts;
 }
 
-function waitForServer(url, timeoutMs = 45_000) {
+function waitForServer(url, timeoutMs = 45_000, serverHandle = null) {
   const deadline = Date.now() + timeoutMs;
+  const proc = serverHandle?.proc ?? null;
+  const getStderr = serverHandle?.getStderr ?? (() => '');
+
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    let activeReq = null;
+
+    const cleanup = () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (activeReq) {
+        activeReq.destroy();
+        activeReq = null;
+      }
+      if (proc) {
+        proc.off('exit', onExit);
+        proc.off('error', onError);
+      }
+    };
+
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    };
+
+    const formatStderrSuffix = () => {
+      const tail = getStderr().trim();
+      return tail ? `\nServer stderr:\n${tail}` : '';
+    };
+
+    const onExit = (code, signal) => {
+      finish(
+        new Error(
+          `Local server exited before becoming ready (code=${code ?? 'null'}, signal=${
+            signal ?? 'null'
+          })${formatStderrSuffix()}`
+        )
+      );
+    };
+
+    const onError = (err) => {
+      finish(
+        new Error(
+          `Failed to spawn local server: ${
+            err instanceof Error ? err.message : String(err)
+          }${formatStderrSuffix()}`
+        )
+      );
+    };
+
+    if (proc) {
+      if (proc.exitCode !== null || proc.signalCode !== null) {
+        onExit(proc.exitCode, proc.signalCode);
+        return;
+      }
+      proc.once('exit', onExit);
+      proc.once('error', onError);
+    }
+
+    const scheduleRetry = (timeoutMessage) => {
+      if (settled) return;
+      if (Date.now() < deadline) {
+        timer = setTimeout(attempt, 250);
+      } else {
+        finish(new Error(`${timeoutMessage}${formatStderrSuffix()}`));
+      }
+    };
+
     const attempt = () => {
+      if (settled) return;
       const req = http.get(url, (res) => {
+        if (activeReq === req) activeReq = null;
         res.resume();
         if (res.statusCode && res.statusCode < 500) {
-          resolve();
-        } else if (Date.now() < deadline) {
-          setTimeout(attempt, 250);
+          finish(null);
         } else {
-          reject(new Error(`Server at ${url} returned HTTP ${res.statusCode}`));
+          scheduleRetry(`Server at ${url} returned HTTP ${res.statusCode}`);
         }
       });
+      activeReq = req;
       req.on('error', () => {
-        if (Date.now() < deadline) {
-          setTimeout(attempt, 250);
-        } else {
-          reject(new Error(`Timed out waiting for server at ${url}`));
-        }
+        if (activeReq === req) activeReq = null;
+        scheduleRetry(`Timed out waiting for server at ${url}`);
       });
     };
+
     attempt();
   });
 }
 
 function startLocalServer(port, preview) {
-  const args = preview
-    ? ['vite', 'preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort']
-    : ['vite', '--host', '127.0.0.1', '--port', String(port), '--strictPort'];
-  const child = spawn('npx', args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
+  const localViteBin = path.join(
+    REPO_ROOT,
+    'node_modules',
+    '.bin',
+    process.platform === 'win32' ? 'vite.cmd' : 'vite'
+  );
+  const useLocalBin = existsSync(localViteBin);
+  const viteArgs = preview
+    ? ['preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort']
+    : ['--host', '127.0.0.1', '--port', String(port), '--strictPort'];
+  const cmd = useLocalBin ? localViteBin : 'npx';
+  const args = useLocalBin ? viteArgs : ['vite', ...viteArgs];
+
+  const proc = spawn(cmd, args, {
+    cwd: REPO_ROOT,
+    detached: process.platform !== 'win32',
+    stdio: ['ignore', 'ignore', 'pipe'],
     env: { ...process.env },
   });
-  return child;
+
+  let stderrTail = '';
+  if (proc.stderr) {
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', (chunk) => {
+      stderrTail += chunk;
+      if (stderrTail.length > MAX_STDERR_CHARS) {
+        stderrTail = stderrTail.slice(-MAX_STDERR_CHARS);
+      }
+    });
+  }
+
+  return { proc, getStderr: () => stderrTail };
+}
+
+function stopLocalServer(serverHandle) {
+  const proc = serverHandle?.proc;
+  if (!proc) return;
+  if (proc.exitCode === null && proc.signalCode === null) {
+    const pid = proc.pid;
+    let signaledGroup = false;
+    if (process.platform !== 'win32' && typeof pid === 'number' && pid > 0) {
+      try {
+        process.kill(-pid, 'SIGTERM');
+        signaledGroup = true;
+      } catch (err) {
+        if (err && typeof err === 'object' && 'code' in err && err.code === 'ESRCH') {
+          signaledGroup = true;
+        }
+      }
+    }
+    if (!signaledGroup && !proc.killed) {
+      try {
+        proc.kill('SIGTERM');
+      } catch {
+        // Ignore already-exited child errors
+      }
+    }
+  }
+  proc.stderr?.destroy();
+  proc.unref();
 }
 
 async function readInspectSnapshot(page) {
@@ -373,13 +545,13 @@ async function main() {
   const executablePath = resolveChromiumExecutablePath();
   const baseUrl = opts.url || `http://127.0.0.1:${opts.port}`;
 
-  let serverProc = null;
+  let serverHandle = null;
   let browser = null;
 
   try {
     if (!opts.url) {
-      serverProc = startLocalServer(opts.port, opts.preview);
-      await waitForServer(baseUrl);
+      serverHandle = startLocalServer(opts.port, opts.preview);
+      await waitForServer(baseUrl, 45_000, serverHandle);
     }
 
     browser = await chromium.launch({
@@ -406,9 +578,7 @@ async function main() {
     if (browser) {
       await browser.close().catch(() => {});
     }
-    if (serverProc && !serverProc.killed) {
-      serverProc.kill('SIGTERM');
-    }
+    stopLocalServer(serverHandle);
   }
 }
 

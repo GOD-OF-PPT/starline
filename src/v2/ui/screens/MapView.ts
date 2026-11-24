@@ -131,7 +131,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
   private sectorStripEl: HTMLElement | null = null;
   private sectorBadgeEl: HTMLElement | null = null;
   private sectorDescEl: HTMLElement | null = null;
-  private lastSectorId = '';
+  private lastSectorId: string | null = null;
 
   private finalMissionSlotEl: HTMLElement | null = null;
   private endlessSlotEl: HTMLElement | null = null;
@@ -139,11 +139,11 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
   private bonusTrackerSlotEl: HTMLElement | null = null;
   private relicSignalSlotEl: HTMLElement | null = null;
 
-  private lastFinalMissionKey = '';
-  private lastEndlessKey = '';
-  private lastNavigatorRevealKey = '';
-  private lastBonusTrackerKey = '';
-  private lastRelicSignalKey = '';
+  private lastFinalMissionKey: string | null = null;
+  private lastEndlessKey: string | null = null;
+  private lastNavigatorRevealKey: string | null = null;
+  private lastBonusTrackerKey: string | null = null;
+  private lastRelicSignalKey: string | null = null;
 
   private gadgetSlotEl: HTMLElement | null = null;
   private gadgetBarEl: HTMLElement | null = null;
@@ -163,9 +163,9 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
   private mobileFocusEl: HTMLElement | null = null;
 
   private renderedGraphMode: 'desktop' | 'mobile' | null = null;
-  private renderedDesktopStructureKey = '';
-  private renderedMobileStructureKey = '';
-  private lastEdgesKey = '';
+  private renderedDesktopStructureKey: string | null = null;
+  private renderedMobileStructureKey: string | null = null;
+  private lastEdgesKey: string | null = null;
 
   private readonly nodeButtons = new Map<string, HTMLButtonElement>();
   private readonly nodeButtonInnerKeys = new Map<string, string>();
@@ -174,7 +174,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
   private emptyHintEl: HTMLElement | null = null;
   private compareGridEl: HTMLElement | null = null;
   private jumpBtnEl: HTMLButtonElement | null = null;
-  private lastJumpBtnKey = '';
+  private lastJumpBtnKey: string | null = null;
   private readonly compareCards = new Map<string, HTMLButtonElement>();
   private readonly compareCardContentKeys = new Map<string, string>();
 
@@ -218,8 +218,8 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
 
   private readonly handleJump = (): void => {
     if (!this.rootEl || !this.jumpBtnEl || this.jumpBtnEl.disabled || !this.latestActions) return;
-    const nid = this.latestEffectiveSelectedId ?? this.jumpBtnEl.dataset.jumpNode ?? null;
-    if (nid) {
+    const nid = this.latestEffectiveSelectedId;
+    if (nid && this.latestReachableSet.has(nid)) {
       this.latestActions.onJumpNode(nid);
     }
   };
@@ -436,21 +436,33 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.footerEl = footerEl;
     this.safeReturnBtn = safeReturnBtn;
     this.abortBtn = abortBtn;
+    this.lastSectorId = null;
+    this.lastFinalMissionKey = null;
+    this.lastEndlessKey = null;
+    this.lastNavigatorRevealKey = null;
+    this.lastBonusTrackerKey = null;
+    this.lastRelicSignalKey = null;
+    this.renderedGraphMode = null;
+    this.renderedDesktopStructureKey = null;
+    this.renderedMobileStructureKey = null;
+    this.lastEdgesKey = null;
+    this.lastJumpBtnKey = null;
+    this.latestEffectiveSelectedId = null;
   }
 
   private syncHtmlSlot(
     slotEl: HTMLElement | null,
-    nextKey: string,
-    prevKey: string,
+    nextKey: string | null,
+    prevKey: string | null,
     buildHtml: () => string
-  ): string {
+  ): string | null {
     if (!slotEl) return prevKey;
-    if (!nextKey) {
-      if (prevKey !== '') {
+    if (nextKey === null) {
+      if (prevKey !== null || slotEl.style.display !== 'none' || slotEl.innerHTML !== '') {
         slotEl.innerHTML = '';
         slotEl.style.display = 'none';
       }
-      return '';
+      return null;
     }
     if (nextKey !== prevKey) {
       slotEl.innerHTML = buildHtml();
@@ -587,7 +599,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     // Optional banners
     this.lastFinalMissionKey = this.syncHtmlSlot(
       this.finalMissionSlotEl,
-      run.isFinalCampaignRun ? '1' : '',
+      run.isFinalCampaignRun ? '1' : null,
       this.lastFinalMissionKey,
       () => `<div class="v3-final-mission-banner" data-testid="final-mission-banner">
         <strong>${svgIcon('star', 13)} 星门重启远征 · 第三幕终局任务</strong>
@@ -599,7 +611,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     const endlessKey =
       endlessThreat >= 1
         ? `${endlessThreat}:${run.seed}:${(run.endlessMutatorIds ?? []).join(',')}`
-        : '';
+        : null;
     this.lastEndlessKey = this.syncHtmlSlot(
       this.endlessSlotEl,
       endlessKey,
@@ -628,7 +640,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
 
     this.lastNavigatorRevealKey = this.syncHtmlSlot(
       this.navigatorRevealSlotEl,
-      fullMapReveal ? String(run.graph.maxLayers) : '',
+      fullMapReveal ? String(run.graph.maxLayers) : null,
       this.lastNavigatorRevealKey,
       () => `<div class="v3-relic-passive-banner" data-testid="relic-passive-navigator">
         ${svgIcon('museum', 13)} <strong>古代星盘常驻被动已生效</strong>：全图 ${run.graph.maxLayers} 层航路情报透视 · 出航燃料 +1
@@ -646,7 +658,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
               failedDiscard ? 'f' : currentlyMet ? 'm' : 'p'
             }`;
           })()
-        : '';
+        : null;
     this.lastBonusTrackerKey = this.syncHtmlSlot(
       this.bonusTrackerSlotEl,
       bonusKey,
@@ -671,7 +683,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       ? `${relicSignalTarget.nodeId}:${relicSignalTarget.layer}:${relicSignalTarget.lane}:${
           relicSignalTarget.relicSignalDefId ?? ''
         }`
-      : '';
+      : null;
     this.lastRelicSignalKey = this.syncHtmlSlot(
       this.relicSignalSlotEl,
       relicSignalKey,
@@ -1100,6 +1112,8 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       if (this.jumpBtnEl.parentNode === this.selectedDeckEl) {
         this.selectedDeckEl.removeChild(this.jumpBtnEl);
       }
+      this.jumpBtnEl.disabled = true;
+      this.jumpBtnEl.removeAttribute('data-jump-node');
       if (this.emptyHintEl.parentNode !== this.selectedDeckEl) {
         this.selectedDeckEl.appendChild(this.emptyHintEl);
       }
@@ -1232,17 +1246,17 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.sectorStripEl = null;
     this.sectorBadgeEl = null;
     this.sectorDescEl = null;
-    this.lastSectorId = '';
+    this.lastSectorId = null;
     this.finalMissionSlotEl = null;
     this.endlessSlotEl = null;
     this.navigatorRevealSlotEl = null;
     this.bonusTrackerSlotEl = null;
     this.relicSignalSlotEl = null;
-    this.lastFinalMissionKey = '';
-    this.lastEndlessKey = '';
-    this.lastNavigatorRevealKey = '';
-    this.lastBonusTrackerKey = '';
-    this.lastRelicSignalKey = '';
+    this.lastFinalMissionKey = null;
+    this.lastEndlessKey = null;
+    this.lastNavigatorRevealKey = null;
+    this.lastBonusTrackerKey = null;
+    this.lastRelicSignalKey = null;
     this.gadgetSlotEl = null;
     this.gadgetBarEl = null;
     this.gadgetBtnsWrapEl = null;
@@ -1257,14 +1271,14 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.dagGridEl = null;
     this.mobileFocusEl = null;
     this.renderedGraphMode = null;
-    this.renderedDesktopStructureKey = '';
-    this.renderedMobileStructureKey = '';
-    this.lastEdgesKey = '';
+    this.renderedDesktopStructureKey = null;
+    this.renderedMobileStructureKey = null;
+    this.lastEdgesKey = null;
     this.selectedDeckEl = null;
     this.emptyHintEl = null;
     this.compareGridEl = null;
     this.jumpBtnEl = null;
-    this.lastJumpBtnKey = '';
+    this.lastJumpBtnKey = null;
     this.footerEl = null;
     this.safeReturnBtn = null;
     this.abortBtn = null;

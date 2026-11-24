@@ -72,6 +72,33 @@ function lruSet<V>(cache: Map<string, V>, key: string, value: V): void {
   cache.set(key, value);
 }
 
+function cloneTacticalDelta(delta: V2TacticalDelta): V2TacticalDelta {
+  if (delta.recommendedSpot) {
+    return {
+      synergyLine: delta.synergyLine,
+      combatDeltaLine: delta.combatDeltaLine,
+      spaceLine: delta.spaceLine,
+      recommendedSpot: {
+        x: delta.recommendedSpot.x,
+        y: delta.recommendedSpot.y,
+        rotation: delta.recommendedSpot.rotation,
+      },
+      positiveImpact: delta.positiveImpact,
+    };
+  }
+  return {
+    synergyLine: delta.synergyLine,
+    combatDeltaLine: delta.combatDeltaLine,
+    spaceLine: delta.spaceLine,
+    positiveImpact: delta.positiveImpact,
+  };
+}
+
+function cacheAndReturnDelta(key: string, value: V2TacticalDelta): V2TacticalDelta {
+  lruSet(deltaCache, key, cloneTacticalDelta(value));
+  return cloneTacticalDelta(value);
+}
+
 function runDeltaSimulation(
   params: Parameters<typeof combatV2.simulateV2Combat>[0]
 ): ReturnType<typeof combatV2.simulateV2Combat> {
@@ -448,7 +475,7 @@ export function computeV2PlacementTacticalDelta(params: {
     const cached = lruGet(deltaCache, nonEqKey);
     if (cached.hit && cached.value) {
       deltaHits += 1;
-      return cached.value;
+      return cloneTacticalDelta(cached.value);
     }
     deltaMisses += 1;
 
@@ -493,8 +520,7 @@ export function computeV2PlacementTacticalDelta(params: {
       };
     }
 
-    lruSet(deltaCache, nonEqKey, result);
-    return result;
+    return cacheAndReturnDelta(nonEqKey, result);
   }
 
   const eqDef = V2_EQUIPMENT_DEFS[params.item.definitionId]!;
@@ -522,7 +548,7 @@ export function computeV2PlacementTacticalDelta(params: {
   const cachedEq = lruGet(deltaCache, eqCacheKey);
   if (cachedEq.hit && cachedEq.value) {
     deltaHits += 1;
-    return cachedEq.value;
+    return cloneTacticalDelta(cachedEq.value);
   }
   deltaMisses += 1;
 
@@ -593,8 +619,7 @@ export function computeV2PlacementTacticalDelta(params: {
         spaceLine: `需 ${cellCount} 格（${V2_SHAPES[eqDef.shapeId].label}）· 当前余 ${freeInfo.free}/${freeInfo.total} 格`,
         positiveImpact: false,
       };
-      lruSet(deltaCache, eqCacheKey, noSpaceResult);
-      return noSpaceResult;
+      return cacheAndReturnDelta(eqCacheKey, noSpaceResult);
     }
 
     const afterStats = calculateV2BuildStats(chosenSpot.bayAfter);
@@ -634,8 +659,7 @@ export function computeV2PlacementTacticalDelta(params: {
       recommendedSpot: { x: chosenSpot.x, y: chosenSpot.y, rotation: chosenSpot.rotation },
       positiveImpact: cmp.positive || activeLinks.length > 0,
     };
-    lruSet(deltaCache, eqCacheKey, stagingResult);
-    return stagingResult;
+    return cacheAndReturnDelta(eqCacheKey, stagingResult);
   }
 
   // Already placed in bay: show active synergy + impact vs removing it + reposition hint if unlinked partner exists!
@@ -735,6 +759,5 @@ export function computeV2PlacementTacticalDelta(params: {
     recommendedSpot,
     positiveImpact: cmp.positive || currentLinks.length > 0,
   };
-  lruSet(deltaCache, eqCacheKey, gridResult);
-  return gridResult;
+  return cacheAndReturnDelta(eqCacheKey, gridResult);
 }

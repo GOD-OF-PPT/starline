@@ -61,9 +61,9 @@ export class ArrangePhaseView implements PhaseView<ArrangeViewProps, ArrangeView
 
   private latestActions: ArrangeViewActions | null = null;
   private latestTerminal = false;
-  private lastMountTagsKey = '';
-  private lastLeaveBtnKey = '';
-  private lastEngineerTitleKey = '';
+  private lastMountTagsKey: string | null = null;
+  private lastLeaveBtnKey: string | null = null;
+  private lastEngineerTitleKey: string | null = null;
 
   private readonly handleToggleShip = (): void => {
     if (!this.rootEl || !this.latestActions) return;
@@ -277,9 +277,9 @@ export class ArrangePhaseView implements PhaseView<ArrangeViewProps, ArrangeView
     this.actionsRowEl = actionsRowEl;
     this.leaveBtn = leaveBtn;
     this.abortBtn = abortBtn;
-    this.lastMountTagsKey = '';
-    this.lastLeaveBtnKey = '';
-    this.lastEngineerTitleKey = '';
+    this.lastMountTagsKey = null;
+    this.lastLeaveBtnKey = null;
+    this.lastEngineerTitleKey = null;
   }
 
   update(props: ArrangeViewProps, actions: ArrangeViewActions): void {
@@ -551,9 +551,9 @@ export class ArrangePhaseView implements PhaseView<ArrangeViewProps, ArrangeView
     this.abortBtn = null;
     this.latestActions = null;
     this.latestTerminal = false;
-    this.lastMountTagsKey = '';
-    this.lastLeaveBtnKey = '';
-    this.lastEngineerTitleKey = '';
+    this.lastMountTagsKey = null;
+    this.lastLeaveBtnKey = null;
+    this.lastEngineerTitleKey = null;
   }
 }
 

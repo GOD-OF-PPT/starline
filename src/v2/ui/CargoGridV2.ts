@@ -207,6 +207,7 @@ export class CargoGridV2Component {
   private lastSynergyRenderKey = '';
   private lastInspectorStateKey = '';
   private renderedSelectedKey = 'none';
+  private lastSelectedItemMetaKey = 'none';
   private lastRenderedEditable: boolean | null = null;
   private lastRenderedPrepareMode: boolean | null = null;
   private callbacksDirty = false;
@@ -456,7 +457,7 @@ export class CargoGridV2Component {
             if (this.destroyed) return;
             if (this.boardEl && !this.boardEl.contains(document.activeElement)) {
               this.gridHasFocus = false;
-              this.cellElements.forEach((el) => el.classList.remove('kb-focused'));
+              this.updateCellVisualFocusAndPreview();
             }
           });
         });
@@ -603,14 +604,16 @@ export class CargoGridV2Component {
       )
       .join(';')}|d=${bay.discardedThisArrange.length}|e=${editable ? 1 : 0}|pm=${nextPrepareMode ? 1 : 0}`;
     const selKey = this.selected ? `${this.selected.zone}:${this.selected.instanceId}` : 'none';
+    const selectedItemMetaKey = this.computeSelectedItemMetaKey();
 
     const bayCombatChanged = isFirstRender || bayCombatHash !== this.lastBayCombatHash;
     const placedUiChanged = isFirstRender || shipChanged || placedUiHash !== this.lastPlacedUiHash;
     const stagingUiChanged = isFirstRender || stagingUiHash !== this.lastStagingUiHash;
     const selectionChanged = selKey !== this.renderedSelectedKey;
+    const selectedItemMetaChanged = selectedItemMetaKey !== this.lastSelectedItemMetaKey;
 
     const stats =
-      bayCombatChanged || !this.lastStats ? calculateV2BuildStats(bay) : this.lastStats;
+      placedUiChanged || !this.lastStats ? calculateV2BuildStats(bay) : this.lastStats;
     this.lastStats = stats;
 
     const forceSnapReplay = this.pendingSnapFeedback;
@@ -649,6 +652,7 @@ export class CargoGridV2Component {
     this.lastPlacedUiHash = placedUiHash;
     this.lastStagingUiHash = stagingUiHash;
     this.renderedSelectedKey = selKey;
+    this.lastSelectedItemMetaKey = selectedItemMetaKey;
     this.lastRenderedEditable = editable;
     this.lastRenderedPrepareMode = nextPrepareMode;
 
@@ -657,10 +661,11 @@ export class CargoGridV2Component {
 
     this.syncInspectorHost();
 
-    const currentDeltaKey = `${bayCombatHash}|${selKey}`;
+    const currentDeltaKey = `${bayCombatHash}|${selectedItemMetaKey}`;
     const deltaInputChanged =
       bayCombatChanged ||
       selectionChanged ||
+      selectedItemMetaChanged ||
       callbacksWereDirty ||
       editableChanged ||
       prepareModeChanged ||
@@ -1132,6 +1137,12 @@ export class CargoGridV2Component {
     }
   }
 
+  private computeSelectedItemMetaKey(): string {
+    const sel = this.getSelectedItemInfo();
+    if (!sel) return 'none';
+    return `${sel.zone}:${sel.item.instanceId}:${sel.item.definitionId}:${sel.item.category}:${sel.item.quality}:${sel.item.origin}:${sel.item.fixedValue}`;
+  }
+
   private scheduleTacticalDeltaUpdate(): void {
     const sel = this.getSelectedItemInfo();
     const provider = this.callbacks.getTacticalDelta;
@@ -1143,16 +1154,20 @@ export class CargoGridV2Component {
     const expectedSelZone = sel.zone;
     const expectedSelId = sel.item.instanceId;
     const expectedSelItem = sel.item;
-    const expectedDeltaKey = `${expectedBayHash}|${expectedSelZone}:${expectedSelId}`;
+    const expectedSelMetaKey = this.computeSelectedItemMetaKey();
+    const expectedDeltaKey = `${expectedBayHash}|${expectedSelMetaKey}`;
 
+    let jobRan = false;
     const runJob = (): void => {
-      this.pendingDeltaHandle = null;
       if (this.destroyed || token !== this.deltaJobToken) return;
+      jobRan = true;
+      this.pendingDeltaHandle = null;
       if (!this.bay || this.lastBayCombatHash !== expectedBayHash) return;
       if (
         !this.selected ||
         this.selected.zone !== expectedSelZone ||
-        this.selected.instanceId !== expectedSelId
+        this.selected.instanceId !== expectedSelId ||
+        this.computeSelectedItemMetaKey() !== expectedSelMetaKey
       ) {
         return;
       }
@@ -1164,7 +1179,8 @@ export class CargoGridV2Component {
         this.lastBayCombatHash !== expectedBayHash ||
         !this.selected ||
         this.selected.zone !== expectedSelZone ||
-        this.selected.instanceId !== expectedSelId
+        this.selected.instanceId !== expectedSelId ||
+        this.computeSelectedItemMetaKey() !== expectedSelMetaKey
       ) {
         return;
       }
@@ -1175,7 +1191,10 @@ export class CargoGridV2Component {
       this.updateCellVisualFocusAndPreview();
     };
 
-    this.pendingDeltaHandle = this.scheduleIdle(runJob);
+    const handle = this.scheduleIdle(runJob);
+    if (!jobRan && !this.destroyed && token === this.deltaJobToken) {
+      this.pendingDeltaHandle = handle;
+    }
   }
 
   private selectItem(
@@ -1188,6 +1207,7 @@ export class CargoGridV2Component {
 
     this.selected = nextSel;
     this.renderedSelectedKey = nextKey;
+    this.lastSelectedItemMetaKey = this.computeSelectedItemMetaKey();
     if (opts?.clearSnap !== false) {
       this.lastSnappedId = null;
       this.pendingSnapFeedback = false;
@@ -1271,11 +1291,11 @@ export class CargoGridV2Component {
             : ''
         }`
       : 'pending';
-    const stateKey = `sel|${sel.zone}:${sel.item.instanceId}:${sel.item.definitionId}:${
-      sel.item.fixedValue
-    }|e=${editable ? 1 : 0}|pm=${this.prepareMode ? 1 : 0}|pr=${hasPrepareRemove ? 1 : 0}|pb=${
-      isSelectedPowerBoosted ? 1 : 0
-    }|d=${deltaKeyPart}`;
+    const stateKey = `sel|${sel.zone}:${sel.item.instanceId}:${sel.item.definitionId}:${sel.item.category}:${
+      sel.item.quality
+    }:${sel.item.origin}:${sel.item.fixedValue}|e=${editable ? 1 : 0}|pm=${
+      this.prepareMode ? 1 : 0
+    }|pr=${hasPrepareRemove ? 1 : 0}|pb=${isSelectedPowerBoosted ? 1 : 0}|d=${deltaKeyPart}`;
     if (this.lastInspectorStateKey === stateKey) return;
     this.lastInspectorStateKey = stateKey;
     box.style.display = '';
@@ -1930,10 +1950,20 @@ export class CargoGridV2Component {
         }
       }
     } else if (e.key === 'Escape') {
-      if (this.carrying || this.selected) {
+      if (this.drag || this.carrying || this.selected) {
         e.preventDefault();
+        const hadActiveDrag = Boolean(this.drag?.active);
+        if (this.drag) {
+          this.clearDragGhost();
+          this.drag = null;
+        }
         this.carrying = false;
+        const hadSelection = this.selected !== null;
         this.selectItem(null, { playSfx: false, clearSnap: true });
+        if (hadActiveDrag && !hadSelection) {
+          this.updateSelectionAndDragClasses();
+          this.renderSynergySvg();
+        }
         this.updateCellVisualFocusAndPreview();
       }
     }

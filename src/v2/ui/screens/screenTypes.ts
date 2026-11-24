@@ -213,7 +213,7 @@ export function buildV2EnemyFormationKey(units: readonly V2EnemyUnitSpec[]): str
           u.pierceRatio * 100
         )}:${u.initialShield ?? 0}:${u.maxShield ?? u.initialShield ?? 0}:${u.isBoss ? 1 : 0}:${
           u.role ?? ''
-        }`
+        }:${u.name}`
     )
     .join(',');
 }
