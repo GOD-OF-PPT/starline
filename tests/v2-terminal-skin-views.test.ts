@@ -567,13 +567,14 @@ import {
 import { createFreshV2SaveData, persistV2SaveData } from '../src/v2/domain/persistenceV2';
 import { calculateV2Settlement } from '../src/v2/domain/settlementV2';
 import { createV2CargoInstance, createV2EquipmentInstance } from '../src/v2/domain/itemCatalog';
-import type {
-  EndingId,
-  V2CargoBayState,
-  V2MapNode,
-  V2ProfileState,
-  V2RunState,
-  V2SaveData,
+import {
+  V2_TAB_LOCK_KEY,
+  type EndingId,
+  type V2CargoBayState,
+  type V2MapNode,
+  type V2ProfileState,
+  type V2RunState,
+  type V2SaveData,
 } from '../src/v2/domain/types';
 import { CargoGridV2Component } from '../src/v2/ui/CargoGridV2';
 import { openV3CampaignModal } from '../src/v2/ui/modals/CampaignModal';
@@ -3833,6 +3834,129 @@ describe('Suite B — M5-4 Stateful PhaseView Lifecycle Across All 12 Upgraded V
 
     view.unmount();
   });
+
+  it('Iter-4 Fix 1 (C2 Failure 1): suppressing same-tick change after uncommitted/rejected Settlement <label> click restores authoritative radiogroup DOM while preserving C5b radio.click() and synthetic single-fire', async () => {
+    const host = env.doc.createElement('div');
+    env.doc.body.appendChild(host);
+
+    const profile = makeRichProfile();
+    const baseRun = makeLaunchedRun(profile, 4444);
+    const lootEq = createV2EquipmentInstance({
+      instanceId: 'iter4_settle_eq',
+      kind: 'shield',
+      quality: 'common',
+      origin: 'loot',
+      acquiredDepth: 1,
+      location: 'bay',
+    });
+    const settleRun: V2RunState = {
+      ...baseRun,
+      phase: 'SETTLEMENT',
+      settlementReason: 'safe_return',
+      bay: {
+        ...baseRun.bay,
+        placed: [...baseRun.bay.placed, { item: lootEq, x: 2, y: 2, rotation: 0 }],
+      },
+    };
+
+    const disps: Record<string, 'sell' | 'store' | 'dismantle'> = {};
+    let mode: 'accept' | 'reject' | 'defer' = 'accept';
+    const calls: Array<{ id: string; disp: string }> = [];
+    const view = new SettlementPhaseView();
+    view.mount(host as unknown as HTMLElement);
+
+    const syncView = () => {
+      const summary = calculateV2Settlement(settleRun, profile, disps);
+      view.update(
+        { run: settleRun, profile, summary, nextGoal: makeNextGoal(), readOnly: false },
+        {
+          onChangeDisposition: (id, disp) => {
+            if (mode === 'reject') return;
+            calls.push({ id, disp });
+            if (mode === 'defer') return;
+            disps[id] = disp as 'sell' | 'store' | 'dismantle';
+            syncView();
+          },
+          onShowcaseRetry: () => {},
+          onShowcaseToBase: () => {},
+          onConfirmSettlement: () => {},
+        }
+      );
+    };
+    syncView();
+
+    const sellLabel = host.querySelector(
+      `label[data-settle-item="${lootEq.instanceId}"][data-settle-disp="sell"]`
+    )!;
+    const storeLabel = host.querySelector(
+      `label[data-settle-item="${lootEq.instanceId}"][data-settle-disp="store"]`
+    )!;
+    const dismantleLabel = host.querySelector(
+      `label[data-settle-item="${lootEq.instanceId}"][data-settle-disp="dismantle"]`
+    )!;
+    const sellRadio = sellLabel.querySelector('input[data-settle-radio]')!;
+    const storeRadio = storeLabel.querySelector('input[data-settle-radio]')!;
+    const dismantleRadio = dismantleLabel.querySelector('input[data-settle-radio]')!;
+
+    expect(sellRadio.checked).toBe(true);
+    expect(sellLabel.classList.contains('is-selected')).toBe(true);
+
+    // (a) Rejected/uncommitted <label> click -> same-tick programmatic radio.checked=true + change:
+    // MUST suppress duplicate callback AND immediately restore authoritative radiogroup DOM (0 desync)!
+    mode = 'reject';
+    storeLabel.click();
+    expect(calls).toHaveLength(0);
+    expect(storeRadio.checked).toBe(false);
+    expect(sellRadio.checked).toBe(true);
+
+    storeRadio.checked = true;
+    storeRadio.dispatchEvent(new MiniEvent('change', { bubbles: true }));
+    expect(calls).toHaveLength(0);
+    expect(storeRadio.checked).toBe(false);
+    expect(storeRadio.getAttribute('checked')).toBeNull();
+    expect(storeLabel.classList.contains('is-selected')).toBe(false);
+    expect(sellRadio.checked).toBe(true);
+    expect(sellRadio.getAttribute('checked')).toBe('');
+    expect(sellLabel.classList.contains('is-selected')).toBe(true);
+
+    // (b) Synthetic label -> input.click(checked=false) -> input.checked=true + change while deferred/uncommitted:
+    // fires strictly ONCE AND keeps DOM 100% synced with authoritative 'sell'!
+    await Promise.resolve();
+    mode = 'defer';
+    dismantleLabel.click();
+    dismantleRadio.dispatchEvent(new MiniEvent('click', { bubbles: true }));
+    dismantleRadio.checked = true;
+    dismantleRadio.dispatchEvent(new MiniEvent('change', { bubbles: true }));
+    expect(calls).toEqual([{ id: lootEq.instanceId, disp: 'dismantle' }]);
+    expect(dismantleRadio.checked).toBe(false);
+    expect(dismantleRadio.getAttribute('checked')).toBeNull();
+    expect(dismantleLabel.classList.contains('is-selected')).toBe(false);
+    expect(sellRadio.checked).toBe(true);
+    expect(sellRadio.getAttribute('checked')).toBe('');
+    expect(sellLabel.classList.contains('is-selected')).toBe(true);
+
+    // (c) C5b preserved: rejected <label> click -> same-tick genuine direct radio.click() (checked=true) commits cleanly once!
+    await Promise.resolve();
+    calls.length = 0;
+    mode = 'reject';
+    storeLabel.click();
+    expect(calls).toHaveLength(0);
+    expect(storeRadio.checked).toBe(false);
+
+    mode = 'accept';
+    storeRadio.checked = true;
+    storeRadio.dispatchEvent(new MiniEvent('click', { bubbles: true }));
+    storeRadio.dispatchEvent(new MiniEvent('change', { bubbles: true }));
+    expect(calls).toEqual([{ id: lootEq.instanceId, disp: 'store' }]);
+    expect(storeRadio.checked).toBe(true);
+    expect(storeRadio.getAttribute('checked')).toBe('');
+    expect(storeLabel.classList.contains('is-selected')).toBe(true);
+    expect(sellRadio.checked).toBe(false);
+    expect(sellRadio.getAttribute('checked')).toBeNull();
+    expect(sellLabel.classList.contains('is-selected')).toBe(false);
+
+    view.unmount();
+  });
 });
 
 // ===========================================================================
@@ -4463,5 +4587,182 @@ describe('Suite C — V2AppController Unified 4-Slot PhaseView Lifecycle Integra
     const craneAfterMigrate = soundPlaySpy.mock.calls.filter(([kind]) => kind === 'craneServo');
     expect(craneAfterMigrate).toHaveLength(0);
     ctrl2.destroy();
+  });
+
+  it('Iter-4 Fix 2 (C2 Failure 2): Multi-Tab Takeover (#v2-btn-takeover) mid-Base-docking clears activeDockingNotice, stops BaseScene docking with 0 craneServo SFX, and renders synced 7777¤ credits in Top HUD', () => {
+    vi.useFakeTimers();
+
+    const baseProfile: V2ProfileState = { ...makeRichProfile(), credits: 600 };
+    const baseRun = makeLaunchedRun(baseProfile, 7474);
+    const settleRun: V2RunState = {
+      ...baseRun,
+      phase: 'SETTLEMENT',
+      settlementReason: 'safe_return',
+      wallet: 150,
+    };
+    const initialSave: V2SaveData = {
+      ...createFreshV2SaveData(),
+      profile: baseProfile,
+      settings: { ...createFreshV2SaveData().settings, reducedMotion: false },
+      activeRun: settleRun,
+    };
+    persistV2SaveData(env.win.localStorage as unknown as Storage, initialSave);
+    env.win.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+    const skipDockingSpy = vi.spyOn(PhaserHost.prototype, 'skipBaseReturnDocking');
+    const soundPlaySpy = vi.spyOn(soundEngine, 'play');
+
+    const ctrl = new V2AppController(env.mountEl as unknown as HTMLElement, {
+      onSwitchToV1: () => {},
+    });
+    ctrl.init();
+
+    // Confirm settlement in non-reducedMotion -> starts BaseScene return docking (600¤ -> creditsAfter)
+    env.mountEl.querySelector('[data-testid="btn-confirm-settlement"]')!.click();
+    const baseScene = (ctrl as unknown as { phaserHost: { baseScene: BaseScene } }).phaserHost
+      .baseScene;
+    expect(baseScene.getDockingVisualSnapshot().active).toBe(true);
+    const noticeBefore = (
+      ctrl as unknown as {
+        activeDockingNotice: { animating: boolean; creditsBefore: number; creditsAfter: number } | null;
+      }
+    ).activeDockingNotice;
+    expect(noticeBefore).not.toBeNull();
+    expect(noticeBefore!.animating).toBe(true);
+    expect(noticeBefore!.creditsBefore).toBe(600);
+    expect(env.mountEl.querySelector('.top-hud')!.textContent).toContain('600¤');
+
+    // Simulate another tab persisting a newer 7777¤ Base save and claiming the multi-tab lock
+    const syncedSave: V2SaveData = {
+      ...createFreshV2SaveData(),
+      profile: { ...makeRichProfile(), credits: 7777 },
+      settings: { ...createFreshV2SaveData().settings, reducedMotion: false },
+      activeRun: null,
+    };
+    persistV2SaveData(env.win.localStorage as unknown as Storage, syncedSave);
+    const foreignLockPayload = JSON.stringify({
+      tabId: 'foreign_tab_iter4_takeover',
+      updatedAt: Date.now(),
+    });
+    env.win.localStorage.setItem(V2_TAB_LOCK_KEY, foreignLockPayload);
+    const storageEv = Object.assign(new MiniEvent('storage'), {
+      key: V2_TAB_LOCK_KEY,
+      newValue: foreignLockPayload,
+    });
+    env.win.dispatchEvent(storageEv);
+
+    const takeoverBtn = env.mountEl.querySelector('#v2-btn-takeover');
+    expect(takeoverBtn).not.toBeNull();
+
+    // Take over mid-docking -> MUST stop BaseScene docking, clear notice, and show authoritative 7777¤!
+    takeoverBtn!.click();
+
+    expect(skipDockingSpy).toHaveBeenCalledTimes(1);
+    expect((ctrl as unknown as { activeDockingNotice: unknown }).activeDockingNotice).toBeNull();
+    expect(baseScene.getDockingVisualSnapshot().active).toBe(false);
+    expect(env.mountEl.querySelector('.docking-overlay-card')).toBeNull();
+
+    const hudText = env.mountEl.querySelector('.top-hud')!.textContent;
+    expect(hudText).toContain('7777¤');
+    expect(hudText).not.toContain('600¤');
+    expect((env.win.__STARLINE_INSPECT__!() as { credits: number }).credits).toBe(7777);
+
+    // Stepping real BaseScene.update() after takeover MUST produce 0 stray craneServo SFX!
+    soundPlaySpy.mockClear();
+    for (let i = 0; i < 6; i++) {
+      baseScene.update(i * 400, 400);
+    }
+    const craneAfterTakeover = soundPlaySpy.mock.calls.filter(([kind]) => kind === 'craneServo');
+    expect(craneAfterTakeover).toHaveLength(0);
+
+    ctrl.destroy();
+  });
+
+  it('Iter-4 Fix 3 (C2 Low Note): toggling reducedMotion ON (#v2-set-motion) mid-Base-docking immediately stops BaseScene docking with 0 further craneServo SFX and finishes the docking notice cleanly', () => {
+    vi.useFakeTimers();
+
+    const baseProfile: V2ProfileState = { ...makeRichProfile(), credits: 600 };
+    const baseRun = makeLaunchedRun(baseProfile, 8484);
+    const settleRun: V2RunState = {
+      ...baseRun,
+      phase: 'SETTLEMENT',
+      settlementReason: 'safe_return',
+      wallet: 150,
+    };
+    const initialSave: V2SaveData = {
+      ...createFreshV2SaveData(),
+      profile: baseProfile,
+      settings: { ...createFreshV2SaveData().settings, reducedMotion: false },
+      activeRun: settleRun,
+    };
+    persistV2SaveData(env.win.localStorage as unknown as Storage, initialSave);
+    env.win.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+    const skipDockingSpy = vi.spyOn(PhaserHost.prototype, 'skipBaseReturnDocking');
+    const soundPlaySpy = vi.spyOn(soundEngine, 'play');
+
+    const ctrl = new V2AppController(env.mountEl as unknown as HTMLElement, {
+      onSwitchToV1: () => {},
+    });
+    ctrl.init();
+
+    // Confirm settlement in non-reducedMotion -> starts BaseScene return docking
+    env.mountEl.querySelector('[data-testid="btn-confirm-settlement"]')!.click();
+    const baseScene = (ctrl as unknown as { phaserHost: { baseScene: BaseScene } }).phaserHost
+      .baseScene;
+    expect(baseScene.getDockingVisualSnapshot().active).toBe(true);
+    const notice = (
+      ctrl as unknown as {
+        activeDockingNotice: {
+          animating: boolean;
+          progress: number;
+          creditsBefore: number;
+          creditsAfter: number;
+        } | null;
+      }
+    ).activeDockingNotice;
+    expect(notice).not.toBeNull();
+    expect(notice!.animating).toBe(true);
+    expect(notice!.progress).toBe(0);
+    expect(env.mountEl.querySelector('#v2-skip-dock')).not.toBeNull();
+
+    // Open Settings and toggle reducedMotion ON mid-docking
+    env.mountEl.querySelector('#v2-hud-settings')!.click();
+    env.mountEl.querySelector('#v2-set-motion')!.click();
+
+    expect(env.doc.body.classList.contains('reduced-motion')).toBe(true);
+    expect(skipDockingSpy).toHaveBeenCalledTimes(1);
+    expect(baseScene.getDockingVisualSnapshot().active).toBe(false);
+
+    // Docking notice cleanly finishes (animating === false, progress === 1, Close CTA visible, final credits in HUD)
+    const noticeAfter = (
+      ctrl as unknown as {
+        activeDockingNotice: {
+          animating: boolean;
+          progress: number;
+          creditsAfter: number;
+        } | null;
+      }
+    ).activeDockingNotice;
+    expect(noticeAfter).not.toBeNull();
+    expect(noticeAfter!.animating).toBe(false);
+    expect(noticeAfter!.progress).toBe(1);
+    expect(env.mountEl.querySelector('#v2-skip-dock')).toBeNull();
+    expect(env.mountEl.querySelector('#v2-close-dock')).not.toBeNull();
+    expect(env.mountEl.querySelector('.top-hud')!.textContent).toContain(
+      `${noticeAfter!.creditsAfter}¤`
+    );
+
+    // Stepping real BaseScene.update() after enabling reducedMotion MUST produce 0 craneServo SFX!
+    soundPlaySpy.mockClear();
+    for (let i = 0; i < 6; i++) {
+      baseScene.update(i * 400, 400);
+    }
+    const craneAfterReduced = soundPlaySpy.mock.calls.filter(([kind]) => kind === 'craneServo');
+    expect(craneAfterReduced).toHaveLength(0);
+
+    // Close Settings modal before destroy so shared modalStack stays clean
+    env.mountEl.querySelector('#v2-set-done')!.click();
+    ctrl.destroy();
   });
 });
