@@ -2,53 +2,7 @@
  * Strictly scoped under .v2-shell / .v3-* so legacy V1 (?mode=v1) stays 100% isolated.
  */
 
-/* --- Pre-Combat Desktop Fold-Safe Sticky Layout (1366x768) --- */
-@media (min-width: 860px) and (min-height: 540px) {
-  .v2-shell.phase-combat:not(.phase-combat-live) {
-    height: 100dvh;
-    max-height: 100dvh;
-    overflow: hidden;
-    padding-bottom: 10px;
-  }
-
-  .v2-shell.phase-combat:not(.phase-combat-live) .v2-top-hud,
-  .v2-shell.phase-combat:not(.phase-combat-live) .banners-stack {
-    flex-shrink: 0;
-  }
-
-  .v2-shell.phase-combat:not(.phase-combat-live) .main-layout {
-    flex: 1 1 0;
-    min-height: 0;
-    grid-template-rows: auto minmax(0, 1fr);
-    align-items: stretch;
-  }
-
-  .v2-shell.phase-combat:not(.phase-combat-live) .scene-card {
-    height: 162px;
-  }
-
-  .v2-shell.phase-combat:not(.phase-combat-live) .panel-left {
-    height: 100%;
-    max-height: 100%;
-    min-height: 0;
-    overflow: hidden;
-    padding-bottom: 0;
-  }
-
-  .v2-shell.phase-combat:not(.phase-combat-live) .panel-right {
-    max-height: 100%;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  .v2-shell.phase-combat:not(.phase-combat-live) .v3-panel-scroll-body {
-    flex: 1 1 0;
-    min-height: 0;
-    overflow-y: auto;
-    padding-right: 4px;
-    padding-bottom: 8px;
-  }
-}
+/* Pre-combat full-bleed ShipStage layout is governed centrally by v3-layout.css (.v2-shell.phase-voyage). */
 
 /* --- Pre-Combat Tactical Mode Strip --- */
 .v2-shell .v3-tactical-mode-strip {

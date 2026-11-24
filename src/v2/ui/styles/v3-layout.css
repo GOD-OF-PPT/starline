@@ -169,8 +169,7 @@
 }
 
 @media (min-width: 860px) and (min-height: 540px) {
-  .v2-shell.phase-prepare,
-  .v2-shell.phase-settlement {
+  .v2-shell.phase-prepare {
     height: 100dvh;
     max-height: 100dvh;
     overflow: hidden;
@@ -178,14 +177,11 @@
   }
 
   .v2-shell.phase-prepare .v2-top-hud,
-  .v2-shell.phase-settlement .v2-top-hud,
-  .v2-shell.phase-prepare .banners-stack,
-  .v2-shell.phase-settlement .banners-stack {
+  .v2-shell.phase-prepare .banners-stack {
     flex-shrink: 0;
   }
 
-  .v2-shell.phase-prepare .main-layout,
-  .v2-shell.phase-settlement .main-layout {
+  .v2-shell.phase-prepare .main-layout {
     flex: 1 1 0;
     min-height: 0;
     grid-template-rows: auto minmax(0, 1fr);
@@ -196,12 +192,7 @@
     height: 148px;
   }
 
-  .v2-shell.phase-settlement .scene-card {
-    height: 136px;
-  }
-
-  .v2-shell.phase-prepare .panel-left,
-  .v2-shell.phase-settlement .panel-left {
+  .v2-shell.phase-prepare .panel-left {
     height: 100%;
     max-height: 100%;
     min-height: 0;
@@ -209,15 +200,13 @@
     padding-bottom: 0;
   }
 
-  .v2-shell.phase-prepare .panel-right,
-  .v2-shell.phase-settlement .panel-right {
+  .v2-shell.phase-prepare .panel-right {
     max-height: 100%;
     min-height: 0;
     overflow-y: auto;
   }
 
-  .v2-shell.phase-prepare .v3-panel-scroll-body,
-  .v2-shell.phase-settlement .v3-panel-scroll-body {
+  .v2-shell.phase-prepare .v3-panel-scroll-body {
     flex: 1 1 0;
     min-height: 0;
     overflow-y: auto;
@@ -571,4 +560,365 @@
   .v2-shell .v3-map-card-jump-btn {
     min-height: 44px;
   }
+}
+
+/* ==========================================================================
+   S03 — Persistent Stage Layout (ShipStage >=60% + HoldView + ContextDock)
+   Strictly scoped under .v2-shell so Legacy V1 (?mode=v1) stays untouched.
+   ========================================================================== */
+
+.v2-shell .v3-mobile-hold-toggle {
+  display: none;
+}
+
+.v2-shell.phase-voyage {
+  max-width: 100%;
+  width: 100%;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  padding: env(safe-area-inset-top, 0px) 10px calc(8px + env(safe-area-inset-bottom, 0px)) 10px;
+  gap: 6px;
+  box-sizing: border-box;
+}
+
+.v2-shell .v2-top-hud.is-voyage-slim {
+  flex-shrink: 0;
+  min-height: 40px;
+  padding: 4px 10px;
+  gap: 6px 10px;
+}
+
+.v2-shell .v2-top-hud.is-voyage-slim .hud-pills {
+  gap: 6px;
+}
+
+.v2-shell .v2-top-hud.is-voyage-slim .hud-pill {
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.v2-shell .v2-top-hud.is-voyage-slim .hud-actions {
+  gap: 6px;
+}
+
+.v2-shell.phase-voyage .banners-stack {
+  flex-shrink: 0;
+  max-height: 54px;
+  overflow-y: auto;
+}
+
+.v2-shell.phase-voyage .main-layout {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 10px;
+  box-sizing: border-box;
+}
+
+.v2-shell.phase-voyage .scene-card.v3-ship-stage {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 62dvh;
+  max-height: none;
+  z-index: 1;
+  border-radius: var(--radius-md, 10px);
+  transition: filter 200ms ease, transform 220ms ease, opacity 180ms ease;
+}
+
+.v2-shell.phase-voyage .scene-card.v3-ship-stage.scene-collapsed {
+  display: block;
+  opacity: 0.16;
+  filter: blur(2px) brightness(0.42);
+}
+
+.v2-shell.phase-voyage .scene-card.v3-ship-stage .scene-overlay {
+  z-index: 2;
+}
+
+.v2-shell.phase-voyage.phase-combat-live .scene-card.v3-ship-stage {
+  z-index: 5;
+}
+
+.v2-shell.phase-voyage.phase-combat-live .scene-card.v3-ship-stage .scene-overlay {
+  z-index: 6;
+}
+
+.v2-shell.phase-voyage .panel-left.v3-context-dock,
+.v2-shell.phase-voyage .panel-right.v3-hold-view {
+  position: relative;
+  z-index: 4;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  background: rgba(12, 20, 34, 0.88);
+  backdrop-filter: blur(8px);
+  border-color: rgba(126, 162, 206, 0.32);
+  box-shadow: 0 10px 28px rgba(4, 9, 18, 0.45);
+  overflow-y: auto;
+  overflow-x: hidden;
+  box-sizing: border-box;
+}
+
+.v2-shell.phase-voyage .panel-left.v3-context-dock .v3-sticky-panel-root {
+  height: auto;
+  min-height: 0;
+}
+
+.v2-shell.phase-voyage .panel-left.v3-context-dock .v3-panel-scroll-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  padding-bottom: 6px;
+}
+
+/* Live combat: keep persistent HoldView mounted in DOM without obstructing battle stage */
+.v2-shell.phase-voyage.phase-combat-live .panel-left.v3-context-dock,
+.v2-shell.phase-voyage.phase-combat-live .panel-right.v3-hold-view {
+  position: absolute;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Desktop (1366x768 & standard widescreen) floating ContextDock + persistent HoldView over full-bleed ShipStage */
+@media (min-width: 860px) and (min-height: 501px) {
+  .v2-shell.phase-voyage .main-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(290px, auto);
+    grid-template-rows: minmax(0, 1fr);
+    align-items: end;
+    justify-items: stretch;
+    gap: 12px;
+  }
+
+  .v2-shell.phase-voyage .panel-left.v3-context-dock {
+    grid-column: 1;
+    grid-row: 1;
+    justify-self: start;
+    align-self: end;
+    width: 100%;
+    max-width: 540px;
+    max-height: 62%;
+  }
+
+  .v2-shell.phase-voyage .panel-right.v3-hold-view {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+    align-self: end;
+    width: clamp(290px, 27vw, 370px);
+    max-height: 62%;
+  }
+
+  .v2-shell.phase-voyage.phase-arrange .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage.phase-shop .panel-left.v3-context-dock {
+    max-width: 480px;
+    max-height: calc(100% - 36px);
+  }
+
+  .v2-shell.phase-voyage.phase-arrange .panel-right.v3-hold-view,
+  .v2-shell.phase-voyage.phase-shop .panel-right.v3-hold-view {
+    width: clamp(360px, 34vw, 456px);
+    max-height: calc(100% - 10px);
+  }
+
+  .v2-shell.phase-voyage.phase-map .panel-left.v3-context-dock {
+    max-width: 660px;
+    max-height: 62%;
+  }
+
+  .v2-shell.phase-voyage.phase-map .panel-right.v3-hold-view {
+    width: clamp(300px, 28vw, 384px);
+    max-height: 66%;
+  }
+
+  .v2-shell.phase-voyage.phase-encounter .panel-left.v3-context-dock {
+    max-width: 520px;
+    max-height: 62%;
+  }
+
+  .v2-shell.phase-voyage.phase-encounter .panel-right.v3-hold-view {
+    width: clamp(270px, 24vw, 344px);
+    max-height: 54%;
+  }
+
+  /* Leave upper stage half completely unobstructed for Wreck clamp pins */
+  .v2-shell.phase-voyage.phase-wreck-hero .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage.phase-wreck-hero .panel-right.v3-hold-view {
+    max-height: 45%;
+  }
+
+  .v2-shell.phase-voyage.phase-reward .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage.phase-settlement .panel-left.v3-context-dock {
+    max-width: 580px;
+    max-height: 68%;
+  }
+
+  .v2-shell.phase-voyage.phase-reward .panel-right.v3-hold-view,
+  .v2-shell.phase-voyage.phase-settlement .panel-right.v3-hold-view {
+    width: clamp(270px, 25vw, 350px);
+    max-height: 58%;
+  }
+}
+
+/* Mobile Portrait (390x844 & <=859px): Full-bleed ShipStage dims/recedes when HoldView zooms in */
+@media (max-width: 859px) {
+  .v2-shell {
+    overflow-x: hidden;
+  }
+
+  .v2-shell .v3-mobile-hold-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .v2-shell .v2-top-hud.is-voyage-slim #v2-hud-help,
+  .v2-shell .v2-top-hud.is-voyage-slim #v2-hud-settings,
+  .v2-shell .v2-top-hud.is-voyage-slim #v2-btn-exit-showcase {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .v2-shell.phase-voyage .main-layout {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .v2-shell.phase-voyage.is-hold-zoomed .scene-card.v3-ship-stage {
+    filter: brightness(0.42) saturate(0.75);
+    transform: scale(0.97);
+  }
+
+  .v2-shell.phase-voyage:not(.is-hold-zoomed) .panel-left.v3-context-dock {
+    width: 100%;
+    max-height: 54dvh;
+    z-index: 5;
+  }
+
+  .v2-shell.phase-voyage.phase-wreck-hero:not(.is-hold-zoomed) .panel-left.v3-context-dock {
+    max-height: 44dvh;
+  }
+
+  .v2-shell.phase-voyage:not(.is-hold-zoomed) .panel-right.v3-hold-view {
+    position: absolute;
+    inset: auto 6px 6px 6px;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .v2-shell.phase-voyage.is-hold-zoomed .panel-right.v3-hold-view {
+    order: 1;
+    width: 100%;
+    max-height: 62dvh;
+    z-index: 7;
+  }
+
+  .v2-shell.phase-voyage.is-hold-zoomed.phase-arrange .panel-right.v3-hold-view {
+    max-height: 54dvh;
+  }
+
+  .v2-shell.phase-voyage.is-hold-zoomed.phase-arrange .panel-left.v3-context-dock {
+    order: 2;
+    width: 100%;
+    max-height: 26dvh;
+    z-index: 6;
+  }
+
+  .v2-shell.phase-voyage.is-hold-zoomed:not(.phase-arrange) .panel-left.v3-context-dock {
+    position: absolute;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .v2-shell.phase-voyage .panel-left.v3-context-dock .btn-primary,
+  .v2-shell.phase-voyage .panel-left.v3-context-dock .btn-secondary,
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-safe-return"],
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-jump-node"],
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-start-combat"],
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-pause-auto-combat"],
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-toggle-forecast-details"],
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-leave-arrange"],
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-confirm-settlement"] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .v2-shell.phase-voyage .v2-staging-card,
+  .v2-shell.phase-voyage .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage .panel-right.v3-hold-view {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+}
+
+/* Mobile Landscape (844x390 & short-height landscape): >=80% ShipStage + compact side-by-side floating docks */
+@media (max-height: 500px) and (min-width: 600px) {
+  .v2-shell.phase-voyage {
+    padding: 4px 8px;
+    gap: 4px;
+  }
+
+  .v2-shell .v2-top-hud.is-voyage-slim {
+    min-height: 36px;
+    padding: 2px 8px;
+  }
+
+  .v2-shell .v3-mobile-hold-toggle {
+    display: none;
+  }
+
+  .v2-shell.phase-voyage .main-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.12fr) minmax(240px, 0.88fr);
+    grid-template-rows: minmax(0, 1fr);
+    align-items: end;
+    gap: 8px;
+    padding: 6px;
+  }
+
+  .v2-shell.phase-voyage .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage .panel-right.v3-hold-view {
+    position: relative;
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    z-index: 4;
+    max-height: calc(100% - 16px);
+  }
+
+  .v2-shell.phase-voyage.phase-combat-live .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage.phase-combat-live .panel-right.v3-hold-view {
+    position: absolute;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    z-index: 0;
+  }
+}
+
+body.reduced-motion .v2-shell.phase-voyage .scene-card.v3-ship-stage,
+body.reduced-motion .v2-shell.phase-voyage.is-hold-zoomed .scene-card.v3-ship-stage {
+  transform: none !important;
+  transition: none !important;
 }

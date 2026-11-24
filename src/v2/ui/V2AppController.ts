@@ -264,6 +264,8 @@ export class V2AppController {
   private selectedMapNodeId: string | null = null;
   private selectedWreckHotspot: WreckHotspotId = 'armory';
   private mobileMapShowFull = false;
+  private mobileHoldZoomed = false;
+  private lastViewportPhaseKey: string | null = null;
   private lastCompactViewport = typeof window !== 'undefined' ? window.innerWidth < 860 : false;
   private failedAssetKeys: string[] = [];
 
@@ -599,7 +601,7 @@ export class V2AppController {
 
   private isArrangeSceneCollapsed(): boolean {
     if (this.sceneCollapseOverride !== null) return this.sceneCollapseOverride;
-    return true;
+    return false;
   }
 
   private shouldOfferMigrationPrompt(): boolean {
@@ -765,7 +767,9 @@ export class V2AppController {
     this.mainLayoutEl.className = 'main-layout';
 
     this.sceneWrapEl = document.createElement('section');
-    this.sceneWrapEl.className = 'scene-card';
+    this.sceneWrapEl.className = 'scene-card v3-ship-stage';
+    this.sceneWrapEl.dataset.stageRegion = 'ship-stage';
+    this.sceneWrapEl.dataset.testid = 'ship-stage';
 
     this.sceneCanvasHostEl = document.createElement('div');
     this.sceneCanvasHostEl.className = 'scene-canvas-host';
@@ -777,10 +781,14 @@ export class V2AppController {
     this.sceneWrapEl.appendChild(this.sceneOverlayEl);
 
     this.leftPanelEl = document.createElement('section');
-    this.leftPanelEl.className = 'panel-card panel-left';
+    this.leftPanelEl.className = 'panel-card panel-left v3-context-dock';
+    this.leftPanelEl.dataset.stageRegion = 'context-dock';
+    this.leftPanelEl.dataset.testid = 'context-dock';
 
     this.rightPanelEl = document.createElement('section');
-    this.rightPanelEl.className = 'panel-card panel-right';
+    this.rightPanelEl.className = 'panel-card panel-right v3-hold-view';
+    this.rightPanelEl.dataset.stageRegion = 'hold-view';
+    this.rightPanelEl.dataset.testid = 'hold-view';
 
     this.mainLayoutEl.appendChild(this.sceneWrapEl);
     this.mainLayoutEl.appendChild(this.leftPanelEl);
@@ -815,25 +823,42 @@ export class V2AppController {
     const isEnding = currentScreen === 'ending';
     const isBaseHero = !run && !this.prepareDraft && !isEnding;
     const isPrepare = Boolean(!run && this.prepareDraft && !isEnding);
+    const isVoyage = Boolean(run && !isEnding);
+    const isMap = run?.phase === 'MAP';
+    const isEncounter = run?.phase === 'ENCOUNTER';
     const isArrange = run?.phase === 'ARRANGE';
+    const isReward = run?.phase === 'REWARD';
+    const isShop = run?.phase === 'SHOP';
     const isSettlement = run?.phase === 'SETTLEMENT';
     const isLiveCombat = Boolean(run?.phase === 'ENCOUNTER' && run.activeCombat);
     const isPreCombat = Boolean(run?.phase === 'ENCOUNTER' && curNode?.combat && !run.activeCombat);
     const isWreckHero = Boolean(
       run?.phase === 'ENCOUNTER' && curNode?.type === 'wreck' && !curNode.combat && !run.activeCombat
     );
-    const isMapHero = Boolean(run?.phase === 'MAP');
+    const isMapHero = Boolean(isMap);
+    const phaseKey = `${currentScreen}:${run?.phase ?? ''}:${isLiveCombat ? 'live' : 'idle'}`;
+    if (this.lastViewportPhaseKey !== phaseKey) {
+      this.lastViewportPhaseKey = phaseKey;
+      this.mobileHoldZoomed = false;
+    }
+    const isHoldZoomed = Boolean(isVoyage && !isLiveCombat && (isArrange || this.mobileHoldZoomed));
     const collapsed = isArrange && this.isArrangeSceneCollapsed();
 
     this.sceneWrapEl.classList.toggle('scene-collapsed', collapsed);
     this.appShellEl.classList.toggle('phase-base-hero', isBaseHero);
     this.appShellEl.classList.toggle('phase-prepare', isPrepare);
+    this.appShellEl.classList.toggle('phase-voyage', isVoyage);
+    this.appShellEl.classList.toggle('phase-map', Boolean(isMap));
+    this.appShellEl.classList.toggle('phase-encounter', Boolean(isEncounter));
     this.appShellEl.classList.toggle('phase-arrange', Boolean(isArrange));
+    this.appShellEl.classList.toggle('phase-reward', Boolean(isReward));
+    this.appShellEl.classList.toggle('phase-shop', Boolean(isShop));
     this.appShellEl.classList.toggle('phase-settlement', Boolean(isSettlement));
     this.appShellEl.classList.toggle('phase-combat', isLiveCombat || isPreCombat);
     this.appShellEl.classList.toggle('phase-combat-live', isLiveCombat);
     this.appShellEl.classList.toggle('phase-wreck-hero', isWreckHero);
     this.appShellEl.classList.toggle('phase-map-hero', isMapHero);
+    this.appShellEl.classList.toggle('is-hold-zoomed', isHoldZoomed);
 
     this.appShellEl.dataset.screen = currentScreen;
     this.appShellEl.dataset.phase = run ? run.phase : '';
@@ -1103,8 +1128,11 @@ export class V2AppController {
       `;
     }
 
-    const showCollapseBtn = run?.phase === 'ARRANGE';
-    const collapsed = this.isArrangeSceneCollapsed();
+    const isVoyage = Boolean(run && this.computeCurrentScreen() === 'run');
+    const showMobileHoldToggle = Boolean(
+      isVoyage && run && run.phase !== 'ARRANGE' && !run.activeCombat
+    );
+    this.topHudEl.classList.toggle('is-voyage-slim', isVoyage);
 
     this.topHudEl.innerHTML = `
       <div class="hud-brand">
@@ -1125,10 +1153,12 @@ export class V2AppController {
             : ''
         }
         ${
-          showCollapseBtn
-            ? `<button type="button" class="btn btn-sm btn-secondary" id="v2-btn-toggle-scene">${
-                collapsed ? '展开舰体' : '收起舰体'
-              }</button>`
+          showMobileHoldToggle
+            ? `<button type="button" class="btn btn-sm btn-secondary v3-mobile-hold-toggle ${
+                this.mobileHoldZoomed ? 'active' : ''
+              }" id="v3-btn-toggle-mobile-hold" data-testid="btn-toggle-mobile-hold" aria-pressed="${
+                this.mobileHoldZoomed ? 'true' : 'false'
+              }">${svgIcon('grid', 14)} ${this.mobileHoldZoomed ? '收起船舱' : '船舱'}</button>`
             : ''
         }
         <button type="button" class="btn btn-sm btn-ghost" id="v2-hud-help" aria-label="远航指南">${svgIcon('help', 14)} 指南</button>
@@ -1145,11 +1175,11 @@ export class V2AppController {
       this.awaitingEliteDecision = false;
       this.syncAll();
     });
-    this.topHudEl.querySelector('#v2-btn-toggle-scene')?.addEventListener('click', () => {
-      this.sceneCollapseOverride = !collapsed;
+    this.topHudEl.querySelector('#v3-btn-toggle-mobile-hold')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      this.mobileHoldZoomed = !this.mobileHoldZoomed;
       this.applyViewportClasses();
       this.renderTopHud();
-      this.phaserHost?.resize();
     });
     this.topHudEl.querySelector('#v2-hud-help')?.addEventListener('click', () => {
       soundEngine.play('click');
@@ -2671,9 +2701,12 @@ export class V2AppController {
     if (node.combat) {
       if (run.activeCombat) {
         this.preCombatAutoEngage.reset();
-        this.teardownCargoBay();
         this.leftPanelEl.innerHTML = '';
-        this.rightPanelEl.innerHTML = '';
+        // S03: Keep persistent HoldView (CargoGridV2) mounted & read-only across live combat (0 mid-voyage teardown).
+        this.mountV2CargoBay(run.bay, false, {
+          title: `参战船舱 · ${V2_SHIPS[run.shipId].name}`,
+          statusBadge: '交火中 · 只读',
+        });
         return;
       }
 
