@@ -257,6 +257,7 @@ export class V2AppController {
   private tabGuard: MultiTabGuard;
 
   private sessionLaunchIndex = 0;
+  private destroyed = false;
   private isReadOnlyTab = false;
   private storageError: string | null = null;
   private actionToast: string | null = null;
@@ -362,9 +363,11 @@ export class V2AppController {
 
     this.tabGuard = new MultiTabGuard(
       (isOwner) => {
+        if (this.destroyed || typeof window === 'undefined') return;
         this.isReadOnlyTab = !isOwner;
         if (this.isReadOnlyTab) {
           this.preCombatAutoEngage.pause('readonly');
+          this.cancelInFlightWreckCut();
         }
         this.phaserHost?.setCombatPaused(this.isReadOnlyTab);
         this.syncAll();
@@ -511,7 +514,7 @@ export class V2AppController {
     window.addEventListener('resize', this.handleWindowResize);
     window.addEventListener('orientationchange', this.handleWindowResize);
     if (this.playtestTelemetry.isEnabled()) {
-      this.mountEl.addEventListener('click', this.handlePlaytestMountClick);
+      this.mountEl.addEventListener('click', this.handlePlaytestMountClick, true);
     }
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       document.addEventListener('visibilitychange', this.handleVisibilityChange);
@@ -536,12 +539,13 @@ export class V2AppController {
   }
 
   destroy(): void {
+    this.destroyed = true;
     delete window.__STARLINE_INSPECT__;
     soundEngine.setTrack('none');
     window.removeEventListener('resize', this.handleWindowResize);
     window.removeEventListener('orientationchange', this.handleWindowResize);
     if (this.playtestTelemetry.isEnabled()) {
-      this.mountEl.removeEventListener('click', this.handlePlaytestMountClick);
+      this.mountEl.removeEventListener('click', this.handlePlaytestMountClick, true);
     }
     if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
       document.removeEventListener('visibilitychange', this.handleVisibilityChange);
@@ -2049,13 +2053,19 @@ export class V2AppController {
   private cancelInFlightWreckCut(): void {
     const active = this.inFlightWreckCut;
     if (!active) return;
-    if (active.clampTimerId !== null) window.clearTimeout(active.clampTimerId);
-    if (active.cutTimerId !== null) window.clearTimeout(active.cutTimerId);
-    if (active.flipTimerId !== null) window.clearTimeout(active.flipTimerId);
+    if (typeof window !== 'undefined') {
+      if (active.clampTimerId !== null) window.clearTimeout(active.clampTimerId);
+      if (active.cutTimerId !== null) window.clearTimeout(active.cutTimerId);
+      if (active.flipTimerId !== null) window.clearTimeout(active.flipTimerId);
+      window.removeEventListener('keydown', this.handleWreckCutSkipKey);
+    } else {
+      if (active.clampTimerId !== null) globalThis.clearTimeout(active.clampTimerId);
+      if (active.cutTimerId !== null) globalThis.clearTimeout(active.cutTimerId);
+      if (active.flipTimerId !== null) globalThis.clearTimeout(active.flipTimerId);
+    }
     for (const el of active.flipEls) {
       el.remove();
     }
-    window.removeEventListener('keydown', this.handleWreckCutSkipKey);
     this.inFlightWreckCut = null;
     this.phaserHost?.finishV2WreckCutFx();
   }
@@ -2255,6 +2265,7 @@ export class V2AppController {
     spotId: V2WreckSpotId
   ): void {
     this.cancelInFlightWreckCut();
+    if (this.destroyed || typeof window === 'undefined') return;
     if (!this.canMutate()) {
       this.syncAll();
       return;
@@ -3209,6 +3220,19 @@ export class V2AppController {
       this.mountV2CargoBay(run.bay, false, {
         title: `参战船舱 · ${V2_SHIPS[run.shipId].name}`,
         statusBadge: '战前锁定',
+        getTacticalDelta: (item, zone) => {
+          const activeRun = this.getCurrentRun() ?? run;
+          return computeV2PlacementTacticalDelta({
+            run: activeRun,
+            bay: activeRun.bay,
+            startingHp: activeRun.hp,
+            maxHp: activeRun.maxHp,
+            targetPolicy: activeRun.targetPolicy,
+            item,
+            zone,
+            stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
+          });
+        },
       });
       return;
     }
@@ -3585,7 +3609,9 @@ export class V2AppController {
   private cancelSettlementRollup(): void {
     this.settlementRollup.cancel();
     this.settledRollupRunId = null;
-    window.removeEventListener('keydown', this.handleSettlementRollupKey);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('keydown', this.handleSettlementRollupKey);
+    }
   }
 
   private buildDockingCargoItems(

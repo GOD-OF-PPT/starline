@@ -1927,7 +1927,9 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
         (dom.window.__STARLINE_INSPECT__?.() as { phaserScene?: string | null } | undefined)
           ?.phaserScene
       ).toBe('V2CombatScene');
-      expect(mountEl.querySelector('[data-testid="map-node-L1A"]')!.textContent).toContain('24HP');
+      const l1CardBefore = mountEl.querySelector('[data-testid="map-node-L1A"]')!;
+      expect(l1CardBefore.getAttribute('data-preview-final-hp')).toBe('24');
+      expect(l1CardBefore.textContent).not.toContain('24HP');
       showStageSpy.mockClear();
       updateVisualSpy.mockClear();
       sceneUpdateVisualSpy.mockClear();
@@ -1949,8 +1951,14 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
         new MiniEvent('pointerup', { bubbles: true, clientX: dropPt.x, clientY: dropPt.y })
       );
 
-      // Forecast updated LIVE from 24HP (3轮) -> 26HP (2轮), 0 destroys, 0 remounts, 0 stage resets!
-      expect(mountEl.querySelector('[data-testid="map-node-L1A"]')!.textContent).toContain('26HP');
+      // Forecast updated LIVE from 24HP -> 26HP (via data-preview-final-hp & on-demand Details Drawer), 0 destroys, 0 remounts, 0 stage resets!
+      const l1CardAfter = mountEl.querySelector('[data-testid="map-node-L1A"]')!;
+      expect(l1CardAfter.getAttribute('data-preview-final-hp')).toBe('26');
+      expect(l1CardAfter.textContent).not.toContain('26HP');
+      const detailsBtn = l1CardAfter.querySelector('[data-testid="btn-toggle-forecast-details"]')!;
+      expect(detailsBtn).not.toBeNull();
+      detailsBtn.click();
+      expect(mountEl.querySelector('[data-testid="forecast-details-drawer"]')!.textContent).toContain('26HP');
       expect(mapMountSpy).toHaveBeenCalledTimes(1);
       expect(gridDestroySpy).toHaveBeenCalledTimes(0);
       expect(showStageSpy).toHaveBeenCalledTimes(0);
@@ -3454,6 +3462,8 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       const cutAmbushBtn = ambMount.querySelector('[data-testid="wreck-cut-cargo"]');
       expect(cutAmbushBtn).not.toBeNull();
       cutAmbushBtn!.click();
+      // S08: Advance through the 600ms plasma cut FX before ambush combat pre-view engages
+      vi.advanceTimersByTime(600);
 
       // Ambush switched ENCOUNTER panel directly into pre-combat with 1.5s auto-engage countdown!
       const ambStartBtn = ambMount.querySelector('[data-testid="btn-start-combat"]');
