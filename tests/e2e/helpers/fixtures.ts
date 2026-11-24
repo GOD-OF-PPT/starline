@@ -2194,7 +2194,7 @@ export function presetBossEncounterV3(
     placed: [
       {
         item: createCargoItem({
-          instanceId: `boss_wpn_1_${act}`,
+          instanceId: nextId(`boss_wpn_${act}`),
           definitionId: 'equipment.laser.improved',
           origin: 'owned',
         }),
@@ -2203,7 +2203,7 @@ export function presetBossEncounterV3(
       },
       {
         item: createCargoItem({
-          instanceId: `boss_bat_1_${act}`,
+          instanceId: nextId(`boss_bat_${act}`),
           definitionId: 'equipment.battery.improved',
           origin: 'owned',
         }),
@@ -2212,7 +2212,7 @@ export function presetBossEncounterV3(
       },
       {
         item: createCargoItem({
-          instanceId: `boss_shd_1_${act}`,
+          instanceId: nextId(`boss_shd_${act}`),
           definitionId: 'equipment.shield.improved',
           origin: 'owned',
         }),

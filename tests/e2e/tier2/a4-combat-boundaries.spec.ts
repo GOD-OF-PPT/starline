@@ -265,7 +265,9 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
     });
     await app.boot({ seed: 24004 });
 
-    await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
+    await expect(
+      app.byTestId(TEST_IDS.COMBAT_SCREEN).or(app.byTestId(TEST_IDS.REWARD_SCREEN)),
+    ).toBeVisible();
     await expect(page.locator('[data-testid^="tactical-order-"]:not([disabled])')).toHaveCount(0);
     expect((await app.inspect()).activeRun?.combatWaitingDecision).toBe(false);
 

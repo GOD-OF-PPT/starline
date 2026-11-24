@@ -51,10 +51,7 @@ test.describe('Tier 4 · J4: Legacy V1 (?mode=v1) Coexistence & Non-Interference
     await expect(returnV2Pill).toBeVisible();
 
     // Enter V1 station & launch a V1 expedition unconditionally to exercise V1 persistence path
-    const v1EnterBtn = page
-      .locator('#btn-enter-game, .title-screen button')
-      .or(page.getByRole('button', { name: /进入|开始|继续/ }))
-      .first();
+    const v1EnterBtn = page.locator('#btn-enter-game');
     await expect(v1EnterBtn).toBeVisible();
     await v1EnterBtn.click();
 

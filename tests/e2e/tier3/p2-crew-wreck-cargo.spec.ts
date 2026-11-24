@@ -73,13 +73,22 @@ test.describe('Tier 3 · P2: Named Crew Mastery × Multi-Cut Wreck × Cargo Grid
     await expect(app.gridCell(4, 0)).toHaveAttribute('aria-disabled', 'true');
     await expect(app.gridCell(0, 3)).toHaveAttribute('aria-disabled', 'true');
 
-    // Place extracted staging item cleanly on valid cells (3,1) avoiding blocked cells
-    const stagingCard = page
-      .locator('.staging-card, .v2-staging-card, [data-testid^="staging-item"]')
-      .first();
-    await expect(stagingCard).toBeVisible();
-    await stagingCard.click();
-    await app.gridCell(3, 1).click();
+    // Place all extracted staging items cleanly onto valid cells on heavy_freighter (avoiding blocked cells (4,0) and (0,3))
+    const stagingCardsP1 = page.locator('.staging-card, .v2-staging-card, [data-testid^="staging-item"]');
+    await expect(stagingCardsP1.first()).toBeVisible();
+    for (let step = 0; step < 5 && (await stagingCardsP1.count()) > 0; step += 1) {
+      await stagingCardsP1.first().click();
+      const recPlaceBtn = app
+        .byTestId(TEST_IDS.ARRANGE_SCREEN)
+        .locator('button:not([disabled])')
+        .filter({ hasText: /装入推荐位/ })
+        .first();
+      if (await recPlaceBtn.isVisible()) {
+        await recPlaceBtn.click();
+      } else {
+        await app.gridCell(3, 1).click();
+      }
+    }
 
     await app.leaveArrange();
     const mapSnap = await app.waitForInspect((s) => s.phase === 'MAP', 10_000, 'return to MAP after arrange');
@@ -138,7 +147,7 @@ test.describe('Tier 3 · P2: Named Crew Mastery × Multi-Cut Wreck × Cargo Grid
         afterSwapSave?.activeRun?.activeEngineerOffer?.used === true,
     ).toBe(true);
 
-    // Place swapped equipment adjacent to existing loan_laser_1 (0,0..0,1) -> at (1,1) and verify Tactical Delta updates
+    // Place swapped equipment via recommended unoccupied slot (since (0,0..1,1) hold starter loan_laser_1 & loan_shield_1) and verify Tactical Delta updates
     const stagingCard = page
       .locator('.staging-card, .v2-staging-card, [data-testid^="staging-item"]')
       .first();
@@ -150,8 +159,31 @@ test.describe('Tier 3 · P2: Named Crew Mastery × Multi-Cut Wreck × Cargo Grid
       .first();
     await expect(deltaPanel).toBeVisible();
     const deltaBefore = (await deltaPanel.textContent()) ?? '';
+    const placedBefore =
+      (await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE))?.activeRun?.bay.placed.length ?? 0;
 
-    await app.gridCell(1, 1).click();
+    const placeRecBtn = arrangeScreen
+      .locator('button:not([disabled])')
+      .filter({ hasText: /装入推荐位/ })
+      .first();
+    await expect(placeRecBtn).toBeVisible();
+    await placeRecBtn.click();
+
+    await expect
+      .poll(
+        async () =>
+          (await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE))?.activeRun?.bay.placed.length ?? 0,
+        { timeout: 5_000, message: 'Swapped module should be placed into bay' },
+      )
+      .toBeGreaterThan(placedBefore);
+
+    // Selecting any placed module on the grid now reflects updated removal/post-install Tactical Delta
+    const placedAfter =
+      (await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE))?.activeRun?.bay.placed ?? [];
+    const newestPlaced = placedAfter[placedAfter.length - 1];
+    expect(newestPlaced).toBeDefined();
+    await app.gridCell(newestPlaced!.x, newestPlaced!.y).click();
+
     await expect
       .poll(async () => (await deltaPanel.textContent()) ?? '', {
         timeout: 5_000,
@@ -254,8 +286,22 @@ test.describe('Tier 3 · P2: Named Crew Mastery × Multi-Cut Wreck × Cargo Grid
     await app.cutWreckSpot('reactor');
     await app.extractWreck();
 
-    // Leave arrange back to MAP
+    // Place extracted staging item(s) before leaving Arrange back to MAP
     if ((await app.inspect()).phase === 'ARRANGE') {
+      const stagingCardsP3 = page.locator('.staging-card, .v2-staging-card, [data-testid^="staging-item"]');
+      for (let step = 0; step < 4 && (await stagingCardsP3.count()) > 0; step += 1) {
+        await stagingCardsP3.first().click();
+        const recPlaceBtn = app
+          .byTestId(TEST_IDS.ARRANGE_SCREEN)
+          .locator('button:not([disabled])')
+          .filter({ hasText: /装入推荐位|舍弃/ })
+          .first();
+        if (await recPlaceBtn.isVisible()) {
+          await recPlaceBtn.click();
+        } else {
+          break;
+        }
+      }
       await app.leaveArrange();
     }
 
@@ -349,7 +395,7 @@ test.describe('Tier 3 · P2: Named Crew Mastery × Multi-Cut Wreck × Cargo Grid
     await assertStagingCardsBounded(page);
 
     // Select first staging card so inspector renders discard control, verify undo, then clear overflow to leave
-    const stagingCards = arrangeScreen.locator('.v2-staging-card, .staging-card, [data-testid^="staging-item"]');
+    const stagingCards = page.locator('.v2-staging-card, .staging-card, [data-testid^="staging-item"]');
     await expect(stagingCards.first()).toBeVisible();
     await stagingCards.first().click();
 
@@ -359,9 +405,9 @@ test.describe('Tier 3 · P2: Named Crew Mastery × Multi-Cut Wreck × Cargo Grid
     await expect(discardBtn).toBeVisible();
     await discardBtn.click();
 
-    const undoBtn = arrangeScreen
+    const undoBtn = page
       .locator('#btn-v2-undo-discard')
-      .or(arrangeScreen.getByRole('button', { name: /撤回|撤销/ }))
+      .or(page.getByRole('button', { name: /撤回|撤销/ }))
       .first();
     await expect(undoBtn).toBeVisible();
     await undoBtn.click();

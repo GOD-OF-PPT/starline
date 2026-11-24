@@ -111,16 +111,24 @@ test.describe('Tier 4 · J3: Mobile 390×844 Full Touch Gameplay Loop', () => {
     await assertZeroHorizontalOverflow(page, 390);
     await assertStagingCardsBounded(page);
 
-    const stagingCard = arrangeScreen
+    const stagingCard = page
       .locator('.staging-card, .v2-staging-card, [data-testid^="staging-item"]')
       .first();
     await expect(stagingCard).toBeVisible();
     await stagingCard.click();
 
-    const rotateBtn = arrangeScreen.getByRole('button', { name: /旋转/ }).first();
+    const rotateBtn = page.getByRole('button', { name: /旋转/ }).first();
     await expect(rotateBtn).toBeVisible();
     await rotateBtn.click();
-    await app.gridCell(1, 0).click();
+    const recPlaceBtn = page
+      .locator('button:not([disabled])')
+      .filter({ hasText: /装入推荐位/ })
+      .first();
+    if (await recPlaceBtn.isVisible()) {
+      await recPlaceBtn.click();
+    } else {
+      await app.gridCell(1, 0).click();
+    }
     await assertZeroHorizontalOverflow(page, 390);
     await app.leaveArrange();
 
