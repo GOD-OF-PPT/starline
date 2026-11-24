@@ -1,65 +1,466 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ---------------------------------------------------------------------------
-// Minimal PhaserHost mock ONLY for V2AppController DOM integration tests.
-// All real domain modules, screen views, CargoGridV2, PreCombatAutoEngageController,
-// and V2AppController run unmocked!
+// Minimal Third-Party Phaser WebGL Stub (ONLY 'phaser' is mocked — ALL real
+// project classes: PhaserHost, BaseScene, CombatScene, V2CombatScene,
+// V2AppController, CargoGridV2Component, MapPhaseView, ArrangePhaseView run!)
 // ---------------------------------------------------------------------------
-const phaserHostSpies = vi.hoisted(() => ({
-  showV2Stage: vi.fn(),
-  updateV2ShipVisualSpec: vi.fn(),
-  setCombatPaused: vi.fn(),
-  resize: vi.fn(),
-  destroy: vi.fn(),
-  updateCombatSettings: vi.fn(),
-  showV2BaseScene: vi.fn(),
-  playV2CombatPlayback: vi.fn(),
-  triggerV2WreckCutFx: vi.fn(),
-}));
+const { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, phaserTestHarness } = vi.hoisted(() => {
+  const MOCK_SCENE_STATUS = {
+    PENDING: 0,
+    INIT: 1,
+    START: 2,
+    LOADING: 3,
+    CREATING: 4,
+    RUNNING: 5,
+    PAUSED: 6,
+    SLEEPING: 7,
+    SHUTDOWN: 8,
+    DESTROYED: 9,
+  } as const;
 
-vi.mock('../src/scenes/PhaserHost', () => {
-  class MockPhaserHost {
-    constructor(_host: HTMLElement) {}
-    onBuildingClick(_cb: (id: string) => void): void {}
-    onBerthClick(_cb: () => void): void {}
-    onAssetLoadError(_cb: (keys: string[]) => void): void {}
-    getActiveSceneKey(): string {
-      return 'V2CombatScene';
+  interface MockListener {
+    readonly fn: (...args: unknown[]) => void;
+    readonly ctx: unknown;
+    readonly once: boolean;
+  }
+
+  class MockEventEmitter {
+    private readonly listeners = new Map<string, MockListener[]>();
+
+    on(event: string, fn: (...args: unknown[]) => void, ctx?: unknown): this {
+      const list = this.listeners.get(event) ?? [];
+      list.push({ fn, ctx, once: false });
+      this.listeners.set(event, list);
+      return this;
     }
-    showV2BaseScene(...args: unknown[]): void {
-      phaserHostSpies.showV2BaseScene(...args);
+
+    once(event: string, fn: (...args: unknown[]) => void, ctx?: unknown): this {
+      const list = this.listeners.get(event) ?? [];
+      list.push({ fn, ctx, once: true });
+      this.listeners.set(event, list);
+      return this;
     }
-    showV2Stage(...args: unknown[]): void {
-      phaserHostSpies.showV2Stage(...args);
+
+    off(event: string, fn?: (...args: unknown[]) => void, ctx?: unknown): this {
+      if (!fn) {
+        this.listeners.delete(event);
+        return this;
+      }
+      const list = this.listeners.get(event);
+      if (!list) return this;
+      this.listeners.set(
+        event,
+        list.filter((entry) => !(entry.fn === fn && (ctx === undefined || entry.ctx === ctx)))
+      );
+      return this;
     }
-    updateV2ShipVisualSpec(...args: unknown[]): void {
-      phaserHostSpies.updateV2ShipVisualSpec(...args);
-    }
-    setCombatPaused(...args: unknown[]): void {
-      phaserHostSpies.setCombatPaused(...args);
-    }
-    updateCombatSettings(...args: unknown[]): void {
-      phaserHostSpies.updateCombatSettings(...args);
-    }
-    playV2CombatPlayback(...args: unknown[]): void {
-      phaserHostSpies.playV2CombatPlayback(...args);
-    }
-    triggerV2WreckCutFx(...args: unknown[]): void {
-      phaserHostSpies.triggerV2WreckCutFx(...args);
-    }
-    skipV2CombatPlayback(): void {}
-    playBaseReturnDocking(_opts: unknown): void {}
-    skipBaseReturnDocking(): void {}
-    resize(): void {
-      phaserHostSpies.resize();
-    }
-    destroy(): void {
-      phaserHostSpies.destroy();
+
+    emit(event: string, ...args: unknown[]): boolean {
+      const list = this.listeners.get(event);
+      if (!list || list.length === 0) return false;
+      const snapshot = [...list];
+      this.listeners.set(
+        event,
+        list.filter((entry) => !entry.once)
+      );
+      for (const entry of snapshot) {
+        entry.fn.apply(entry.ctx, args);
+      }
+      return true;
     }
   }
-  return { PhaserHost: MockPhaserHost };
+
+  class MockDisplayObject {
+    scene: MockPhaserScene | null;
+    x: number;
+    y: number;
+    width = 256;
+    height = 128;
+    displayWidth = 256;
+    displayHeight = 128;
+    visible = true;
+    alpha = 1;
+    depth = 0;
+    textureKey: string;
+    text: string;
+    tint: number | null = null;
+    blendMode = 0;
+
+    constructor(scene: MockPhaserScene, x = 0, y = 0, textureKey = '', text = '') {
+      this.scene = scene;
+      this.x = x;
+      this.y = y;
+      this.textureKey = textureKey;
+      this.text = text;
+    }
+
+    get texture(): { readonly key: string } {
+      return { key: this.textureKey };
+    }
+
+    setOrigin(_x?: number, _y?: number): this {
+      return this;
+    }
+    setDepth(d: number): this {
+      this.depth = d;
+      return this;
+    }
+    setVisible(v: boolean): this {
+      this.visible = v;
+      return this;
+    }
+    setAlpha(a: number): this {
+      this.alpha = a;
+      return this;
+    }
+    setBlendMode(mode: number): this {
+      this.blendMode = mode;
+      return this;
+    }
+    setScale(sx: number, sy?: number): this {
+      this.displayWidth = this.width * sx;
+      this.displayHeight = this.height * (sy ?? sx);
+      return this;
+    }
+    setPosition(x: number, y: number): this {
+      this.x = x;
+      this.y = y;
+      return this;
+    }
+    setY(y: number): this {
+      this.y = y;
+      return this;
+    }
+    setAngle(_deg: number): this {
+      return this;
+    }
+    setSize(w: number, h: number): this {
+      this.width = w;
+      this.height = h;
+      this.displayWidth = w;
+      this.displayHeight = h;
+      return this;
+    }
+    setTexture(key: string): this {
+      this.textureKey = key;
+      return this;
+    }
+    setText(t: string): this {
+      this.text = t;
+      return this;
+    }
+    setColor(_c: string): this {
+      return this;
+    }
+    setBackgroundColor(_c: string): this {
+      return this;
+    }
+    setTint(t: number): this {
+      this.tint = t;
+      return this;
+    }
+    setTintFill(t: number): this {
+      this.tint = t;
+      return this;
+    }
+    clearTint(): this {
+      this.tint = null;
+      return this;
+    }
+    setCrop(): this {
+      return this;
+    }
+    setInteractive(_opts?: unknown): this {
+      return this;
+    }
+    on(_event: string, _fn: (...args: unknown[]) => void): this {
+      return this;
+    }
+    off(_event: string, _fn?: (...args: unknown[]) => void): this {
+      return this;
+    }
+    clear(): this {
+      return this;
+    }
+    fillStyle(_c: number, _a?: number): this {
+      return this;
+    }
+    lineStyle(_w: number, _c: number, _a?: number): this {
+      return this;
+    }
+    fillRect(_x: number, _y: number, _w: number, _h: number): this {
+      return this;
+    }
+    strokeRect(_x: number, _y: number, _w: number, _h: number): this {
+      return this;
+    }
+    fillRoundedRect(_x: number, _y: number, _w: number, _h: number, _r?: number): this {
+      return this;
+    }
+    strokeRoundedRect(_x: number, _y: number, _w: number, _h: number, _r?: number): this {
+      return this;
+    }
+    fillCircle(_x: number, _y: number, _r: number): this {
+      return this;
+    }
+    strokeCircle(_x: number, _y: number, _r: number): this {
+      return this;
+    }
+    fillEllipse(_x: number, _y: number, _w: number, _h: number): this {
+      return this;
+    }
+    strokeEllipse(_x: number, _y: number, _w: number, _h: number): this {
+      return this;
+    }
+    lineBetween(_x1: number, _y1: number, _x2: number, _y2: number): this {
+      return this;
+    }
+    beginPath(): this {
+      return this;
+    }
+    moveTo(_x: number, _y: number): this {
+      return this;
+    }
+    lineTo(_x: number, _y: number): this {
+      return this;
+    }
+    closePath(): this {
+      return this;
+    }
+    fillPath(): this {
+      return this;
+    }
+    strokePath(): this {
+      return this;
+    }
+    fillTriangle(): this {
+      return this;
+    }
+    strokeTriangle(): this {
+      return this;
+    }
+    arc(): this {
+      return this;
+    }
+    destroy(): void {
+      this.scene = null;
+    }
+  }
+
+  class MockPhaserScene {
+    readonly sceneKey: string;
+    game!: MockPhaserGame;
+    events = new MockEventEmitter();
+    load = {
+      on: (_event: string, _fn: (...args: unknown[]) => void) => this.load,
+      image: (_key: string, _url: string) => this.load,
+    };
+    textures = {
+      exists: (_key: string) => true,
+    };
+    cameras = {
+      main: {
+        setViewport: () => {},
+        setZoom: () => {},
+        centerOn: () => {},
+        setBackgroundColor: () => {},
+      },
+    };
+    scale = new (class extends MockEventEmitter {
+      width = 640;
+      height = 360;
+      resize(w: number, h: number): void {
+        this.width = w;
+        this.height = h;
+      }
+    })();
+    add = {
+      image: (x: number, y: number, key: string) => new MockDisplayObject(this, x, y, key),
+      text: (x: number, y: number, text: string, _style?: unknown) =>
+        new MockDisplayObject(this, x, y, '', text),
+      graphics: () => new MockDisplayObject(this),
+      zone: (x: number, y: number, w: number, h: number) =>
+        new MockDisplayObject(this, x, y).setSize(w, h),
+    };
+    sys: {
+      isActive: () => boolean;
+      settings: { status: number };
+    };
+    scene: { isActive: () => boolean };
+
+    constructor(config?: { readonly key?: string }) {
+      this.sceneKey = config?.key ?? 'Scene';
+      const isActive = () => Boolean(this.game?.scene.isActive(this.sceneKey));
+      this.sys = {
+        isActive,
+        settings: { status: MOCK_SCENE_STATUS.PENDING },
+      };
+      this.scene = { isActive };
+    }
+
+    init?(_data?: unknown): void;
+    preload?(): void;
+    create?(): void;
+  }
+
+  const phaserTestHarness = {
+    autoReady: true,
+    lastGame: null as MockPhaserGame | null,
+    deferCreateKeys: new Set<string>(),
+  };
+
+  class MockPhaserGame {
+    readonly events = new MockEventEmitter();
+    readonly registryMap = new Map<string, unknown>();
+    readonly registry = {
+      set: (k: string, v: unknown) => {
+        this.registryMap.set(k, v);
+      },
+      get: (k: string) => this.registryMap.get(k),
+    };
+    readonly scale = {
+      width: 640,
+      height: 360,
+      resize: (w: number, h: number) => {
+        this.scale.width = w;
+        this.scale.height = h;
+        this.canvas.width = w;
+        this.canvas.height = h;
+      },
+    };
+    readonly renderer = {
+      width: 640,
+      height: 360,
+      resize: (w: number, h: number) => {
+        this.renderer.width = w;
+        this.renderer.height = h;
+      },
+    };
+    readonly loop = { rawDelta: 16 };
+    readonly canvas: {
+      width: number;
+      height: number;
+      style: Record<string, string>;
+      parentElement: HTMLElement | null;
+    };
+    private readonly sceneMap = new Map<string, MockPhaserScene>();
+    private readonly activeScenes = new Set<string>();
+    readonly startedScenes: { readonly key: string; readonly data: unknown }[] = [];
+
+    readonly scene = {
+      isActive: (key: string) => this.activeScenes.has(key),
+      start: (key: string, data?: unknown) => {
+        this.startedScenes.push({ key, data });
+        const target = this.sceneMap.get(key);
+        if (!target) return;
+        if (
+          target.sys.settings.status >= MOCK_SCENE_STATUS.START &&
+          target.sys.settings.status <= MOCK_SCENE_STATUS.CREATING
+        ) {
+          return;
+        }
+        if (this.activeScenes.has(key)) {
+          this.activeScenes.delete(key);
+          target.sys.settings.status = MOCK_SCENE_STATUS.SHUTDOWN;
+          target.events.emit('shutdown');
+        }
+        target.scale.width = this.scale.width;
+        target.scale.height = this.scale.height;
+        target.sys.settings.status = MOCK_SCENE_STATUS.INIT;
+        target.init?.(data);
+        target.sys.settings.status = MOCK_SCENE_STATUS.LOADING;
+        target.preload?.();
+        if (phaserTestHarness.deferCreateKeys.has(key)) {
+          return;
+        }
+        this.finishPreload(key);
+      },
+      stop: (key: string) => {
+        const target = this.sceneMap.get(key);
+        const isLiveOrStarting =
+          this.activeScenes.has(key) ||
+          (target !== undefined &&
+            target.sys.settings.status >= MOCK_SCENE_STATUS.INIT &&
+            target.sys.settings.status <= MOCK_SCENE_STATUS.RUNNING);
+        if (!isLiveOrStarting) return;
+        this.activeScenes.delete(key);
+        if (target) {
+          target.sys.settings.status = MOCK_SCENE_STATUS.SHUTDOWN;
+          target.events.emit('shutdown');
+        }
+      },
+    };
+
+    constructor(config: {
+      readonly parent?: HTMLElement;
+      readonly width?: number;
+      readonly height?: number;
+      readonly scene?: readonly MockPhaserScene[];
+    }) {
+      const w = config.width ?? 640;
+      const h = config.height ?? 360;
+      this.scale.width = w;
+      this.scale.height = h;
+      this.renderer.width = w;
+      this.renderer.height = h;
+      this.canvas = {
+        width: w,
+        height: h,
+        style: {},
+        parentElement: config.parent ?? null,
+      };
+      for (const sc of config.scene ?? []) {
+        sc.game = this;
+        this.sceneMap.set(sc.sceneKey, sc);
+      }
+      phaserTestHarness.lastGame = this;
+      if (phaserTestHarness.autoReady) {
+        queueMicrotask(() => {
+          this.emitReady();
+        });
+      }
+    }
+
+    finishPreload(key: string): void {
+      const target = this.sceneMap.get(key);
+      if (!target || target.sys.settings.status !== MOCK_SCENE_STATUS.LOADING) return;
+      target.sys.settings.status = MOCK_SCENE_STATUS.CREATING;
+      this.activeScenes.add(key);
+      target.create?.();
+      target.sys.settings.status = MOCK_SCENE_STATUS.RUNNING;
+    }
+
+    emitReady(): void {
+      this.events.emit('ready');
+    }
+
+    destroy(_removeCanvas?: boolean): void {
+      for (const key of [...this.sceneMap.keys()]) {
+        this.scene.stop(key);
+      }
+    }
+  }
+
+  return { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, phaserTestHarness };
 });
 
+vi.mock('phaser', () => ({
+  default: {
+    AUTO: 0,
+    BlendModes: { SKIP_CHECK: -1, NORMAL: 0, ADD: 1, MULTIPLY: 2, SCREEN: 3 },
+    Scale: { NONE: 0, NO_CENTER: 0 },
+    Core: { Events: { READY: 'ready' } },
+    Scenes: {
+      ...MOCK_SCENE_STATUS,
+      Events: { SHUTDOWN: 'shutdown' },
+    },
+    Scene: MockPhaserScene,
+    Game: MockPhaserGame,
+  },
+}));
+
+import { PhaserHost } from '../src/scenes/PhaserHost';
 import { V2_REGULAR_ENCOUNTER_KINDS, buildEncounterUnits } from '../src/v2/data/enemies';
 import { V3_BESTIARY_NOTES } from '../src/v2/data/lore';
 import { V2_TUTORIAL_HINTS, createV2TutorialRun } from '../src/v2/data/tutorialV2';
@@ -71,6 +472,7 @@ import {
   getAvailableContractBoard,
   pickRecommendedV2ContractId,
 } from '../src/v2/domain/contracts';
+import { evaluateWreckHotspotCut } from '../src/v2/domain/dismantle';
 import {
   applyV2EngineerSwap,
   buyV2MerchantOffer,
@@ -90,14 +492,21 @@ import {
 } from '../src/v2/domain/encounter';
 import {
   discardV2Item,
+  findFirstLegalV2Placement,
   placeV2FromStaging,
   removeV2ItemById,
   verifyV2SpatialConflict,
 } from '../src/v2/domain/inventoryV2';
-import { createV2CargoInstance, createV2EquipmentInstance, getAnyV2ItemDef } from '../src/v2/domain/itemCatalog';
+import {
+  createV2CargoInstance,
+  createV2EquipmentInstance,
+  createV3GadgetInstance,
+  getAnyV2ItemDef,
+} from '../src/v2/domain/itemCatalog';
 import { buildFreeFallbackPrepareSlots, launchV2Expedition } from '../src/v2/domain/loadout';
 import {
   createFreshV2SaveData,
+  loadV2SaveData,
   persistV2SaveData,
   validateV2SaveDataDetailed,
 } from '../src/v2/domain/persistenceV2';
@@ -105,9 +514,11 @@ import { applyV2Settlement } from '../src/v2/domain/settlementV2';
 import {
   classifyV2CombatThreat,
   computeV2ItemSacrificePreview,
+  summarizeV2DiscardedSacrifices,
   summarizeV2MissionSacrificeOptions,
 } from '../src/v2/domain/tacticalDelta';
-import type { V2MapNode, V2RunState } from '../src/v2/domain/types';
+import { V2_TAB_LOCK_KEY, type V2MapNode, type V2RunState, type V2SaveData } from '../src/v2/domain/types';
+import { V2CombatScene } from '../src/v2/scenes/V2CombatScene';
 import { CargoGridV2Component } from '../src/v2/ui/CargoGridV2';
 import { ArrangePhaseView } from '../src/v2/ui/screens/ArrangeView';
 import { renderBaseHeroView } from '../src/v2/ui/screens/BaseView';
@@ -127,6 +538,7 @@ class MiniEvent {
   readonly type: string;
   readonly bubbles: boolean;
   readonly key: string;
+  readonly newValue: string | null;
   readonly button: number;
   readonly pointerType: string;
   readonly clientX: number;
@@ -141,6 +553,7 @@ class MiniEvent {
     init: {
       bubbles?: boolean;
       key?: string;
+      newValue?: string | null;
       button?: number;
       pointerType?: string;
       clientX?: number;
@@ -150,6 +563,7 @@ class MiniEvent {
     this.type = type;
     this.bubbles = init.bubbles ?? false;
     this.key = init.key ?? '';
+    this.newValue = init.newValue ?? null;
     this.button = init.button ?? 0;
     this.pointerType = init.pointerType ?? 'mouse';
     this.clientX = init.clientX ?? 0;
@@ -615,10 +1029,9 @@ class MiniWindow extends MiniNode {
   clearInterval(id?: ReturnType<typeof setInterval>): void {
     globalThis.clearInterval(id);
   }
-  requestAnimationFrame(_cb: () => void): number {
-    return 1;
-  }
-  cancelAnimationFrame(_id: number): void {}
+  private nextRafId = 1;
+  requestAnimationFrame = (_cb: () => void): number => this.nextRafId++;
+  cancelAnimationFrame = (_id: number): void => {};
 }
 
 function installMiniDom(): { window: MiniWindow; document: MiniDocument; restore: () => void } {
@@ -633,6 +1046,8 @@ function installMiniDom(): { window: MiniWindow; document: MiniDocument; restore
     Event: g.Event,
     MouseEvent: g.MouseEvent,
     KeyboardEvent: g.KeyboardEvent,
+    requestAnimationFrame: g.requestAnimationFrame,
+    cancelAnimationFrame: g.cancelAnimationFrame,
   };
   const doc = new MiniDocument();
   const win = new MiniWindow(doc);
@@ -645,6 +1060,8 @@ function installMiniDom(): { window: MiniWindow; document: MiniDocument; restore
   g.Event = MiniEvent;
   g.MouseEvent = MiniEvent;
   g.KeyboardEvent = MiniEvent;
+  g.requestAnimationFrame = win.requestAnimationFrame;
+  g.cancelAnimationFrame = win.cancelAnimationFrame;
   return {
     window: win,
     document: doc,
@@ -658,6 +1075,8 @@ function installMiniDom(): { window: MiniWindow; document: MiniDocument; restore
       g.Event = prev.Event;
       g.MouseEvent = prev.MouseEvent;
       g.KeyboardEvent = prev.KeyboardEvent;
+      g.requestAnimationFrame = prev.requestAnimationFrame;
+      g.cancelAnimationFrame = prev.cancelAnimationFrame;
     },
   };
 }
@@ -666,6 +1085,19 @@ function cellCenterPoint(cols: number, rows: number, cx: number, cy: number): { 
   const cellW = 320 / cols;
   const cellH = 320 / rows;
   return { x: cx * cellW + cellW * 0.5, y: cy * cellH + cellH * 0.5 };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+function readLoadedSave(storage: Storage): V2SaveData {
+  const loaded = loadV2SaveData(storage);
+  if (loaded.status !== 'loaded') {
+    throw new Error(`Expected loaded save status, got ${loaded.status}`);
+  }
+  return loaded.data;
 }
 
 function findFormalRunWithNodeType(
@@ -704,6 +1136,9 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
   let dom: ReturnType<typeof installMiniDom>;
 
   beforeEach(() => {
+    phaserTestHarness.autoReady = true;
+    phaserTestHarness.lastGame = null;
+    phaserTestHarness.deferCreateKeys.clear();
     dom = installMiniDom();
     vi.clearAllMocks();
   });
@@ -1000,7 +1435,7 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       expect(settled.profile.tutorialCompleted).toBe(true);
       expect(settled.profile.buildings.workbench).toBe(true);
 
-      // Step 5B: L4B Risk Branch (tutorial_raider 14HP/4dmg + guaranteed cargo.ancient_navigator)
+      // Step 5B: L4B Risk Branch (tutorial_raider 7HP/4穿盾攻/甲2 + guaranteed cargo.ancient_navigator)
       const l4bNode = leaveL3.run.graph.nodes['L4B'];
       expect(l4bNode.combat?.encounterKind).toBe('tutorial_raider');
       expect(l4bNode.hasRelicSignal).toBe(true);
@@ -1330,14 +1765,23 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       expect(bought.ok).toBe(true);
       expect(bought.run.activeEngineerOffer?.used).toBe(false);
       // Place bought item so staging is empty, keeping offer UNUSED -> still enters ARRANGE!
-      const placedInShop = placeV2FromStaging(bought.run.bay, offer.item.instanceId, 2, 0, 0);
-      if (placedInShop.ok) {
-        expect(finishV2MerchantVisit({ ...bought.run, bay: placedInShop.bay }).run.phase).toBe('ARRANGE');
-      }
+      const spot = findFirstLegalV2Placement(bought.run.bay, offer.item.definitionId);
+      expect(spot).not.toBeNull();
+      const placedInShop = placeV2FromStaging(
+        bought.run.bay,
+        offer.item.instanceId,
+        spot!.x,
+        spot!.y,
+        spot!.rotation
+      );
+      expect(placedInShop.ok).toBe(true);
+      expect(placedInShop.bay.staging).toHaveLength(0);
+      expect(finishV2MerchantVisit({ ...bought.run, bay: placedInShop.bay }).run.phase).toBe('ARRANGE');
       // Use engineer swap + discard swapped item -> offer.used === true & empty staging -> MAP!
       const swapped = applyV2EngineerSwap(bought.run, bought.run.activeEngineerOffer!.candidates[0]);
       expect(swapped.ok).toBe(true);
       const droppedSwap = discardV2Item(swapped.run.bay, swapped.run.bay.staging[0].item.instanceId);
+      expect(droppedSwap.ok).toBe(true);
       expect(finishV2MerchantVisit({ ...swapped.run, bay: droppedSwap.bay }).run.phase).toBe('MAP');
       // Sell bought item back to merchant -> expires dangling offer -> MAP!
       const resold = sellV2ItemToMerchant(bought.run, offer.item.instanceId, 'tx_s02_resell');
@@ -1451,7 +1895,7 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       expect(jumped.run.discardedCountThisRun).toBe(1);
     });
 
-    it('allows live CargoGridV2 editing on MAP via syncMapLocal (0 destroys, 0 MapPhaseView remounts, 0 showV2Stage resets, live forecast & staging guard)', () => {
+    it('allows live CargoGridV2 editing on MAP via syncMapLocal (0 destroys, 0 MapPhaseView remounts, 0 showV2Stage resets, real PhaserHost/V2CombatScene hardpoint sync, live forecast & staging guard)', async () => {
       // Build tutorial MAP run with battery initially UNWIRED at (3,3) -> L1A forecast is 24HP (3轮)
       const rawTut = createV2TutorialRun('tut_s02_map_edit');
       const batId = rawTut.bay.staging[0].item.instanceId;
@@ -1465,6 +1909,9 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
 
       const mapMountSpy = vi.spyOn(MapPhaseView.prototype, 'mount');
       const gridDestroySpy = vi.spyOn(CargoGridV2Component.prototype, 'destroy');
+      const showStageSpy = vi.spyOn(PhaserHost.prototype, 'showV2Stage');
+      const updateVisualSpy = vi.spyOn(PhaserHost.prototype, 'updateV2ShipVisualSpec');
+      const sceneUpdateVisualSpy = vi.spyOn(V2CombatScene.prototype, 'updateShipVisualSpec');
 
       const mountEl = dom.document.createElement('div');
       dom.document.body.appendChild(mountEl);
@@ -1472,11 +1919,18 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
         onSwitchToV1: () => {},
       });
       controller.init();
+      await flushMicrotasks();
 
       expect(mapMountSpy).toHaveBeenCalledTimes(1);
+      expect(showStageSpy).toHaveBeenCalledTimes(1);
+      expect(
+        (dom.window.__STARLINE_INSPECT__?.() as { phaserScene?: string | null } | undefined)
+          ?.phaserScene
+      ).toBe('V2CombatScene');
       expect(mountEl.querySelector('[data-testid="map-node-L1A"]')!.textContent).toContain('24HP');
-      phaserHostSpies.showV2Stage.mockClear();
-      phaserHostSpies.updateV2ShipVisualSpec.mockClear();
+      showStageSpy.mockClear();
+      updateVisualSpy.mockClear();
+      sceneUpdateVisualSpy.mockClear();
 
       // Drag/click battery from (3,3) to (1,0) directly on MAP!
       const board = mountEl.querySelector('.v2-cargo-board')!;
@@ -1499,8 +1953,9 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       expect(mountEl.querySelector('[data-testid="map-node-L1A"]')!.textContent).toContain('26HP');
       expect(mapMountSpy).toHaveBeenCalledTimes(1);
       expect(gridDestroySpy).toHaveBeenCalledTimes(0);
-      expect(phaserHostSpies.showV2Stage).toHaveBeenCalledTimes(0);
-      expect(phaserHostSpies.updateV2ShipVisualSpec).toHaveBeenCalled();
+      expect(showStageSpy).toHaveBeenCalledTimes(0);
+      expect(updateVisualSpy).toHaveBeenCalledTimes(1);
+      expect(sceneUpdateVisualSpy).toHaveBeenCalledTimes(1);
 
       // Moving item to staging on MAP disables jump & safe-return buttons with explicit reason!
       const toStagingBtn = mountEl.querySelector('#btn-v2-to-staging');
@@ -1511,6 +1966,7 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       expect(jumpBtn.disabled).toBe(true);
       expect(jumpBtn.textContent).toContain('请先清空暂存区');
       expect(safeBtn.disabled).toBe(true);
+      expect(safeBtn.textContent).toContain('需清空暂存区');
 
       controller.destroy();
     });
@@ -1750,7 +2206,7 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       expect(onEngage).toHaveBeenCalledTimes(0);
     });
 
-    it('enforces startV2CombatAtCurrentNode domain idempotency and V2AppController S05 integration', () => {
+    it('enforces startV2CombatAtCurrentNode domain idempotency and V2AppController S05 integration with real PhaserHost/V2CombatScene playback', async () => {
       // 1. Domain idempotency checks
       const rawTut = createV2TutorialRun('tut_s05_dom');
       const batId = rawTut.bay.staging[0].item.instanceId;
@@ -1777,13 +2233,15 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       );
       expect(claimed.ok).toBe(false);
 
-      // 2. Full V2AppController S05 integration with vi.useFakeTimers()
+      // 2. Full V2AppController S05 integration with vi.useFakeTimers() + real PhaserHost/V2CombatScene
       vi.useFakeTimers();
       const save = { ...createFreshV2SaveData(), activeRun: entered.run };
       persistV2SaveData(dom.window.localStorage as unknown as Storage, save);
       dom.window.sessionStorage.setItem('starline_v2_title_entered', '1');
 
       const startSpy = vi.spyOn(combatV2, 'startV2CombatAtCurrentNode');
+      const showStageSpy = vi.spyOn(PhaserHost.prototype, 'showV2Stage');
+      const sceneSetPlaybackSpy = vi.spyOn(V2CombatScene.prototype, 'setPlayback');
 
       const mountEl = dom.document.createElement('div');
       dom.document.body.appendChild(mountEl);
@@ -1791,6 +2249,12 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
         onSwitchToV1: () => {},
       });
       controller.init();
+      await flushMicrotasks();
+
+      expect(
+        (dom.window.__STARLINE_INSPECT__?.() as { phaserScene?: string | null } | undefined)
+          ?.phaserScene
+      ).toBe('V2CombatScene');
 
       const startBtn = mountEl.querySelector('[data-testid="btn-start-combat"]')!;
       const pauseBtn = mountEl.querySelector('[data-testid="btn-pause-auto-combat"]')!;
@@ -1826,21 +2290,29 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       mountEl.querySelector('[data-testid="btn-pause-auto-combat"]')!.click();
       mountEl.querySelector('#v2-hud-help')!.click();
       expect(mountEl.querySelector('[data-testid="btn-pause-auto-combat"]')!.textContent).toContain('继续自动交火');
-      // Close modal
-      mountEl.querySelector('.modal-close-btn')?.click();
+      // Close modal unconditionally
+      const closeModalBtn = mountEl.querySelector('.modal-close-btn');
+      expect(closeModalBtn).not.toBeNull();
+      closeModalBtn!.click();
       vi.advanceTimersByTime(5000);
       expect(startSpy).toHaveBeenCalledTimes(0);
 
-      // Resume -> let 1500ms expire -> engages strictly ONCE!
+      // Resume -> let 1500ms expire -> engages strictly ONCE & launches real V2CombatScene playback!
+      showStageSpy.mockClear();
+      sceneSetPlaybackSpy.mockClear();
       mountEl.querySelector('[data-testid="btn-pause-auto-combat"]')!.click();
       vi.advanceTimersByTime(1500);
       expect(startSpy).toHaveBeenCalledTimes(1);
+      expect(showStageSpy).toHaveBeenCalledTimes(1);
+      expect(showStageSpy.mock.calls[0][0].simulation).not.toBeNull();
+      expect(sceneSetPlaybackSpy).toHaveBeenCalledTimes(1);
+      expect(sceneSetPlaybackSpy.mock.calls[0][0].simulation).not.toBeNull();
       vi.advanceTimersByTime(5000);
       expect(startSpy).toHaveBeenCalledTimes(1);
+      expect(showStageSpy).toHaveBeenCalledTimes(1);
       controller.destroy();
 
       // 3. Manual click at 300ms + timer race fires strictly ONCE, and destroy() leaks 0 timers
-      startSpy.mockClear();
       persistV2SaveData(dom.window.localStorage as unknown as Storage, save);
       const mountEl2 = dom.document.createElement('div');
       dom.document.body.appendChild(mountEl2);
@@ -1848,15 +2320,22 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
         onSwitchToV1: () => {},
       });
       controller2.init();
+      await flushMicrotasks();
+      startSpy.mockClear();
+      showStageSpy.mockClear();
+      sceneSetPlaybackSpy.mockClear();
       vi.advanceTimersByTime(300);
       mountEl2.querySelector('[data-testid="btn-start-combat"]')!.click();
       expect(startSpy).toHaveBeenCalledTimes(1);
+      expect(showStageSpy).toHaveBeenCalledTimes(1);
+      expect(showStageSpy.mock.calls[0][0].simulation).not.toBeNull();
+      expect(sceneSetPlaybackSpy).toHaveBeenCalledTimes(1);
+      expect(sceneSetPlaybackSpy.mock.calls[0][0].simulation).not.toBeNull();
       vi.advanceTimersByTime(5000);
       expect(startSpy).toHaveBeenCalledTimes(1);
       controller2.destroy();
 
       // Destroy during active countdown leaks 0 calls
-      startSpy.mockClear();
       persistV2SaveData(dom.window.localStorage as unknown as Storage, save);
       const mountEl3 = dom.document.createElement('div');
       dom.document.body.appendChild(mountEl3);
@@ -1864,10 +2343,14 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
         onSwitchToV1: () => {},
       });
       controller3.init();
+      await flushMicrotasks();
+      startSpy.mockClear();
+      showStageSpy.mockClear();
       vi.advanceTimersByTime(500);
       controller3.destroy();
       vi.advanceTimersByTime(5000);
       expect(startSpy).toHaveBeenCalledTimes(0);
+      expect(showStageSpy).toHaveBeenCalledTimes(0);
     });
   });
 
@@ -1958,6 +2441,1031 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
           completedContractIds: ['rescue_std', 'survey_std', 'bounty_std', 'derelict_std'],
         })
       ).toBe('transport_std');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Iteration-2 Hardening & Defect Regression Suite
+  // (C1-D1, C1-D2, [B1], C2-D1, C2-D2, extractV2Wreck, tacticalDelta, Polish)
+  // -------------------------------------------------------------------------
+  describe('Iteration-2 Regression Suite: Domain Guards, L4B Balance, SHOP/Multi-Tab Modals, engageNow & Polish', () => {
+    it('C1-D1: prevents hp <= 0 resurrection in resolveV2EventOption, evaluateWreckHotspotCut, cutV2WreckHotspot, and legacy heal paths', () => {
+      const { run: distressBase, node: distressNode } = findFormalRunWithNodeType('distress', 'free_salvage', 1030);
+      const makeDeadEventRun = (
+        option: NonNullable<V2RunState['activeEvent']>['options'][number],
+        terminal = false
+      ): V2RunState => {
+        const nodeObj: V2MapNode = terminal
+          ? { ...distressNode, nextNodeIds: [], resolved: false }
+          : { ...distressNode, resolved: false };
+        return {
+          ...distressBase,
+          phase: 'ENCOUNTER',
+          currentNodeId: nodeObj.nodeId,
+          visitedNodeIds: [nodeObj.nodeId],
+          hp: 0,
+          bay: { ...distressBase.bay, staging: [] },
+          graph: {
+            ...distressBase.graph,
+            nodes: { ...distressBase.graph.nodes, [nodeObj.nodeId]: nodeObj },
+          },
+          activeEvent: {
+            nodeId: nodeObj.nodeId,
+            eventId: 'c1_d1_dead_evt',
+            title: '死舰事件测试',
+            description: 'hp=0 guard check',
+            resolved: false,
+            chosenIndex: null,
+            options: [option],
+          },
+        };
+      };
+
+      // Non-terminal fallback, terminal fallback, cargo reward, and heal reward at hp=0 -> ALWAYS SETTLEMENT('defeat', hp: 0)
+      const deadNonTerm = resolveV2EventOption(
+        makeDeadEventRun({ index: 0, label: '绕行', costSummary: '无', rewardSummary: '无', isFallback: true }),
+        0,
+        ['core']
+      );
+      expect(deadNonTerm.ok).toBe(true);
+      expect(deadNonTerm.run.hp).toBe(0);
+      expect(deadNonTerm.run.phase).toBe('SETTLEMENT');
+      expect(deadNonTerm.run.settlementReason).toBe('defeat');
+      expect(deadNonTerm.hadHeal).toBe(false);
+
+      const deadTerm = resolveV2EventOption(
+        makeDeadEventRun({ index: 0, label: '终层绕行', costSummary: '无', rewardSummary: '无', isFallback: true }, true),
+        0,
+        ['core']
+      );
+      expect(deadTerm.ok).toBe(true);
+      expect(deadTerm.run.hp).toBe(0);
+      expect(deadTerm.run.phase).toBe('SETTLEMENT');
+      expect(deadTerm.run.settlementReason).toBe('defeat');
+
+      const deadCargo = resolveV2EventOption(
+        makeDeadEventRun({
+          index: 0,
+          label: '捞货',
+          costSummary: '无',
+          rewardSummary: '货',
+          rewardItems: [
+            createV2CargoInstance({
+              instanceId: 'c1_d1_dead_cargo',
+              defId: 'cargo.alloy_bar',
+              origin: 'loot',
+              acquiredDepth: 1,
+              location: 'staging',
+            }),
+          ],
+        }),
+        0,
+        ['core']
+      );
+      expect(deadCargo.ok).toBe(true);
+      expect(deadCargo.run.hp).toBe(0);
+      expect(deadCargo.run.phase).toBe('SETTLEMENT');
+      expect(deadCargo.run.settlementReason).toBe('defeat');
+
+      const deadHeal = resolveV2EventOption(
+        makeDeadEventRun({
+          index: 0,
+          label: '应急抢修',
+          costSummary: '无',
+          rewardSummary: '+12 HP',
+          rewardHp: 12,
+        }),
+        0,
+        ['core']
+      );
+      expect(deadHeal.ok).toBe(true);
+      expect(deadHeal.run.hp).toBe(0);
+      expect(deadHeal.run.phase).toBe('SETTLEMENT');
+      expect(deadHeal.run.settlementReason).toBe('defeat');
+      expect(deadHeal.hadHeal).toBe(false);
+
+      // Wreck cut rejected at hp=0 (including reactor repair), while extractV2Wreck settles cleanly to defeat
+      const { run: wreckBase, node: wreckNode } = findFormalRunWithNodeType('wreck', 'free_salvage', 1010);
+      const deadWreck: V2RunState = {
+        ...wreckBase,
+        phase: 'ENCOUNTER',
+        currentNodeId: wreckNode.nodeId,
+        visitedNodeIds: [wreckNode.nodeId],
+        hp: 0,
+        bay: { ...wreckBase.bay, staging: [] },
+      };
+      const evalDeadCut = evaluateWreckHotspotCut(
+        deadWreck,
+        {
+          nodeId: wreckNode.nodeId,
+          stability: 100,
+          maxStability: 100,
+          cutsMade: 0,
+          extracted: false,
+          ambushTriggered: false,
+          stabilizerActive: false,
+          hotspots: [
+            {
+              spotId: 'reactor',
+              label: '反应堆舱',
+              cut: false,
+              riskHullDamage: 0,
+              riskFuelCost: 0,
+              riskAmbush: false,
+              reactorRepairGain: 8,
+            },
+          ],
+        },
+        'reactor'
+      );
+      expect(evalDeadCut.canCut).toBe(false);
+      expect(evalDeadCut.isLethal).toBe(true);
+
+      const cutDead = cutV2WreckHotspot(deadWreck, 'reactor', ['core'], 'repair');
+      expect(cutDead.ok).toBe(false);
+      expect(cutDead.run.hp).toBe(0);
+
+      const extractedDead = extractV2Wreck(deadWreck);
+      expect(extractedDead.ok).toBe(true);
+      expect(extractedDead.run.hp).toBe(0);
+      expect(extractedDead.run.phase).toBe('SETTLEMENT');
+      expect(extractedDead.run.settlementReason).toBe('defeat');
+
+      // Defensive hp <= 0 heal guards on legacy wreck/distress/combat-reward paths
+      const deadLegacyWreck = resolveV2WreckChoice(deadWreck, 'reactor_repair', ['core']);
+      expect(deadLegacyWreck.ok).toBe(true);
+      expect(deadLegacyWreck.run.hp).toBe(0);
+      expect(deadLegacyWreck.run.phase).toBe('SETTLEMENT');
+      expect(deadLegacyWreck.run.settlementReason).toBe('defeat');
+
+      const deadDistress = resolveV2DistressChoice(
+        {
+          ...distressBase,
+          phase: 'ENCOUNTER',
+          currentNodeId: distressNode.nodeId,
+          visitedNodeIds: [distressNode.nodeId],
+          hp: 0,
+          fuel: 6,
+          bay: { ...distressBase.bay, staging: [] },
+        },
+        'rescue_crew'
+      );
+      expect(deadDistress.ok).toBe(true);
+      expect(deadDistress.run.hp).toBe(0);
+      expect(deadDistress.run.phase).toBe('SETTLEMENT');
+      expect(deadDistress.run.settlementReason).toBe('defeat');
+
+      const { run: cmbBase, node: cmbNode } = findFormalRunWithNodeType('combat', 'free_salvage', 1050);
+      const deadReward = pickV2CombatReward(
+        {
+          ...cmbBase,
+          phase: 'REWARD',
+          currentNodeId: cmbNode.nodeId,
+          visitedNodeIds: [cmbNode.nodeId],
+          hp: 0,
+          bay: { ...cmbBase.bay, staging: [] },
+          pendingReward: {
+            nodeId: cmbNode.nodeId,
+            equipmentOption: createV2EquipmentInstance({
+              instanceId: 'c1_d1_eq',
+              kind: 'shield',
+              quality: 'common',
+              origin: 'loot',
+              acquiredDepth: 1,
+              location: 'staging',
+            }),
+            cargoOption: createV2CargoInstance({
+              instanceId: 'c1_d1_cg',
+              defId: 'cargo.data_box',
+              origin: 'loot',
+              acquiredDepth: 1,
+              location: 'staging',
+            }),
+            repairAmount: 10,
+            chosen: null,
+          },
+        },
+        'repair',
+        ['core']
+      );
+      expect(deadReward.ok).toBe(true);
+      expect(deadReward.run.hp).toBe(0);
+      expect(deadReward.run.phase).toBe('SETTLEMENT');
+      expect(deadReward.run.settlementReason).toBe('defeat');
+    });
+
+    it('C1-D2: L4B tutorial_raider (7HP/4 pierce/armor2) stays 稳 with wired Laser+Battery and is strictly 危险/致命 when Laser is dropped even with Shield or Repair + PowerCell Battery', () => {
+      const tut = createV2TutorialRun('tut_c1_d2');
+      const l4bUnits = tut.graph.nodes['L4B'].combat!.units;
+      expect(l4bUnits).toHaveLength(1);
+      expect(l4bUnits[0].maxHp).toBe(7);
+      expect(l4bUnits[0].damagePerRound).toBe(4);
+      expect(l4bUnits[0].armor).toBe(2);
+      expect(l4bUnits[0].pierceRatio).toBe(1);
+
+      // 1. Wired Laser + Battery -> 稳 (2R / 22HP @ 30HP; 2R / 18HP @ 26HP)
+      const batId = tut.bay.staging[0].item.instanceId;
+      const wired = placeV2FromStaging(tut.bay, batId, 1, 0, 0);
+      expect(wired.ok).toBe(true);
+      const keep30 = combatV2.simulateV2Combat({
+        resultId: 'c1d2_keep30',
+        bay: wired.bay,
+        startingHp: 30,
+        maxHp: 30,
+        units: l4bUnits,
+        targetPolicy: 'weakest',
+        sectorId: 'near_orbit',
+        crewId: 'engineer',
+      });
+      const keep26 = combatV2.simulateV2Combat({
+        resultId: 'c1d2_keep26',
+        bay: wired.bay,
+        startingHp: 26,
+        maxHp: 30,
+        units: l4bUnits,
+        targetPolicy: 'weakest',
+        sectorId: 'near_orbit',
+        crewId: 'engineer',
+      });
+      expect(keep30.outcome).toBe('victory');
+      expect(keep30.roundsCount).toBe(2);
+      expect(keep30.finalPlayerHpAfterRepair).toBe(22);
+      expect(classifyV2CombatThreat({ outcome: keep30.outcome, playerFinalHp: keep30.finalPlayerHpAfterRepair }, 30).label).toBe('稳');
+      expect(keep26.outcome).toBe('victory');
+      expect(keep26.roundsCount).toBe(2);
+      expect(keep26.finalPlayerHpAfterRepair).toBe(18);
+      expect(classifyV2CombatThreat({ outcome: keep26.outcome, playerFinalHp: keep26.finalPlayerHpAfterRepair }, 30).label).toBe('稳');
+
+      // 2. Dropped Laser + L2 Shield + Battery on PowerCell (1,2) -> 危险 (2HP @ 30HP) / 致命 (0HP @ 26HP)
+      const shieldItem = createV2EquipmentInstance({
+        instanceId: 'c1d2_shield',
+        kind: 'shield',
+        quality: 'common',
+        origin: 'loot',
+        acquiredDepth: 2,
+        location: 'bay',
+      });
+      const batPcItem = createV2EquipmentInstance({
+        instanceId: 'c1d2_bat_pc',
+        kind: 'battery',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const bayDropShieldPc = {
+        ...tut.bay,
+        staging: [],
+        placed: [
+          { item: shieldItem, x: 0, y: 2, rotation: 0 as const },
+          { item: batPcItem, x: 1, y: 2, rotation: 0 as const }, // PowerCell (1,2)!
+        ],
+      };
+      const dropShield30 = combatV2.simulateV2Combat({
+        resultId: 'c1d2_drop_shd_30',
+        bay: bayDropShieldPc,
+        startingHp: 30,
+        maxHp: 30,
+        units: l4bUnits,
+        targetPolicy: 'weakest',
+        sectorId: 'near_orbit',
+        crewId: 'engineer',
+      });
+      const dropShield26 = combatV2.simulateV2Combat({
+        resultId: 'c1d2_drop_shd_26',
+        bay: bayDropShieldPc,
+        startingHp: 26,
+        maxHp: 30,
+        units: l4bUnits,
+        targetPolicy: 'weakest',
+        sectorId: 'near_orbit',
+        crewId: 'engineer',
+      });
+      expect(dropShield30.finalPlayerHpAfterRepair).toBe(2);
+      expect(classifyV2CombatThreat({ outcome: dropShield30.outcome, playerFinalHp: dropShield30.finalPlayerHpAfterRepair }, 30).label).toBe('危险');
+      expect(dropShield26.outcome).toBe('defeat');
+      expect(classifyV2CombatThreat({ outcome: dropShield26.outcome, playerFinalHp: dropShield26.finalPlayerHpAfterRepair }, 30).label).toBe('致命');
+
+      // 3. Dropped Laser + Engineer-Swapped repair.common + Battery on PowerCell (1,2) -> 危险 (4HP @ 30HP) / 致命 (0HP @ 26HP)
+      const repairItem = createV2EquipmentInstance({
+        instanceId: 'c1d2_repair',
+        kind: 'repair',
+        quality: 'common',
+        origin: 'loot',
+        acquiredDepth: 2,
+        location: 'bay',
+      });
+      const bayDropRepairPc = {
+        ...tut.bay,
+        staging: [],
+        placed: [
+          { item: repairItem, x: 0, y: 2, rotation: 0 as const },
+          { item: batPcItem, x: 1, y: 2, rotation: 0 as const },
+        ],
+      };
+      const dropRepair30 = combatV2.simulateV2Combat({
+        resultId: 'c1d2_drop_rep_30',
+        bay: bayDropRepairPc,
+        startingHp: 30,
+        maxHp: 30,
+        units: l4bUnits,
+        targetPolicy: 'weakest',
+        sectorId: 'near_orbit',
+        crewId: 'engineer',
+      });
+      const dropRepair26 = combatV2.simulateV2Combat({
+        resultId: 'c1d2_drop_rep_26',
+        bay: bayDropRepairPc,
+        startingHp: 26,
+        maxHp: 30,
+        units: l4bUnits,
+        targetPolicy: 'weakest',
+        sectorId: 'near_orbit',
+        crewId: 'engineer',
+      });
+      expect(dropRepair30.finalPlayerHpAfterRepair).toBe(4);
+      expect(classifyV2CombatThreat({ outcome: dropRepair30.outcome, playerFinalHp: dropRepair30.finalPlayerHpAfterRepair }, 30).label).toBe('危险');
+      expect(dropRepair26.outcome).toBe('defeat');
+      expect(classifyV2CombatThreat({ outcome: dropRepair26.outcome, playerFinalHp: dropRepair26.finalPlayerHpAfterRepair }, 30).label).toBe('致命');
+    });
+
+    it('hardening: enforces extractV2Wreck double-call idempotency, multi-discard telescoping sacrifice deltas, and unlinked heavy firepower previews', () => {
+      // 1. extractV2Wreck double-call idempotency (cannot double-increment wrecksDissectedThisRun)
+      const { run: wreckBase, node: wreckNode } = findFormalRunWithNodeType('wreck', 'free_salvage', 1015);
+      const inWreck: V2RunState = {
+        ...wreckBase,
+        phase: 'ENCOUNTER',
+        currentNodeId: wreckNode.nodeId,
+        visitedNodeIds: [wreckNode.nodeId],
+        bay: { ...wreckBase.bay, staging: [] },
+      };
+      const cut1 = cutV2WreckHotspot(inWreck, 'armory', ['core']);
+      expect(cut1.ok).toBe(true);
+      const ext1 = extractV2Wreck(cut1.run);
+      expect(ext1.ok).toBe(true);
+      expect(ext1.run.wrecksDissectedThisRun).toBe(1);
+      expect(ext1.run.claimedEventIds).toContain(`wreck_extract_${wreckNode.nodeId}`);
+      // Even if a buggy caller forces phase back to ENCOUNTER, node.resolved + claimedEventIds rejects double extract!
+      const ext2 = extractV2Wreck({ ...ext1.run, phase: 'ENCOUNTER' });
+      expect(ext2.ok).toBe(false);
+      expect(ext2.run.wrecksDissectedThisRun).toBe(1);
+
+      // 2. summarizeV2DiscardedSacrifices multi-discard (laser + battery in BOTH orders => exact -5 total!)
+      const tut = createV2TutorialRun('tut_multi_discard');
+      const batId = tut.bay.staging[0].item.instanceId;
+      const laserId = `${tut.runId}_tut_laser`;
+      const wired = placeV2FromStaging(tut.bay, batId, 1, 0, 0);
+      expect(wired.ok).toBe(true);
+
+      // Order A: discard laser THEN battery
+      const dLaser1 = discardV2Item(wired.bay, laserId);
+      expect(dLaser1.ok).toBe(true);
+      const dBat2 = discardV2Item(dLaser1.bay, batId);
+      expect(dBat2.ok).toBe(true);
+      const sumA = summarizeV2DiscardedSacrifices(dBat2.bay);
+      expect(sumA).toContain('激光炮（火力 -5）');
+      expect(sumA).toContain('能量电池（借用 · 0¤）');
+
+      // Order B: discard battery THEN laser (no double-counting: -2 + -3 = -5)
+      const dBat1 = discardV2Item(wired.bay, batId);
+      expect(dBat1.ok).toBe(true);
+      const dLaser2 = discardV2Item(dBat1.bay, laserId);
+      expect(dLaser2.ok).toBe(true);
+      const sumB = summarizeV2DiscardedSacrifices(dLaser2.bay);
+      expect(sumB).toContain('能量电池（火力 -2）');
+      expect(sumB).toContain('激光炮（火力 -3）');
+
+      // 3. buildSacrificePreviewFromStatsDelta unlinked heavy cannon firepower (common=-6, improved=-8; laser wired=-5)
+      const heavyCommon = createV2EquipmentInstance({
+        instanceId: 'hv_common',
+        kind: 'heavy',
+        quality: 'common',
+        origin: 'owned',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const heavyImproved = createV2EquipmentInstance({
+        instanceId: 'hv_improved',
+        kind: 'heavy',
+        quality: 'improved',
+        origin: 'owned',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const bayHeavyCommon = {
+        ...tut.bay,
+        staging: [],
+        placed: [{ item: heavyCommon, x: 0, y: 0, rotation: 0 as const }],
+      };
+      const pvHeavyCommon = computeV2ItemSacrificePreview(bayHeavyCommon, 'hv_common');
+      expect(pvHeavyCommon).not.toBeNull();
+      expect(pvHeavyCommon!.firepowerLoss).toBe(6);
+      expect(pvHeavyCommon!.fullLabel).toContain('火力 -6');
+
+      const bayHeavyImproved = {
+        ...tut.bay,
+        staging: [],
+        placed: [{ item: heavyImproved, x: 0, y: 0, rotation: 0 as const }],
+      };
+      const pvHeavyImproved = computeV2ItemSacrificePreview(bayHeavyImproved, 'hv_improved');
+      expect(pvHeavyImproved).not.toBeNull();
+      expect(pvHeavyImproved!.firepowerLoss).toBe(8);
+      expect(pvHeavyImproved!.fullLabel).toContain('火力 -8');
+
+      // Laser wired/unwired/battery unchanged
+      const pvLaserWired = computeV2ItemSacrificePreview(wired.bay, laserId);
+      expect(pvLaserWired!.firepowerLoss).toBe(5);
+      const pvBatWired = computeV2ItemSacrificePreview(wired.bay, batId);
+      expect(pvBatWired!.firepowerLoss).toBe(2);
+    });
+
+    it('[B1]: SHOP onFinish opens openV2DiscardConfirmModal on auto-skip (MAP & SETTLEMENT), keeps undoable on cancel, and skips modal when exiting to ARRANGE', async () => {
+      const { run: shopBase, node: shopNode } = findFormalRunWithNodeType('merchant', 'free_salvage', 1040);
+      const shopRun: V2RunState = {
+        ...shopBase,
+        phase: 'SHOP',
+        currentNodeId: shopNode.nodeId,
+        visitedNodeIds: [shopNode.nodeId],
+        wallet: 200,
+        bay: { ...shopBase.bay, staging: [], discardedThisArrange: [] },
+      };
+
+      const save = { ...createFreshV2SaveData(), activeRun: shopRun };
+      persistV2SaveData(dom.window.localStorage as unknown as Storage, save);
+      dom.window.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+      const mountEl = dom.document.createElement('div');
+      dom.document.body.appendChild(mountEl);
+      const controller = new V2AppController(mountEl as unknown as HTMLElement, {
+        onSwitchToV1: () => {},
+      });
+      controller.init();
+      await flushMicrotasks();
+
+      // Select placed item at (0,0) and discard it inside SHOP
+      const board = mountEl.querySelector('.v2-cargo-board')!;
+      const pt = cellCenterPoint(4, 4, 0, 0);
+      board.dispatchEvent(new MiniEvent('pointerdown', { bubbles: true, clientX: pt.x, clientY: pt.y }));
+      board.dispatchEvent(new MiniEvent('pointerup', { bubbles: true, clientX: pt.x, clientY: pt.y }));
+      const discardBtn = mountEl.querySelector('#btn-v2-discard');
+      expect(discardBtn).not.toBeNull();
+      discardBtn!.click();
+
+      // Click finish -> opens discard-confirm modal instead of silently deleting!
+      const finishBtn = mountEl.querySelector('#v2-shop-finish');
+      expect(finishBtn).not.toBeNull();
+      finishBtn!.click();
+      const cancelBtn = mountEl.querySelector('#v2-discard-cancel');
+      const okBtn = mountEl.querySelector('#v2-discard-ok');
+      expect(cancelBtn).not.toBeNull();
+      expect(okBtn).not.toBeNull();
+      expect(
+        (dom.window.__STARLINE_INSPECT__?.() as { phase?: string | null } | undefined)?.phase
+      ).toBe('SHOP');
+
+      // Cancel keeps SHOP + undoable discard
+      cancelBtn!.click();
+      expect(mountEl.querySelector('#v2-discard-ok')).toBeNull();
+      expect(
+        (dom.window.__STARLINE_INSPECT__?.() as { phase?: string | null } | undefined)?.phase
+      ).toBe('SHOP');
+      const undoBtn = mountEl.querySelector('#btn-v2-undo-discard');
+      expect(undoBtn).not.toBeNull();
+      undoBtn!.click();
+
+      // Re-select & discard, then confirm -> flushes and transitions to MAP
+      board.dispatchEvent(new MiniEvent('pointerdown', { bubbles: true, clientX: pt.x, clientY: pt.y }));
+      board.dispatchEvent(new MiniEvent('pointerup', { bubbles: true, clientX: pt.x, clientY: pt.y }));
+      mountEl.querySelector('#btn-v2-discard')!.click();
+      mountEl.querySelector('#v2-shop-finish')!.click();
+      const confirmBtn = mountEl.querySelector('#v2-discard-ok');
+      expect(confirmBtn).not.toBeNull();
+      confirmBtn!.click();
+
+      expect(
+        (dom.window.__STARLINE_INSPECT__?.() as { phase?: string | null } | undefined)?.phase
+      ).toBe('MAP');
+      const savedAfterMap = readLoadedSave(dom.window.localStorage as unknown as Storage);
+      expect(savedAfterMap.activeRun!.bay.discardedThisArrange).toHaveLength(0);
+      expect(savedAfterMap.activeRun!.discardedCountThisRun).toBe(1);
+      controller.destroy();
+
+      // Terminal SHOP auto-skip with discarded item -> confirm transitions to SETTLEMENT
+      const termShopNode: V2MapNode = { ...shopNode, nextNodeIds: [], resolved: false };
+      const termShopRun: V2RunState = {
+        ...shopRun,
+        graph: { ...shopRun.graph, nodes: { ...shopRun.graph.nodes, [termShopNode.nodeId]: termShopNode } },
+      };
+      persistV2SaveData(dom.window.localStorage as unknown as Storage, {
+        ...createFreshV2SaveData(),
+        activeRun: termShopRun,
+      });
+      const mountElTerm = dom.document.createElement('div');
+      dom.document.body.appendChild(mountElTerm);
+      const ctrlTerm = new V2AppController(mountElTerm as unknown as HTMLElement, {
+        onSwitchToV1: () => {},
+      });
+      ctrlTerm.init();
+      await flushMicrotasks();
+      const termBoard = mountElTerm.querySelector('.v2-cargo-board')!;
+      termBoard.dispatchEvent(new MiniEvent('pointerdown', { bubbles: true, clientX: pt.x, clientY: pt.y }));
+      termBoard.dispatchEvent(new MiniEvent('pointerup', { bubbles: true, clientX: pt.x, clientY: pt.y }));
+      mountElTerm.querySelector('#btn-v2-discard')!.click();
+      mountElTerm.querySelector('#v2-shop-finish')!.click();
+      const termOk = mountElTerm.querySelector('#v2-discard-ok');
+      expect(termOk).not.toBeNull();
+      termOk!.click();
+      expect(
+        (dom.window.__STARLINE_INSPECT__?.() as { phase?: string | null } | undefined)?.phase
+      ).toBe('SETTLEMENT');
+      ctrlTerm.destroy();
+
+      // SHOP exiting to ARRANGE (bought item still in staging) -> skips confirm modal and keeps discard undoable!
+      const offer = shopNode.merchant!.offers[0];
+      const bought = buyV2MerchantOffer(shopRun, offer.offerId, 'tx_b1_arrange', ['core']);
+      expect(bought.ok).toBe(true);
+      const discardedInBought = discardV2Item(bought.run.bay, bought.run.bay.placed[0].item.instanceId);
+      expect(discardedInBought.ok).toBe(true);
+      persistV2SaveData(dom.window.localStorage as unknown as Storage, {
+        ...createFreshV2SaveData(),
+        activeRun: { ...bought.run, bay: discardedInBought.bay },
+      });
+      const mountElArr = dom.document.createElement('div');
+      dom.document.body.appendChild(mountElArr);
+      const ctrlArr = new V2AppController(mountElArr as unknown as HTMLElement, {
+        onSwitchToV1: () => {},
+      });
+      ctrlArr.init();
+      await flushMicrotasks();
+      mountElArr.querySelector('#v2-shop-finish')!.click();
+      expect(mountElArr.querySelector('#v2-discard-ok')).toBeNull();
+      expect(
+        (dom.window.__STARLINE_INSPECT__?.() as { phase?: string | null } | undefined)?.phase
+      ).toBe('ARRANGE');
+      const savedArr = readLoadedSave(dom.window.localStorage as unknown as Storage);
+      expect(savedArr.activeRun!.bay.discardedThisArrange).toHaveLength(1);
+      ctrlArr.destroy();
+    });
+
+    it('C2-D2: blocks multi-tab read-only takeover race across ALL 4 discard-confirm callbacks (MAP jump, MAP safe return, ARRANGE leave, SHOP finish)', async () => {
+      const triggerForeignTakeover = (): void => {
+        dom.window.dispatchEvent(
+          new MiniEvent('storage', {
+            key: V2_TAB_LOCK_KEY,
+            newValue: JSON.stringify({ tabId: 'foreign_owner_tab', updatedAt: Date.now() }),
+          })
+        );
+      };
+
+      const rawTut = createV2TutorialRun('tut_c2_d2');
+      const batId = rawTut.bay.staging[0].item.instanceId;
+      const placed = placeV2FromStaging(rawTut.bay, batId, 1, 0, 0);
+      expect(placed.ok).toBe(true);
+      const discarded = discardV2Item(placed.bay, `${rawTut.runId}_tut_alloy`);
+      expect(discarded.ok).toBe(true);
+
+      // 1. MAP onJumpNode
+      const mapRun: V2RunState = { ...rawTut, phase: 'MAP', bay: discarded.bay };
+      persistV2SaveData(dom.window.localStorage as unknown as Storage, {
+        ...createFreshV2SaveData(),
+        activeRun: mapRun,
+      });
+      dom.window.sessionStorage.setItem('starline_v2_title_entered', '1');
+      const elMapJump = dom.document.createElement('div');
+      dom.document.body.appendChild(elMapJump);
+      const ctrlMapJump = new V2AppController(elMapJump as unknown as HTMLElement, {
+        onSwitchToV1: () => {},
+      });
+      ctrlMapJump.init();
+      await flushMicrotasks();
+      elMapJump.querySelector('[data-testid="btn-jump-node"]')!.click();
+      const okMapJump = elMapJump.querySelector('#v2-discard-ok');
+      expect(okMapJump).not.toBeNull();
+      triggerForeignTakeover();
+      okMapJump!.click();
+      expect(
+        (dom.window.__STARLINE_INSPECT__?.() as { phase?: string | null } | undefined)?.phase
+      ).toBe('MAP');
+      expect(readLoadedSave(dom.window.localStorage as unknown as Storage).activeRun!.bay.discardedThisArrange).toHaveLength(1);
+      ctrlMapJump.destroy();
+
+      // 2. MAP onSafeReturn
+      persistV2SaveData(dom.window.localStorage as unknown as Storage, {
+        ...createFreshV2SaveData(),
+        activeRun: mapRun,
+      });
+      const elMapSafe = dom.document.createElement('div');
+      dom.document.body.appendChild(elMapSafe);
+      const ctrlMapSafe = new V2AppController(elMapSafe as unknown as HTMLElement, {
+        onSwitchToV1: () => {},
+      });
+      ctrlMapSafe.init();
+      await flushMicrotasks();
+      elMapSafe.querySelector('[data-testid="btn-safe-return"]')!.click();
+      const okMapSafe = elMapSafe.querySelector('#v2-discard-ok');
+      expect(okMapSafe).not.toBeNull();
+      triggerForeignTakeover();
+      okMapSafe!.click();
+      expect(
+        (dom.window.__STARLINE_INSPECT__?.() as { phase?: string | null } | undefined)?.phase
+      ).toBe('MAP');
+      expect(readLoadedSave(dom.window.localStorage as unknown as Storage).activeRun!.bay.discardedThisArrange).toHaveLength(1);
+      ctrlMapSafe.destroy();
+
+      // 3. ARRANGE onLeaveArrange
+      const arrRun: V2RunState = { ...rawTut, phase: 'ARRANGE', bay: discarded.bay };
+      persistV2SaveData(dom.window.localStorage as unknown as Storage, {
+        ...createFreshV2SaveData(),
+        activeRun: arrRun,
+      });
+      const elArr = dom.document.createElement('div');
+      dom.document.body.appendChild(elArr);
+      const ctrlArr = new V2AppController(elArr as unknown as HTMLElement, {
+        onSwitchToV1: () => {},
+      });
+      ctrlArr.init();
+      await flushMicrotasks();
+      elArr.querySelector('[data-testid="btn-leave-arrange"]')!.click();
+      const okArr = elArr.querySelector('#v2-discard-ok');
+      expect(okArr).not.toBeNull();
+      triggerForeignTakeover();
+      okArr!.click();
+      expect(
+        (dom.window.__STARLINE_INSPECT__?.() as { phase?: string | null } | undefined)?.phase
+      ).toBe('ARRANGE');
+      expect(readLoadedSave(dom.window.localStorage as unknown as Storage).activeRun!.bay.discardedThisArrange).toHaveLength(1);
+      ctrlArr.destroy();
+
+      // 4. SHOP onFinish (auto-skip)
+      const { run: shopBase, node: shopNode } = findFormalRunWithNodeType('merchant', 'free_salvage', 1040);
+      const shopDiscarded = discardV2Item(shopBase.bay, shopBase.bay.placed[0].item.instanceId);
+      expect(shopDiscarded.ok).toBe(true);
+      const shopRun: V2RunState = {
+        ...shopBase,
+        phase: 'SHOP',
+        currentNodeId: shopNode.nodeId,
+        visitedNodeIds: [shopNode.nodeId],
+        bay: { ...shopDiscarded.bay, staging: [] },
+      };
+      persistV2SaveData(dom.window.localStorage as unknown as Storage, {
+        ...createFreshV2SaveData(),
+        activeRun: shopRun,
+      });
+      const elShop = dom.document.createElement('div');
+      dom.document.body.appendChild(elShop);
+      const ctrlShop = new V2AppController(elShop as unknown as HTMLElement, {
+        onSwitchToV1: () => {},
+      });
+      ctrlShop.init();
+      await flushMicrotasks();
+      elShop.querySelector('#v2-shop-finish')!.click();
+      const okShop = elShop.querySelector('#v2-discard-ok');
+      expect(okShop).not.toBeNull();
+      triggerForeignTakeover();
+      okShop!.click();
+      expect(
+        (dom.window.__STARLINE_INSPECT__?.() as { phase?: string | null } | undefined)?.phase
+      ).toBe('SHOP');
+      expect(readLoadedSave(dom.window.localStorage as unknown as Storage).activeRun!.bay.discardedThisArrange).toHaveLength(1);
+      ctrlShop.destroy();
+    });
+
+    it('C2-D1: PreCombatAutoEngageController.engageNow() never leaves zombie countdown state on modalOpen, !canMutate, or !eligible from countdown or paused', () => {
+      vi.useFakeTimers();
+      let liveState = { eligible: true, canMutate: true, modalOpen: false, hidden: false };
+      const onEngage = vi.fn(() => true);
+      const onChange = vi.fn();
+
+      const ctrl = new PreCombatAutoEngageController({
+        durationMs: PRE_COMBAT_AUTO_ENGAGE_MS,
+        onEngage,
+        onChange,
+        isLiveEligible: () => liveState,
+      });
+
+      // (a) From countdown + modalOpen -> transitions cleanly to paused('modal'), 0 timers, onChange emitted
+      ctrl.sync({ eligible: true, nodeKey: 'n1', canMutate: true, modalOpen: false, hidden: false });
+      expect(ctrl.getSnapshot().status).toBe('countdown');
+      onChange.mockClear();
+      liveState = { eligible: true, canMutate: true, modalOpen: true, hidden: false };
+      expect(ctrl.engageNow()).toBe(false);
+      expect(ctrl.getSnapshot().status).toBe('paused');
+      expect(ctrl.getSnapshot().pauseReason).toBe('modal');
+      expect(vi.getTimerCount()).toBe(0);
+      expect(onChange).toHaveBeenCalledTimes(1);
+      expect(onEngage).toHaveBeenCalledTimes(0);
+
+      // (b) From countdown + !canMutate -> transitions cleanly to paused('readonly'), 0 timers, onChange emitted
+      liveState = { eligible: true, canMutate: true, modalOpen: false, hidden: false };
+      ctrl.sync({ eligible: true, nodeKey: 'n2', canMutate: true, modalOpen: false, hidden: false });
+      expect(ctrl.getSnapshot().status).toBe('countdown');
+      onChange.mockClear();
+      liveState = { eligible: true, canMutate: false, modalOpen: false, hidden: false };
+      expect(ctrl.engageNow()).toBe(false);
+      expect(ctrl.getSnapshot().status).toBe('paused');
+      expect(ctrl.getSnapshot().pauseReason).toBe('readonly');
+      expect(vi.getTimerCount()).toBe(0);
+      expect(onChange).toHaveBeenCalledTimes(1);
+
+      // (c) From countdown + !eligible -> resets cleanly to idle(nodeKey=null), 0 timers, onChange emitted
+      liveState = { eligible: true, canMutate: true, modalOpen: false, hidden: false };
+      ctrl.sync({ eligible: true, nodeKey: 'n3', canMutate: true, modalOpen: false, hidden: false });
+      expect(ctrl.getSnapshot().status).toBe('countdown');
+      onChange.mockClear();
+      liveState = { eligible: false, canMutate: true, modalOpen: false, hidden: false };
+      expect(ctrl.engageNow()).toBe(false);
+      expect(ctrl.getSnapshot().status).toBe('idle');
+      expect(ctrl.getSnapshot().nodeKey).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(onChange).toHaveBeenCalledTimes(1);
+
+      // (d) From paused('manual') + modalOpen / !canMutate -> preserves paused('manual') without clobbering
+      liveState = { eligible: true, canMutate: true, modalOpen: false, hidden: false };
+      ctrl.sync({ eligible: true, nodeKey: 'n4', canMutate: true, modalOpen: false, hidden: false });
+      expect(ctrl.pause('manual')).toBe(true);
+      onChange.mockClear();
+      liveState = { eligible: true, canMutate: true, modalOpen: true, hidden: false };
+      expect(ctrl.engageNow()).toBe(false);
+      expect(ctrl.getSnapshot().status).toBe('paused');
+      expect(ctrl.getSnapshot().pauseReason).toBe('manual');
+      expect(vi.getTimerCount()).toBe(0);
+      expect(onChange).toHaveBeenCalledTimes(0);
+
+      // (e) From paused('manual') + !eligible -> resets cleanly to idle & emits onChange
+      liveState = { eligible: false, canMutate: true, modalOpen: false, hidden: false };
+      expect(ctrl.engageNow()).toBe(false);
+      expect(ctrl.getSnapshot().status).toBe('idle');
+      expect(ctrl.getSnapshot().nodeKey).toBeNull();
+      expect(onChange).toHaveBeenCalledTimes(1);
+      ctrl.destroy();
+    });
+
+    it('polish & S05 integration: resets campaignBannerCollapsed on save reset, updates btn-safe-return label preserving DOM === identity, and pauses S05 on policy/gadget & triggers on wreck ambush', async () => {
+      // 1. Polish: onResetV2Save resets campaignBannerCollapsed -> aria-expanded="false"
+      const postTutSave = createFreshV2SaveData();
+      const completedProfile = { ...postTutSave.profile, tutorialCompleted: true };
+      persistV2SaveData(dom.window.localStorage as unknown as Storage, {
+        ...postTutSave,
+        profile: completedProfile,
+      });
+      dom.window.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+      const resetMount = dom.document.createElement('div');
+      dom.document.body.appendChild(resetMount);
+      const ctrlReset = new V2AppController(resetMount as unknown as HTMLElement, {
+        onSwitchToV1: () => {},
+      });
+      ctrlReset.init();
+      await flushMicrotasks();
+      expect(
+        resetMount.querySelector('[data-testid="btn-toggle-campaign-banner"]')?.getAttribute('aria-expanded')
+      ).toBe('true');
+
+      // Open settings modal and double-click #v2-btn-reset
+      resetMount.querySelector('#v2-hud-settings')!.click();
+      const resetBtn = resetMount.querySelector('#v2-btn-reset');
+      expect(resetBtn).not.toBeNull();
+      resetBtn!.click(); // arm
+      resetBtn!.click(); // confirm reset
+      expect(
+        resetMount.querySelector('[data-testid="btn-toggle-campaign-banner"]')?.getAttribute('aria-expanded')
+      ).toBe('false');
+      ctrlReset.destroy();
+
+      // 2. Polish: MapPhaseView updates btn-safe-return text on staging while preserving === identity
+      const mapHost = dom.document.createElement('div');
+      dom.document.body.appendChild(mapHost);
+      const rawTut = createV2TutorialRun('tut_safe_label');
+      const batId = rawTut.bay.staging[0].item.instanceId;
+      const wired = placeV2FromStaging(rawTut.bay, batId, 1, 0, 0);
+      const mapView = new MapPhaseView();
+      const noopMapActions = {
+        onToggleMobileMap: () => {},
+        onSelectNode: () => {},
+        onJumpNode: () => {},
+        onUseGadget: () => {},
+        onSafeReturn: () => {},
+        onAbortContract: () => {},
+      };
+      mapView.mount(mapHost as unknown as HTMLElement);
+      mapView.update(
+        {
+          run: { ...rawTut, phase: 'MAP', bay: wired.bay },
+          readOnly: false,
+          selectedMapNodeId: 'L1A',
+          isCompactViewport: false,
+          mobileMapShowFull: false,
+          pureAutoCombat: false,
+          stargateRelayTier: 0,
+          fullMapReveal: false,
+        },
+        noopMapActions
+      );
+      const safeBtnBefore = mapHost.querySelector('[data-testid="btn-safe-return"]');
+      expect(safeBtnBefore).not.toBeNull();
+      expect(safeBtnBefore!.disabled).toBe(false);
+      expect(safeBtnBefore!.textContent).toContain('免费安全返航');
+      expect(safeBtnBefore!.textContent).not.toContain('需清空暂存区');
+
+      // Update with staged item present -> same DOM node, disabled + explicit reason
+      mapView.update(
+        {
+          run: { ...rawTut, phase: 'MAP' },
+          readOnly: false,
+          selectedMapNodeId: 'L1A',
+          isCompactViewport: false,
+          mobileMapShowFull: false,
+          pureAutoCombat: false,
+          stargateRelayTier: 0,
+          fullMapReveal: false,
+        },
+        noopMapActions
+      );
+      const safeBtnStaged = mapHost.querySelector('[data-testid="btn-safe-return"]');
+      expect(safeBtnStaged).toBe(safeBtnBefore);
+      expect(safeBtnStaged!.disabled).toBe(true);
+      expect(safeBtnStaged!.textContent).toContain('免费安全返航（需清空暂存区）');
+
+      // Clear staging again -> same DOM node, reverted text
+      mapView.update(
+        {
+          run: { ...rawTut, phase: 'MAP', bay: wired.bay },
+          readOnly: false,
+          selectedMapNodeId: 'L1A',
+          isCompactViewport: false,
+          mobileMapShowFull: false,
+          pureAutoCombat: false,
+          stargateRelayTier: 0,
+          fullMapReveal: false,
+        },
+        noopMapActions
+      );
+      const safeBtnAfter = mapHost.querySelector('[data-testid="btn-safe-return"]');
+      expect(safeBtnAfter).toBe(safeBtnBefore);
+      expect(safeBtnAfter!.disabled).toBe(false);
+      expect(safeBtnAfter!.textContent).toContain('免费安全返航');
+      expect(safeBtnAfter!.textContent).not.toContain('需清空暂存区');
+      mapView.unmount();
+
+      // 3. S05 Controller integration: policy click + overcharge_cell gadget click pause countdown
+      vi.useFakeTimers();
+      const startSpy = vi.spyOn(combatV2, 'startV2CombatAtCurrentNode');
+      const { run: cmbBase, node: cmbNode } = findFormalRunWithNodeType('combat', 'free_salvage', 1060);
+      const overchargeGadget = createV3GadgetInstance({
+        instanceId: 's05_overcharge_1',
+        kind: 'overcharge_cell',
+        origin: 'owned',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const gadgetSpot = findFirstLegalV2Placement(cmbBase.bay, overchargeGadget.definitionId);
+      expect(gadgetSpot).not.toBeNull();
+      const swarmUnits = buildEncounterUnits('swarm', 2, cmbNode.nodeId);
+      expect(swarmUnits.length).toBeGreaterThan(1);
+      const multiEnemyNode: V2MapNode = {
+        ...cmbNode,
+        resolved: false,
+        combat: {
+          encounterKind: 'swarm',
+          units: swarmUnits,
+          bounty: 12,
+          improvedProb: 0,
+        },
+      };
+      const policyGadgetRun: V2RunState = {
+        ...cmbBase,
+        phase: 'ENCOUNTER',
+        currentNodeId: multiEnemyNode.nodeId,
+        visitedNodeIds: [multiEnemyNode.nodeId],
+        activeCombat: null,
+        targetPolicy: 'weakest',
+        overchargeCellActive: false,
+        bay: {
+          ...cmbBase.bay,
+          staging: [],
+          placed: [
+            ...cmbBase.bay.placed,
+            {
+              item: overchargeGadget,
+              x: gadgetSpot!.x,
+              y: gadgetSpot!.y,
+              rotation: gadgetSpot!.rotation,
+            },
+          ],
+        },
+        graph: {
+          ...cmbBase.graph,
+          nodes: { ...cmbBase.graph.nodes, [multiEnemyNode.nodeId]: multiEnemyNode },
+        },
+      };
+      persistV2SaveData(dom.window.localStorage as unknown as Storage, {
+        ...createFreshV2SaveData(),
+        activeRun: policyGadgetRun,
+      });
+      const pgMount = dom.document.createElement('div');
+      dom.document.body.appendChild(pgMount);
+      const ctrlPg = new V2AppController(pgMount as unknown as HTMLElement, {
+        onSwitchToV1: () => {},
+      });
+      ctrlPg.init();
+      await flushMicrotasks();
+
+      // Clicking policy button pauses countdown cleanly
+      const policyBtn = pgMount.querySelector('[data-policy="highest_threat"]');
+      expect(policyBtn).not.toBeNull();
+      policyBtn!.click();
+      expect(pgMount.querySelector('[data-testid="btn-pause-auto-combat"]')!.textContent).toContain('继续自动交火');
+      vi.advanceTimersByTime(5000);
+      expect(startSpy).toHaveBeenCalledTimes(0);
+
+      // Resume -> clicking overcharge_cell gadget pauses countdown cleanly and activates overchargeCellActive
+      pgMount.querySelector('[data-testid="btn-pause-auto-combat"]')!.click();
+      expect(pgMount.querySelector('[data-testid="btn-pause-auto-combat"]')!.textContent).toContain('暂停 / 调整');
+      const gadgetBtn = pgMount.querySelector('[data-testid="use-gadget-overcharge_cell"]');
+      expect(gadgetBtn).not.toBeNull();
+      gadgetBtn!.click();
+      expect(pgMount.querySelector('[data-testid="btn-pause-auto-combat"]')!.textContent).toContain('继续自动交火');
+      expect(pgMount.querySelector('[data-testid="overcharge-active-banner"]')).not.toBeNull();
+      vi.advanceTimersByTime(5000);
+      expect(startSpy).toHaveBeenCalledTimes(0);
+      ctrlPg.destroy();
+
+      // 4. S05 Controller integration: wreck ambush triggers pre-combat 1.5s auto-engage countdown!
+      startSpy.mockClear();
+      const { run: wrkBase, node: wrkNode } = findFormalRunWithNodeType('wreck', 'free_salvage', 1070);
+      const ambushWreckRun: V2RunState = {
+        ...wrkBase,
+        phase: 'ENCOUNTER',
+        currentNodeId: wrkNode.nodeId,
+        visitedNodeIds: [wrkNode.nodeId],
+        hp: 30,
+        fuel: 8,
+        activeCombat: null,
+        bay: { ...wrkBase.bay, staging: [] },
+        activeWreck: {
+          nodeId: wrkNode.nodeId,
+          stability: 60,
+          maxStability: 100,
+          cutsMade: 1,
+          extracted: false,
+          ambushTriggered: false,
+          stabilizerActive: false,
+          hotspots: [
+            {
+              spotId: 'armory',
+              label: '军械舱',
+              cut: true,
+              riskHullDamage: 0,
+              riskFuelCost: 0,
+              riskAmbush: false,
+            },
+            {
+              spotId: 'cargo',
+              label: '高危货舱',
+              cut: false,
+              riskHullDamage: 2,
+              riskFuelCost: 0,
+              riskAmbush: true,
+              rewardItems: [
+                createV2CargoInstance({
+                  instanceId: 's05_ambush_loot',
+                  defId: 'cargo.alloy_bar',
+                  origin: 'loot',
+                  acquiredDepth: wrkNode.layer,
+                  location: 'staging',
+                }),
+              ],
+            },
+          ],
+        },
+      };
+      persistV2SaveData(dom.window.localStorage as unknown as Storage, {
+        ...createFreshV2SaveData(),
+        activeRun: ambushWreckRun,
+      });
+      const ambMount = dom.document.createElement('div');
+      dom.document.body.appendChild(ambMount);
+      const ctrlAmb = new V2AppController(ambMount as unknown as HTMLElement, {
+        onSwitchToV1: () => {},
+      });
+      ctrlAmb.init();
+      await flushMicrotasks();
+
+      const cutAmbushBtn = ambMount.querySelector('[data-testid="wreck-cut-cargo"]');
+      expect(cutAmbushBtn).not.toBeNull();
+      cutAmbushBtn!.click();
+
+      // Ambush switched ENCOUNTER panel directly into pre-combat with 1.5s auto-engage countdown!
+      const ambStartBtn = ambMount.querySelector('[data-testid="btn-start-combat"]');
+      expect(ambStartBtn).not.toBeNull();
+      expect(ambStartBtn!.textContent).toContain('1.5s 后自动交火');
+      expect(startSpy).toHaveBeenCalledTimes(0);
+
+      vi.advanceTimersByTime(1500);
+      expect(startSpy).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(5000);
+      expect(startSpy).toHaveBeenCalledTimes(1);
+      ctrlAmb.destroy();
     });
   });
 });
