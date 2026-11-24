@@ -4,9 +4,11 @@ import {
   type V2EquipmentDef,
   type V2EquipmentKind,
 } from '../data/equipment';
+import { V3_FACTION_MAX_REP } from '../data/factions';
 import { V2_SHIPS, type V2ShipId } from '../data/ships';
 import { calculateV2BuildStats } from './buildStatsV2';
 import {
+  getAntiArbitragePartsCraftFloor,
   getDismantlePartsMultiplier,
   getEffectiveWorkshopCost,
   getWreckFactionStabilityBonus,
@@ -192,7 +194,13 @@ export function getUpgradeToImprovedCost(
       : 0;
   const rawParts = Math.max(20, Math.round(def.recycleValue * 2));
   const baseParts = wbTier >= 3 ? Math.max(12, Math.round(rawParts * 0.9)) : rawParts;
-  const parts = getEffectiveWorkshopCost(baseParts, profile.factionRep.deep_institute);
+  const discounted = getEffectiveWorkshopCost(baseParts, profile.factionRep.deep_institute);
+  const improvedDef = getV2EquipmentDefByKind(def.kind, 'improved');
+  const commonBase = Math.max(6, Math.round(def.recycleValue * 0.8));
+  const improvedBase = Math.max(10, Math.round(improvedDef.recycleValue * 0.9));
+  const maxMult = getDismantlePartsMultiplier(V3_FACTION_MAX_REP) * 1.1;
+  const maxDismantleDelta = Math.ceil(improvedBase * maxMult) - Math.ceil(commonBase * maxMult);
+  const parts = Math.max(discounted, maxDismantleDelta + 2);
   return { parts, credits: 0 };
 }
 
@@ -294,7 +302,14 @@ export function getPartsCraftCost(
       : 0;
   const rawParts = Math.max(18, Math.round(def.recycleValue * 1.8));
   const baseParts = wbTier >= 3 ? Math.max(12, Math.round(rawParts * 0.9)) : rawParts;
-  const parts = getEffectiveWorkshopCost(baseParts, profile.factionRep.deep_institute);
+  const discounted = getEffectiveWorkshopCost(baseParts, profile.factionRep.deep_institute);
+  const commonBaseDismantle = Math.max(6, Math.round(def.recycleValue * 0.8));
+  const antiArbitrageFloor = getAntiArbitragePartsCraftFloor(
+    commonBaseDismantle,
+    V3_HULL_TUNING_MAX.salvage,
+    2
+  );
+  const parts = Math.max(discounted, antiArbitrageFloor);
   return { parts, credits: 0 };
 }
 

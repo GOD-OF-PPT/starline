@@ -81,12 +81,12 @@ function handleGlobalModalKeyDown(e: KeyboardEvent): void {
     const active = document.activeElement as HTMLElement | null;
 
     if (e.shiftKey) {
-      if (!active || active === first || !top.card.contains(active)) {
+      if (!active || active === top.card || active === first || !top.card.contains(active)) {
         e.preventDefault();
         last.focus();
       }
     } else {
-      if (!active || active === last || !top.card.contains(active)) {
+      if (!active || active === top.card || active === last || !top.card.contains(active)) {
         e.preventDefault();
         first.focus();
       }
@@ -157,8 +157,7 @@ export function openManagedModal(
     // Restore focus to previous modal or original opener
     if (modalStack.length > 0) {
       const prevTop = modalStack[modalStack.length - 1];
-      const focusables = getFocusableElements(prevTop.card);
-      (focusables[0] ?? prevTop.card).focus();
+      prevTop.card.focus();
     } else if (opener && document.body.contains(opener) && !opener.hasAttribute('disabled')) {
       opener.focus();
     }
@@ -176,11 +175,11 @@ export function openManagedModal(
   host.appendChild(backdrop);
   syncBackgroundInert();
 
-  // Defer initial focus until caller finishes populating card DOM
+  // Defer initial focus until caller finishes populating card DOM; focus the dialog card container
+  // rather than the header Close button so Space/Enter cannot accidentally dismiss the dialog.
   queueMicrotask(() => {
     if (closed) return;
-    const focusables = getFocusableElements(card);
-    (focusables[0] ?? card).focus();
+    card.focus();
   });
 
   return { backdrop, card, close };

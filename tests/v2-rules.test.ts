@@ -1002,9 +1002,9 @@ describe('V2 规则与验收矩阵核心测试（T01–T12 / AC01–AC18, AC22�
     expect(toMap.run.phase).toBe('MAP');
   });
 
-  it('设备数据完备性: 全部 10 类普通与优良设备价格、预算与商店无套利不变量', () => {
+  it('设备数据完备性: 全部 16 类普通与优良设备价格、预算与商店无套利不变量', () => {
     const all = Object.values(V2_EQUIPMENT_DEFS);
-    expect(all.length).toBe(20); // 10 kinds × 2 qualities
+    expect(all.length).toBe(32); // 16 kinds × 2 qualities
     for (const def of all) {
       expect(def.shopBuyPrice).toBeGreaterThan(def.recycleValue);
       expect(Math.floor(def.recycleValue * 0.8)).toBeLessThan(def.shopBuyPrice);

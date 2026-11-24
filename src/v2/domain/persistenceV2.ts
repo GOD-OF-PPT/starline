@@ -75,6 +75,7 @@ export interface V2ValidationResult {
 }
 
 export const V3_MAX_RUN_HISTORY = 30;
+export const V3_MAX_SETTLED_RUN_IDS = 100;
 
 const VALID_PHASES: ReadonlySet<V2RunPhase> = new Set([
   'MAP',
@@ -598,6 +599,9 @@ function validateV2Item(raw: unknown, label: string): V2ValidationResult {
   if (def.category !== 'mission' && item.origin === 'mission') {
     return { ok: false, error: `${label} 非任务物不可标记为 mission` };
   }
+  if (def.category === 'gadget' && item.origin === 'loan') {
+    return { ok: false, error: `${label} 消耗装置不可标记为借用` };
+  }
   if (!isFiniteInt(item.fixedValue) || item.fixedValue < 0) {
     return { ok: false, error: `${label}.fixedValue 非法` };
   }
@@ -966,6 +970,18 @@ function validateV2RunCore(
   }
   if (!isFiniteInt(run.wallet) || run.wallet < 0) {
     return { ok: false, error: 'activeRun.wallet 为负或非法' };
+  }
+  if (
+    run.startingStipendCredits !== undefined &&
+    !isNonNegInt(run.startingStipendCredits)
+  ) {
+    return { ok: false, error: 'activeRun.startingStipendCredits 为负或非法' };
+  }
+  if (run.stipendSpentCredits !== undefined) {
+    const maxStipend = run.startingStipendCredits ?? 0;
+    if (!isNonNegInt(run.stipendSpentCredits) || run.stipendSpentCredits > maxStipend) {
+      return { ok: false, error: 'activeRun.stipendSpentCredits 为负、非法或超出初始启动金' };
+    }
   }
   if (!isPlainObject(run.graph) || !isPlainObject(run.graph.nodes)) {
     return { ok: false, error: 'activeRun.graph 损坏' };
@@ -1612,7 +1628,7 @@ function validateSaveDataCore(
       return { ok: false, error: 'profile.facilityTiers 缺失' };
     }
     for (const [facKey, tierVal] of Object.entries(p.facilityTiers)) {
-      if (!isFiniteInt(tierVal) || tierVal < 0 || tierVal > 3) {
+      if (!isSafeMapKey(facKey) || !isFiniteInt(tierVal) || tierVal < 0 || tierVal > 3) {
         return { ok: false, error: `profile.facilityTiers.${facKey} 越界或非法` };
       }
     }
@@ -1646,7 +1662,7 @@ function validateSaveDataCore(
       return { ok: false, error: 'profile.campaign.relicPityCounters 非法' };
     }
     for (const [pityKey, pityVal] of Object.entries(p.campaign.relicPityCounters)) {
-      if (!isNonNegInt(pityVal)) {
+      if (!isSafeMapKey(pityKey) || !isNonNegInt(pityVal)) {
         return { ok: false, error: `profile.campaign.relicPityCounters.${pityKey} 非法` };
       }
     }
@@ -1676,7 +1692,7 @@ function validateSaveDataCore(
       }
     }
     for (const [repKey, repVal] of Object.entries(p.factionRep)) {
-      if (!isFiniteInt(repVal) || repVal < 0 || repVal > 300) {
+      if (!isSafeMapKey(repKey) || !isFiniteInt(repVal) || repVal < 0 || repVal > 300) {
         return { ok: false, error: `profile.factionRep.${repKey} 越界或非法` };
       }
     }
@@ -1693,7 +1709,7 @@ function validateSaveDataCore(
       }
     }
     for (const [mKey, mVal] of Object.entries(p.crewMastery)) {
-      if (!isFiniteInt(mVal) || mVal < 0 || mVal > 2) {
+      if (!isSafeMapKey(mKey) || !isFiniteInt(mVal) || mVal < 0 || mVal > 2) {
         return { ok: false, error: `profile.crewMastery.${mKey} 越界或非法` };
       }
     }
@@ -1831,7 +1847,9 @@ export function migrateV2ToV3SaveData(rawV2: unknown): {
     : [];
   const loadoutPresets = sanitizeLoadoutPresets(srcProfile.loadoutPresets);
   const settledRunIds = Array.isArray(srcProfile.settledRunIds)
-    ? srcProfile.settledRunIds.filter((s): s is string => typeof s === 'string')
+    ? Array.from(
+        new Set(srcProfile.settledRunIds.filter((s): s is string => typeof s === 'string'))
+      ).slice(-V3_MAX_SETTLED_RUN_IDS)
     : [];
   const completedContractTypes: V2FormalContractType[] = Array.isArray(
     srcProfile.completedContractTypes
@@ -2007,10 +2025,24 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
   ) {
     facilityTiers.stargate_relay = 0;
   }
+  for (const f of V2_FACILITY_ORDER) {
+    if (f === 'drydock_tier2') continue;
+    if (buildings[f]) {
+      facilityTiers[f] = Math.max(1, facilityTiers[f] ?? 0);
+    }
+    if ((facilityTiers[f] ?? 0) >= 1) {
+      buildings[f] = true;
+    }
+  }
   if (buildings.drydock_tier2 || (facilityTiers.drydock_tier2 ?? 0) >= 1) {
     facilityTiers.drydock = Math.max(2, facilityTiers.drydock ?? 0);
-  } else if (buildings.drydock) {
-    facilityTiers.drydock = Math.max(1, facilityTiers.drydock ?? 0);
+  }
+  if ((facilityTiers.drydock ?? 0) >= 2) {
+    buildings.drydock = true;
+    buildings.drydock_tier2 = true;
+    facilityTiers.drydock_tier2 = Math.max(1, facilityTiers.drydock_tier2 ?? 0);
+  } else if ((facilityTiers.drydock ?? 0) >= 1) {
+    buildings.drydock = true;
   }
 
   const factionRep: Record<FactionId, number> = { ...createInitialV3FactionRep() };
@@ -2136,7 +2168,9 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
         .slice(0, V3_MAX_RUN_HISTORY)
     : [];
   const settledRunIds = Array.isArray(rawProfile.settledRunIds)
-    ? rawProfile.settledRunIds.filter((s): s is string => typeof s === 'string')
+    ? Array.from(
+        new Set(rawProfile.settledRunIds.filter((s): s is string => typeof s === 'string'))
+      ).slice(-V3_MAX_SETTLED_RUN_IDS)
     : [];
   const loadoutPresets = sanitizeLoadoutPresets(rawProfile.loadoutPresets);
 
@@ -2307,12 +2341,39 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
     const safeChargesUsed = Math.min(safeChargesMax, sanitizeNonNegInt(rawRun.tacticalChargesUsed));
     const needsChargesPatch =
       rawRun.tacticalChargesMax !== safeChargesMax || rawRun.tacticalChargesUsed !== safeChargesUsed;
+    const nextStartingStipend =
+      rawRun.startingStipendCredits !== undefined
+        ? sanitizeNonNegInt(rawRun.startingStipendCredits)
+        : undefined;
+    const needsStipendPatch =
+      rawRun.startingStipendCredits !== undefined &&
+      nextStartingStipend !== rawRun.startingStipendCredits;
+    const normalizedStartingStipend = nextStartingStipend ?? 0;
+    const nextStipendSpent =
+      rawRun.stipendSpentCredits !== undefined
+        ? Math.min(normalizedStartingStipend, sanitizeNonNegInt(rawRun.stipendSpentCredits))
+        : undefined;
+    const needsStipendSpentPatch =
+      rawRun.stipendSpentCredits !== undefined &&
+      nextStipendSpent !== rawRun.stipendSpentCredits;
 
-    if (needsEndlessPatch || needsCrewMasteryPatch || needsChargesPatch) {
+    if (
+      needsEndlessPatch ||
+      needsCrewMasteryPatch ||
+      needsChargesPatch ||
+      needsStipendPatch ||
+      needsStipendSpentPatch
+    ) {
       activeRun = {
         ...rawRun,
         ...(rawRun.endlessThreat !== undefined ? { endlessThreat: nextEndlessThreat } : {}),
         ...(rawRun.crewMasteryTier !== undefined ? { crewMasteryTier: nextCrewMasteryTier } : {}),
+        ...(rawRun.startingStipendCredits !== undefined
+          ? { startingStipendCredits: nextStartingStipend }
+          : {}),
+        ...(rawRun.stipendSpentCredits !== undefined
+          ? { stipendSpentCredits: nextStipendSpent }
+          : {}),
         tacticalChargesMax: safeChargesMax,
         tacticalChargesUsed: safeChargesUsed,
       };

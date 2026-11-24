@@ -286,7 +286,7 @@ export function renderMapView(
                 return `<button type="button" class="v2-map-compare-card ${active ? 'selected' : ''}" data-select-node="${rid}" data-testid="map-compare-${rid}">
                   <div class="v2-mc-head">
                     <span class="v2-mc-head-left">${svgIcon(rm.icon, 14)} ${rn.lane === 0 ? 'A线' : 'B线'} · ${rm.label}</span>
-                    <span class="v2-fuel-tag ${canJump ? '' : 'no-fuel'}">${svgIcon('fuel', 11)} ${fuelInfo.totalCost}</span>
+                    <span class="v2-fuel-tag ${canJump ? '' : 'no-fuel'}" title="本次跃迁消耗 ${fuelInfo.totalCost} 燃料">${svgIcon('fuel', 11)} ${fuelInfo.totalCost} 燃料</span>
                   </div>
                   <div class="v2-mc-tags v3-map-intent-tags">
                     ${rn.contractMarker ? `<span class="v2-badge-contract">${svgIcon('star', 10)} 委托目标</span>` : ''}

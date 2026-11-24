@@ -1404,7 +1404,19 @@ export class V2CombatScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
-    const dt = Math.min(delta, 50) / 1000;
+    const isHidden = typeof document !== 'undefined' && document.hidden;
+    const safeDelta = Number.isFinite(delta) ? Math.max(0, delta) : 0;
+    const rawLoopDelta = this.game?.loop?.rawDelta;
+    const safeRawDelta =
+      typeof rawLoopDelta === 'number' && Number.isFinite(rawLoopDelta) ? Math.max(0, rawLoopDelta) : safeDelta;
+    const elapsedMs = isHidden ? 0 : Math.max(safeDelta, safeRawDelta);
+    // Use bounded wall-clock elapsed time (`game.loop.rawDelta`) so combat round pacing
+    // (~950ms/round at 1x) stays faithful to real time even during Phaser's 120-frame startup/focus
+    // cooldown or <5 FPS software rendering, while pausing on hidden tabs and stepping at most
+    // one round per frame (never skipping tactical pause boundaries).
+    const stepDeltaMs = Math.min(500, elapsedMs);
+    const fxDeltaMs = Math.min(120, elapsedMs);
+    const dt = fxDeltaMs / 1000;
     const pb = this.playback;
     const reduced = pb?.settings.reducedMotion ?? false;
     const lowQuality = pb?.settings.lowQuality ?? false;
@@ -1418,7 +1430,7 @@ export class V2CombatScene extends Phaser.Scene {
     if (pb?.simulation && !this.externalPaused && !this.decisionPaused) {
       const intervalMs = 950 / speed;
       if (this.playbackActive) {
-        this.roundTimerMs -= delta;
+        this.roundTimerMs -= stepDeltaMs;
         if (this.roundTimerMs <= 0) {
           const pauseAt = pb.pauseAtRound ?? null;
           if (pauseAt !== null && this.nextRoundIdx + 1 === pauseAt) {
@@ -1445,7 +1457,7 @@ export class V2CombatScene extends Phaser.Scene {
           }
         }
       } else if (this.waitingCompletion) {
-        this.completionDelayMs -= delta;
+        this.completionDelayMs -= stepDeltaMs;
         if (this.completionDelayMs <= 0) {
           this.waitingCompletion = false;
           pb.onComplete?.();
@@ -1455,7 +1467,7 @@ export class V2CombatScene extends Phaser.Scene {
 
     // Camera micro-shake (DPR-safe via centerOn so zoomed world stays 100% full-bleed!)
     if (this.shakeTimerMs > 0 && !reduced) {
-      this.shakeTimerMs = Math.max(0, this.shakeTimerMs - delta);
+      this.shakeTimerMs = Math.max(0, this.shakeTimerMs - fxDeltaMs);
       const mag = (this.shakeTimerMs / 120) * 3.2;
       this.cameras.main.centerOn(
         this.viewW * 0.5 + (Math.random() - 0.5) * mag * 2,
@@ -1474,7 +1486,7 @@ export class V2CombatScene extends Phaser.Scene {
     if (this.playerSprite && this.playerSprite.scene) {
       this.playerSprite.setPosition(this.playerBaseX + this.playerRecoilX, this.playerBaseY + bobP);
       if (this.playerFlashMs > 0) {
-        this.playerFlashMs -= delta;
+        this.playerFlashMs -= fxDeltaMs;
         this.playerSprite.setTintFill(0xffffff);
       } else {
         this.playerSprite.clearTint();
@@ -1483,10 +1495,10 @@ export class V2CombatScene extends Phaser.Scene {
     }
 
     // Enemy bobbing + 3-state visual (Normal / Armored Charge / Damaged Smoke & Dimmed Flicker)
-    this.smokeAccumMs += delta;
+    this.smokeAccumMs += fxDeltaMs;
     const emitSmoke = !reduced && !lowQuality && this.smokeAccumMs >= 160;
     if (emitSmoke) this.smokeAccumMs = 0;
-    if (this.enemyChargeMs > 0) this.enemyChargeMs = Math.max(0, this.enemyChargeMs - delta);
+    if (this.enemyChargeMs > 0) this.enemyChargeMs = Math.max(0, this.enemyChargeMs - fxDeltaMs);
 
     for (let i = 0; i < this.enemies.length; i++) {
       const e = this.enemies[i];
@@ -1500,7 +1512,7 @@ export class V2CombatScene extends Phaser.Scene {
       }
       const isDamaged = e.hp > 0 && e.hp <= e.maxHp * 0.5;
       if (e.flashMs > 0) {
-        e.flashMs -= delta;
+        e.flashMs -= fxDeltaMs;
         e.sprite.setTintFill(0xffffff);
       } else if (isDamaged) {
         const flicker = !reduced && Math.sin(this.elapsed * 18 + i * 3) > 0.72;

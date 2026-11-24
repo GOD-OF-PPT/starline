@@ -520,18 +520,18 @@ test.describe('Tier 2 · A2: Core Loop, Bankruptcy, Fuel & Loadout Boundaries', 
     const arrangeScreen = app.byTestId(TEST_IDS.ARRANGE_SCREEN);
     await expect(arrangeScreen).toBeVisible();
 
-    const stagingPod = arrangeScreen
+    const stagingPod = page
       .locator('.v2-staging-card, .staging-card, [data-testid^="staging-item"]')
       .first();
     await expect(stagingPod).toBeVisible();
     await stagingPod.click();
 
-    const abortOrDiscardBtn = arrangeScreen
-      .locator('#v2-arrange-abort, #btn-v2-discard, [data-testid^="btn-discard-"]')
-      .or(arrangeScreen.getByRole('button', { name: /放弃当前委托|移交|信标|舍弃|丢弃|放弃/ }))
+    const abortBtn = arrangeScreen
+      .locator('#v2-arrange-abort')
+      .or(arrangeScreen.getByRole('button', { name: /放弃当前委托/ }))
       .first();
-    await expect(abortOrDiscardBtn).toBeVisible();
-    await abortOrDiscardBtn.click();
+    await expect(abortBtn).toBeVisible();
+    await abortBtn.click();
 
     // Confirm abort modal if prompted
     const confirmAbortBtn = page

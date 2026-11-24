@@ -16,7 +16,7 @@ import {
 } from '../data/facilities';
 import { getV3GadgetDefByKind, type V3GadgetKind } from '../data/gadgets';
 import { syncCampaignProgress } from './campaign';
-import { getEffectiveWorkshopCost } from './factions';
+import { getAntiArbitragePartsCraftFloor, getEffectiveWorkshopCost } from './factions';
 import { createV2EquipmentInstance, createV3GadgetInstance } from './itemCatalog';
 import type { V2ProfileState } from './types';
 
@@ -324,13 +324,19 @@ export function canBuildV2Facility(
 ): { readonly canBuild: boolean; readonly reason?: string } {
   const def = V2_FACILITIES[facilityId];
   if (!def) return { canBuild: false, reason: '未知设施' };
-  if (profile.buildings[facilityId]) return { canBuild: false, reason: '已建成' };
+  const alreadyBuilt =
+    facilityId === 'drydock_tier2'
+      ? profile.buildings.drydock_tier2 || getFacilityTier(profile, 'drydock') >= 2
+      : profile.buildings[facilityId] || getFacilityTier(profile, facilityId) >= 1;
+  if (alreadyBuilt) return { canBuild: false, reason: '已建成' };
 
   if (facilityId === 'workbench' || facilityId === 'contract_hub') {
     return { canBuild: false, reason: '完成教学航次自动免费启用' };
   }
   if (facilityId === 'drydock') {
-    if (!profile.buildings.workbench) return { canBuild: false, reason: '需先启用拆解工作台' };
+    if (getFacilityTier(profile, 'workbench') < 1) {
+      return { canBuild: false, reason: '需先启用拆解工作台' };
+    }
   }
   if (facilityId === 'research_lab') {
     if (profile.completedContractTypes.length < 1) {
@@ -338,10 +344,14 @@ export function canBuildV2Facility(
     }
   }
   if (facilityId === 'display') {
-    if (!profile.buildings.research_lab) return { canBuild: false, reason: '需先建成研究台' };
+    if (getFacilityTier(profile, 'research_lab') < 1) {
+      return { canBuild: false, reason: '需先建成研究台' };
+    }
   }
   if (facilityId === 'drydock_tier2') {
-    if (!profile.buildings.drydock) return { canBuild: false, reason: '需先建成船坞一阶' };
+    if (getFacilityTier(profile, 'drydock') < 1) {
+      return { canBuild: false, reason: '需先建成船坞一阶' };
+    }
     if (profile.completedContractTypes.length < 2) {
       return { canBuild: false, reason: '需完成至少 2 种标准委托' };
     }
@@ -398,7 +408,7 @@ export function canResearchV2Instance(
   profile: V2ProfileState,
   instanceId: string
 ): { readonly canResearch: boolean; readonly reason?: string; readonly kind?: V2EquipmentKind; readonly isImproved?: boolean } {
-  if (!profile.buildings.research_lab) {
+  if (getFacilityTier(profile, 'research_lab') < 1) {
     return { canResearch: false, reason: '需先建成「研究台」（100¤）' };
   }
   const item = profile.equipmentWarehouse.find((w) => w.instanceId === instanceId);
@@ -463,7 +473,7 @@ export function craftV2CommonEquipment(
   kind: V2EquipmentKind,
   uniqueSuffix?: string
 ): V2ProfileActionResult {
-  if (!profile.buildings.research_lab) {
+  if (getFacilityTier(profile, 'research_lab') < 1) {
     return { ok: false, profile, error: '需先建成「研究台」才可制造设备' };
   }
   if (!profile.blueprints.includes(kind)) {
@@ -515,7 +525,10 @@ export function canCraftV3GadgetWithParts(
   const def = getV3GadgetDefByKind(kind);
   const wbTier = getFacilityTier(profile, 'workbench');
   const rawCost = wbTier >= 3 ? Math.max(8, Math.round(def.craftCostParts * 0.9)) : def.craftCostParts;
-  const partsCost = getEffectiveWorkshopCost(rawCost, profile.factionRep.deep_institute);
+  const discountedCost = getEffectiveWorkshopCost(rawCost, profile.factionRep.deep_institute);
+  const gadgetBaseDismantle = Math.max(4, Math.round(def.fixedValue * 0.55));
+  const antiArbitrageFloor = getAntiArbitragePartsCraftFloor(gadgetBaseDismantle, 2, 2);
+  const partsCost = Math.max(discountedCost, antiArbitrageFloor);
   if (wbTier < 2) {
     return { canCraft: false, partsCost, reason: '需将拆解工作台升级至 T2 后解锁装置制造' };
   }
@@ -643,7 +656,9 @@ export function canRestoreV2Relic(
 ): { readonly canRestore: boolean; readonly reason?: string } {
   const def = V2_RELICS[relicId];
   if (!def) return { canRestore: false, reason: '未知藏品' };
-  if (!profile.buildings.display) return { canRestore: false, reason: '需先建成收藏展台' };
+  if (getFacilityTier(profile, 'display') < 1) {
+    return { canRestore: false, reason: '需先建成收藏展台' };
+  }
   const st = profile.relics[relicId];
   if (!st) return { canRestore: false, reason: '藏品记录缺失' };
   if (st.restored) return { canRestore: false, reason: '已修复展示' };

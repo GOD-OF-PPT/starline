@@ -31,8 +31,19 @@
   pointer-events: auto;
 }
 
+.v3-overlay-screen > [data-slot] {
+  display: contents;
+  pointer-events: none;
+}
+
+.v3-overlay-screen > [data-slot] > * {
+  pointer-events: auto;
+}
+
 .v3-overlay-screen > .scene-stage-tag,
-.v3-overlay-screen > .v2-combat-event-ticker {
+.v3-overlay-screen > .v2-combat-event-ticker,
+.v3-overlay-screen > [data-slot] > .v2-combat-event-ticker,
+.v3-overlay-screen > [data-slot] > .v3-live-intent-strip {
   pointer-events: none;
 }
 

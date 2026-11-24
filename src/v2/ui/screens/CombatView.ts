@@ -564,21 +564,86 @@ export function renderCombatLiveOverlay(
         }</span>`
       : '';
 
+  const statusGroupHtml = `
+    <span class="combat-pill">回合 <strong class="num">${liveCombatRound}/${sim.roundsCount}</strong></span>
+    <span class="combat-pill v2-hp-pill">
+      ${svgIcon('hull', 13)}
+      <span class="v2-mini-bar"><span style="width:${hpPct}%"></span></span>
+      <strong class="num">${liveCombatPlayerHp}/${run.maxHp}</strong>
+    </span>
+    <span class="combat-pill">${svgIcon('shield', 13)} <strong class="num">${liveCombatPlayerShield}</strong></span>
+    <span class="combat-pill">${svgIcon('combat', 13)} 敌 <strong class="num">${liveCombatEnemiesAlive}</strong></span>
+    <span class="combat-pill v3-charge-pill">${svgIcon('bolt', 12)} 充能 <strong class="num">${chargesRemaining}/${chargesMax}</strong></span>
+    ${envPillHtml}
+    ${endlessLivePillHtml}
+  `;
+
+  const tickerHtml =
+    !showDecisionBar && liveCombatEventLine
+      ? `<div class="v2-combat-event-ticker v3-combat-event-ticker">${liveCombatEventLine}</div>`
+      : '';
+
+  const decisionKey = showDecisionBar
+    ? `${pending!.decisionId}:${chargesRemaining}/${chargesMax}:${pending!.options
+        .map((o) => `${o.choice}:${o.enabled ? '1' : '0'}:${o.predictedFinalHp}`)
+        .join(',')}`
+    : 'none';
+
+  const existingRoot = overlayEl.querySelector<HTMLElement>(':scope > .v3-combat-live-overlay[data-live-mounted="1"]');
+  const existingState = existingRoot ? combatLiveBindings.get(existingRoot) : undefined;
+
+  if (existingRoot && existingState) {
+    existingState.actions = actions;
+    existingState.showDecisionBar = showDecisionBar;
+    existingState.pendingDecisionId = pending?.decisionId ?? null;
+
+    const statusEl = existingRoot.querySelector<HTMLElement>('[data-slot="combat-status-group"]');
+    if (statusEl) statusEl.innerHTML = statusGroupHtml;
+
+    const speedBtn = existingRoot.querySelector<HTMLButtonElement>('#v2-combat-speed');
+    if (speedBtn) speedBtn.textContent = `${combatSpeed}×`;
+
+    const skipBtn = existingRoot.querySelector<HTMLButtonElement>('#v2-combat-skip');
+    if (skipBtn) {
+      skipBtn.disabled = showDecisionBar;
+      skipBtn.textContent = showDecisionBar ? '等待指令' : '跳过演出';
+    }
+
+    const bossSlot = existingRoot.querySelector<HTMLElement>('[data-slot="boss-hud"]');
+    if (bossSlot) bossSlot.innerHTML = bossHudHtml;
+
+    const phaseSlot = existingRoot.querySelector<HTMLElement>('[data-slot="phase-banner"]');
+    if (phaseSlot) phaseSlot.innerHTML = phaseBannerHtml;
+
+    const intentSlot = existingRoot.querySelector<HTMLElement>('[data-slot="intent-strip"]');
+    if (intentSlot) intentSlot.innerHTML = liveIntentStripHtml;
+
+    const tickerSlot = existingRoot.querySelector<HTMLElement>('[data-slot="event-ticker"]');
+    if (tickerSlot) tickerSlot.innerHTML = tickerHtml;
+
+    const decisionSlot = existingRoot.querySelector<HTMLElement>('[data-slot="decision-bar"]');
+    if (decisionSlot && existingState.decisionKey !== decisionKey) {
+      existingState.decisionKey = decisionKey;
+      decisionSlot.innerHTML = decisionHtml;
+      decisionSlot.querySelectorAll<HTMLButtonElement>('[data-elite-tactic]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const decisionId = existingState.pendingDecisionId;
+          if (!decisionId || btn.disabled) return;
+          existingState.actions.onCommitEliteTactic(
+            decisionId,
+            btn.dataset.eliteTactic as V2EliteTacticChoice
+          );
+        });
+      });
+    }
+    return;
+  }
+
   overlayEl.innerHTML = `
-    <div class="v3-overlay-screen v3-combat-live-overlay" data-testid="combat-screen">
+    <div class="v3-overlay-screen v3-combat-live-overlay" data-testid="combat-screen" data-live-mounted="1">
       <div class="combat-hud-bar v2-combat-hero-hud">
-        <div class="v2-combat-status-group">
-          <span class="combat-pill">回合 <strong class="num">${liveCombatRound}/${sim.roundsCount}</strong></span>
-          <span class="combat-pill v2-hp-pill">
-            ${svgIcon('hull', 13)}
-            <span class="v2-mini-bar"><span style="width:${hpPct}%"></span></span>
-            <strong class="num">${liveCombatPlayerHp}/${run.maxHp}</strong>
-          </span>
-          <span class="combat-pill">${svgIcon('shield', 13)} <strong class="num">${liveCombatPlayerShield}</strong></span>
-          <span class="combat-pill">${svgIcon('combat', 13)} 敌 <strong class="num">${liveCombatEnemiesAlive}</strong></span>
-          <span class="combat-pill v3-charge-pill">${svgIcon('bolt', 12)} 充能 <strong class="num">${chargesRemaining}/${chargesMax}</strong></span>
-          ${envPillHtml}
-          ${endlessLivePillHtml}
+        <div class="v2-combat-status-group" data-slot="combat-status-group">
+          ${statusGroupHtml}
         </div>
         <div class="v2-combat-ctrl-group">
           <button type="button" class="btn btn-sm btn-ghost" id="v2-combat-peek-bay">${svgIcon('grid', 13)} 查看船舱</button>
@@ -588,28 +653,45 @@ export function renderCombatLiveOverlay(
           }>${showDecisionBar ? '等待指令' : '跳过演出'}</button>
         </div>
       </div>
-      ${bossHudHtml}
-      ${phaseBannerHtml}
-      ${liveIntentStripHtml}
-      ${
-        !showDecisionBar && liveCombatEventLine
-          ? `<div class="v2-combat-event-ticker v3-combat-event-ticker">${liveCombatEventLine}</div>`
-          : ''
-      }
-      ${decisionHtml}
+      <div data-slot="boss-hud">${bossHudHtml}</div>
+      <div data-slot="phase-banner">${phaseBannerHtml}</div>
+      <div data-slot="intent-strip">${liveIntentStripHtml}</div>
+      <div data-slot="event-ticker">${tickerHtml}</div>
+      <div data-slot="decision-bar">${decisionHtml}</div>
     </div>
   `;
 
-  overlayEl.querySelector('#v2-combat-peek-bay')?.addEventListener('click', actions.onPeekBay);
-  overlayEl.querySelector('#v2-combat-speed')?.addEventListener('click', actions.onToggleSpeed);
+  const mountedRoot = overlayEl.querySelector<HTMLElement>(':scope > .v3-combat-live-overlay[data-live-mounted="1"]');
+  const binding: CombatLiveBindingState = {
+    actions,
+    showDecisionBar,
+    pendingDecisionId: pending?.decisionId ?? null,
+    decisionKey,
+  };
+  if (mountedRoot) {
+    combatLiveBindings.set(mountedRoot, binding);
+  }
+
+  overlayEl.querySelector('#v2-combat-peek-bay')?.addEventListener('click', () => binding.actions.onPeekBay());
+  overlayEl.querySelector('#v2-combat-speed')?.addEventListener('click', () => binding.actions.onToggleSpeed());
   overlayEl.querySelector('#v2-combat-skip')?.addEventListener('click', () => {
-    if (showDecisionBar) return;
-    actions.onSkipPlayback();
+    if (binding.showDecisionBar) return;
+    binding.actions.onSkipPlayback();
   });
   overlayEl.querySelectorAll<HTMLButtonElement>('[data-elite-tactic]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      if (!pending || btn.disabled) return;
-      actions.onCommitEliteTactic(pending.decisionId, btn.dataset.eliteTactic as V2EliteTacticChoice);
+      const decisionId = binding.pendingDecisionId;
+      if (!decisionId || btn.disabled) return;
+      binding.actions.onCommitEliteTactic(decisionId, btn.dataset.eliteTactic as V2EliteTacticChoice);
     });
   });
 }
+
+interface CombatLiveBindingState {
+  actions: CombatLiveOverlayActions;
+  showDecisionBar: boolean;
+  pendingDecisionId: string | null;
+  decisionKey: string;
+}
+
+const combatLiveBindings = new WeakMap<HTMLElement, CombatLiveBindingState>();

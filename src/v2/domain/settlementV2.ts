@@ -16,7 +16,7 @@ import {
   getSurveyInstituteBonusParts,
 } from './factions';
 import { createV2EquipmentInstance, getAnyV2ItemDef } from './itemCatalog';
-import { V3_MAX_RUN_HISTORY } from './persistenceV2';
+import { V3_MAX_RUN_HISTORY, V3_MAX_SETTLED_RUN_IDS } from './persistenceV2';
 import { getEffectiveWarehouseCapacity, getFacilityTier } from './progressionV2';
 import type {
   CampaignActId,
@@ -92,7 +92,7 @@ export function getDefaultDispositionForItem(
   if (item.origin === 'loan') return 'return_loan';
   if (item.origin === 'mission') return contractCompleted ? 'deliver' : 'return_loan';
   if (item.origin === 'owned') return 'store'; // Owned equipment defaults back to warehouse (§10.3)
-  if (item.category === 'cargo' && profile?.buildings.display) {
+  if (item.category === 'cargo' && profile && getFacilityTier(profile, 'display') >= 1) {
     const def = getAnyV2ItemDef(item.definitionId);
     if (def?.isCollectible && def.relicId) {
       const relicProgress = profile.relics[def.relicId];
@@ -125,7 +125,7 @@ export function getAllowedDispositionsForItem(
     if (item.origin === 'owned') {
       return canDismantle ? ['store', 'sell', 'dismantle'] : ['store', 'sell'];
     }
-    if (profile.buildings.research_lab) {
+    if (getFacilityTier(profile, 'research_lab') >= 1) {
       return canDismantle ? ['sell', 'store', 'dismantle'] : ['sell', 'store'];
     }
     return canDismantle ? ['sell', 'dismantle'] : ['sell'];
@@ -151,6 +151,13 @@ export function calculateV2Settlement(
   const reason = run.settlementReason ?? (run.hp <= 0 ? 'defeat' : 'safe_return');
   const contractCompleted = isContractReadyForDelivery(run, reason);
   const activeBonus = run.bonusObjective ?? run.contract.bonusObjective ?? null;
+  const startingStipend = Math.max(0, Math.floor(run.startingStipendCredits ?? 0));
+  const spentStipend = Math.min(
+    startingStipend,
+    Math.max(0, Math.floor(run.stipendSpentCredits ?? 0))
+  );
+  const unspentStipend = Math.max(0, startingStipend - spentStipend);
+  const cashableWallet = Math.max(0, run.wallet - unspentStipend);
 
   // Only placed items participate in settlement (staging must be empty before combat/return)
   const placedItems = run.bay.placed.map((p) => p.item);
@@ -186,13 +193,13 @@ export function calculateV2Settlement(
       };
     });
 
-    const defeatRecoverableBase = run.wallet + nonLoanRecoverable;
+    const defeatRecoverableBase = cashableWallet + nonLoanRecoverable;
     const finalCreditsEarned = Math.floor(defeatRecoverableBase * 0.4);
     const runSalvagePartsEarned = Math.floor(Math.max(0, Math.floor(run.salvagePartsEarned ?? 0)) * 0.4);
 
     return {
       reason: 'defeat',
-      walletCredits: run.wallet,
+      walletCredits: cashableWallet,
       contractCompleted: false,
       contractRewardCredits: 0,
       tutorialBonusCredits: 0,
@@ -339,7 +346,7 @@ export function calculateV2Settlement(
   }
 
   const finalCreditsEarned =
-    run.wallet +
+    cashableWallet +
     soldItemsCredits +
     crewMasteryBonusCredits +
     contractRewardCredits +
@@ -354,7 +361,7 @@ export function calculateV2Settlement(
 
   return {
     reason: 'safe_return',
-    walletCredits: run.wallet,
+    walletCredits: cashableWallet,
     contractCompleted,
     contractRewardCredits,
     tutorialBonusCredits,
@@ -593,7 +600,9 @@ export function applyV2Settlement(
     tutorialCompleted: profile.tutorialCompleted || tutorialSucceeded,
     tutorialBonusClaimed:
       profile.tutorialBonusClaimed || summary.tutorialBonusCredits > 0,
-    settledRunIds: [...profile.settledRunIds, run.runId],
+    settledRunIds: Array.from(new Set([...profile.settledRunIds, run.runId])).slice(
+      -V3_MAX_SETTLED_RUN_IDS
+    ),
     factionRep: nextFactionRep,
     runHistory: nextRunHistory,
     career: nextCareer,
@@ -638,6 +647,19 @@ export function finalizeClimaxEnding(
   run: V2RunState,
   endingId: EndingId
 ): FinalizeClimaxEndingResult {
+  if (run.isShowcase) {
+    const summary = calculateV2Settlement(
+      { ...run, phase: 'SETTLEMENT', settlementReason: 'safe_return' },
+      profile
+    );
+    return {
+      ok: true,
+      profile,
+      summary,
+      newlyUnlockedAchievementIds: [],
+    };
+  }
+
   const baseClaimedAchievements =
     profile.achievementsClaimed !== undefined
       ? [...profile.achievementsClaimed]

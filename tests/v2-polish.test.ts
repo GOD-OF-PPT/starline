@@ -286,7 +286,13 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
     expect(pending).not.toBeNull();
     expect(pending!.roundNumber).toBe(2);
     expect(pending!.chosen).toBeNull();
-    expect(pending!.options.length).toBe(3);
+    expect(pending!.options.length).toBe(4);
+    expect(pending!.options.map((o) => o.choice)).toEqual([
+      'overload',
+      'emergency_shield',
+      'focus_calibrate',
+      'signature_cannon_skiff',
+    ]);
 
     // Starting shield 10, Elite R1 enemy total dmg = 4 + 1 + 1 = 6 -> R1 end shield = 4, hp+shield = 34 > 3 -> Overload enabled!
     expect(pending!.playerShieldAtPause).toBe(4);
@@ -336,7 +342,7 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
     const dupCommit = commitV2EliteTacticDecision(
       committed.run,
       pending!.decisionId,
-      'emergency_defense'
+      'emergency_shield'
     );
     expect(dupCommit.ok).toBe(false);
 
@@ -416,14 +422,14 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
     // Wrong decisionId MUST be rejected
     expect(commitV2EliteTacticDecision(restoredRun, 'wrong_id', 'overload').ok).toBe(false);
 
-    // 2. Commit Emergency Defense once -> persist -> reload
+    // 2. Commit Emergency Shield once -> persist -> reload
     const committed = commitV2EliteTacticDecision(
       restoredRun,
       pendingBefore!.decisionId,
-      'emergency_defense'
+      'emergency_shield'
     );
     expect(committed.ok).toBe(true);
-    expect(committed.run.activeCombat?.pendingDecision?.chosen).toBe('emergency_defense');
+    expect(committed.run.activeCombat?.pendingDecision?.chosen).toBe('emergency_shield');
 
     expect(
       persistV2SaveData(memStorage, { ...reloadedMidPause.data, activeRun: committed.run }).ok
@@ -433,10 +439,10 @@ describe('V2 Polish Phase B & D Domain Rules', () => {
     if (reloadedPostCommit.status !== 'loaded') return;
 
     const postCommitRun = reloadedPostCommit.data.activeRun!;
-    expect(postCommitRun.activeCombat?.pendingDecision?.chosen).toBe('emergency_defense');
+    expect(postCommitRun.activeCombat?.pendingDecision?.chosen).toBe('emergency_shield');
     // Re-committing after reload MUST fail so bonuses can NEVER stack!
     expect(
-      commitV2EliteTacticDecision(postCommitRun, pendingBefore!.decisionId, 'emergency_defense').ok
+      commitV2EliteTacticDecision(postCommitRun, pendingBefore!.decisionId, 'emergency_shield').ok
     ).toBe(false);
     expect(
       commitV2EliteTacticDecision(postCommitRun, pendingBefore!.decisionId, 'overload').ok

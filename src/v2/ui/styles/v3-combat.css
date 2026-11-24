@@ -285,7 +285,7 @@
   pointer-events: none;
 }
 
-.v2-shell.phase-combat-live .v3-combat-live-overlay > * {
+.v2-shell.phase-combat-live .v3-combat-live-overlay > :not([data-slot]) {
   pointer-events: auto;
 }
 

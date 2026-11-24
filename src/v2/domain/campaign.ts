@@ -215,13 +215,17 @@ export function syncCampaignProgress(profile: V2ProfileState): CampaignSyncResul
     }
   };
 
-  if (profile.tutorialCompleted || profile.buildings.workbench) {
+  if (
+    profile.tutorialCompleted ||
+    profile.buildings.workbench ||
+    (profile.facilityTiers?.workbench ?? 0) >= 1
+  ) {
     markMilestone('tutorial_complete');
   }
   if (profile.completedContractIds.length > 0 || profile.completedContractTypes.length > 0) {
     markMilestone('first_contract_complete');
   }
-  if (profile.buildings.research_lab) {
+  if (profile.buildings.research_lab || (profile.facilityTiers?.research_lab ?? 0) >= 1) {
     markMilestone('research_lab_built');
   }
 

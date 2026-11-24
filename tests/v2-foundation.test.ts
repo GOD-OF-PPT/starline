@@ -3,6 +3,7 @@ import { soundEngine } from '../src/audio/soundEngine';
 import { createFreshSaveData } from '../src/domain/persistence';
 import { V2_CARGO_DEFS } from '../src/v2/data/cargo';
 import { V2_EQUIPMENT_DEFS, type V2EquipmentKind } from '../src/v2/data/equipment';
+import { V3_GADGET_DEFS } from '../src/v2/data/gadgets';
 import { createV2ShowcaseRun } from '../src/v2/data/showcaseRun';
 import {
   completeV2CombatAtCurrentNode,
@@ -1833,11 +1834,13 @@ describe('M1 Foundation: F02 Save Schema V3 & Non-Destructive V2->V3 Migration',
   });
 });
 
-describe('M1 Foundation: F04 Codex 31/31, seenItems, Locked Deep Contracts, Anti-Repeat & Shop Engineer Swap', () => {
-  it('reaches 31/31 Codex by recording delivered mission items on safe_return and NOT on defeat/abort', () => {
+describe('M1 Foundation: F04 Codex 48/48, seenItems, Locked Deep Contracts, Anti-Repeat & Shop Engineer Swap', () => {
+  it('reaches 48/48 Codex by recording delivered mission items on safe_return and NOT on defeat/abort', () => {
     const totalCodexDefs =
-      Object.keys(V2_EQUIPMENT_DEFS).length + Object.keys(V2_CARGO_DEFS).length;
-    expect(totalCodexDefs).toBe(31);
+      Object.keys(V2_EQUIPMENT_DEFS).length +
+      Object.keys(V3_GADGET_DEFS).length +
+      Object.keys(V2_CARGO_DEFS).length;
+    expect(totalCodexDefs).toBe(48);
 
     const profile = createFreshV2Profile();
 
@@ -1919,6 +1922,42 @@ describe('M1 Foundation: F04 Codex 31/31, seenItems, Locked Deep Contracts, Anti
     const rescueSum = calculateV2Settlement(rescueSafeRun, profile);
     expect(rescueSum.contractCompleted).toBe(true);
     expect(rescueSum.discoveredDefIds).toContain('mission.escape_pod');
+
+    // 3. Derelict mission delivery -> mission.black_box discovered on safe_return and NOT on defeat/abort
+    const dLaunch = launchV2Expedition({
+      profile,
+      contractTemplateId: 'derelict_std',
+      shipId: 'cannon_skiff',
+      crewId: 'engineer',
+      primaryArchetype: 'laser',
+      slots: [],
+      seed: 9103,
+    });
+    const blackBox = createV2CargoInstance({
+      instanceId: 'm_black_box_1',
+      defId: 'mission.black_box',
+      origin: 'mission',
+      acquiredDepth: 4,
+      location: 'bay',
+      missionBinding: dLaunch.run!.contract.contractId,
+    });
+    const derelictSafeRun: V2RunState = {
+      ...dLaunch.run!,
+      phase: 'SETTLEMENT',
+      settlementReason: 'safe_return',
+      bay: {
+        ...dLaunch.run!.bay,
+        placed: [{ item: blackBox, x: 0, y: 0, rotation: 0 }],
+      },
+    };
+    const derelictSum = calculateV2Settlement(derelictSafeRun, profile);
+    expect(derelictSum.contractCompleted).toBe(true);
+    expect(derelictSum.discoveredDefIds).toContain('mission.black_box');
+    const derelictDefeatSum = calculateV2Settlement(
+      { ...derelictSafeRun, settlementReason: 'defeat', hp: 0 },
+      profile
+    );
+    expect(derelictDefeatSum.discoveredDefIds).not.toContain('mission.black_box');
   });
 
   it('tracks seenItems via recordV2SeenItems & collectVisibleV2DefIdsForRun without leaking unpeeked wreck contents', () => {

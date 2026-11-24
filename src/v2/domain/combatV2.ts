@@ -22,6 +22,7 @@ import {
 import { aggregateEndlessMutatorEffects, getV3SectorDef } from '../data/sectors';
 import { getShipSignatureCommand } from '../data/ships';
 import { calculateV2BuildStats, type V2BuildStats } from './buildStatsV2';
+import { freezeRunBonusObjectiveForSettlement } from './contracts';
 import { generateV2CombatRewardBundle } from './encounter';
 import type {
   SectorId,
@@ -1612,9 +1613,8 @@ export function completeV2CombatAtCurrentNode(
 
   const sim = run.activeCombat.simulation;
   if (sim.outcome === 'defeat') {
-    return {
-      ok: true,
-      run: {
+    const defeatRun = freezeRunBonusObjectiveForSettlement(
+      {
         ...run,
         hp: 0,
         activeCombat: null,
@@ -1623,6 +1623,11 @@ export function completeV2CombatAtCurrentNode(
         settlementReason: 'defeat',
         claimedEventIds: [...run.claimedEventIds, claimKey],
       },
+      'defeat'
+    );
+    return {
+      ok: true,
+      run: defeatRun,
     };
   }
 
@@ -1652,9 +1657,8 @@ export function completeV2CombatAtCurrentNode(
         resolved: true,
       },
     };
-    return {
-      ok: true,
-      run: {
+    const climaxRun = freezeRunBonusObjectiveForSettlement(
+      {
         ...run,
         hp: sim.finalPlayerHpAfterRepair,
         wallet: run.wallet + effectiveBounty,
@@ -1672,6 +1676,11 @@ export function completeV2CombatAtCurrentNode(
         defeatedBossIdsThisRun: nextBosses,
         defeatedEnemyKindsThisRun: nextDefeatedKinds,
       },
+      'safe_return'
+    );
+    return {
+      ok: true,
+      run: climaxRun,
     };
   }
 

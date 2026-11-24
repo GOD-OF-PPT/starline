@@ -108,7 +108,7 @@ Every feature discovered across all 3 Survey reports (Spec Miner + Explorer #1 +
 | M4 | True Dismantling Loop, 16+ Event Deck & Faction Contracts | F11, F12, F13 — Multi-cut press-your-luck derelict dissection, Salvage Parts dismantling & Common→Improved upgrades, 16+ crew-reactive event deck, 3 factions + rep + Bounty/Derelict contracts + bonus objectives. | M1, M2 | DONE (`tsc` 0 errors, `vite build` 94 modules, Reviewer APPROVE + Auditor CLEAN; tests deferred to M7) |
 | M5 | Buildcraft Expansion, Upgradable Station, Relic Passives & Diorama Parity | F14, F15, F16 — 6 new modules (16 total), 4 consumable gadgets, 4th Flagship (`星门巡洋舰`) + hull power cells, T1–T3 facilities + Stargate Relay + 4 active relic passives, Holodeck trial reconciliation, full V2 `BaseScene` diorama. | M1, M2, M4 | DONE (`tsc` 0 errors, `vite build` 96 modules, Reviewer APPROVE + Auditor CLEAN; tests deferred to M7) |
 | M6 | Climax Mission, 3 Endings, Endless Abyss, Career/Achievements & Balance | F17, F18 — Final `星门重启远征` mission, 3 endings + Victory Ceremony, Endless Abyss (`威压 1–10` + mutators + seed challenge), 30-run Career Ledger, Bestiary, Lore Archive, 18 Achievements, full balance matrix. | M2, M3, M4, M5 | DONE (`tsc` 0 errors, `vite build` 102 modules, Reviewer APPROVE + Auditor CLEAN; tests deferred to M7) |
-| M7 | Final Milestone: E2E Tiers 1–4 Pass & Tier 5 Adversarial Hardening | F19 — Phase 1: pass 100% of E2E Tiers 1–4 sequentially; Phase 2: white-box adversarial Tier-5 Challenger loop until zero remaining gaps; final whole-project Forensic Audit CLEAN. | M6, E2E (`TEST_READY.md`) | PLANNED |
+| M7 | Final Milestone: E2E Tiers 1–4 Pass & Tier 5 Adversarial Hardening | F19 — Phase 0: complete M3–M6 Vitest + balance sim; Phase 1: pass 100% of E2E Tiers 1–4 sequentially (dev + `E2E_USE_PREVIEW=1`); Phase 2: white-box adversarial Tier-5 Challenger loop until zero remaining gaps; final whole-project Forensic Audit CLEAN. | M6, E2E (`TEST_READY.md`) | IN_PROGRESS (Phase 0 DONE 116/116 Vitest; Phase 1a Tier 1 DONE 55/55; Phase 1b Tier 2 DONE 54/54; Phase 1c Tiers 3–4 next) |
 
 ---
 
@@ -231,3 +231,112 @@ Every feature discovered across all 3 Survey reports (Spec Miner + Explorer #1 +
 ### 5. Git Commit Hygiene Protocol (All Milestones)
 - `.agents/` MUST be in `.gitignore` (added in M1 first).
 - Every milestone sub-orchestrator stages ONLY its explicitly owned files (`git add -- <files>`) — NEVER `git add -A` or `git add .` — and commits upon passing its milestone gate so progress is preserved cleanly on `main`.
+
+---
+
+## Round 2: Experience Overhaul Execution Plan (`docs/PROJECT-体验重铸.md`)
+
+> **User Request (`.agents/teamwork/ORIGINAL_REQUEST.md`)**: `以 docs/PROJECT-体验重铸.md 作为本轮执行计划，优先推进修复代码编写任务，任务修改完成则开PR合并到Main，修复完所有都合并到main之后再进入测试环境`
+> **Surveyed Baseline**: `main@8a8626d` (PR #1 V3 Expansion + PR #2 First-Voyage Review Docs; `node_modules/` absent; 5 stale Vitest assertions on `main` fixed on unmerged `origin/feat/m7-tests-hardening@12d7ff5`).
+> **Execution Principle**: Prioritize all code-fix implementation milestones (`R2-M1` through `R2-M6`), verifying each milestone with independent Review + Challenge + Forensic Audit and opening & merging PRs to `main` (`gh pr create --base main` → Gate PASS → `gh pr merge --merge --delete-branch`). Enter the browser/Playwright test environment (`R2-M7`) ONLY AFTER all code-fix PRs (`R2-M1`–`R2-M6`) are merged into `main`.
+
+### Adopted Design Decisions (`docs/PROJECT-体验重铸.md §7` Defaults)
+- **D1 = `b`**: Default Layer-1 forecast shows qualitative Threat Tiers (`稳 / 吃力 / 危险 / 致命`) + `↑↓` trend badges; exact deterministic simulation (`余 xxHP (n轮)`, labeled `不干预时结果`) lives in an on-demand Details Drawer.
+- **D2 = `b`**: Free safe return restricted to Beacon nodes only (with non-softlock emergency tow fallback and intact `0¤` bankruptcy launch guarantee).
+- **D3 = `b` (harmonized with PR #1 Active Tactical Commands)**: Preserve PR #1's default-ON Active Tactical Commands (`1` charge regular / `2` boss) AND extend with deterministic per-module click-to-overload (`interventions[]`, including battery boosting adjacent weapons).
+- **D4 = `b`**: Battery supply capacity cap (Common = 1 adjacent weapon, Improved = 2 adjacent weapons, deterministic tie-breaker) + `cargo.coolant_tank`↔`heavy` cross-category synergy + `"新联动！"` discovery popup & ledger.
+- **D5 = `a`**: Preserve legacy V1 (`?mode=v1`) untouched.
+
+### Round 2 Feature Inventory (46 Items — 100% Assigned, 0 Unassigned)
+
+| # | Plan ID | Feature | Work Class | Post-V3 Status | Milestone | Source |
+|---|---|---|---|---|---|---|
+| 0 | `PRE-01` | Env Bootstrap (`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci`) & Reconcile `origin/feat/m7-tests-hardening` (fixes 5 broken Vitest cases, adds 4 M3–M6 suites 116/116, 14 domain hardening fixes, SwiftShader low-FPS combat fix) | `CODE-FIX` | Pending | R2-M1 | Explorer #2 |
+| 1 | `F01` | Persistent `CargoGridV2Component` + local Arrange refresh (0 destroy/recreate on 10 drags) | `CODE-FIX` | Pending | R2-M1 | Spec Miner, Explorer #1 |
+| 2 | `F02` | Phaser stage `playbackKey` deduplication (static stages & wreck cut FX no longer wiped on frame 0) | `CODE-FIX` | Partial-V3 | R2-M1 | Spec Miner, Explorer #1 |
+| 3 | `F03` | `tacticalDelta` cache (`bayHash+itemId+zone`, idle scheduling) + `CargoGridV2` sub-render split (0 `simulateV2Combat` on arrow keys) | `CODE-FIX` | Pending | R2-M1 | Spec Miner, Explorer #1 |
+| 4 | `F04` | Stateful `mount/update/unmount` lifecycle on `src/v2/ui/screens/{ArrangeView,MapView}.ts` | `CODE-FIX` | Partial-V3 | R2-M1 | Spec Miner, Explorer #1 |
+| 5 | `F05` | Phase-switch & UI persistence Vitest unit tests + Playwright 10-screenshot first-voyage capture script (`scripts/capture-first-voyage.mjs`) | `CODE-FIX` + `TEST-ENV` | Partial-V3 | R2-M1 (code), R2-M7 (run) | Spec Miner, Explorer #1 |
+| 6 | `G0` | Foundation Gate (all Vitest + F01–F05 regression green) | `GATE` | Pending | R2-M1 / R2-M7 | Spec Miner |
+| 7 | `S01` | Rewrite `tutorialV2.ts` per §4.1 (14HP target, battery in staging/hand, penultimate 2×3 reactor w/ sacrifice preview, post-reactor fork w/ risky enemy + `ancient_navigator`, `engineerSwapAvailable: true`, Base Step-0 focus) | `CODE-FIX` | Pending | R2-M3 | Spec Miner, Explorer #1 |
+| 8 | `S02` | `shouldAutoSkipArrange(run)` across all 6 resolution paths in `encounter.ts`/`events.ts` + editable CargoGrid on `MAP` | `CODE-FIX` | Partial-V3 | R2-M3 | Spec Miner, Explorer #1 |
+| 9 | `S03` | Persistent `ShipStage` (≥60% viewport at 1366×768 / 390×844 / 844×390) + persistent `HoldView` + floating `ContextDock`, Arrange expanded by default, slim HUD | `CODE-FIX` | Pending | R2-M4 | Spec Miner, Explorer #1 |
+| 10 | `S04` | Unified Star Map (node = card, 1-click jump preserving `data-testid`s) + hide target policy when `units.length <= 1` | `CODE-FIX` | Pending | R2-M3 | Spec Miner, Explorer #1 |
+| 11 | `S05` | Pre-combat merge (pausable 1.5s auto-engage countdown; cancels on pause/policy/gadget/details/unmount/read-only) | `CODE-FIX` | Pending | R2-M3 | Spec Miner, Explorer #1 |
+| 12 | `S06` | Qualitative Threat Tiers (`稳/吃力/危险/致命` + `↑↓`) on Layer 1 + on-demand Details Drawer (`不干预时结果`) + 1-row compact CargoGrid stat bar (preserve `data-preview-final-hp`) | `CODE-FIX` | Pending | R2-M4 | Spec Miner, Explorer #1 |
+| 13 | `S07` | Tactile drag-drop (grab offset + mobile lift, ghost snap, live hover synergy links + animated `.energy-link-line`, invalid spring-back, distinct SFX, opt-in `recommendedSpot`, un-linked fallback loadout) | `CODE-FIX` | Partial | R2-M4 | Spec Miner, Explorer #1 |
+| 14 | `S08` | Direct Wreck clamp click → ~600ms skippable plasma cut FX → FLIP item flight to staging → state commit (instant in `reducedMotion`) | `CODE-FIX` | Pending | R2-M4 | Spec Miner, Explorer #1 |
+| 15 | `S09` | Return-to-port real item artwork unloaded by `BaseScene` crane + auto-resolve single-option settlement items (`buttons <= decisionItems + 1`) + sequential `creditTick` rollup | `CODE-FIX` | Partial | R2-M4 | Spec Miner, Explorer #1 |
+| 16 | `S10` | Post-tutorial recommended contract differs from `transport_std` (distinct gameplay & tradeoff) | `CODE-FIX` | Pending | R2-M3 | Spec Miner, Explorer #1 |
+| 17 | `A01` | Localized ADD hit glow + ≤40ms mild tint + shield-only absorb flash (remove all `setTintFill(0xffffff)`) | `CODE-FIX` | Pending | R2-M2 | Spec Miner, Explorer #1 |
+| 18 | `A02` | Multi-beat `time.delayedCall` combat round choreography (0/120/160-200/450ms ÷ `speed`, clean `skipPlayback` timer cancel) | `CODE-FIX` | Pending | R2-M2 | Spec Miner, Explorer #1 |
+| 19 | `A03` | 3-layer beams, heavy cannon tracers, muzzle flash, capped spark/shield-shard particles (≤24/burst, ≤100 active, off in `lowQuality`), 40–80ms hitstop | `CODE-FIX` | Pending | R2-M2 | Spec Miner, Explorer #1 |
+| 20 | `A04` | Multi-stage death choreography (staggered explosions, split-hull drift, debris), damage-trail ticked HP bars, tiered non-overlapping staggered damage popups | `CODE-FIX` | Pending | R2-M2 | Spec Miner, Explorer #1 |
+| 21 | `A05` | Engine exhaust plumes via `manifest.ts` `hardpoints.engine` + subtle idle micro-tilt | `CODE-FIX` | Pending | R2-M2 | Spec Miner, Explorer #1 |
+| 22 | `A06` | High-res layered gunboat (`1024×512`), 5 modules (`512×256`), 1 enemy (`1024×512` + split halves): code support (`A04` split clipping + hardpoint wiring) in R2-M2; hand-painted WebP raster plates tracked as `EXTERNAL-ART` | `CODE+ART` | Pending (art external) | R2-M2 (code) / External-Art | Spec Miner, Explorer #1 |
+| 23 | `A07` | High-res layered wreck cutaway (`2560×1440` 3 rooms × 2 states): interactive compartment cutaway/clamp code in R2-M4 (`S08`); hand-painted WebP raster plates tracked as `EXTERNAL-ART` | `CODE+ART` | Pending (art external) | R2-M4 (code) / External-Art | Spec Miner, Explorer #1 |
+| 24 | `A08` | Base 4-joint articulated crane + smooth overlay cross-fade/scanline power-up (`BaseScene.ts` code in R2-M2); hand-painted iso gunboat / 3-state base WebP raster plates tracked as `EXTERNAL-ART` | `CODE+ART` | Pending (art external) | R2-M2 (code) / External-Art | Spec Miner, Explorer #1 |
+| 25 | `A09` | Industrial Terminal UI skin v1 (`src/v2/ui/styles/v3-terminal-skin.css` scoped to `.v2-shell`: 45° `clip-path`, recessed CRT, tactile buttons, hazard stripes, powered-off disabled, 0 functional pills on first voyage) + revise Art Spec §8 | `CODE-FIX` | Pending | R2-M5 | Spec Miner, Explorer #1 |
+| 26 | `A10` | Full WebAudio overhaul (`sfxBus`/`bgmBus`/`ambientBus` → `DynamicsCompressorNode` → `masterGain`, ambient noise bed, ±5% pitch randomization, 7+ new SFX kinds, `creditTick` & UI/combat/base caller wiring) | `CODE-FIX` | Partial-V3 | R2-M2 (engine) + R2-M4 (callers) | Spec Miner, Explorer #1 |
+| 27 | `G1` | Internal First-Voyage Slice Walkthrough (desktop + mobile + pointer-only + keyboard-only + `reducedMotion` + all §8 automated metrics) | `TEST-ENV` | Pending | R2-M7 | Spec Miner |
+| 28 | `T01` | Opt-in local playtest telemetry (`?playtest=1`, `localStorage['starline_playtest_log']`, JSON export, zero writes when inactive) | `CODE-FIX` | Pending | R2-M4 | Spec Miner, Explorer #1 |
+| 29 | `T02` | 8-player counterbalanced human blind playtest vs `8f43788` | `PLAYTEST-HUMAN` | External | External-Human (enabled by T01) | Spec Miner, Explorer #1 |
+| 30 | `T03` | Human playtest evaluation report (`docs/reviews/<date>-v3-slice/`) | `PLAYTEST-HUMAN` | External | External-Human | Spec Miner, Explorer #1 |
+| 31 | `G2` | Scale-up human playtest gate (≥6/8 refit, ≤60s action, ≤1 confirm, ≥4/8 replay) | `PLAYTEST-HUMAN` | External | External-Human | Spec Miner |
+| 32 | `D01` | Mid-combat component Overload (`interventions[]` + clickable mounted ship modules incl. battery-adjacent boost, harmonized with PR #1 Active Tactical Commands) | `CODE-FIX` | Partial-V3 | R2-M6 | Spec Miner, Explorer #1 |
+| 33 | `D02` | Specific-enemy target lock (`lockedEnemyId`) on top of PR #1's enemy intent cycles (click card or canvas sprite; fallback on death) | `CODE-FIX` | Partial-V3 | R2-M6 | Spec Miner, Explorer #1 |
+| 34 | `D03` | Battery power capacity limit (Common=1, Improved=2, deterministic) + `cargo.coolant_tank`↔`heavy` cross-category synergy + `"新联动！"` discovery popup & `discoveredSynergies` ledger | `CODE-FIX` | Partial-V3 | R2-M6 | Spec Miner, Explorer #1 |
+| 35 | `D04` | Risk-reward curve (beacon-only free return w/ non-softlock emergency fallback, depth-scaled cargo appreciation, lower defeat salvage floor, `V2_RULES_VERSION='3.1.0'` + non-destructive migration) | `CODE-FIX` | Pending | R2-M6 | Spec Miner, Explorer #1 |
+| 36 | `D05` | Multi-cut press-your-luck wreck dissection ("再切一刀") — already implemented by PR #1; verify & ensure parity with `S08`/balance | `CODE-FIX` | Done-V3 | R2-M6 (verify) | Spec Miner, Explorer #1 |
+| 37 | `D06` | Dynamic spatial conflict generation wired to `verifyV2SpatialConflict` guaranteeing ≥1 genuine spatial conflict per standard run | `CODE-FIX` | Pending | R2-M6 | Spec Miner, Explorer #1 |
+| 38 | `D07` | 3-equipment synergy-tagged combat reward (reducing free HP heals) + Run-1 3-pick-1 equipment family unlock (PR #1 relic passives preserved) | `CODE-FIX` | Partial-V3 | R2-M6 | Spec Miner, Explorer #1 |
+| 39 | `D08` | Permanent CI balance & strategy regression suite (`tests/v2-rules.test.ts` + `tests/v2-simulation.test.ts`: sandwich T09 ≤60%, policy/lock flip ≥10%, conflict ≥1/run, defeat rate 10–25%) | `CODE-FIX` | Pending | R2-M6 | Spec Miner, Explorer #1 |
+| 40 | `G3` | Rule Balance Gate (proven via D08 CI balance matrix) | `GATE` | Pending | R2-M6 / R2-M7 | Spec Miner |
+| 41 | `M5-1` | Remaining high-res ships/enemies/bosses/BGs/title WebP raster art (`1024×512`, `2560×1440`, `3840×2160`) | `EXTERNAL-ART` | External (post-G2) | External-Art | Spec Miner, Explorer #1 |
+| 42 | `M5-2` | Unified 31+ item icons + dedicated repair drone WebP raster art | `EXTERNAL-ART` | External (post-G2) | External-Art | Spec Miner, Explorer #1 |
+| 43 | `M5-3` | Industrial Terminal UI skin extended to all remaining V2/V3 screens & modals (Prepare, Shop, Facilities, Codex, Settings, Campaign, Contracts, Workshop, Career, Ending; V1 untouched) | `CODE-FIX` | Pending | R2-M5 | Spec Miner, Explorer #1 |
+| 44 | `M5-4` | Stateful `mount/update/unmount` lifecycle for remaining screens (Combat, Wreck, Settlement, Shop, Prepare, Base, Event, Reward) | `CODE-FIX` | Partial-V3 | R2-M5 | Spec Miner, Explorer #1 |
+| 45 | `M5-5` | 5-breakpoint responsive regression (`360×640`, `390×844`, `430×932`, `844×390`, `1366×768`) | `TEST-ENV` | Pending | R2-M7 | Spec Miner, Explorer #1 |
+
+### Round 2 Milestones (Strictly Sequenced PR-to-`main` Pipeline → Test Environment Entry)
+
+| # | Name | Scope | PR Target | Dependencies | Status |
+|---|---|---|---|---|---|
+| **R2-M1** | Bootstrap, Baseline M7 Reconcile & M0 Foundation | `PRE-01` (`npm ci` + merge `origin/feat/m7-tests-hardening` + commit updated `PROJECT.md`), `F01`, `F02`, `F03`, `F04`, `F05-code`, `G0` (Vitest/build) | PR #3 (`v3/M0-baseline-m7-reconcile`) + PR #4 (`v3/M0-foundation-f01-f05`) | none | IN_PROGRESS (dispatching R2-M1A) |
+| **R2-M2** | M2 Combat VFX, BaseScene Kinematics & Audio Overhaul | `A01`, `A02`, `A03`, `A04`, `A05`, `A06-code` (split-hull clipping), `A08-code` (4-joint crane + cross-fade/scanline), `A10` (WebAudio engine/buses/compressor/ambient/pitch/SFX) | PR (`v3/M2-vfx-audio-a01-a05-a10`) | R2-M1 | PLANNED |
+| **R2-M3** | M1A First-Voyage Gameplay & Flow | `S01` (tutorial rewrite), `S02` (auto-skip empty arrange + editable MAP bay), `S04` (unified 1-click Map + hide single-enemy policy), `S05` (pausable 1.5s pre-combat auto-engage), `S10` (post-tutorial contract rec) | PR (`v3/M1A-first-voyage-flow`) | R2-M1, R2-M2 | PLANNED |
+| **R2-M4** | M1B Persistent Stage, Forecast, Tactile Drag, Wreck/Return & Telemetry | `S03` (persistent ShipStage ≥60% + HoldView + ContextDock), `S06` (Threat Tiers + Details Drawer + 1-row stats), `S07` (drag-drop feel + live links + opt-in solver + un-linked fallback), `S08` (direct wreck clamp + 600ms cut + FLIP), `S09` (real-sprite crane unload + auto-disposition + `creditTick`), `A10-callers`, `T01` (`?playtest=1` telemetry) | PR (`v3/M1B-stage-feel-telemetry`) | R2-M2, R2-M3 | PLANNED |
+| **R2-M5** | M2/M5 Industrial Terminal UI Skin & Stateful Views | `A09` (first-voyage terminal skin + Art Spec §8 update), `M5-3` (full V2/V3 terminal skin coverage; V1 untouched), `M5-4` (stateful `mount/update/unmount` for remaining screen views) | PR (`v3/M2-M5-terminal-skin-views`) | R2-M4 | PLANNED |
+| **R2-M6** | M4 Core Loop Depth, Rules v3.1 & CI Balance Suite | `D01` (component overload + Tactical Commands), `D02` (target lock), `D03` (battery cap + `coolant_tank` synergy + `"新联动！"` discovery), `D04` (beacon return + depth scaling + lower defeat floor + `V2_RULES_VERSION='3.1.0'` migration), `D05` (verify parity), `D06` (dynamic spatial conflict via `verifyV2SpatialConflict`), `D07` (3-eq synergy reward + Run-1 3-pick-1 family unlock), `D08` (CI balance matrix — Gate G3) | PR(s) (`v3/M4A-combat-buildstats-d01-d03`, `v3/M4B-risk-rewards-balance-d04-d08`) | R2-M4, R2-M5 | PLANNED |
+| **R2-M7** | Final Milestone: Test Environment Verification, E2E Tiers 1–4, 5-Breakpoint & Tier-5 Hardening | Entered ONLY AFTER R2-M1..R2-M6 are ALL merged to `main`. Sync/extend E2E specs for Round-2 specs (`TEST_INFRA.md`/`TEST_READY.md`), pass 100% Vitest + `tsc` + `vite build` + Playwright E2E Tiers 1–4 (dev & preview `E2E_USE_PREVIEW=1`), run `F05` 10-screenshot capture (`1366×768`, `390×844`, `reducedMotion`), verify `G0`/`G1`/`G3` automated metrics & `M5-5` 5 breakpoints, run Tier-5 white-box adversarial Challenger loop until 0 gaps, whole-project Forensic Audit CLEAN, final `PROJECT.md` sync PR. | PR(s) (`v3/M7-e2e-verification-hardening`) | R2-M1..R2-M6 merged to `main` | PLANNED |
+
+### Round 2 Interface Contracts (#6–#10)
+
+### 6. Stateful PhaseView Contract (`src/v2/ui/screens/screenTypes.ts` ↔ `V2AppController.ts`)
+- Upgrade existing `src/v2/ui/screens/*.ts` in-place (do NOT create parallel `src/v2/ui/phases/`).
+- Interface: `export interface PhaseView<P, A> { mount(host: HTMLElement): void; update(props: P, actions: A): void; unmount(): void; }`.
+- `V2AppController` tracks mounted phase views and invokes `mount()`/`unmount()` ONLY on phase/screen transitions; in-phase updates call `update()` preserving DOM identity, focus, selection, and animations.
+- `CargoGridV2Component` stays mounted across in-phase updates (`setCallbacks()` + sub-container rendering); `syncPhaserStage()` deduplicates static/wreck stages via composite `playbackKey` so active VFX (e.g., wreck cuts) are never cleared on same-frame refreshes.
+
+### 7. E2E Contract Compatibility & UX Harmonization (`src/v2/ui/` ↔ `tests/e2e/`)
+- Preserve all `PROJECT.md § Interface Contracts #2` observability & `data-testid` anchors wherever compatible:
+  - Unified Map (`S04`): each destination card keeps `[data-testid="map-node-<id>"]` and embeds its 1-click `[data-testid="btn-jump-node"]` (or activates jump cleanly).
+  - Pre-combat (`S05`): `[data-testid="btn-start-combat"]` stays clickable for immediate engage; auto-engage 1.5s timer exposes `[data-testid="btn-pause-auto-combat"]` and cancels on pause/policy/gadget/details/unmount/read-only.
+  - Threat Tiers (`S06`): Layer 1 shows qualitative tier (`稳/吃力/危险/致命`) + `↑↓` trend; preserve `data-preview-final-hp` attribute on combat forecast container and expose `[data-testid="btn-toggle-forecast-details"]` opening `[data-testid="forecast-details-drawer"]` with exact deterministic numbers labeled `"不干预时结果"`.
+  - Any E2E tests in `tests/e2e/` asserting superseded pre-overhaul behaviors (e.g., old tutorial 15HP/3-layer layout, mandatory empty ARRANGE, unrestricted free safe return at non-beacon nodes, old 1-eq/1-cargo/1-repair combat reward) will be updated cleanly in `R2-M7` (and documented in `TEST_INFRA.md` / `TEST_READY.md`) once all code-fix PRs are merged to `main`.
+
+### 8. WebAudio Bus & SFX Contract (`src/audio/soundEngine.ts`)
+- Graph: `sfxBus` + `bgmBus` + `ambientBus` → `DynamicsCompressorNode` → `masterGain` → `ctx.destination` (graceful no-op if `AudioContext` unavailable/suspended).
+- Distinct SFX kinds include: existing V2/V3 SFX + `pickup`, `hoverValid`, `placeHeavy`, `wreckCut`, `clampPop`, `craneServo`, `cashRegister`, `enemyFire`, plus wired `creditTick` and ±3–5% pitch randomization.
+
+### 9. Rules Version `3.1.0` & Migration Contract (`R2-M6`)
+- `V2_SCHEMA_VERSION` stays `3` (additive profile/run fields: `discoveredSynergies?: string[]`, `pendingFamilyUnlockChoices?: V2EquipmentFamily[]`, `lockedEnemyId?: string | null`, `interventions?: V2CombatIntervention[]`, `isBeacon?: boolean` on map nodes).
+- Bump `V2_RULES_VERSION` from `'3.0.0'` to `'3.1.0'` in `R2-M6`; `loadV2Save()` MUST migrate `'3.0.0'` saves non-destructively (keeping backup and safely handling any in-flight `activeRun` without corrupting profile progress or `starline_save_v1`).
+
+### 10. PR-to-`main` Gate Protocol (`R2-M1`–`R2-M7`)
+- Because `GOD-OF-PPT/starline` has no GitHub Actions CI and `delete_branch_on_merge: false`, every PR MUST:
+  1. Branch from synced `origin/main` (`v3/<task-or-milestone>-<short-desc>`).
+  2. Use `<type>(<TaskID>): <description>` commits, staging explicit file paths ONLY (`git add -- <files>`).
+  3. Pass local `npx tsc --noEmit && npm test && npm run build` (exit 0) in BOTH Worker AND independent Verification Wave (2 Reviewers + 2 Challengers + 1 Forensic Auditor).
+  4. Merge ONLY AFTER `GATE_STATUS.md` records `PASS` (zero Auditor violations, all Reviewers APPROVE, all Challengers confirm), via `gh pr merge <num> --merge --delete-branch`, followed immediately by `git checkout main && git pull --ff-only origin main`.
+
