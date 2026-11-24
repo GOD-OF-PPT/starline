@@ -72,7 +72,6 @@ export interface PrepareViewActions {
 interface OwnedBtnRefs {
   readonly btnEl: HTMLButtonElement;
   readonly smallEl: HTMLElement;
-  infoKey: string;
 }
 
 interface PresetRowRefs {
@@ -336,7 +335,15 @@ export class PreparePhaseView implements PhaseView<PrepareViewProps, PrepareView
   };
 
   private readonly handleSeedInput = (): void => {
-    if (!this.seedInputEl || !this.latestActions) return;
+    if (
+      !this.rootEl ||
+      !this.seedInputEl ||
+      !this.latestActions ||
+      this.latestReadOnly ||
+      this.seedInputEl.disabled
+    ) {
+      return;
+    }
     const raw = this.seedInputEl.value;
     this.latestActions.onChangeCustomSeed(raw);
     if (this.mutatorPreviewEl && this.latestEndlessThreat >= 1) {
@@ -353,6 +360,14 @@ export class PreparePhaseView implements PhaseView<PrepareViewProps, PrepareView
   };
 
   private readonly handlePresetNameInput = (): void => {
+    if (
+      !this.rootEl ||
+      !this.presetNameInputEl ||
+      this.latestReadOnly ||
+      this.presetNameInputEl.disabled
+    ) {
+      return;
+    }
     this.userEditedPresetName = true;
   };
 
@@ -1299,7 +1314,7 @@ export class PreparePhaseView implements PhaseView<PrepareViewProps, PrepareView
             btnEl.appendChild(badge);
             btnEl.appendChild(img);
             btnEl.appendChild(textWrap);
-            refs = { btnEl, smallEl, infoKey: `${w.definitionId}:${w.quality}` };
+            refs = { btnEl, smallEl };
             this.ownedBtns.set(w.instanceId, refs);
           }
 

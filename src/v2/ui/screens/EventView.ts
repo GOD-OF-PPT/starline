@@ -210,7 +210,11 @@ export class EventPhaseView implements PhaseView<EventViewProps, EventViewAction
 
       if (node.hasRelicSignal) {
         if (this.relicBannerEl.parentElement !== this.rootEl) {
-          this.rootEl.insertBefore(this.relicBannerEl, this.abandonWrapEl);
+          const anchor =
+            this.modernBodyEl.parentElement === this.rootEl
+              ? this.modernBodyEl
+              : this.abandonWrapEl;
+          this.rootEl.insertBefore(this.relicBannerEl, anchor);
         }
       } else if (this.relicBannerEl.parentElement) {
         this.relicBannerEl.remove();

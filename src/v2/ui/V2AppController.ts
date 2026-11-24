@@ -596,6 +596,7 @@ export class V2AppController {
     }
     this.unsubscribeModalOpen?.();
     this.unsubscribeModalOpen = null;
+    this.activeDockingNotice = null;
     this.cancelInFlightWreckCut();
     this.cancelSettlementRollup();
     this.preCombatAutoEngage.destroy();
@@ -2471,10 +2472,8 @@ export class V2AppController {
     if (currentScreen === 'title' || currentScreen === 'ending') {
       this.cancelSettlementRollup();
       this.leftViewSlot.unmount(true);
-      if (currentScreen === 'title') {
-        this.teardownCargoBay();
-        this.rightPanelEl.innerHTML = '';
-      }
+      this.teardownCargoBay();
+      this.rightPanelEl.innerHTML = '';
       return;
     }
 
@@ -2789,6 +2788,7 @@ export class V2AppController {
           this.syncAll();
         },
         onChangeCustomSeed: (raw) => {
+          if (this.isReadOnlyTab) return;
           const curDraft = this.prepareDraft;
           if (!curDraft) return;
           curDraft.customSeedInput = raw;
@@ -4296,6 +4296,8 @@ export class V2AppController {
         };
       },
       onReplayEnding: (endingId: EndingId) => {
+        this.activeDockingNotice = null;
+        this.phaserHost?.skipBaseReturnDocking();
         this.endingGalleryId = endingId;
         this.selectedEndingId = endingId;
         soundEngine.play('click');

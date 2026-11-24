@@ -292,7 +292,55 @@ export class SettlementPhaseView
   private latestActions: SettlementViewActions | null = null;
   private latestReadOnly = false;
   private readonly selectedByItem = new Map<string, V2SettlementDisposition>();
+  private updateRevision = 0;
+  private clickDedupSeq = 0;
+  private pendingClickDedup: {
+    readonly itemId: string;
+    readonly disp: V2SettlementDisposition;
+    suppressInputClick: boolean;
+    suppressChange: boolean;
+    readonly token: number;
+  } | null = null;
   private lastTitleKey: string | null = null;
+
+  private syncRadiogroupChecked(
+    itemId: string,
+    selectedDisp: V2SettlementDisposition | undefined
+  ): void {
+    const refs = this.decisionRows.get(itemId);
+    if (!refs || refs.mode !== 'seg' || !refs.segOpts) return;
+    for (const [d, optRefs] of refs.segOpts.entries()) {
+      const checked = d === selectedDisp;
+      if (optRefs.radioEl.checked !== checked) {
+        optRefs.radioEl.checked = checked;
+      }
+      if (checked) {
+        optRefs.radioEl.setAttribute('checked', '');
+      } else {
+        optRefs.radioEl.removeAttribute('checked');
+      }
+    }
+  }
+
+  private armClickDedup(
+    itemId: string,
+    disp: V2SettlementDisposition,
+    suppressInputClick: boolean
+  ): void {
+    const token = ++this.clickDedupSeq;
+    this.pendingClickDedup = {
+      itemId,
+      disp,
+      suppressInputClick,
+      suppressChange: true,
+      token,
+    };
+    Promise.resolve().then(() => {
+      if (this.pendingClickDedup?.token === token) {
+        this.pendingClickDedup = null;
+      }
+    });
+  }
 
   private readonly handleRootClick = (ev: Event): void => {
     if (!this.rootEl || !this.latestActions) return;
@@ -336,18 +384,54 @@ export class SettlementPhaseView
     const disp = ctrl.dataset.settleDisp as V2SettlementDisposition | undefined;
     if (!iid || !disp) return;
 
-    if (ctrl.tagName.toLowerCase() === 'label') {
-      ev.preventDefault();
-      const radio = ctrl.querySelector<HTMLInputElement>('input[data-settle-radio]');
-      if (radio) {
-        radio.checked = true;
-        radio.setAttribute('checked', '');
-      }
+    const isLabel = ctrl.tagName.toLowerCase() === 'label';
+    const radio = isLabel
+      ? ctrl.querySelector<HTMLInputElement>('input[data-settle-radio]')
+      : null;
+    const isDirectRadioClick = Boolean(radio && target === radio);
+
+    if (isLabel && radio?.disabled) return;
+
+    // Suppress synthetic forwarded <input> click triggered right after a <label> click in the same tick
+    if (
+      isDirectRadioClick &&
+      this.pendingClickDedup &&
+      this.pendingClickDedup.itemId === iid &&
+      this.pendingClickDedup.disp === disp &&
+      this.pendingClickDedup.suppressInputClick
+    ) {
+      this.pendingClickDedup.suppressInputClick = false;
+      return;
     }
 
-    if (this.selectedByItem.get(iid) === disp) return;
-    this.selectedByItem.set(iid, disp);
+    // CRITICAL: Only call preventDefault() when clicking <label>/<span> (target !== radio).
+    // Calling preventDefault() on direct <input type="radio"> activation (ArrowRight/ArrowLeft,
+    // radio.click(), assistive tech) triggers HTML5 canceled-activation revert in browsers!
+    if (isLabel && !isDirectRadioClick) {
+      ev.preventDefault();
+    }
+
+    const prevDisp = this.selectedByItem.get(iid);
+    if (prevDisp === disp) return;
+
+    if (isLabel && !isDirectRadioClick && radio) {
+      radio.checked = true;
+      radio.setAttribute('checked', '');
+    }
+
+    const revBefore = this.updateRevision;
+    if (isLabel) {
+      this.armClickDedup(iid, disp, !isDirectRadioClick);
+    }
+
     actions.onChangeDisposition(iid, disp);
+
+    // If the controller rejected the mutation (e.g. !canMutate() while a modal is open)
+    // and did not call update(), restore radio checked DOM to authoritative prevDisp
+    // while keeping selectedByItem unpoisoned.
+    if (this.updateRevision === revBefore && isLabel) {
+      this.syncRadiogroupChecked(iid, prevDisp);
+    }
   };
 
   private readonly handleRootChange = (ev: Event): void => {
@@ -355,13 +439,30 @@ export class SettlementPhaseView
     const target = ev.target as HTMLElement | null;
     if (!target || typeof target.closest !== 'function') return;
     const input = target.closest('input[data-settle-radio]') as HTMLInputElement | null;
-    if (!input || !this.rootEl.contains(input) || !input.checked) return;
+    if (!input || !this.rootEl.contains(input) || input.disabled || !input.checked) return;
     const iid = input.dataset.settleItem;
     const disp = input.dataset.settleDisp as V2SettlementDisposition | undefined;
     if (!iid || !disp) return;
-    if (this.selectedByItem.get(iid) === disp) return;
-    this.selectedByItem.set(iid, disp);
+
+    if (
+      this.pendingClickDedup &&
+      this.pendingClickDedup.itemId === iid &&
+      this.pendingClickDedup.disp === disp &&
+      this.pendingClickDedup.suppressChange
+    ) {
+      this.pendingClickDedup.suppressChange = false;
+      return;
+    }
+
+    const prevDisp = this.selectedByItem.get(iid);
+    if (prevDisp === disp) return;
+
+    const revBefore = this.updateRevision;
     this.latestActions.onChangeDisposition(iid, disp);
+
+    if (this.updateRevision === revBefore) {
+      this.syncRadiogroupChecked(iid, prevDisp);
+    }
   };
 
   isMountedIn(host: HTMLElement): boolean {
@@ -535,7 +636,8 @@ export class SettlementPhaseView
     const isSafe = summary.reason === 'safe_return';
     const warehouseCap = getEffectiveWarehouseCapacity(p);
 
-    // Sync selectedByItem map from props
+    // Sync authoritative selectedByItem map from props
+    this.updateRevision += 1;
     this.selectedByItem.clear();
     for (const line of summary.lines) {
       this.selectedByItem.set(line.item.instanceId, line.selectedDisposition);
@@ -1152,6 +1254,9 @@ export class SettlementPhaseView
     this.rootEl?.remove();
     this.decisionRows.clear();
     this.selectedByItem.clear();
+    this.updateRevision = 0;
+    this.clickDedupSeq = 0;
+    this.pendingClickDedup = null;
     this.hostEl = null;
     this.rootEl = null;
     this.titleEl = null;
