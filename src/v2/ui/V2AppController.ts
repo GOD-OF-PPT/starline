@@ -1,7 +1,8 @@
+import { getItemImageUrl } from '../../assets/itemArt';
 import { soundEngine } from '../../audio/soundEngine';
 import { createRandomSeed } from '../../domain/rng';
 import { MultiTabGuard } from '../../domain/tabLock';
-import type { V2BaseDioramaState } from '../../scenes/BaseScene';
+import type { ReturnDockingCargoItem, V2BaseDioramaState } from '../../scenes/BaseScene';
 import { PhaserHost } from '../../scenes/PhaserHost';
 import { hasOpenModal, registerModalBackgroundRoot } from '../../ui/Modals';
 import { CAMPAIGN_CHAPTERS, type CampaignCommTrigger } from '../data/campaign';
@@ -53,8 +54,10 @@ import {
   pickRecommendedV2ContractId,
 } from '../domain/contracts';
 import {
+  buildActiveWreckStateForNode,
   craftV2EquipmentWithParts,
   dismantleV2WarehouseItem,
+  evaluateWreckHotspotCut,
   getEffectiveShipLoadoutBudget,
   getEffectiveShipMaxHp,
   tuneV2ShipHull,
@@ -153,13 +156,21 @@ import {
   type V2WreckSpotId,
   type V3HullTuningTrack,
 } from '../domain/types';
-import { CargoGridV2Component, type CargoGridV2Callbacks } from './CargoGridV2';
+import {
+  CargoGridV2Component,
+  isHeavyPlacementItem,
+  type CargoGridV2Callbacks,
+} from './CargoGridV2';
 import { crewPortraitSvg, svgIcon } from './icons';
 import {
   buildV2InspectSnapshot,
   type StarlineInspectSnapshot,
   type StarlineScreenId,
 } from './inspectSnapshot';
+import {
+  PlaytestTelemetryLogger,
+  isPlaytestParamEnabled,
+} from './playtestTelemetry';
 import { openV3CampaignModal, type CampaignModalTab } from './modals/CampaignModal';
 import { openV3CareerModal, type CareerModalTab } from './modals/CareerModal';
 import { ArrangePhaseView } from './screens/ArrangeView';
@@ -184,10 +195,20 @@ import {
   type V2ReturnDockingNotice,
   type V2StaticStageMode,
 } from './screens/screenTypes';
-import { renderSettlementView } from './screens/SettlementView';
+import {
+  SettlementBillRollupController,
+  renderSettlementView,
+} from './screens/SettlementView';
 import { renderShopView } from './screens/ShopView';
 import { renderTitleView } from './screens/TitleView';
 import {
+  VFX_WRECK_CLAMP_POP_RATIO,
+  VFX_WRECK_CUT_DURATION_MS,
+  VFX_WRECK_FLIP_DURATION_MS,
+  type WreckCompartmentVisualState,
+} from '../scenes/v2CombatVfx';
+import {
+  WRECK_SPOT_COORDS,
   renderWreckHotspotOverlay,
   renderWreckLeftPanel,
   type WreckHotspotId,
@@ -236,6 +257,7 @@ export class V2AppController {
   private tabGuard: MultiTabGuard;
 
   private sessionLaunchIndex = 0;
+  private destroyed = false;
   private isReadOnlyTab = false;
   private storageError: string | null = null;
   private actionToast: string | null = null;
@@ -264,6 +286,8 @@ export class V2AppController {
   private selectedMapNodeId: string | null = null;
   private selectedWreckHotspot: WreckHotspotId = 'armory';
   private mobileMapShowFull = false;
+  private mobileHoldZoomed = false;
+  private lastViewportPhaseKey: string | null = null;
   private lastCompactViewport = typeof window !== 'undefined' ? window.innerWidth < 860 : false;
   private failedAssetKeys: string[] = [];
 
@@ -271,6 +295,10 @@ export class V2AppController {
   private activeCombatPlaybackKey: string | null = null;
   private readonly staticStageTracker = new V2StaticStageSyncTracker();
   private readonly preCombatAutoEngage: PreCombatAutoEngageController;
+  private readonly settlementRollup = new SettlementBillRollupController();
+  private readonly playtestTelemetry: PlaytestTelemetryLogger;
+  private settledRollupRunId: string | null = null;
+  private settledRunsCountInSession = 0;
   private unsubscribeModalOpen: (() => void) | null = null;
   private liveCombatRound = 0;
   private liveCombatPlayerHp = 30;
@@ -281,6 +309,21 @@ export class V2AppController {
   private livePhaseBannerText: string | null = null;
   private awaitingEliteDecision = false;
   private showCombatLogDetails = false;
+  private inFlightWreckCut: {
+    readonly runId: string;
+    readonly nodeId: string;
+    readonly spotId: V2WreckSpotId;
+    readonly normX: number;
+    readonly normY: number;
+    readonly willAmbush: boolean;
+    readonly flipItemDefIds: readonly string[];
+    phase: 'cutting' | 'flipping';
+    clampPopped: boolean;
+    clampTimerId: number | null;
+    cutTimerId: number | null;
+    flipTimerId: number | null;
+    flipEls: HTMLElement[];
+  } | null = null;
 
   // Persistent DOM anchors so Phaser canvas never flickers
   private appShellEl!: HTMLElement;
@@ -302,6 +345,13 @@ export class V2AppController {
     this.urlBaseSeed = parseDeterministicSeedParam(
       typeof window !== 'undefined' ? window.location.search : ''
     );
+    const playtestEnabled = isPlaytestParamEnabled(
+      typeof window !== 'undefined' ? window.location.search : ''
+    );
+    this.playtestTelemetry = new PlaytestTelemetryLogger({
+      enabled: playtestEnabled,
+      storage: playtestEnabled && typeof window !== 'undefined' ? window.localStorage : null,
+    });
     this.save = createFreshV2SaveData();
     this.v1Inspection = inspectV1SaveForMigration(window.localStorage);
 
@@ -313,9 +363,11 @@ export class V2AppController {
 
     this.tabGuard = new MultiTabGuard(
       (isOwner) => {
+        if (this.destroyed || typeof window === 'undefined') return;
         this.isReadOnlyTab = !isOwner;
         if (this.isReadOnlyTab) {
           this.preCombatAutoEngage.pause('readonly');
+          this.cancelInFlightWreckCut();
         }
         this.phaserHost?.setCombatPaused(this.isReadOnlyTab);
         this.syncAll();
@@ -461,13 +513,35 @@ export class V2AppController {
     window.__STARLINE_INSPECT__ = () => this.buildInspectSnapshot();
     window.addEventListener('resize', this.handleWindowResize);
     window.addEventListener('orientationchange', this.handleWindowResize);
+    if (this.playtestTelemetry.isEnabled()) {
+      this.mountEl.addEventListener('click', this.handlePlaytestMountClick, true);
+    }
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       document.addEventListener('visibilitychange', this.handleVisibilityChange);
     }
     this.unsubscribeModalOpen?.();
     this.unsubscribeModalOpen = subscribeV2ModalOpen(() => {
+      this.cargoGrid?.cancelActiveDrag(true);
       if (this.preCombatAutoEngage.pause('modal')) {
         this.refreshPreCombatAutoEngageUi();
+      }
+      const hadInFlightCut = this.inFlightWreckCut !== null;
+      this.cancelInFlightWreckCut();
+      if (hadInFlightCut) {
+        const run = this.getCurrentRun();
+        const node = run?.currentNodeId ? run.graph.nodes[run.currentNodeId] ?? null : null;
+        if (
+          run &&
+          run.phase === 'ENCOUNTER' &&
+          node &&
+          node.type === 'wreck' &&
+          !node.resolved &&
+          !node.combat
+        ) {
+          this.syncWreckCompartmentsToPhaser(run, node, null);
+          this.renderWreckOverlay(run, node);
+          this.renderEncounterPhase(run);
+        }
       }
     });
 
@@ -483,15 +557,21 @@ export class V2AppController {
   }
 
   destroy(): void {
+    this.destroyed = true;
     delete window.__STARLINE_INSPECT__;
     soundEngine.setTrack('none');
     window.removeEventListener('resize', this.handleWindowResize);
     window.removeEventListener('orientationchange', this.handleWindowResize);
+    if (this.playtestTelemetry.isEnabled()) {
+      this.mountEl.removeEventListener('click', this.handlePlaytestMountClick, true);
+    }
     if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
       document.removeEventListener('visibilitychange', this.handleVisibilityChange);
     }
     this.unsubscribeModalOpen?.();
     this.unsubscribeModalOpen = null;
+    this.cancelInFlightWreckCut();
+    this.cancelSettlementRollup();
     this.preCombatAutoEngage.destroy();
     if (this.actionToastTimer !== null) {
       window.clearTimeout(this.actionToastTimer);
@@ -509,6 +589,7 @@ export class V2AppController {
 
   private readonly handleVisibilityChange = (): void => {
     if (typeof document !== 'undefined' && document.hidden) {
+      this.cargoGrid?.cancelActiveDrag(true);
       if (this.preCombatAutoEngage.pause('hidden')) {
         this.refreshPreCombatAutoEngageUi();
       }
@@ -575,7 +656,7 @@ export class V2AppController {
       return false;
     }
     this.setCurrentRun(res.run);
-    soundEngine.play('click');
+    soundEngine.play('chargeUp');
     this.syncAll();
     return true;
   }
@@ -599,7 +680,7 @@ export class V2AppController {
 
   private isArrangeSceneCollapsed(): boolean {
     if (this.sceneCollapseOverride !== null) return this.sceneCollapseOverride;
-    return true;
+    return false;
   }
 
   private shouldOfferMigrationPrompt(): boolean {
@@ -765,7 +846,9 @@ export class V2AppController {
     this.mainLayoutEl.className = 'main-layout';
 
     this.sceneWrapEl = document.createElement('section');
-    this.sceneWrapEl.className = 'scene-card';
+    this.sceneWrapEl.className = 'scene-card v3-ship-stage';
+    this.sceneWrapEl.dataset.stageRegion = 'ship-stage';
+    this.sceneWrapEl.dataset.testid = 'ship-stage';
 
     this.sceneCanvasHostEl = document.createElement('div');
     this.sceneCanvasHostEl.className = 'scene-canvas-host';
@@ -777,10 +860,14 @@ export class V2AppController {
     this.sceneWrapEl.appendChild(this.sceneOverlayEl);
 
     this.leftPanelEl = document.createElement('section');
-    this.leftPanelEl.className = 'panel-card panel-left';
+    this.leftPanelEl.className = 'panel-card panel-left v3-context-dock';
+    this.leftPanelEl.dataset.stageRegion = 'context-dock';
+    this.leftPanelEl.dataset.testid = 'context-dock';
 
     this.rightPanelEl = document.createElement('section');
-    this.rightPanelEl.className = 'panel-card panel-right';
+    this.rightPanelEl.className = 'panel-card panel-right v3-hold-view';
+    this.rightPanelEl.dataset.stageRegion = 'hold-view';
+    this.rightPanelEl.dataset.testid = 'hold-view';
 
     this.mainLayoutEl.appendChild(this.sceneWrapEl);
     this.mainLayoutEl.appendChild(this.leftPanelEl);
@@ -815,25 +902,44 @@ export class V2AppController {
     const isEnding = currentScreen === 'ending';
     const isBaseHero = !run && !this.prepareDraft && !isEnding;
     const isPrepare = Boolean(!run && this.prepareDraft && !isEnding);
+    const isVoyage = Boolean(run && !isEnding);
+    const isMap = run?.phase === 'MAP';
+    const isEncounter = run?.phase === 'ENCOUNTER';
     const isArrange = run?.phase === 'ARRANGE';
+    const isReward = run?.phase === 'REWARD';
+    const isShop = run?.phase === 'SHOP';
     const isSettlement = run?.phase === 'SETTLEMENT';
     const isLiveCombat = Boolean(run?.phase === 'ENCOUNTER' && run.activeCombat);
     const isPreCombat = Boolean(run?.phase === 'ENCOUNTER' && curNode?.combat && !run.activeCombat);
     const isWreckHero = Boolean(
       run?.phase === 'ENCOUNTER' && curNode?.type === 'wreck' && !curNode.combat && !run.activeCombat
     );
-    const isMapHero = Boolean(run?.phase === 'MAP');
+    const isMapHero = Boolean(isMap);
+    const phaseKey = `${currentScreen}:${run?.phase ?? ''}:${isLiveCombat ? 'live' : isPreCombat ? 'pre' : 'idle'}`;
+    if (this.lastViewportPhaseKey !== phaseKey) {
+      this.lastViewportPhaseKey = phaseKey;
+      this.mobileHoldZoomed = false;
+      this.cargoGrid?.cancelActiveDrag(false);
+      this.cargoGrid?.collapseDetailsDrawer();
+    }
+    const isHoldZoomed = Boolean(isVoyage && !isLiveCombat && (isArrange || this.mobileHoldZoomed));
     const collapsed = isArrange && this.isArrangeSceneCollapsed();
 
     this.sceneWrapEl.classList.toggle('scene-collapsed', collapsed);
     this.appShellEl.classList.toggle('phase-base-hero', isBaseHero);
     this.appShellEl.classList.toggle('phase-prepare', isPrepare);
+    this.appShellEl.classList.toggle('phase-voyage', isVoyage);
+    this.appShellEl.classList.toggle('phase-map', Boolean(isMap));
+    this.appShellEl.classList.toggle('phase-encounter', Boolean(isEncounter));
     this.appShellEl.classList.toggle('phase-arrange', Boolean(isArrange));
+    this.appShellEl.classList.toggle('phase-reward', Boolean(isReward));
+    this.appShellEl.classList.toggle('phase-shop', Boolean(isShop));
     this.appShellEl.classList.toggle('phase-settlement', Boolean(isSettlement));
     this.appShellEl.classList.toggle('phase-combat', isLiveCombat || isPreCombat);
     this.appShellEl.classList.toggle('phase-combat-live', isLiveCombat);
     this.appShellEl.classList.toggle('phase-wreck-hero', isWreckHero);
     this.appShellEl.classList.toggle('phase-map-hero', isMapHero);
+    this.appShellEl.classList.toggle('is-hold-zoomed', isHoldZoomed);
 
     this.appShellEl.dataset.screen = currentScreen;
     this.appShellEl.dataset.phase = run ? run.phase : '';
@@ -853,10 +959,55 @@ export class V2AppController {
     }
   }
 
+  private static readonly PLAYTEST_INTERACTIVE_SELECTOR =
+    'button, [data-action], a, input, select, [role="button"], label[data-settle-item], [data-select-node], [data-jump-node], [data-wreck-cut], [data-pick-reward], [data-elite-tactic], [data-staging-id]';
+
+  private readonly handlePlaytestMountClick = (ev: MouseEvent): void => {
+    if (!this.playtestTelemetry.isEnabled()) return;
+    const target = ev.target as HTMLElement | null;
+    if (!target) return;
+    const actionable = target.closest<HTMLElement>(V2AppController.PLAYTEST_INTERACTIVE_SELECTOR);
+    if (!actionable) return;
+    const action =
+      actionable.dataset.action ||
+      actionable.dataset.testid ||
+      actionable.id ||
+      actionable.tagName.toLowerCase();
+    this.playtestTelemetry.recordClick(action, actionable.dataset.testid ?? null);
+  };
+
+  private computeTelemetryPhaseKey(): string {
+    const screen = this.computeCurrentScreen();
+    if (screen !== 'run') return screen;
+    const run = this.getCurrentRun();
+    if (!run) return screen;
+    if (run.phase === 'ENCOUNTER') {
+      const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
+      if (run.activeCombat) return 'ENCOUNTER:COMBAT_LIVE';
+      if (node?.combat) return 'ENCOUNTER:COMBAT_PRE';
+      if (node?.type === 'wreck') return 'ENCOUNTER:WRECK';
+      return `ENCOUNTER:${(node?.type ?? 'event').toUpperCase()}`;
+    }
+    return run.phase;
+  }
+
+  getPlaytestTelemetryExportJson(): string | null {
+    if (!this.playtestTelemetry.isEnabled()) return null;
+    return this.playtestTelemetry.exportJson();
+  }
+
   private syncAll(): void {
     this.v1Inspection = inspectV1SaveForMigration(window.localStorage);
     this.syncVisibleSeenItems();
     this.applyViewportClasses();
+    if (this.playtestTelemetry.isEnabled()) {
+      const run = this.getCurrentRun();
+      this.playtestTelemetry.recordPhase(this.computeTelemetryPhaseKey(), {
+        runId: run?.runId ?? null,
+        nodeId: run?.currentNodeId ?? null,
+        isTutorial: run?.isTutorial,
+      });
+    }
     soundEngine.setTrack(
       resolveV2BgmTrack({
         titleEntered: this.titleEntered,
@@ -903,7 +1054,7 @@ export class V2AppController {
       },
       {
         onEnterStation: () => {
-          soundEngine.play('click');
+          soundEngine.play('returnDock');
           this.titleEntered = true;
           this.writeTitleSession(true);
           this.syncAll();
@@ -997,6 +1148,7 @@ export class V2AppController {
   }
 
   private startShowcaseRun(trialId: V2TrialBuildId): void {
+    this.cancelInFlightWreckCut();
     this.staticStageTracker.reset();
     this.activeCombatPlaybackKey = null;
     this.titleEntered = true;
@@ -1010,6 +1162,8 @@ export class V2AppController {
     this.selectedMapNodeId = null;
     this.selectedWreckHotspot = 'armory';
     this.awaitingEliteDecision = false;
+    this.showCombatLogDetails = false;
+    this.cargoGrid?.collapseDetailsDrawer();
     this.showcaseRun = createV2ShowcaseRun(trialId);
     soundEngine.play('warpJump');
     this.syncAll();
@@ -1103,8 +1257,11 @@ export class V2AppController {
       `;
     }
 
-    const showCollapseBtn = run?.phase === 'ARRANGE';
-    const collapsed = this.isArrangeSceneCollapsed();
+    const isVoyage = Boolean(run && this.computeCurrentScreen() === 'run');
+    const showMobileHoldToggle = Boolean(
+      isVoyage && run && run.phase !== 'ARRANGE' && !run.activeCombat
+    );
+    this.topHudEl.classList.toggle('is-voyage-slim', isVoyage);
 
     this.topHudEl.innerHTML = `
       <div class="hud-brand">
@@ -1125,10 +1282,12 @@ export class V2AppController {
             : ''
         }
         ${
-          showCollapseBtn
-            ? `<button type="button" class="btn btn-sm btn-secondary" id="v2-btn-toggle-scene">${
-                collapsed ? '展开舰体' : '收起舰体'
-              }</button>`
+          showMobileHoldToggle
+            ? `<button type="button" class="btn btn-sm btn-secondary v3-mobile-hold-toggle ${
+                this.mobileHoldZoomed ? 'active' : ''
+              }" id="v3-btn-toggle-mobile-hold" data-testid="btn-toggle-mobile-hold" aria-pressed="${
+                this.mobileHoldZoomed ? 'true' : 'false'
+              }">${svgIcon('grid', 14)} ${this.mobileHoldZoomed ? '收起船舱' : '船舱'}</button>`
             : ''
         }
         <button type="button" class="btn btn-sm btn-ghost" id="v2-hud-help" aria-label="远航指南">${svgIcon('help', 14)} 指南</button>
@@ -1145,11 +1304,11 @@ export class V2AppController {
       this.awaitingEliteDecision = false;
       this.syncAll();
     });
-    this.topHudEl.querySelector('#v2-btn-toggle-scene')?.addEventListener('click', () => {
-      this.sceneCollapseOverride = !collapsed;
+    this.topHudEl.querySelector('#v3-btn-toggle-mobile-hold')?.addEventListener('click', () => {
+      soundEngine.play('click');
+      this.mobileHoldZoomed = !this.mobileHoldZoomed;
       this.applyViewportClasses();
       this.renderTopHud();
-      this.phaserHost?.resize();
     });
     this.topHudEl.querySelector('#v2-hud-help')?.addEventListener('click', () => {
       soundEngine.play('click');
@@ -1580,6 +1739,8 @@ export class V2AppController {
             if (res.ok) {
               this.activeCombatPlaybackKey = null;
               this.awaitingEliteDecision = false;
+              this.showCombatLogDetails = false;
+              this.cargoGrid?.collapseDetailsDrawer();
               this.livePhaseBannerText = null;
               this.liveEnemySnapshots = [];
               if (isRunPendingCampaignEnding(res.run)) {
@@ -1636,6 +1797,7 @@ export class V2AppController {
           settings: this.save.settings,
         })
       );
+      this.syncWreckCompartmentsToPhaser(run, currentNode, this.inFlightWreckCut?.spotId ?? null);
       this.renderWreckOverlay(run, currentNode);
       return;
     }
@@ -1804,9 +1966,14 @@ export class V2AppController {
 
   private startTutorialRun(): void {
     if (!this.canMutate()) return;
+    if (this.settledRunsCountInSession > 0) {
+      this.playtestTelemetry.recordReplayStart(this.settledRunsCountInSession, 'tutorial');
+    }
     const run = createV2TutorialRun(`v2tut_${Date.now().toString(36)}`);
     this.save = { ...this.save, activeRun: run };
     this.activeDockingNotice = null;
+    this.showCombatLogDetails = false;
+    this.cargoGrid?.collapseDetailsDrawer();
     this.persist();
     soundEngine.play('warpJump');
     this.syncAll();
@@ -1868,6 +2035,310 @@ export class V2AppController {
     );
   }
 
+  private buildWreckCompartmentStates(
+    run: V2RunState,
+    node: V2MapNode,
+    cuttingSpotId: V2WreckSpotId | null
+  ): readonly WreckCompartmentVisualState[] {
+    const wreck = buildActiveWreckStateForNode(run, node, this.save.profile).wreck;
+    return wreck.hotspots.map((spot) => {
+      const coords = WRECK_SPOT_COORDS[spot.spotId] ?? { normX: 0.5, normY: 0.45 };
+      const evalRes = evaluateWreckHotspotCut(run, wreck, spot.spotId);
+      return {
+        spotId: spot.spotId,
+        normX: coords.normX,
+        normY: coords.normY,
+        cut: spot.cut,
+        cutting: cuttingSpotId === spot.spotId,
+        canCut: evalRes.canCut,
+        isLethal: evalRes.isLethal,
+        isRisky: !evalRes.isFirstSafeCut && !wreck.stabilizerActive,
+        silhouetteKind:
+          spot.spotId === 'armory' ? 'equipment' : spot.spotId === 'cargo' ? 'cargo' : 'reactor',
+      };
+    });
+  }
+
+  private syncWreckCompartmentsToPhaser(
+    run: V2RunState,
+    node: V2MapNode,
+    cuttingSpotId: V2WreckSpotId | null
+  ): void {
+    this.phaserHost?.updateV2WreckCompartments(
+      this.buildWreckCompartmentStates(run, node, cuttingSpotId)
+    );
+  }
+
+  private readonly handleWreckCutSkipKey = (ev: KeyboardEvent): void => {
+    if (!this.inFlightWreckCut) return;
+    if (ev.key === ' ' || ev.key === 'Enter' || ev.key === 'Escape') {
+      ev.preventDefault();
+      this.skipInFlightWreckCut();
+    }
+  };
+
+  private cancelInFlightWreckCut(): void {
+    const active = this.inFlightWreckCut;
+    if (!active) return;
+    if (typeof window !== 'undefined') {
+      if (active.clampTimerId !== null) window.clearTimeout(active.clampTimerId);
+      if (active.cutTimerId !== null) window.clearTimeout(active.cutTimerId);
+      if (active.flipTimerId !== null) window.clearTimeout(active.flipTimerId);
+      window.removeEventListener('keydown', this.handleWreckCutSkipKey);
+    } else {
+      if (active.clampTimerId !== null) globalThis.clearTimeout(active.clampTimerId);
+      if (active.cutTimerId !== null) globalThis.clearTimeout(active.cutTimerId);
+      if (active.flipTimerId !== null) globalThis.clearTimeout(active.flipTimerId);
+    }
+    for (const el of active.flipEls) {
+      el.remove();
+    }
+    this.inFlightWreckCut = null;
+    this.phaserHost?.finishV2WreckCutFx();
+  }
+
+  private resolveWreckFlipTargetRect(): { readonly left: number; readonly top: number; readonly width: number; readonly height: number } {
+    const candidates: (HTMLElement | null)[] = [
+      this.rightPanelEl.querySelector<HTMLElement>('[data-cargo-slot="staging"]'),
+      this.rightPanelEl.querySelector<HTMLElement>('[data-cargo-slot="board"]'),
+      this.leftPanelEl.querySelector<HTMLElement>('[data-testid="wreck-stability"]'),
+      this.rightPanelEl.querySelector<HTMLElement>('#v2-cargo-mount'),
+    ];
+    for (const el of candidates) {
+      if (!el) continue;
+      if (el.style?.display === 'none') continue;
+      const r = el.getBoundingClientRect();
+      if (r && r.width > 0 && r.height > 0) {
+        return { left: r.left, top: r.top, width: r.width, height: r.height };
+      }
+    }
+    const vw = typeof window !== 'undefined' && window.innerWidth > 0 ? window.innerWidth : 1024;
+    const vh = typeof window !== 'undefined' && window.innerHeight > 0 ? window.innerHeight : 768;
+    return { left: vw * 0.72, top: vh * 0.72, width: 48, height: 48 };
+  }
+
+  private launchWreckFlipGhosts(
+    spotId: V2WreckSpotId,
+    normX: number,
+    normY: number,
+    itemDefIds: readonly string[]
+  ): HTMLElement[] {
+    if (typeof document === 'undefined' || itemDefIds.length === 0) return [];
+    const pinEl = this.sceneOverlayEl.querySelector<HTMLElement>(
+      `[data-testid="wreck-spot-${spotId}"]`
+    );
+    const pinRect = pinEl?.getBoundingClientRect();
+    const stageRect = this.sceneWrapEl.getBoundingClientRect();
+    const startX =
+      pinRect && pinRect.width > 0
+        ? pinRect.left + pinRect.width * 0.5
+        : stageRect && stageRect.width > 0
+        ? stageRect.left + stageRect.width * normX
+        : 320;
+    const startY =
+      pinRect && pinRect.height > 0
+        ? pinRect.top + pinRect.height * 0.5
+        : stageRect && stageRect.height > 0
+        ? stageRect.top + stageRect.height * normY
+        : 220;
+
+    const targetRect = this.resolveWreckFlipTargetRect();
+    const endX = targetRect.left + targetRect.width * 0.5;
+    const endY = targetRect.top + targetRect.height * 0.5;
+    const dx = endX - startX;
+    const dy = endY - startY;
+
+    const created: HTMLElement[] = [];
+    itemDefIds.slice(0, 3).forEach((defId, idx) => {
+      const ghost = document.createElement('div');
+      ghost.className = 'v3-wreck-flip-ghost';
+      ghost.dataset.testid = 'wreck-flip-ghost';
+      ghost.dataset.itemDefId = defId;
+      ghost.style.left = `${startX - 24 + idx * 8}px`;
+      ghost.style.top = `${startY - 24 - idx * 6}px`;
+      ghost.style.transform = 'translate(0px, 0px) scale(1)';
+
+      const img = document.createElement('img');
+      img.src = getItemImageUrl(defId);
+      img.alt = '';
+      img.draggable = false;
+      ghost.appendChild(img);
+      document.body.appendChild(ghost);
+      created.push(ghost);
+
+      // Force synchronous style/layout flush so real browsers compute before-change styles
+      // and genuinely execute the 260ms CSS FLIP flight transition.
+      void ghost.getBoundingClientRect();
+
+      ghost.classList.add('is-flying');
+      ghost.style.transform = `translate(${Math.round(dx)}px, ${Math.round(dy)}px) scale(0.55)`;
+      ghost.style.opacity = '0.25';
+    });
+    return created;
+  }
+
+  private startWreckCutSequence(spotId: V2WreckSpotId): void {
+    if (!this.canMutate() || this.inFlightWreckCut) return;
+    const run = this.getCurrentRun();
+    const node = run?.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
+    if (!run || run.phase !== 'ENCOUNTER' || !node || node.type !== 'wreck' || node.resolved || node.combat) {
+      return;
+    }
+
+    const wreck = buildActiveWreckStateForNode(run, node, this.save.profile).wreck;
+    const evalRes = evaluateWreckHotspotCut(run, wreck, spotId);
+    if (!evalRes.canCut) {
+      this.showToast(evalRes.disabledReason ?? '无法切割该舱室');
+      return;
+    }
+
+    const spot = wreck.hotspots.find((h) => h.spotId === spotId);
+    const coords = WRECK_SPOT_COORDS[spotId] ?? { normX: 0.5, normY: 0.45 };
+    const flipItemDefIds = spot
+      ? spot.rewardItems && spot.rewardItems.length > 0
+        ? spot.rewardItems.map((i) => i.definitionId)
+        : spot.rewardItem
+        ? [spot.rewardItem.definitionId]
+        : []
+      : [];
+    const willAmbush = Boolean(evalRes.effectiveAmbushRisk);
+
+    this.selectedWreckHotspot = spotId;
+    if (this.phaserHost) {
+      this.phaserHost.triggerV2WreckCutFx(coords.normX, coords.normY);
+    } else {
+      soundEngine.play('wreckCut');
+    }
+
+    // Instant commit path in reducedMotion (0 timers, 0 FLIP ghosts, zero info loss)
+    if (this.save.settings.reducedMotion) {
+      soundEngine.play('clampPop');
+      this.phaserHost?.popV2WreckCutClamp(coords.normX, coords.normY);
+      this.commitWreckCut(run.runId, node.nodeId, spotId);
+      return;
+    }
+
+    const state = {
+      runId: run.runId,
+      nodeId: node.nodeId,
+      spotId,
+      normX: coords.normX,
+      normY: coords.normY,
+      willAmbush,
+      flipItemDefIds,
+      phase: 'cutting' as 'cutting' | 'flipping',
+      clampPopped: false,
+      clampTimerId: null as number | null,
+      cutTimerId: null as number | null,
+      flipTimerId: null as number | null,
+      flipEls: [] as HTMLElement[],
+    };
+    this.inFlightWreckCut = state;
+    this.syncWreckCompartmentsToPhaser(run, node, spotId);
+    this.renderWreckOverlay(run, node);
+    this.renderEncounterPhase(run);
+    window.addEventListener('keydown', this.handleWreckCutSkipKey);
+
+    const clampDelayMs = Math.round(VFX_WRECK_CUT_DURATION_MS * VFX_WRECK_CLAMP_POP_RATIO);
+    state.clampTimerId = window.setTimeout(() => {
+      if (this.inFlightWreckCut !== state) return;
+      state.clampTimerId = null;
+      if (!state.clampPopped) {
+        state.clampPopped = true;
+        soundEngine.play('clampPop');
+        this.phaserHost?.popV2WreckCutClamp(state.normX, state.normY);
+      }
+    }, clampDelayMs);
+
+    state.cutTimerId = window.setTimeout(() => {
+      if (this.inFlightWreckCut !== state) return;
+      state.cutTimerId = null;
+      if (!state.clampPopped) {
+        state.clampPopped = true;
+        soundEngine.play('clampPop');
+        this.phaserHost?.popV2WreckCutClamp(state.normX, state.normY);
+      }
+      if (state.willAmbush || state.flipItemDefIds.length === 0) {
+        this.commitWreckCut(state.runId, state.nodeId, state.spotId);
+        return;
+      }
+      state.phase = 'flipping';
+      state.flipEls = this.launchWreckFlipGhosts(
+        state.spotId,
+        state.normX,
+        state.normY,
+        state.flipItemDefIds
+      );
+      state.flipTimerId = window.setTimeout(() => {
+        if (this.inFlightWreckCut !== state) return;
+        state.flipTimerId = null;
+        this.commitWreckCut(state.runId, state.nodeId, state.spotId);
+      }, VFX_WRECK_FLIP_DURATION_MS);
+    }, VFX_WRECK_CUT_DURATION_MS);
+  }
+
+  private skipInFlightWreckCut(): void {
+    const active = this.inFlightWreckCut;
+    if (!active) return;
+    const { runId, nodeId, spotId, normX, normY, clampPopped } = active;
+    this.cancelInFlightWreckCut();
+    if (!clampPopped) {
+      soundEngine.play('clampPop');
+      this.phaserHost?.popV2WreckCutClamp(normX, normY);
+    }
+    this.commitWreckCut(runId, nodeId, spotId);
+  }
+
+  private commitWreckCut(
+    expectedRunId: string,
+    expectedNodeId: string,
+    spotId: V2WreckSpotId
+  ): void {
+    this.cancelInFlightWreckCut();
+    if (this.destroyed || typeof window === 'undefined') return;
+    if (!this.canMutate()) {
+      this.syncAll();
+      return;
+    }
+    const latestRun = this.getCurrentRun();
+    if (
+      !latestRun ||
+      latestRun.runId !== expectedRunId ||
+      latestRun.phase !== 'ENCOUNTER' ||
+      latestRun.currentNodeId !== expectedNodeId
+    ) {
+      this.syncAll();
+      return;
+    }
+    const res = cutV2WreckHotspot(
+      latestRun,
+      spotId,
+      this.save.profile.unlockedFamilies,
+      undefined,
+      this.save.profile
+    );
+    if (!res.ok) {
+      this.showToast(res.error ?? '无法切割该舱室');
+      this.syncAll();
+      return;
+    }
+    this.selectedWreckHotspot = spotId;
+    this.setCurrentRun(res.run);
+    const updatedNode = res.run.currentNodeId ? res.run.graph.nodes[res.run.currentNodeId] : null;
+    if (res.ambushTriggered || updatedNode?.combat) {
+      this.showCombatLogDetails = false;
+      this.cargoGrid?.collapseDetailsDrawer();
+    }
+    if (res.ambushTriggered) {
+      soundEngine.play('bossAlarm');
+      this.showToast('残骸警报触发！敌舰伏击来袭，战利品已暂封待战后返还！');
+    } else if (res.tookHazard) {
+      soundEngine.play('hullHit');
+      if (res.summaryText) this.showToast(res.summaryText);
+    }
+    this.syncAll();
+  }
+
   private renderWreckOverlay(run: V2RunState, node: V2MapNode): void {
     renderWreckHotspotOverlay(
       this.sceneOverlayEl,
@@ -1877,13 +2348,20 @@ export class V2AppController {
         profile: this.save.profile,
         readOnly: this.isReadOnlyTab && !run.isShowcase,
         selectedHotspot: this.selectedWreckHotspot,
+        cuttingSpotId: this.inFlightWreckCut?.spotId ?? null,
       },
       {
         onSelectHotspot: (spot) => {
           this.selectedWreckHotspot = spot;
-          soundEngine.play('click');
+          soundEngine.play('hoverValid');
           this.renderWreckOverlay(run, node);
           this.renderEncounterPhase(run);
+        },
+        onCutHotspot: (spot) => {
+          this.startWreckCutSequence(spot);
+        },
+        onSkipCut: () => {
+          this.skipInFlightWreckCut();
         },
       }
     );
@@ -1918,8 +2396,17 @@ export class V2AppController {
     const run = this.getCurrentRun();
     if (!run || this.computeCurrentScreen() !== 'run') {
       this.preCombatAutoEngage.reset();
+      this.cancelInFlightWreckCut();
+    } else if (
+      this.inFlightWreckCut &&
+      (run.phase !== 'ENCOUNTER' ||
+        run.runId !== this.inFlightWreckCut.runId ||
+        run.currentNodeId !== this.inFlightWreckCut.nodeId)
+    ) {
+      this.cancelInFlightWreckCut();
     }
     if (!run) {
+      this.cancelSettlementRollup();
       if (this.prepareDraft) {
         this.renderPreparePanels();
       } else {
@@ -1933,6 +2420,9 @@ export class V2AppController {
 
     if (run.phase !== 'ENCOUNTER') {
       this.preCombatAutoEngage.reset();
+    }
+    if (run.phase !== 'SETTLEMENT') {
+      this.cancelSettlementRollup();
     }
 
     if (run.phase === 'MAP') {
@@ -2110,6 +2600,9 @@ export class V2AppController {
     this.prepareDraft = null;
     this.settlementDispositions = {};
     this.selectedMapNodeId = null;
+    this.showCombatLogDetails = false;
+    this.cargoGrid?.collapseDetailsDrawer();
+    this.cancelInFlightWreckCut();
 
     const hasRelicSignal = Object.values(res.run.graph.nodes).some((n) => Boolean(n.hasRelicSignal));
     if (hasRelicSignal) {
@@ -2120,6 +2613,9 @@ export class V2AppController {
       this.triggerCrewComm('act3_start');
     }
 
+    if (this.settledRunsCountInSession > 0) {
+      this.playtestTelemetry.recordReplayStart(this.settledRunsCountInSession, 'expedition');
+    }
     this.persist();
     soundEngine.play('warpJump');
     this.syncAll();
@@ -2330,7 +2826,11 @@ export class V2AppController {
               rotation: spot.rotation,
             },
           ];
-          soundEngine.play('place');
+          soundEngine.play(
+            isHeavyPlacementItem({ definitionId: defId, category: 'equipment' })
+              ? 'placeHeavy'
+              : 'place'
+          );
           this.syncAll();
         },
         onAddOwned: (instId) => {
@@ -2356,7 +2856,7 @@ export class V2AppController {
               rotation: spot.rotation,
             },
           ];
-          soundEngine.play('place');
+          soundEngine.play(isHeavyPlacementItem(w) ? 'placeHeavy' : 'place');
           this.syncAll();
         },
         onSavePreset: (name) => {
@@ -2548,7 +3048,7 @@ export class V2AppController {
         },
         onSelectNode: (nid) => {
           this.selectedMapNodeId = nid;
-          soundEngine.play('click');
+          soundEngine.play('hoverValid');
           const latest = this.getCurrentRun();
           if (latest && latest.phase === 'MAP') {
             this.renderMapPhase(latest);
@@ -2572,7 +3072,25 @@ export class V2AppController {
             }
             this.selectedMapNodeId = null;
             this.selectedWreckHotspot = 'armory';
+            this.showCombatLogDetails = false;
+            this.cargoGrid?.collapseDetailsDrawer();
             const enteredNode = res.run.graph.nodes[nid];
+            if (this.playtestTelemetry.isEnabled()) {
+              const isSafeBeacon =
+                enteredNode?.eventId === 'tutorial_safe_beacon' ||
+                enteredNode?.eventState?.eventId === 'tutorial_safe_beacon';
+              const isRisk = Boolean(
+                enteredNode?.combat &&
+                  (enteredNode.type === 'elite' ||
+                    enteredNode.type === 'boss' ||
+                    enteredNode.hasRelicSignal ||
+                    enteredNode.layer >= cur.graph.maxLayers)
+              );
+              this.playtestTelemetry.recordBranchChoice(
+                nid,
+                isSafeBeacon ? 'safe_return' : isRisk ? 'risk_branch' : 'other'
+              );
+            }
             const bossId = enteredNode?.combat?.bossId ?? enteredNode?.bossId;
             if (bossId === 'boss_anvil') this.triggerCrewComm('act1_boss_intro');
             else if (bossId === 'boss_dreadnought') this.triggerCrewComm('act2_boss_intro');
@@ -2602,6 +3120,7 @@ export class V2AppController {
             if (!cur || cur.phase !== 'MAP') return;
             const res = initiateV2SafeReturnFromMap(cur);
             if (!res.ok) return this.showToast(res.error ?? '当前无法返航');
+            this.playtestTelemetry.recordBranchChoice(cur.currentNodeId, 'safe_return');
             this.settlementDispositions = {};
             this.setCurrentRun(res.run);
             soundEngine.play('returnDock');
@@ -2671,9 +3190,12 @@ export class V2AppController {
     if (node.combat) {
       if (run.activeCombat) {
         this.preCombatAutoEngage.reset();
-        this.teardownCargoBay();
         this.leftPanelEl.innerHTML = '';
-        this.rightPanelEl.innerHTML = '';
+        // S03: Keep persistent HoldView (CargoGridV2) mounted & read-only across live combat (0 mid-voyage teardown).
+        this.mountV2CargoBay(run.bay, false, {
+          title: `参战船舱 · ${V2_SHIPS[run.shipId].name}`,
+          statusBadge: '交火中 · 只读',
+        });
         return;
       }
 
@@ -2702,7 +3224,7 @@ export class V2AppController {
             if (!latest || latest.phase !== 'ENCOUNTER' || latest.activeCombat) return;
             this.preCombatAutoEngage.pause('policy');
             this.setCurrentRun({ ...latest, targetPolicy: policy });
-            soundEngine.play('click');
+            soundEngine.play('tacticalOrder');
             this.syncAll();
           },
           onToggleLog: () => {
@@ -2735,6 +3257,19 @@ export class V2AppController {
       this.mountV2CargoBay(run.bay, false, {
         title: `参战船舱 · ${V2_SHIPS[run.shipId].name}`,
         statusBadge: '战前锁定',
+        getTacticalDelta: (item, zone) => {
+          const activeRun = this.getCurrentRun() ?? run;
+          return computeV2PlacementTacticalDelta({
+            run: activeRun,
+            bay: activeRun.bay,
+            startingHp: activeRun.hp,
+            maxHp: activeRun.maxHp,
+            targetPolicy: activeRun.targetPolicy,
+            item,
+            zone,
+            stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
+          });
+        },
       });
       return;
     }
@@ -2750,56 +3285,38 @@ export class V2AppController {
           profile: this.save.profile,
           readOnly,
           selectedHotspot: this.selectedWreckHotspot,
+          cuttingSpotId: this.inFlightWreckCut?.spotId ?? null,
         },
         {
           onSelectHotspot: (spot) => {
             this.selectedWreckHotspot = spot;
-            soundEngine.play('click');
+            soundEngine.play('hoverValid');
             this.renderWreckOverlay(run, node);
             this.renderEncounterPhase(run);
           },
           onCutSpot: (spotId: V2WreckSpotId) => {
-            if (!this.canMutate()) return;
-            const res = cutV2WreckHotspot(
-              run,
-              spotId,
-              this.save.profile.unlockedFamilies,
-              undefined,
-              this.save.profile
-            );
-            if (!res.ok) return this.showToast(res.error ?? '无法切割该舱室');
-            this.selectedWreckHotspot = spotId;
-            this.setCurrentRun(res.run);
-            if (res.ambushTriggered) {
-              soundEngine.play('bossAlarm');
-              this.showToast('残骸警报触发！敌舰伏击来袭，战利品已暂封待战后返还！');
-            } else {
-              const spotCoords =
-                spotId === 'armory' ? [0.22, 0.48] : spotId === 'cargo' ? [0.78, 0.5] : [0.5, 0.45];
-              this.phaserHost?.triggerV2WreckCutFx(spotCoords[0], spotCoords[1]);
-              if (res.tookHazard) {
-                soundEngine.play('hullHit');
-                if (res.summaryText) this.showToast(res.summaryText);
-              } else {
-                soundEngine.play('place');
-              }
-            }
-            this.syncAll();
+            this.startWreckCutSequence(spotId);
           },
-          onUseGadget: (instanceId) => this.handleUseGadget(run, instanceId),
+          onSkipCut: () => {
+            this.skipInFlightWreckCut();
+          },
+          onUseGadget: (instanceId) => {
+            if (this.inFlightWreckCut) return;
+            this.handleUseGadget(run, instanceId);
+          },
           onExtract: () => {
-            if (!this.canMutate()) return;
+            if (!this.canMutate() || this.inFlightWreckCut) return;
             const res = extractV2Wreck(run);
             if (!res.ok) return this.showToast(res.error ?? '无法撤离残骸');
             if (res.run.phase === 'SETTLEMENT') {
               this.settlementDispositions = {};
             }
             this.setCurrentRun(res.run);
-            soundEngine.play('click');
+            soundEngine.play(res.run.phase === 'SETTLEMENT' ? 'returnDock' : 'pickup');
             this.syncAll();
           },
           onAbandon: () => {
-            if (!this.canMutate()) return;
+            if (!this.canMutate() || this.inFlightWreckCut) return;
             const res = abandonV2EventAndReturn(run);
             if (!res.ok) return this.showToast(res.error ?? '无法放弃返航');
             this.settlementDispositions = {};
@@ -2902,7 +3419,7 @@ export class V2AppController {
           );
           if (!res.ok) return this.showToast(res.error ?? '购买失败');
           this.setCurrentRun(res.run);
-          soundEngine.play('place');
+          soundEngine.play('cashRegister');
           this.syncAll();
         },
         onBuyFuel: () => {
@@ -2910,7 +3427,7 @@ export class V2AppController {
           const res = buyV2MerchantFuel(run, `tx_fuel_${node.nodeId}`, guildRep);
           if (!res.ok) return this.showToast(res.error ?? '无法购买燃料');
           this.setCurrentRun(res.run);
-          soundEngine.play('click');
+          soundEngine.play('cashRegister');
           this.syncAll();
         },
         onBuyRepair: () => {
@@ -2918,7 +3435,7 @@ export class V2AppController {
           const res = buyV2MerchantRepair(run, `tx_repair_${node.nodeId}`, guildRep);
           if (!res.ok) return this.showToast(res.error ?? '无法购买维修');
           this.setCurrentRun(res.run);
-          soundEngine.play('click');
+          soundEngine.play('repairPulse');
           this.syncAll();
         },
         onSellLoot: (iid) => {
@@ -2926,7 +3443,7 @@ export class V2AppController {
           const res = sellV2ItemToMerchant(run, iid, `tx_sell_${node.nodeId}_${iid}`);
           if (!res.ok) return this.showToast(res.error ?? '出售失败');
           this.setCurrentRun(res.run);
-          soundEngine.play('click');
+          soundEngine.play('cashRegister');
           this.syncAll();
         },
         onEngineerSwap: (kind) => this.handleEngineerSwap(run, kind),
@@ -2946,7 +3463,7 @@ export class V2AppController {
               this.settlementDispositions = {};
             }
             this.setCurrentRun(res.run);
-            soundEngine.play('click');
+            soundEngine.play(res.run.phase === 'SETTLEMENT' ? 'returnDock' : 'warpJump');
             this.syncAll();
           };
           if (latest.bay.discardedThisArrange.length > 0 && preview.run.phase !== 'ARRANGE') {
@@ -3007,7 +3524,7 @@ export class V2AppController {
             this.settlementDispositions = {};
           }
           this.setCurrentRun(res.run);
-          soundEngine.play('place');
+          soundEngine.play(choice === 'repair' ? 'repairPulse' : 'rewardRare');
           this.syncAll();
         },
       }
@@ -3075,7 +3592,7 @@ export class V2AppController {
               this.settlementDispositions = {};
             }
             this.setCurrentRun(res.run);
-            soundEngine.play('click');
+            soundEngine.play(res.run.phase === 'SETTLEMENT' ? 'returnDock' : 'tacticalOrder');
             this.syncAll();
           };
           if (latest.bay.discardedThisArrange.length > 0) {
@@ -3117,8 +3634,59 @@ export class V2AppController {
     });
   }
 
+  private readonly handleSettlementRollupKey = (ev: KeyboardEvent): void => {
+    if (hasOpenModal()) return;
+    if (!this.settlementRollup.isActive()) return;
+    if (ev.key === ' ' || ev.key === 'Enter' || ev.key === 'Escape') {
+      ev.preventDefault();
+      this.settlementRollup.skip();
+      window.removeEventListener('keydown', this.handleSettlementRollupKey);
+    }
+  };
+
+  private cancelSettlementRollup(): void {
+    this.settlementRollup.cancel();
+    this.settledRollupRunId = null;
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('keydown', this.handleSettlementRollupKey);
+    }
+  }
+
+  private buildDockingCargoItems(
+    summary: ReturnType<typeof calculateV2Settlement>
+  ): readonly ReturnDockingCargoItem[] {
+    const nonLoan = summary.lines.filter((l) => l.item.origin !== 'loan');
+    const pool = nonLoan.length > 0 ? nonLoan : summary.lines;
+    const priorityOf = (l: (typeof summary.lines)[number]): number => {
+      if (l.selectedDisposition === 'keep_relic' || l.relicId) return 0;
+      if (l.item.category === 'mission' || l.item.origin === 'mission') return 1;
+      return 2;
+    };
+    const sorted = [...pool].sort((a, b) => {
+      const pa = priorityOf(a);
+      const pb = priorityOf(b);
+      if (pa !== pb) return pa - pb;
+      return b.item.fixedValue - a.item.fixedValue;
+    });
+    return sorted.slice(0, 5).map((l) => ({
+      instanceId: l.item.instanceId,
+      definitionId: l.item.definitionId,
+      name: l.name,
+      artUrl: getItemImageUrl(l.item.definitionId),
+      isRelic: Boolean(l.relicId || l.selectedDisposition === 'keep_relic'),
+      isMission: l.item.category === 'mission' || l.item.origin === 'mission',
+      toDisplay: l.selectedDisposition === 'keep_relic',
+    }));
+  }
+
   private renderSettlementPhase(run: V2RunState): void {
     this.unmountActiveLeftPhaseView();
+    if (this.settlementRollup.isActive() && this.settledRollupRunId === run.runId) {
+      this.settlementRollup.skip({ silentCashRegister: true });
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('keydown', this.handleSettlementRollupKey);
+      }
+    }
     const p = this.save.profile;
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const summary = calculateV2Settlement(run, p, this.settlementDispositions);
@@ -3132,17 +3700,31 @@ export class V2AppController {
       {
         onChangeDisposition: (iid, disp) => {
           if (!this.canMutate()) return;
+          this.settlementRollup.skip({ silentCashRegister: true });
+          window.removeEventListener('keydown', this.handleSettlementRollupKey);
           this.settlementDispositions[iid] = disp;
-          soundEngine.play('click');
+          soundEngine.play(
+            disp === 'dismantle'
+              ? 'clampPop'
+              : disp === 'keep_relic'
+              ? 'relicRestore'
+              : 'creditTick'
+          );
           this.renderTopHud();
           this.renderSettlementPhase(run);
         },
+        onSkipRollup: () => {
+          this.settlementRollup.skip();
+          window.removeEventListener('keydown', this.handleSettlementRollupKey);
+        },
         onShowcaseRetry: () => {
+          this.cancelSettlementRollup();
           soundEngine.play('click');
           openV2ShowcasePickerModal(this.modalHostEl, (tid) => this.startShowcaseRun(tid));
         },
         onShowcaseToBase: () => {
-          soundEngine.play('click');
+          this.cancelSettlementRollup();
+          soundEngine.play('returnDock');
           this.showcaseRun = null;
           this.settlementDispositions = {};
           this.syncAll();
@@ -3150,6 +3732,8 @@ export class V2AppController {
         onConfirmSettlement: () => {
           if (!this.canMutate()) return;
           if (!this.save.activeRun || this.save.activeRun.phase !== 'SETTLEMENT') return;
+
+          this.cancelSettlementRollup();
 
           const creditsBefore = this.save.profile.credits;
           const result = applyV2Settlement(
@@ -3162,6 +3746,7 @@ export class V2AppController {
             return;
           }
 
+          const dockingItems = this.buildDockingCargoItems(result.summary);
           const wasTutorialCompleted = this.save.profile.tutorialCompleted;
           this.save = {
             ...this.save,
@@ -3172,6 +3757,7 @@ export class V2AppController {
             this.campaignBannerCollapsed = false;
           }
           this.settlementDispositions = {};
+          this.settledRunsCountInSession += 1;
           this.persist();
 
           soundEngine.play(result.summary.contractCompleted ? 'contractDeliver' : 'returnDock');
@@ -3224,7 +3810,7 @@ export class V2AppController {
             earnedParts: result.summary.totalSalvagePartsEarned,
             contractCompleted: result.summary.contractCompleted,
             unlockedText: unlockedParts.length > 0 ? unlockedParts.join(' · ') : null,
-            crateCount: Math.max(1, result.summary.lines.length),
+            crateCount: Math.max(1, dockingItems.length || result.summary.lines.length),
             hasKeptRelic: Object.keys(result.summary.keptRelicsById).length > 0,
             wasDefeat: result.summary.reason === 'defeat',
             animating: !reduced,
@@ -3256,6 +3842,7 @@ export class V2AppController {
               crateCount: notice.crateCount,
               hasKeptRelic: notice.hasKeptRelic,
               wasDefeat: notice.wasDefeat,
+              items: dockingItems,
               onProgress: (prog) => {
                 if (this.activeDockingNotice !== notice) return;
                 notice.progress = prog;
@@ -3274,6 +3861,23 @@ export class V2AppController {
         },
       }
     );
+
+    if (this.settledRollupRunId !== run.runId) {
+      this.settledRollupRunId = run.runId;
+      this.settlementRollup.start(
+        this.leftPanelEl,
+        summary.finalCreditsEarned,
+        this.save.settings.reducedMotion,
+        {
+          onComplete: () => {
+            window.removeEventListener('keydown', this.handleSettlementRollupKey);
+          },
+        }
+      );
+      if (this.settlementRollup.isActive()) {
+        window.addEventListener('keydown', this.handleSettlementRollupKey);
+      }
+    }
 
     this.mountV2CargoBay(run.bay, false, {
       title: isSafe ? '返航船舱清点' : '战败前最终布局',
@@ -3386,6 +3990,9 @@ export class V2AppController {
       onPrepareRemoveItem: opts.onPrepareRemove ? (id) => opts.onPrepareRemove?.(id) : undefined,
       getTacticalDelta: opts.getTacticalDelta,
       getInspectorHost: opts.getInspectorHost,
+      onDragAttempt: this.playtestTelemetry.isEnabled()
+        ? (attempt) => this.playtestTelemetry.recordDragAttempt(attempt)
+        : undefined,
     };
 
     const canReuse =
@@ -3551,6 +4158,20 @@ export class V2AppController {
     openV2SettingsModal(this.modalHostEl, this.save.settings, {
       readOnly: this.isReadOnlyTab,
       hasV1Save: this.v1Inspection.hasV1Save,
+      playtestTelemetry: this.playtestTelemetry.isEnabled()
+        ? {
+            enabled: true,
+            onExport: () => {
+              const json = this.playtestTelemetry.downloadJson();
+              this.showToast('已导出试玩日志 (JSON)。');
+              return json;
+            },
+            onClear: () => {
+              this.playtestTelemetry.clear();
+              this.showToast('已清空本地试玩日志。');
+            },
+          }
+        : undefined,
       onChange: (next) => {
         this.save = { ...this.save, settings: next };
         this.applySettingsEffects();
@@ -3659,7 +4280,7 @@ export class V2AppController {
         if (res.ok) {
           this.save = { ...this.save, profile: res.profile };
           this.persist();
-          soundEngine.play('place');
+          soundEngine.play('wreckCut');
           this.syncAll();
         }
         return res;
@@ -3685,7 +4306,7 @@ export class V2AppController {
         if (res.ok) {
           this.save = { ...this.save, profile: res.profile };
           this.persist();
-          soundEngine.play('click');
+          soundEngine.play('cashRegister');
           this.syncAll();
         }
         return res;
@@ -3711,7 +4332,7 @@ export class V2AppController {
         if (res.ok) {
           this.save = { ...this.save, profile: res.profile };
           this.persist();
-          soundEngine.play('click');
+          soundEngine.play('cashRegister');
           this.syncAll();
         }
         return res;

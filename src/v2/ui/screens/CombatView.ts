@@ -10,6 +10,7 @@ import {
   getV3EndlessMutatorDef,
   getV3SectorDef,
 } from '../../data/sectors';
+import { V2_SHAPES } from '../../data/shapes';
 import { getShipSignatureCommand } from '../../data/ships';
 import {
   computeCombatTacticalChargesMax,
@@ -18,6 +19,12 @@ import {
   resolveNodeBossId,
 } from '../../domain/combatV2';
 import { canUseV3GadgetInRun } from '../../domain/encounter';
+import { getAnyV2ItemDef } from '../../domain/itemCatalog';
+import {
+  classifyV2CombatDeltaTrend,
+  classifyV2CombatThreat,
+  getV2ThreatTierMeta,
+} from '../../domain/tacticalDelta';
 import type {
   V2CombatUnitSnapshot,
   V2EliteTacticChoice,
@@ -548,9 +555,7 @@ export function renderCombatPreView(
       const initSnap = pv?.initialEnemies.find((s) => s.enemyId === u.enemyId);
       const cycle = getUnitIntentCyclePreview(u, node.combat!.encounterKind, bossId);
       const initShield = resolveUnitInitialShield(u, node.combat!.encounterKind, bossId);
-      const dispMaxHp = initSnap?.maxHp ?? u.maxHp;
       const dispShield = initSnap?.shield ?? initShield.shield;
-      const dispDmg = u.damagePerRound + mutFx.enemyDamageBonus;
       const dispArmor = initSnap?.armor ?? u.armor;
       const dispPierce = initSnap?.pierceRatio ?? u.pierceRatio;
       const intentCycleHtml = cycle
@@ -577,12 +582,19 @@ export function renderCombatPreView(
           )}</span>`;
         })
         .join('');
+      const roleTag = u.isBoss
+        ? '首领单位'
+        : dispPierce > 0
+        ? '穿盾火力'
+        : dispArmor > 0
+        ? '装甲单位'
+        : dispShield > 0
+        ? '护盾单位'
+        : '常规编队';
       return `<div class="v2-enemy-chip v3-enemy-card ${u.isBoss ? 'is-boss' : ''}">
         <div class="v3-enemy-card-head">
           <strong>${u.name}</strong>
-          <span class="v3-enemy-stats">HP ${dispMaxHp}${dispShield > 0 ? ` · 盾 ${dispShield}` : ''} · 攻 ${dispDmg}${
-        dispArmor > 0 ? ` · 甲 ${dispArmor}` : ''
-      }${dispPierce > 0 ? ` · 穿盾 ${Math.round(dispPierce * 100)}%` : ''}</span>
+          <span class="v3-enemy-role-badge">${roleTag}</span>
         </div>
         <div class="intent-cycle">
           <span class="v3-intent-prefix">行动意图</span>
@@ -591,6 +603,41 @@ export function renderCombatPreView(
       </div>`;
     })
     .join('');
+
+  const enemyDetailsListHtml = node.combat.units
+    .map((u) => {
+      const initSnap = pv?.initialEnemies.find((e) => e.enemyId === u.enemyId);
+      const initShield = resolveUnitInitialShield(u, node.combat!.encounterKind, bossId);
+      const dispMaxHp = initSnap?.maxHp ?? u.maxHp;
+      const dispShield = initSnap?.shield ?? initShield.shield;
+      const dispDmg = initSnap?.damagePerRound ?? u.damagePerRound + mutFx.enemyDamageBonus;
+      const dispArmor = initSnap?.armor ?? u.armor;
+      const dispPierce = initSnap?.pierceRatio ?? u.pierceRatio;
+      return `<div class="v3-drawer-enemy-row"><strong>${u.name}</strong>：HP ${dispMaxHp}${
+        dispShield > 0 ? ` · 盾 ${dispShield}` : ''
+      } · 攻 ${dispDmg}${dispArmor > 0 ? ` · 甲 ${dispArmor}` : ''}${
+        dispPierce > 0 ? ` · 穿盾 ${Math.round(dispPierce * 100)}%` : ''
+      }</div>`;
+    })
+    .join('');
+
+  const cargoPerCellSummary = run.bay.placed
+    .filter((p) => p.item.category === 'cargo' && p.item.fixedValue > 0)
+    .map((p) => {
+      const def = getAnyV2ItemDef(p.item.definitionId);
+      const cells = def ? Math.max(1, V2_SHAPES[def.shapeId].cells.length) : 1;
+      const perCell = (p.item.fixedValue / cells).toFixed(1);
+      return `${def?.name ?? p.item.definitionId} ${perCell}¤/格`;
+    })
+    .join(' · ');
+
+  const pvThreat = pv
+    ? classifyV2CombatThreat(
+        { outcome: pv.outcome, playerFinalHp: pv.finalPlayerHpAfterRepair },
+        run.maxHp
+      )
+    : null;
+  const pvThreatMeta = pvThreat ? getV2ThreatTierMeta(pvThreat.tier) : null;
 
   const overchargeGadgets = run.bay.placed
     .map((p) => ({ item: p.item, def: getV3GadgetDef(p.item.definitionId) }))
@@ -691,50 +738,68 @@ export function renderCombatPreView(
         }
 
         ${
-          pv
-            ? `<div class="v2-combat-preview-card ${pv.outcome === 'victory' ? 'ok' : 'danger'}" data-preview-final-hp="${
+          pv && pvThreatMeta
+            ? `<div class="v2-combat-preview-card ${pvThreatMeta.riskClass} threat-${pvThreatMeta.tier}" data-preview-final-hp="${
                 pv.outcome === 'victory' ? pv.finalPlayerHpAfterRepair : 0
-              }">
+              }" data-threat-tier="${pvThreatMeta.tier}">
                 <div class="v2-cp-head">
-                  <strong>${!pureAutoCombat ? '基础配装预估：' : '战果预估：'}${
-                pv.outcome === 'victory' ? '预计获胜' : '有战败风险'
-              }</strong>
-                  <span class="num">${pv.roundsCount} 回合</span>
+                  <strong>${!pureAutoCombat ? '基础配装威胁评估' : '战前威胁评估'}</strong>
+                  <span class="v3-threat-pill threat-${pvThreatMeta.tier}" data-testid="combat-threat-tier">${pvThreatMeta.symbol} ${pvThreatMeta.label}</span>
                 </div>
                 <div class="v2-cp-body">
-                  耐久 ${pv.startingPlayerHp} · 护盾 ${pv.startingPlayerShield} → 战后 <strong>${
-                pv.outcome === 'victory' ? pv.finalPlayerHpAfterRepair : 0
-              }</strong>${pv.repairApplied > 0 ? `（含维修 +${pv.repairApplied}）` : ''}
-                  ${
-                    !pureAutoCombat
-                      ? ` · <strong>战中可施放 ${chargesMax} 次战术指令改写战局</strong>`
-                      : ''
-                  }
+                  ${pvThreatMeta.layer1Summary}${
+                !pureAutoCombat
+                  ? ` · <strong>战中可施放 ${chargesMax} 次战术指令改写战局</strong>`
+                  : ''
+              }
                 </div>
-                <button type="button" class="btn btn-sm btn-ghost" id="v2-toggle-log" style="margin-top:4px;">${
-                  showCombatLogDetails ? '收起回合推演' : '查看回合推演'
+                <button type="button" class="btn btn-sm btn-ghost v3-forecast-details-btn" id="v2-toggle-log" data-testid="btn-toggle-forecast-details" aria-expanded="${
+                  showCombatLogDetails ? 'true' : 'false'
+                }" style="margin-top:4px;">${
+                  showCombatLogDetails ? '收起详细推演' : '查看不干预推演明细'
                 }</button>
                 ${
                   showCombatLogDetails
-                    ? `<div class="v2-combat-log-list">
-                        ${pv.rounds
-                          .slice(0, 10)
-                          .map((r) => {
-                            const phaseNote = r.bossPhaseTransitions?.length
-                              ? ` · ★ ${r.bossPhaseTransitions.map((t) => t.label).join(' / ')}`
-                              : '';
-                            const specialNote = r.enemySpecialNotes?.length
-                              ? ` · ${r.enemySpecialNotes[0]}`
-                              : '';
-                            return `<div class="v2-log-row">R${r.round}: 我方 ${
-                              r.playerAttacks.reduce((s, a) => s + a.appliedDamage, 0)
-                            }伤${r.counterAttack ? `+反击${r.counterAttack.appliedDamage}` : ''} · 敌方 ${
-                              r.enemyAttacks.reduce((s, a) => s + a.hullDamage, 0)
-                            }直伤(盾吸${r.shieldAbsorbedTotal}) → ${r.playerHpAfter}HP${
-                              r.envModifierEvent ? ` · [${r.envModifierEvent}]` : ''
-                            }${phaseNote || specialNote}</div>`;
-                          })
-                          .join('')}
+                    ? `<div class="v3-forecast-details-drawer" data-testid="forecast-details-drawer">
+                        <div class="v3-drawer-head">
+                          <span class="v3-drawer-tag">不干预时结果</span>
+                          <strong class="num">${
+                            pv.outcome === 'victory'
+                              ? `预计获胜 · 余 ${pv.finalPlayerHpAfterRepair}HP (${pv.roundsCount}轮)`
+                              : `预计战败 · 余 0HP (${pv.roundsCount}轮)`
+                          }</strong>
+                        </div>
+                        <div class="v3-drawer-sub">
+                          起始耐久 ${pv.startingPlayerHp} · 护盾 ${pv.startingPlayerShield}${
+                            pv.repairApplied > 0 ? ` · 胜后维修 +${pv.repairApplied}` : ''
+                          }
+                        </div>
+                        <div class="v3-drawer-enemies">${enemyDetailsListHtml}</div>
+                        ${
+                          cargoPerCellSummary
+                            ? `<div class="v3-drawer-cargo">当前货舱单格价值：${cargoPerCellSummary}</div>`
+                            : ''
+                        }
+                        <div class="v2-combat-log-list">
+                          ${pv.rounds
+                            .slice(0, 10)
+                            .map((r) => {
+                              const phaseNote = r.bossPhaseTransitions?.length
+                                ? ` · ★ ${r.bossPhaseTransitions.map((t) => t.label).join(' / ')}`
+                                : '';
+                              const specialNote = r.enemySpecialNotes?.length
+                                ? ` · ${r.enemySpecialNotes[0]}`
+                                : '';
+                              return `<div class="v2-log-row">R${r.round}: 我方 ${
+                                r.playerAttacks.reduce((s, a) => s + a.appliedDamage, 0)
+                              }伤${r.counterAttack ? `+反击${r.counterAttack.appliedDamage}` : ''} · 敌方 ${
+                                r.enemyAttacks.reduce((s, a) => s + a.hullDamage, 0)
+                              }直伤(盾吸${r.shieldAbsorbedTotal}) → ${r.playerHpAfter}HP${
+                                r.envModifierEvent ? ` · [${r.envModifierEvent}]` : ''
+                              }${phaseNote || specialNote}</div>`;
+                            })
+                            .join('')}
+                        </div>
                       </div>`
                     : ''
                 }
@@ -747,7 +812,7 @@ export function renderCombatPreView(
         <div class="v3-precombat-cta-row">
           <button type="button" class="btn btn-primary btn-launch-hero v3-auto-engage-btn ${
             autoEngage?.status === 'countdown' ? 'is-countdown' : ''
-          }" id="v2-btn-start-combat" data-testid="btn-start-combat" data-auto-engage-status="${
+          }" id="v2-btn-start-combat" data-testid="btn-start-combat" data-action="start-combat" data-auto-engage-status="${
             autoEngage?.status ?? 'idle'
           }" data-auto-engage-remaining-ms="${Math.max(
             0,
@@ -924,28 +989,50 @@ export function renderCombatLiveOverlay(
           <span class="v3-et-threat">我方 ${pending!.playerHpAtPause} HP / ${pending!.playerShieldAtPause} 盾 · 敌方本轮预计 <strong class="text-danger">${pending!.enemyThreatDamage}</strong> 伤</span>
         </div>
         <div class="v2-et-options v3-tactical-options">
-          ${pending!.options
-            .map((opt) => {
-              const isSig = Boolean(opt.isSignature || opt.choice.startsWith('signature_'));
-              const predHp = opt.predictedOutcome === 'victory' ? opt.predictedFinalHp : 0;
-              return `<button type="button" class="v2-et-btn ${getTacticButtonClass(
-                opt.choice,
-                isSig
-              )}" data-elite-tactic="${opt.choice}" data-testid="tactical-order-${opt.choice}" data-preview-final-hp="${predHp}" ${
-                isSig ? 'data-tactical-signature="true"' : ''
-              } ${!opt.enabled ? 'disabled' : ''}>
-                <div class="v2-et-btn-head">
-                  <strong>${isSig ? `<span class="v3-sig-chip">${sigDef.badge}</span> ` : ''}${opt.label}</strong>
-                  <span class="v2-et-pred ${opt.predictedOutcome === 'victory' ? 'ok' : 'risk'}">${
-                opt.predictedOutcome === 'victory'
-                  ? `余 ${predHp} HP (${opt.predictedRounds}轮)`
-                  : `预计 0 HP (${opt.predictedRounds}轮)`
-              }</span>
-                </div>
-                <div class="v2-et-btn-sub">${opt.enabled ? opt.summary : opt.disabledReason ?? '当前不可用'}</div>
-              </button>`;
-            })
-            .join('')}
+          ${(() => {
+            const baseOpt = pending!.options.find((o) => o.choice === 'normal') ?? pending!.options[0];
+            const baseHp = baseOpt
+              ? baseOpt.predictedOutcome === 'victory'
+                ? baseOpt.predictedFinalHp
+                : 0
+              : 0;
+            return pending!.options
+              .map((opt) => {
+                const isSig = Boolean(opt.isSignature || opt.choice.startsWith('signature_'));
+                const predHp = opt.predictedOutcome === 'victory' ? opt.predictedFinalHp : 0;
+                const optThreat = classifyV2CombatThreat(
+                  { outcome: opt.predictedOutcome, playerFinalHp: predHp },
+                  run.maxHp
+                );
+                const optMeta = getV2ThreatTierMeta(optThreat.tier);
+                const trend =
+                  opt.choice === 'normal' || !baseOpt
+                    ? 'neutral'
+                    : classifyV2CombatDeltaTrend({
+                        beforeOutcome: baseOpt.predictedOutcome,
+                        afterOutcome: opt.predictedOutcome,
+                        beforeHp: baseHp,
+                        afterHp: predHp,
+                        beforeRounds: baseOpt.predictedRounds,
+                        afterRounds: opt.predictedRounds,
+                        maxHp: run.maxHp,
+                      });
+                const trendGlyph = trend === 'up' ? '↑ ' : trend === 'down' ? '↓ ' : '';
+                return `<button type="button" class="v2-et-btn ${getTacticButtonClass(
+                  opt.choice,
+                  isSig
+                )}" data-elite-tactic="${opt.choice}" data-testid="tactical-order-${opt.choice}" data-preview-final-hp="${predHp}" data-threat-tier="${optMeta.tier}" ${
+                  isSig ? 'data-tactical-signature="true"' : ''
+                } ${!opt.enabled ? 'disabled' : ''}>
+                  <div class="v2-et-btn-head">
+                    <strong>${isSig ? `<span class="v3-sig-chip">${sigDef.badge}</span> ` : ''}${opt.label}</strong>
+                    <span class="v2-et-pred v3-threat-pill threat-${optMeta.tier} trend-${trend}">${trendGlyph}${optMeta.symbol} ${optMeta.label}</span>
+                  </div>
+                  <div class="v2-et-btn-sub">${opt.enabled ? opt.summary : opt.disabledReason ?? '当前不可用'}</div>
+                </button>`;
+              })
+              .join('');
+          })()}
         </div>
       </div>
     `

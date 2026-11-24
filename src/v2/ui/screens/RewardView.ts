@@ -59,7 +59,7 @@ export function renderRewardView(
             <div class="v2-reward-sub">${
               eqDef ? `${renderV2MiniMaskHtml(eqDef.shapeId)} ${V2_SHAPES[eqDef.shapeId].label} · ${eqDelta.synergyLine}` : ''
             }</div>
-            <div class="v2-reward-val">${eqDelta.combatDeltaLine}</div>
+            <div class="v2-reward-val">${eqDelta.qualitativeDeltaLine ?? eqDelta.combatDeltaLine}</div>
           </div>
         </button>
 

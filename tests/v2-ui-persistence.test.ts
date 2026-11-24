@@ -1759,9 +1759,16 @@ describe('M0 Foundation UI Persistence & Performance Suite (F01-F04)', () => {
       expect(postCutSnap.activeRings).toBe(2);
       expect(postCutSnap.moduleCount).toBe(0);
 
+      // S08: Complete in-flight cut via skip cue (still ZERO showV2Stage resets!) before extracting
+      const skipCutBtn = mountEl.querySelector('[data-testid="btn-skip-wreck-cut"]');
+      expect(skipCutBtn).not.toBeNull();
+      skipCutBtn!.click();
+      expect(showStageSpy).toHaveBeenCalledTimes(0);
+
       // Genuine transition: extract from wreck -> leaves wreck stage -> calls showV2Stage!
       const extractBtn = mountEl.querySelector('[data-testid="btn-wreck-extract"]')!;
       expect(extractBtn).not.toBeNull();
+      expect(extractBtn.disabled).toBe(false);
       extractBtn.click();
       expect(showStageSpy).toHaveBeenCalledTimes(1);
 

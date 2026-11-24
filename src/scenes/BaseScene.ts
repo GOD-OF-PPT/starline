@@ -46,11 +46,26 @@ export interface V2BaseDioramaState {
   readonly totalShips?: number;
 }
 
+export interface ReturnDockingCargoItem {
+  readonly instanceId: string;
+  readonly definitionId: string;
+  readonly name: string;
+  readonly artUrl: string;
+  readonly isRelic: boolean;
+  readonly isMission: boolean;
+  readonly toDisplay?: boolean;
+}
+
+export function getDockingItemTextureKey(defId: string): string {
+  return `item.dock.${defId}`;
+}
+
 export interface ReturnDockingPlayback {
   readonly earnedCredits: number;
   readonly crateCount: number;
   readonly hasKeptRelic: boolean;
   readonly wasDefeat: boolean;
+  readonly items?: readonly ReturnDockingCargoItem[];
   readonly onProgress?: (progress: number) => void;
   readonly onFinish?: () => void;
 }
@@ -345,13 +360,17 @@ export class BaseScene extends Phaser.Scene {
   private overlayTransitions: Record<BaseOverlayKey, OverlayTransitionState> = createInitialOverlayStates();
   private lastCranePose: ArticulatedCranePose | null = null;
 
-  // F11 Return-to-port docking & unloading animation (pure presentation, zero payout authority)
+  // F11 + S09 Return-to-port docking & real item artwork unloading animation (pure presentation)
   private dockingPlayback: ReturnDockingPlayback | null = null;
   private dockingElapsedMs = 0;
   private readonly dockingDurationMs = 1400;
   private dockingServoStage: 0 | 1 | 2 = 0;
   private servoClockMs = 0;
   private lastCraneServoMs = -1000;
+  private dockingCargoSprites: Phaser.GameObjects.Image[] = [];
+  private loadingItemTextureKeys = new Set<string>();
+  private lastDockingRenderedKeys: string[] = [];
+  private lastDockingFallbackCrates = 0;
 
   constructor() {
     super({ key: 'BaseScene' });
@@ -440,6 +459,10 @@ export class BaseScene extends Phaser.Scene {
       .setVisible(false);
 
     this.animGraphics = this.add.graphics().setDepth(6);
+    this.dockingCargoSprites = [];
+    this.loadingItemTextureKeys.clear();
+    this.lastDockingRenderedKeys = [];
+    this.lastDockingFallbackCrates = 0;
     this.overlayInitialized = false;
     this.overlayTransitions = createInitialOverlayStates();
     this.lastCranePose = null;
@@ -447,6 +470,10 @@ export class BaseScene extends Phaser.Scene {
     this.servoClockMs = 0;
     this.lastCraneServoMs = -1000;
     this.texturesReady = true;
+
+    if (this.dockingPlayback) {
+      this.ensureDockingItemTextures(this.dockingPlayback);
+    }
 
     this.createInteractiveZones();
     this.redrawStatic();
@@ -462,6 +489,10 @@ export class BaseScene extends Phaser.Scene {
       this.dockingServoStage = 0;
       this.servoClockMs = 0;
       this.lastCraneServoMs = -1000;
+      this.destroyDockingCargoSprites();
+      this.loadingItemTextureKeys.clear();
+      this.lastDockingRenderedKeys = [];
+      this.lastDockingFallbackCrates = 0;
       this.hitZones = [];
       this.stargatePin = null;
       this.berthZone = null;
@@ -569,10 +600,81 @@ export class BaseScene extends Phaser.Scene {
     return this.lastCranePose;
   }
 
+  private hideDockingCargoSprites(): void {
+    for (const sp of this.dockingCargoSprites) {
+      if (sp && typeof sp.setVisible === 'function') {
+        sp.setVisible(false);
+      }
+    }
+  }
+
+  private destroyDockingCargoSprites(): void {
+    for (const sp of this.dockingCargoSprites) {
+      if (sp && typeof sp.destroy === 'function') {
+        sp.destroy();
+      }
+    }
+    this.dockingCargoSprites = [];
+  }
+
+  private ensureDockingItemTextures(playback: ReturnDockingPlayback): void {
+    const items = playback.items?.slice(0, 5);
+    if (!items || items.length === 0) return;
+    let queuedLoad = false;
+    for (const item of items) {
+      const texKey = getDockingItemTextureKey(item.definitionId);
+      if (this.textures?.exists(texKey) || this.loadingItemTextureKeys.has(texKey)) {
+        continue;
+      }
+      this.loadingItemTextureKeys.add(texKey);
+      if (item.artUrl.startsWith('data:')) {
+        if (typeof this.textures?.addBase64 === 'function') {
+          try {
+            this.textures.addBase64(texKey, item.artUrl);
+          } catch {
+            // Gracefully fall back to styled procedural crate if data URI decode fails
+          }
+        }
+      } else if (typeof this.load?.image === 'function') {
+        try {
+          this.load.image(texKey, item.artUrl);
+          queuedLoad = true;
+        } catch {
+          // Graceful fallback
+        }
+      }
+    }
+    if (queuedLoad && typeof this.load?.start === 'function') {
+      try {
+        this.load.start();
+      } catch {
+        // Ignore if loader is already active or mocked
+      }
+    }
+  }
+
+  getDockingVisualSnapshot(): {
+    readonly active: boolean;
+    readonly renderedItemKeys: readonly string[];
+    readonly fallbackCrateCount: number;
+  } {
+    return {
+      active: this.dockingPlayback !== null,
+      renderedItemKeys: [...this.lastDockingRenderedKeys],
+      fallbackCrateCount: this.lastDockingFallbackCrates,
+    };
+  }
+
   startReturnDocking(playback: ReturnDockingPlayback): void {
     this.dockingPlayback = playback;
     this.dockingElapsedMs = 0;
     this.dockingServoStage = 0;
+    this.hideDockingCargoSprites();
+    this.lastDockingRenderedKeys = [];
+    this.lastDockingFallbackCrates = 0;
+    if (this.texturesReady) {
+      this.ensureDockingItemTextures(playback);
+    }
   }
 
   skipReturnDocking(): void {
@@ -581,6 +683,9 @@ export class BaseScene extends Phaser.Scene {
     this.dockingPlayback = null;
     this.dockingElapsedMs = 0;
     this.dockingServoStage = 2;
+    this.hideDockingCargoSprites();
+    this.lastDockingRenderedKeys = [];
+    this.lastDockingFallbackCrates = 0;
     if (this.arrivalShipSprite) this.arrivalShipSprite.setVisible(false);
     pb.onProgress?.(1);
     pb.onFinish?.();
@@ -641,6 +746,9 @@ export class BaseScene extends Phaser.Scene {
         this.dockingPlayback = null;
         this.dockingElapsedMs = 0;
         this.dockingServoStage = 2;
+        this.hideDockingCargoSprites();
+        this.lastDockingRenderedKeys = [];
+        this.lastDockingFallbackCrates = 0;
         if (this.arrivalShipSprite) this.arrivalShipSprite.setVisible(false);
       }
       pb.onProgress?.(p);
@@ -1800,16 +1908,35 @@ export class BaseScene extends Phaser.Scene {
         };
       } else if (p <= 0.96) {
         const unloadP = (p - 0.44) / 0.52;
-        const crates = Math.min(5, Math.max(2, this.dockingPlayback.crateCount));
+        const realItems =
+          this.dockingPlayback.items && this.dockingPlayback.items.length > 0
+            ? this.dockingPlayback.items.slice(0, 5)
+            : null;
+        const crates = realItems
+          ? realItems.length
+          : Math.min(5, Math.max(2, this.dockingPlayback.crateCount));
         let leadGripX: number | null = null;
         let leadGripY: number | null = null;
         let leadIsRelic = false;
+        const renderedKeys: string[] = [];
+        let fallbackCrates = 0;
+
+        this.hideDockingCargoSprites();
 
         for (let i = 0; i < crates; i++) {
           const localP = Math.max(0, Math.min(1, unloadP * 1.45 - i * 0.13));
           if (localP <= 0 || localP >= 1) continue;
-          const isRelicCrate = this.dockingPlayback.hasKeptRelic && i === crates - 1;
-          const target = isRelicCrate ? L.display : L.workbench;
+          const item = realItems ? realItems[i] : null;
+          const isRelicCrate = item
+            ? Boolean(item.toDisplay || item.isRelic)
+            : this.dockingPlayback.hasKeptRelic && i === crates - 1;
+          const target = item
+            ? item.toDisplay
+              ? L.display
+              : L.workbench
+            : isRelicCrate
+            ? L.display
+            : L.workbench;
           const cx = lerp(L.padShip.x, target.x, localP);
           const cy =
             lerp(L.padShip.y - 12 * s, target.y, localP) -
@@ -1819,12 +1946,58 @@ export class BaseScene extends Phaser.Scene {
             leadGripY = cy;
             leadIsRelic = isRelicCrate;
           }
-          const sz = Math.max(6, 13 * s);
-          this.animGraphics.fillStyle(isRelicCrate ? 0x62d6df : 0xf6b852, 1);
-          this.animGraphics.lineStyle(1.6, 0x0d1726, 1);
-          this.animGraphics.fillRoundedRect(cx - sz * 0.5, cy - sz * 0.5, sz, sz, 3);
-          this.animGraphics.strokeRoundedRect(cx - sz * 0.5, cy - sz * 0.5, sz, sz, 3);
+
+          const texKey = item ? getDockingItemTextureKey(item.definitionId) : null;
+          if (item && texKey && this.textures?.exists(texKey)) {
+            let sp = this.dockingCargoSprites[i];
+            if (!sp || !sp.scene) {
+              sp = this.add.image(cx, cy, texKey).setOrigin(0.5, 0.5).setDepth(5.6);
+              this.dockingCargoSprites[i] = sp;
+            } else if (sp.texture?.key !== texKey && typeof sp.setTexture === 'function') {
+              sp.setTexture(texKey);
+            }
+            const maxDim = Math.max(1, sp.width || 192, sp.height || 192);
+            const targetBox = (item.isMission || item.isRelic ? 42 : 32) * s;
+            const itemScale = Math.max(0.02, targetBox / maxDim);
+            sp.setPosition(cx, cy + 4 * s)
+              .setScale(itemScale)
+              .setAlpha(1)
+              .setVisible(true);
+            if (typeof sp.setAngle === 'function') {
+              sp.setAngle(settings.reducedMotion ? 0 : Math.sin(localP * Math.PI * 3) * 6);
+            }
+            // Subtle sling harness rim behind real item sprite so silhouette pops cleanly over station diorama
+            const frameSz = Math.max(10, targetBox * 0.62);
+            const rimColor = item.isRelic ? 0x62d6df : item.isMission ? 0xf6b852 : 0x9bb2ce;
+            this.animGraphics.fillStyle(0x0b1320, 0.48);
+            this.animGraphics.lineStyle(1.4, rimColor, 0.85);
+            this.animGraphics.fillRoundedRect(
+              cx - frameSz * 0.5,
+              cy + 4 * s - frameSz * 0.5,
+              frameSz,
+              frameSz,
+              4
+            );
+            this.animGraphics.strokeRoundedRect(
+              cx - frameSz * 0.5,
+              cy + 4 * s - frameSz * 0.5,
+              frameSz,
+              frameSz,
+              4
+            );
+            renderedKeys.push(texKey);
+          } else {
+            const sz = Math.max(6, 13 * s);
+            this.animGraphics.fillStyle(isRelicCrate ? 0x62d6df : 0xf6b852, 1);
+            this.animGraphics.lineStyle(1.6, 0x0d1726, 1);
+            this.animGraphics.fillRoundedRect(cx - sz * 0.5, cy - sz * 0.5, sz, sz, 3);
+            this.animGraphics.strokeRoundedRect(cx - sz * 0.5, cy - sz * 0.5, sz, sz, 3);
+            fallbackCrates += 1;
+          }
         }
+
+        this.lastDockingRenderedKeys = renderedKeys;
+        this.lastDockingFallbackCrates = fallbackCrates;
 
         if (leadGripX !== null && leadGripY !== null) {
           craneTarget = { x: leadGripX, y: leadGripY - 6 * s };
@@ -1835,6 +2008,9 @@ export class BaseScene extends Phaser.Scene {
           craneTarget = L.pt(0.39, 0.54);
         }
       } else {
+        this.hideDockingCargoSprites();
+        this.lastDockingRenderedKeys = [];
+        this.lastDockingFallbackCrates = 0;
         const settleFrac = clampVal((p - 0.96) / 0.04, 0, 1);
         craneTarget = {
           x: lerp(L.workbench.x, L.pt(0.39, 0.55).x, settleFrac),
@@ -1859,6 +2035,7 @@ export class BaseScene extends Phaser.Scene {
         this.animGraphics.strokeEllipse(L.padShip.x, L.padShip.y + 8 * s, (90 + ringP * 90) * s, (45 + ringP * 45) * s);
       }
     } else {
+      this.hideDockingCargoSprites();
       if (this.arrivalShipSprite) {
         this.arrivalShipSprite.setVisible(false);
       }

@@ -8,7 +8,11 @@ import {
   type V2BaseDioramaState,
 } from './BaseScene';
 import { CombatScene, type CombatScenePlayback } from './CombatScene';
-import { V2CombatScene, type V2StagePlayback } from '../v2/scenes/V2CombatScene';
+import {
+  V2CombatScene,
+  type V2StagePlayback,
+  type WreckCompartmentVisualState,
+} from '../v2/scenes/V2CombatScene';
 
 export type ActiveSceneMode = 'base' | 'combat' | 'v2_stage';
 
@@ -31,6 +35,7 @@ export class PhaserHost {
   private pendingV2Base: V2BaseDioramaState | null = null;
   private pendingCombat: CombatScenePlayback | null = null;
   private pendingV2Stage: V2StagePlayback | null = null;
+  private pendingWreckCompartments: readonly WreckCompartmentVisualState[] | null = null;
   private buildingClickHandler: ((id: BuildingId) => void) | null = null;
   private berthClickHandler: (() => void) | null = null;
   private assetErrorHandler: ((failedKeys: string[]) => void) | null = null;
@@ -399,6 +404,11 @@ export class PhaserHost {
     } else {
       this.v2CombatScene.setPlayback(playback);
     }
+    if (playback.eventBackdrop !== 'wreck') {
+      this.pendingWreckCompartments = null;
+    } else if (this.pendingWreckCompartments) {
+      this.v2CombatScene.setWreckCompartmentStates(this.pendingWreckCompartments);
+    }
     this.scheduleResize();
   }
 
@@ -453,6 +463,25 @@ export class PhaserHost {
   triggerV2WreckCutFx(normX: number, normY: number): void {
     if (this.ready && this.game.scene.isActive('V2CombatScene')) {
       this.v2CombatScene.triggerWreckCutFx(normX, normY);
+    }
+  }
+
+  updateV2WreckCompartments(states: readonly WreckCompartmentVisualState[]): void {
+    this.pendingWreckCompartments = states;
+    if (this.currentMode === 'v2_stage') {
+      this.v2CombatScene.setWreckCompartmentStates(states);
+    }
+  }
+
+  popV2WreckCutClamp(normX: number, normY: number): void {
+    if (this.ready && this.game.scene.isActive('V2CombatScene')) {
+      this.v2CombatScene.popWreckCutClamp(normX, normY);
+    }
+  }
+
+  finishV2WreckCutFx(): void {
+    if (this.ready && this.game.scene.isActive('V2CombatScene')) {
+      this.v2CombatScene.finishWreckCutFx();
     }
   }
 

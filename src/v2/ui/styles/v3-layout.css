@@ -169,8 +169,7 @@
 }
 
 @media (min-width: 860px) and (min-height: 540px) {
-  .v2-shell.phase-prepare,
-  .v2-shell.phase-settlement {
+  .v2-shell.phase-prepare {
     height: 100dvh;
     max-height: 100dvh;
     overflow: hidden;
@@ -178,14 +177,11 @@
   }
 
   .v2-shell.phase-prepare .v2-top-hud,
-  .v2-shell.phase-settlement .v2-top-hud,
-  .v2-shell.phase-prepare .banners-stack,
-  .v2-shell.phase-settlement .banners-stack {
+  .v2-shell.phase-prepare .banners-stack {
     flex-shrink: 0;
   }
 
-  .v2-shell.phase-prepare .main-layout,
-  .v2-shell.phase-settlement .main-layout {
+  .v2-shell.phase-prepare .main-layout {
     flex: 1 1 0;
     min-height: 0;
     grid-template-rows: auto minmax(0, 1fr);
@@ -196,12 +192,7 @@
     height: 148px;
   }
 
-  .v2-shell.phase-settlement .scene-card {
-    height: 136px;
-  }
-
-  .v2-shell.phase-prepare .panel-left,
-  .v2-shell.phase-settlement .panel-left {
+  .v2-shell.phase-prepare .panel-left {
     height: 100%;
     max-height: 100%;
     min-height: 0;
@@ -209,15 +200,13 @@
     padding-bottom: 0;
   }
 
-  .v2-shell.phase-prepare .panel-right,
-  .v2-shell.phase-settlement .panel-right {
+  .v2-shell.phase-prepare .panel-right {
     max-height: 100%;
     min-height: 0;
     overflow-y: auto;
   }
 
-  .v2-shell.phase-prepare .v3-panel-scroll-body,
-  .v2-shell.phase-settlement .v3-panel-scroll-body {
+  .v2-shell.phase-prepare .v3-panel-scroll-body {
     flex: 1 1 0;
     min-height: 0;
     overflow-y: auto;
@@ -497,34 +486,6 @@
   justify-content: center;
 }
 
-.v2-shell .v3-threat-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border-radius: 5px;
-  font-size: 10.5px;
-  font-weight: 700;
-}
-
-.v2-shell .v3-threat-pill.threat-steady {
-  color: #7ae582;
-  background: rgba(122, 229, 130, 0.15);
-  border: 1px solid rgba(122, 229, 130, 0.42);
-}
-
-.v2-shell .v3-threat-pill.threat-strained {
-  color: #f6c969;
-  background: rgba(246, 184, 82, 0.16);
-  border: 1px solid rgba(246, 184, 82, 0.45);
-}
-
-.v2-shell .v3-threat-pill.threat-danger,
-.v2-shell .v3-threat-pill.threat-lethal {
-  color: #ff9c8f;
-  background: rgba(242, 117, 100, 0.18);
-  border: 1px solid rgba(242, 117, 100, 0.52);
-}
-
 .v2-shell .v2-mc-forecast.warn {
   color: #f6c969;
 }
@@ -571,4 +532,814 @@
   .v2-shell .v3-map-card-jump-btn {
     min-height: 44px;
   }
+}
+
+/* ==========================================================================
+   S03 — Persistent Stage Layout (ShipStage >=60% + HoldView + ContextDock)
+   Strictly scoped under .v2-shell so Legacy V1 (?mode=v1) stays untouched.
+   ========================================================================== */
+
+.v2-shell .v3-mobile-hold-toggle {
+  display: none;
+}
+
+.v2-shell.phase-voyage {
+  max-width: 100%;
+  width: 100%;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  padding: env(safe-area-inset-top, 0px) 10px calc(8px + env(safe-area-inset-bottom, 0px)) 10px;
+  gap: 6px;
+  box-sizing: border-box;
+}
+
+.v2-shell .v2-top-hud.is-voyage-slim {
+  flex-shrink: 0;
+  min-height: 40px;
+  padding: 4px 10px;
+  gap: 6px 10px;
+}
+
+.v2-shell .v2-top-hud.is-voyage-slim .hud-pills {
+  gap: 6px;
+}
+
+.v2-shell .v2-top-hud.is-voyage-slim .hud-pill {
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.v2-shell .v2-top-hud.is-voyage-slim .hud-actions {
+  gap: 6px;
+}
+
+.v2-shell.phase-voyage .banners-stack {
+  flex-shrink: 0;
+  max-height: 54px;
+  overflow-y: auto;
+}
+
+.v2-shell.phase-voyage .main-layout {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 10px;
+  box-sizing: border-box;
+}
+
+.v2-shell.phase-voyage .scene-card.v3-ship-stage {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 62dvh;
+  max-height: none;
+  z-index: 1;
+  border-radius: var(--radius-md, 10px);
+  transition: filter 200ms ease, transform 220ms ease, opacity 180ms ease;
+}
+
+.v2-shell.phase-voyage .scene-card.v3-ship-stage.scene-collapsed {
+  display: block;
+  opacity: 0.16;
+  filter: blur(2px) brightness(0.42);
+}
+
+.v2-shell.phase-voyage .scene-card.v3-ship-stage .scene-overlay {
+  z-index: 2;
+}
+
+.v2-shell.phase-voyage.phase-combat-live .scene-card.v3-ship-stage {
+  z-index: 5;
+}
+
+.v2-shell.phase-voyage.phase-combat-live .scene-card.v3-ship-stage .scene-overlay {
+  z-index: 6;
+}
+
+.v2-shell.phase-voyage .panel-left.v3-context-dock,
+.v2-shell.phase-voyage .panel-right.v3-hold-view {
+  position: relative;
+  z-index: 4;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  background: rgba(12, 20, 34, 0.88);
+  backdrop-filter: blur(8px);
+  border-color: rgba(126, 162, 206, 0.32);
+  box-shadow: 0 10px 28px rgba(4, 9, 18, 0.45);
+  overflow-y: auto;
+  overflow-x: hidden;
+  box-sizing: border-box;
+}
+
+.v2-shell.phase-voyage .panel-left.v3-context-dock .v3-sticky-panel-root {
+  height: auto;
+  min-height: 0;
+}
+
+.v2-shell.phase-voyage .panel-left.v3-context-dock .v3-panel-scroll-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  padding-bottom: 6px;
+}
+
+/* Live combat: keep persistent HoldView mounted in DOM without obstructing battle stage */
+.v2-shell.phase-voyage.phase-combat-live .panel-left.v3-context-dock,
+.v2-shell.phase-voyage.phase-combat-live .panel-right.v3-hold-view {
+  position: absolute;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Desktop (1366x768 & standard widescreen) floating ContextDock + persistent HoldView over full-bleed ShipStage */
+@media (min-width: 860px) and (min-height: 501px) {
+  .v2-shell.phase-voyage .main-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(290px, auto);
+    grid-template-rows: minmax(0, 1fr);
+    align-items: end;
+    justify-items: stretch;
+    gap: 12px;
+  }
+
+  .v2-shell.phase-voyage .panel-left.v3-context-dock {
+    grid-column: 1;
+    grid-row: 1;
+    justify-self: start;
+    align-self: end;
+    width: 100%;
+    max-width: 540px;
+    max-height: 62%;
+  }
+
+  .v2-shell.phase-voyage .panel-right.v3-hold-view {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+    align-self: end;
+    width: clamp(290px, 27vw, 370px);
+    max-height: 62%;
+  }
+
+  .v2-shell.phase-voyage.phase-arrange .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage.phase-shop .panel-left.v3-context-dock {
+    max-width: 480px;
+    max-height: calc(100% - 36px);
+  }
+
+  .v2-shell.phase-voyage.phase-arrange .panel-right.v3-hold-view,
+  .v2-shell.phase-voyage.phase-shop .panel-right.v3-hold-view {
+    width: clamp(360px, 34vw, 456px);
+    max-height: calc(100% - 10px);
+  }
+
+  .v2-shell.phase-voyage.phase-map .panel-left.v3-context-dock {
+    max-width: 660px;
+    max-height: 62%;
+  }
+
+  .v2-shell.phase-voyage.phase-map .panel-right.v3-hold-view {
+    width: clamp(300px, 28vw, 384px);
+    max-height: 66%;
+  }
+
+  .v2-shell.phase-voyage.phase-encounter .panel-left.v3-context-dock {
+    max-width: 520px;
+    max-height: 62%;
+  }
+
+  .v2-shell.phase-voyage.phase-encounter .panel-right.v3-hold-view {
+    width: clamp(270px, 24vw, 344px);
+    max-height: 54%;
+  }
+
+  /* Leave upper stage half completely unobstructed for Wreck clamp pins */
+  .v2-shell.phase-voyage.phase-wreck-hero .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage.phase-wreck-hero .panel-right.v3-hold-view {
+    max-height: 45%;
+  }
+
+  .v2-shell.phase-voyage.phase-reward .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage.phase-settlement .panel-left.v3-context-dock {
+    max-width: 580px;
+    max-height: 68%;
+  }
+
+  .v2-shell.phase-voyage.phase-reward .panel-right.v3-hold-view,
+  .v2-shell.phase-voyage.phase-settlement .panel-right.v3-hold-view {
+    width: clamp(270px, 25vw, 350px);
+    max-height: 58%;
+  }
+}
+
+/* Mobile Portrait (390x844 & tall <=859px): strictly disjoint from short landscape (max-height: 500px and min-width: 600px) */
+@media (max-width: 599px), (max-width: 859px) and (min-height: 501px) {
+  .v2-shell {
+    overflow-x: hidden;
+  }
+
+  .v2-shell .v3-mobile-hold-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .v2-shell .v2-top-hud.is-voyage-slim #v2-hud-help,
+  .v2-shell .v2-top-hud.is-voyage-slim #v2-hud-settings,
+  .v2-shell .v2-top-hud.is-voyage-slim #v2-btn-exit-showcase {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .v2-shell.phase-voyage .main-layout {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .v2-shell.phase-voyage.is-hold-zoomed .scene-card.v3-ship-stage {
+    filter: brightness(0.42) saturate(0.75);
+    transform: scale(0.97);
+  }
+
+  .v2-shell.phase-voyage:not(.is-hold-zoomed) .panel-left.v3-context-dock {
+    width: 100%;
+    max-height: 54dvh;
+    z-index: 5;
+  }
+
+  .v2-shell.phase-voyage.phase-wreck-hero:not(.is-hold-zoomed) .panel-left.v3-context-dock {
+    max-height: 44dvh;
+  }
+
+  .v2-shell.phase-voyage:not(.is-hold-zoomed) .panel-right.v3-hold-view {
+    position: absolute;
+    inset: auto 6px 6px 6px;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .v2-shell.phase-voyage.is-hold-zoomed .panel-right.v3-hold-view {
+    order: 1;
+    width: 100%;
+    max-height: 62dvh;
+    z-index: 7;
+  }
+
+  .v2-shell.phase-voyage.is-hold-zoomed.phase-arrange .panel-right.v3-hold-view {
+    max-height: 54dvh;
+  }
+
+  .v2-shell.phase-voyage.is-hold-zoomed.phase-arrange .panel-left.v3-context-dock {
+    order: 2;
+    width: 100%;
+    max-height: 26dvh;
+    z-index: 6;
+  }
+
+  .v2-shell.phase-voyage.is-hold-zoomed:not(.phase-arrange) .panel-left.v3-context-dock {
+    position: absolute;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .v2-shell.phase-voyage .panel-left.v3-context-dock .btn-primary,
+  .v2-shell.phase-voyage .panel-left.v3-context-dock .btn-secondary,
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-safe-return"],
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-jump-node"],
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-start-combat"],
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-pause-auto-combat"],
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-toggle-forecast-details"],
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-leave-arrange"],
+  .v2-shell.phase-voyage .panel-left.v3-context-dock [data-testid="btn-confirm-settlement"],
+  .v2-shell.phase-voyage .panel-right.v3-hold-view .v3-item-details-toggle,
+  .v2-shell.phase-voyage .panel-right.v3-hold-view [data-testid="btn-toggle-recommend-hint"],
+  .v2-shell.phase-voyage .panel-right.v3-hold-view .inspector-actions .btn {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .v2-shell .v2-settle-seg-opt {
+    min-height: 44px;
+    min-width: 44px;
+    justify-content: center;
+  }
+
+  .v2-shell.phase-voyage .v2-staging-card,
+  .v2-shell.phase-voyage .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage .panel-right.v3-hold-view {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+}
+
+/* Mobile Landscape (844x390 & short-height landscape): >=80% ShipStage + compact side-by-side floating docks */
+@media (max-height: 500px) and (min-width: 600px) {
+  .v2-shell {
+    overflow-x: hidden;
+  }
+
+  .v2-shell.phase-voyage {
+    padding: 4px 8px;
+    gap: 4px;
+  }
+
+  .v2-shell .v2-top-hud.is-voyage-slim {
+    min-height: 36px;
+    padding: 2px 8px;
+  }
+
+  .v2-shell .v3-mobile-hold-toggle {
+    display: none;
+  }
+
+  .v2-shell.phase-voyage .main-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.12fr) minmax(240px, 0.88fr);
+    grid-template-rows: minmax(0, 1fr);
+    align-items: end;
+    gap: 8px;
+    padding: 6px;
+  }
+
+  .v2-shell.phase-voyage .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage .panel-right.v3-hold-view {
+    position: relative;
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    z-index: 4;
+    max-height: calc(100% - 16px);
+  }
+
+  .v2-shell.phase-voyage.phase-wreck-hero .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage.phase-wreck-hero .panel-right.v3-hold-view {
+    max-height: 52%;
+  }
+
+  .v2-shell.phase-voyage.phase-combat-live .panel-left.v3-context-dock,
+  .v2-shell.phase-voyage.phase-combat-live .panel-right.v3-hold-view {
+    position: absolute;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    z-index: 0;
+  }
+}
+
+body.reduced-motion .v2-shell.phase-voyage .scene-card.v3-ship-stage,
+body.reduced-motion .v2-shell.phase-voyage.is-hold-zoomed .scene-card.v3-ship-stage {
+  transform: none !important;
+  transition: none !important;
+}
+
+/* ==========================================================================
+   S06 — Colorblind-Safe Threat Tiers, Details Drawer & 1-Row Compact Stats
+   ========================================================================== */
+
+.v2-shell .v3-threat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: default;
+  min-height: 0;
+}
+
+.v2-shell .v3-threat-pill.threat-steady {
+  color: #8be893;
+  background: rgba(122, 229, 130, 0.14);
+  border: 1.5px solid rgba(122, 229, 130, 0.6);
+}
+
+.v2-shell .v3-threat-pill.threat-strained {
+  color: #f8d27a;
+  background: rgba(246, 184, 82, 0.16);
+  border: 1.5px dashed rgba(246, 184, 82, 0.72);
+}
+
+.v2-shell .v3-threat-pill.threat-danger {
+  color: #ffab9e;
+  background: rgba(242, 117, 100, 0.18);
+  border: 1.5px solid rgba(242, 117, 100, 0.65);
+  border-left-width: 4px;
+}
+
+.v2-shell .v3-threat-pill.threat-lethal {
+  color: #ffd0c8;
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(242, 117, 100, 0.28),
+    rgba(242, 117, 100, 0.28) 5px,
+    rgba(110, 24, 24, 0.42) 5px,
+    rgba(110, 24, 24, 0.42) 10px
+  );
+  border: 2px double rgba(255, 138, 122, 0.9);
+}
+
+.v2-shell .v3-trend-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.v2-shell .v3-trend-badge.trend-up {
+  color: #8be893;
+  background: rgba(122, 229, 130, 0.15);
+  border: 1px solid rgba(122, 229, 130, 0.45);
+}
+
+.v2-shell .v3-trend-badge.trend-down {
+  color: #ffab9e;
+  background: rgba(242, 117, 100, 0.18);
+  border: 1px dashed rgba(242, 117, 100, 0.6);
+}
+
+.v2-shell .v3-trend-badge.trend-neutral {
+  color: #c0d2e6;
+  background: rgba(148, 163, 184, 0.14);
+  border: 1px solid rgba(148, 163, 184, 0.34);
+}
+
+.v2-shell .v3-delta-qual-wrap {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+/* On-Demand Details Drawers (MapView, CombatView, CargoGridV2) */
+.v2-shell .v3-map-details-wrap,
+.v2-shell .v3-item-details-wrap {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.v2-shell .v3-forecast-details-btn,
+.v2-shell .v3-item-details-toggle {
+  align-self: flex-start;
+  font-size: 11.5px;
+  padding: 3px 8px;
+}
+
+.v2-shell .v3-forecast-details-drawer,
+.v2-shell .v3-item-details-drawer {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: rgba(7, 14, 24, 0.88);
+  border: 1px solid rgba(110, 148, 192, 0.34);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #d6e4f3;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.v2-shell .v3-drawer-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.v2-shell .v3-drawer-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #f6d38b;
+  background: rgba(246, 184, 82, 0.16);
+  border: 1px solid rgba(246, 184, 82, 0.45);
+}
+
+.v2-shell .v3-drawer-sub,
+.v2-shell .v3-drawer-enemies,
+.v2-shell .v3-drawer-cargo {
+  color: var(--text-secondary, #a8bdd4);
+  font-size: 11px;
+}
+
+.v2-shell .v3-enemy-role-badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: #b7cde4;
+  background: rgba(110, 148, 192, 0.16);
+  border: 1px solid rgba(110, 148, 192, 0.32);
+}
+
+/* 1-Row Compact Telemetry Bar replacing 4 tall .stat-chip blocks in V2 CargoGrid */
+.v2-shell .cargo-stats-strip,
+.v2-shell .v2-stats-strip {
+  display: block;
+}
+
+.v2-shell .v3-compact-stats-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.v2-shell .v3-stat-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: rgba(13, 24, 40, 0.86);
+  border: 1px solid rgba(110, 148, 192, 0.28);
+  color: var(--text-primary, #eaf2fc);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.v2-shell .v3-stat-cell.is-cap {
+  border-style: dashed;
+  border-color: rgba(246, 184, 82, 0.65);
+}
+
+.v2-shell .v3-stat-k {
+  font-size: 10.5px;
+  color: var(--text-secondary, #9db4ce);
+}
+
+.v2-shell .v3-stat-v {
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.v2-shell .v3-stat-mini {
+  font-size: 10px;
+  font-weight: 700;
+  color: #f6c969;
+}
+
+.v2-shell .v3-stat-link-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #62d6df;
+}
+
+/* ==========================================================================
+   S07 — Tactile Drag Ghost Mask, Live Hover Energy Links & Spring-Back
+   Strictly scoped to .v2-shell / .v2-drag-ghost (V1 styles 100% isolated).
+   ========================================================================== */
+
+.v2-shell .synergy-overlay-svg .energy-link-line {
+  stroke: var(--link-color, var(--accent-energy, #62d6df));
+  stroke-width: 4.5;
+  stroke-linecap: round;
+  stroke-dasharray: 10 6;
+  animation: energyFlow 700ms linear infinite;
+}
+
+.v2-shell .synergy-overlay-svg .energy-link-line.is-preview {
+  stroke-width: 5;
+  filter: drop-shadow(0 0 6px var(--link-color, #62d6df));
+  animation-duration: 520ms;
+}
+
+.v2-shell .v2-placed-item.synergy-preview-partner .placed-subcell {
+  border-color: rgba(98, 214, 223, 0.88);
+  box-shadow: inset 0 0 12px rgba(98, 214, 223, 0.34), 0 0 10px rgba(98, 214, 223, 0.36);
+}
+
+.v2-drag-ghost {
+  position: fixed;
+  z-index: 950;
+  pointer-events: none;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  overflow: visible;
+  will-change: left, top, transform, opacity;
+}
+
+.v2-drag-ghost.is-touch-lifted {
+  filter: drop-shadow(0 14px 18px rgba(4, 10, 20, 0.65));
+}
+
+.v2-drag-ghost .drag-ghost-subcell {
+  position: absolute;
+  box-sizing: border-box;
+  border-radius: 6px;
+  background: rgba(24, 46, 72, 0.72);
+  border: 1.5px solid rgba(126, 178, 224, 0.72);
+  box-shadow: 0 4px 12px rgba(5, 10, 20, 0.45);
+}
+
+.v2-drag-ghost.is-valid .drag-ghost-subcell {
+  background: rgba(34, 88, 66, 0.54);
+  border-color: rgba(122, 229, 130, 0.88);
+}
+
+.v2-drag-ghost.is-invalid .drag-ghost-subcell {
+  background: rgba(108, 34, 34, 0.56);
+  border-color: rgba(242, 117, 100, 0.92);
+}
+
+.v2-drag-ghost .drag-ghost-sprite-wrap {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.v2-drag-ghost.is-spring-back {
+  transition:
+    left 220ms cubic-bezier(0.22, 1.32, 0.36, 1),
+    top 220ms cubic-bezier(0.22, 1.32, 0.36, 1),
+    opacity 220ms ease-out,
+    transform 220ms ease-out;
+}
+
+@keyframes v3InvalidShake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-5px);
+  }
+  55% {
+    transform: translateX(5px);
+  }
+  80% {
+    transform: translateX(-3px);
+  }
+}
+
+.v2-shell .v2-placed-item.invalid-shake,
+.v2-shell .v2-staging-card.invalid-shake {
+  animation: v3InvalidShake 220ms ease-out;
+}
+
+body.reduced-motion .v2-shell .synergy-overlay-svg .energy-link-line,
+body.reduced-motion .v2-shell .synergy-overlay-svg .energy-link-line.is-preview,
+body.reduced-motion .v2-drag-ghost.is-spring-back,
+body.reduced-motion .v2-shell .v2-placed-item.invalid-shake,
+body.reduced-motion .v2-shell .v2-staging-card.invalid-shake {
+  animation: none !important;
+  transition: none !important;
+}
+
+/* ==========================================================================
+   S09 — Auto-Disposition Settlement, Segmented Radios & Bill Rollup Styles
+   ========================================================================== */
+
+.v2-shell .v3-settle-thumb {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  border-radius: 4px;
+  background: rgba(8, 16, 28, 0.72);
+  border: 1px solid rgba(110, 148, 192, 0.28);
+  flex-shrink: 0;
+}
+
+.v2-shell .v3-auto-resolved-list {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(12, 22, 38, 0.56);
+  border: 1px solid rgba(110, 148, 192, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.v2-shell .v3-auto-resolved-head {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary, #9db4ce);
+}
+
+.v2-shell .v2-settle-row.is-auto-resolved {
+  padding: 4px 6px;
+  background: rgba(10, 18, 30, 0.5);
+  border-color: rgba(110, 148, 192, 0.16);
+}
+
+.v2-shell .v2-settle-auto-badge,
+.v2-shell .v2-settle-current-choice {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #b7d3ec;
+  background: rgba(98, 214, 223, 0.12);
+  border: 1px solid rgba(98, 214, 223, 0.32);
+}
+
+.v2-shell .v2-settle-lock-hint {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-secondary, #8fa5be);
+  padding: 2px 6px;
+}
+
+.v2-shell .v2-settle-disp-seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.v2-shell .v2-settle-seg-opt {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--text-primary, #dce8f8);
+  background: rgba(20, 34, 54, 0.84);
+  border: 1px solid rgba(110, 148, 192, 0.34);
+  user-select: none;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.v2-shell .v2-settle-seg-opt:focus-within {
+  outline: 2px solid var(--accent-energy, #62d6df);
+  outline-offset: 2px;
+}
+
+.v2-shell .v2-settle-seg-opt input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.v2-shell .v2-settle-seg-opt.is-selected {
+  color: #0b1320;
+  background: #f6b852;
+  border-color: #f6b852;
+}
+
+.v2-shell .v2-settle-totals .v2-mig-row.is-rollup-pending {
+  opacity: 0.22;
+  transform: translateY(3px);
+}
+
+.v2-shell .v2-settle-totals .v2-mig-row.is-rollup-revealed {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 150ms ease-out, transform 150ms ease-out;
+}
+
+body.reduced-motion .v2-shell .v2-settle-totals .v2-mig-row.is-rollup-pending,
+body.reduced-motion .v2-shell .v2-settle-totals .v2-mig-row.is-rollup-revealed {
+  opacity: 1;
+  transform: none;
+  transition: none !important;
 }

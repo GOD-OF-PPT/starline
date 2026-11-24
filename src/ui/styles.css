@@ -4690,11 +4690,14 @@ body.low-quality .placed-item-node {
 /* --- 2. COMBAT LIVE HERO STAGE & ELITE ROUND-2 TACTIC OVERLAY --- */
 .v2-shell.phase-combat-live .panel-left,
 .v2-shell.phase-combat-live .panel-right {
-  display: none !important;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
 }
 
 .v2-shell.phase-combat-live .main-layout {
-  grid-template-columns: 1fr !important;
+  grid-template-columns: 1fr;
 }
 
 .v2-combat-hero-hud {

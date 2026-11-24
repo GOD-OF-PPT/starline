@@ -3,53 +3,7 @@
    Scoped strictly to .v2-shell / .v3-* / .modal-card.v3-* (V1 100% isolated).
    ========================================================================== */
 
-/* ---------- Desktop Fold-Safe Wreck Dissection Layout (1366x768) ---------- */
-@media (min-width: 860px) and (min-height: 540px) {
-  .v2-shell.phase-wreck-hero {
-    height: 100dvh;
-    max-height: 100dvh;
-    overflow: hidden;
-    padding-bottom: 10px;
-  }
-
-  .v2-shell.phase-wreck-hero .v2-top-hud,
-  .v2-shell.phase-wreck-hero .banners-stack {
-    flex-shrink: 0;
-  }
-
-  .v2-shell.phase-wreck-hero .main-layout {
-    flex: 1 1 0;
-    min-height: 0;
-    grid-template-rows: auto minmax(0, 1fr);
-    align-items: stretch;
-  }
-
-  .v2-shell.phase-wreck-hero .scene-card {
-    height: 224px;
-  }
-
-  .v2-shell.phase-wreck-hero .panel-left {
-    height: 100%;
-    max-height: 100%;
-    min-height: 0;
-    overflow: hidden;
-    padding-bottom: 0;
-  }
-
-  .v2-shell.phase-wreck-hero .panel-right {
-    max-height: 100%;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  .v2-shell.phase-wreck-hero .v3-panel-scroll-body {
-    flex: 1 1 0;
-    min-height: 0;
-    overflow-y: auto;
-    padding-right: 4px;
-    padding-bottom: 8px;
-  }
-}
+/* Wreck dissection full-bleed ShipStage layout is governed centrally by v3-layout.css (.v2-shell.phase-voyage). */
 
 /* ---------- Wreck Stage Overlay & Hotspot Pin Modifiers ---------- */
 .v3-wreck-stage-head {
@@ -876,9 +830,6 @@ body.reduced-motion .v3-stability-fill.tone-critical {
 
 /* ---------- Mobile (390x844) & Short Landscape Touch/Overflow Safety ---------- */
 @media (max-width: 859px) {
-  .v2-shell.phase-wreck-hero .scene-card {
-    height: 196px;
-  }
 
   .v3-faction-strip {
     grid-template-columns: 1fr;
@@ -900,4 +851,144 @@ body.reduced-motion .v3-stability-fill.tone-critical {
     max-width: 100%;
     overflow-wrap: anywhere;
   }
+}
+
+/* ---------- S08 + A07-code: Direct Clamp Pin, Silhouette Layer & FLIP Flight ---------- */
+.v2-shell .v3-wreck-compartment-pin {
+  min-width: 64px;
+  min-height: 54px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 8px;
+  border-radius: 9px;
+  background: rgba(12, 22, 36, 0.84);
+  border: 1.5px solid rgba(98, 214, 223, 0.72);
+  box-shadow: 0 6px 18px rgba(4, 10, 20, 0.55);
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.v2-shell .v3-wreck-compartment-pin:hover:not(:disabled) {
+  transform: translate(-50%, -50%) scale(1.06);
+  border-color: rgba(246, 184, 82, 0.92);
+}
+
+.v2-shell .v3-wreck-compartment-pin[data-compartment-state="cutting"] {
+  border-color: #f6b852;
+  background: rgba(58, 36, 12, 0.9);
+  box-shadow: 0 0 18px rgba(246, 184, 82, 0.65);
+}
+
+.v2-shell .v3-wreck-compartment-pin[data-compartment-state="cutaway"] {
+  border-style: dashed;
+  border-color: rgba(98, 214, 223, 0.45);
+  background: rgba(8, 16, 28, 0.78);
+}
+
+.v2-shell .v3-clamp-bracket {
+  position: absolute;
+  top: 50%;
+  width: 5px;
+  height: 20px;
+  border-radius: 2px;
+  background: #62d6df;
+  transform: translateY(-50%);
+  transition: transform 220ms ease, opacity 220ms ease;
+}
+
+.v2-shell .v3-clamp-bracket.left {
+  left: -4px;
+}
+
+.v2-shell .v3-clamp-bracket.right {
+  right: -4px;
+}
+
+.v2-shell .v3-wreck-compartment-pin.is-risky .v3-clamp-bracket {
+  background: #f6b852;
+}
+
+.v2-shell .v3-wreck-compartment-pin.is-lethal .v3-clamp-bracket {
+  background: #f27564;
+}
+
+.v2-shell .v3-wreck-compartment-pin[data-compartment-state="cutaway"] .v3-clamp-bracket.left {
+  transform: translate(-6px, -50%) rotate(-18deg);
+  opacity: 0.45;
+}
+
+.v2-shell .v3-wreck-compartment-pin[data-compartment-state="cutaway"] .v3-clamp-bracket.right {
+  transform: translate(6px, -50%) rotate(18deg);
+  opacity: 0.45;
+}
+
+.v2-shell .v3-wreck-silhouette-layer {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  background: rgba(8, 16, 28, 0.82);
+  border: 1px solid rgba(110, 148, 192, 0.34);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.v2-shell .v3-wreck-silhouette-img {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
+
+.v2-shell .v3-wreck-silhouette-img.is-masked {
+  filter: brightness(0.25) contrast(1.4) drop-shadow(0 0 3px rgba(98, 214, 223, 0.75));
+  opacity: 0.85;
+}
+
+.v2-shell .v3-wreck-silhouette-img.is-revealed {
+  filter: none;
+  opacity: 1;
+}
+
+.v2-shell .v3-wreck-cut-skip-bar {
+  align-self: center;
+  margin-bottom: 12px;
+  z-index: 8;
+}
+
+.v2-shell .v3-wreck-cut-card.is-cutting {
+  border-color: rgba(246, 184, 82, 0.88);
+  box-shadow: 0 0 14px rgba(246, 184, 82, 0.25);
+}
+
+.v3-wreck-flip-ghost {
+  position: fixed;
+  z-index: 980;
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  background: rgba(14, 28, 46, 0.92);
+  border: 2px solid #f6b852;
+  box-shadow: 0 0 16px rgba(246, 184, 82, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  will-change: transform, opacity;
+  transition: transform 260ms cubic-bezier(0.2, 0.88, 0.32, 1), opacity 260ms ease-out;
+}
+
+.v3-wreck-flip-ghost img {
+  width: 38px;
+  height: 38px;
+  object-fit: contain;
+}
+
+body.reduced-motion .v2-shell .v3-wreck-compartment-pin,
+body.reduced-motion .v2-shell .v3-clamp-bracket,
+body.reduced-motion .v3-wreck-flip-ghost {
+  transition: none !important;
+  animation: none !important;
 }

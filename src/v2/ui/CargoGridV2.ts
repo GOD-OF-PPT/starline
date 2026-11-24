@@ -30,6 +30,7 @@ import { getAnyV2ItemDef } from '../domain/itemCatalog';
 import {
   computeV2BayHash,
   computeV2ItemSacrificePreview,
+  getV2ThreatTierMeta,
   summarizeV2MissionSacrificeOptions,
   type V2TacticalDelta,
 } from '../domain/tacticalDelta';
@@ -39,6 +40,7 @@ import type {
   V2ItemOrigin,
   V2PlacedItem,
 } from '../domain/types';
+import { svgIcon } from './icons';
 
 export interface CargoGridV2Callbacks {
   readonly onBayChange: (nextBay: V2CargoBayState) => void;
@@ -51,11 +53,25 @@ export interface CargoGridV2Callbacks {
   ) => V2TacticalDelta | null;
   /** Optional external container for mounting the selected-item inspector (e.g. desktop left panel in ARRANGE) */
   readonly getInspectorHost?: () => HTMLElement | null;
+  /** Optional T01 playtest telemetry hook reporting pointer drag drop outcomes */
+  readonly onDragAttempt?: (attempt: {
+    readonly zone: 'grid' | 'staging';
+    readonly itemDefId: string;
+    readonly success: boolean;
+    readonly reason?: 'out_of_bounds' | 'disabled_cell' | 'overlap' | 'outside_board';
+  }) => void;
 }
 
 interface SelectedRef {
   readonly zone: 'grid' | 'staging';
   readonly instanceId: string;
+}
+
+interface DragSourceRect {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
 }
 
 interface DragState {
@@ -70,10 +86,30 @@ interface DragState {
   readonly startClientY: number;
   readonly grabOffsetCellX: number;
   readonly grabOffsetCellY: number;
+  readonly grabOffsetPxX: number;
+  readonly grabOffsetPxY: number;
+  readonly sourceRect: DragSourceRect | null;
   active: boolean;
   hoverOriginX: number | null;
   hoverOriginY: number | null;
+  lastValidHoverKey: string | null;
   ghostEl: HTMLElement | null;
+}
+
+export function isHeavyPlacementItem(
+  item: Pick<V2ItemInstance, 'definitionId' | 'category'>
+): boolean {
+  const def = getAnyV2ItemDef(item.definitionId);
+  const cellCount = def ? V2_SHAPES[def.shapeId].cells.length : 1;
+  const eqKind =
+    item.category === 'equipment' ? V2_EQUIPMENT_DEFS[item.definitionId]?.kind : undefined;
+  return (
+    cellCount >= 4 ||
+    item.category === 'mission' ||
+    eqKind === 'heavy' ||
+    eqKind === 'salvo_pod' ||
+    eqKind === 'overdrive_core'
+  );
 }
 
 export function originTagText(origin: V2ItemOrigin): string {
@@ -187,6 +223,11 @@ export class CargoGridV2Component {
   private invalidToastText: string | null = null;
   private invalidToastTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   private prevLinkCount = 0;
+  private prevLinkSignatures = new Set<string>();
+  private showItemDetailsDrawer = false;
+  private showRecommendHint = false;
+  private readonly springBackCleanups = new Set<() => void>();
+  private readonly previewPartnerIds = new Set<string>();
 
   // Persistent sub-containers created once in ensureContainers()
   private containersReady = false;
@@ -227,10 +268,14 @@ export class CargoGridV2Component {
   constructor(root: HTMLElement, callbacks: CargoGridV2Callbacks) {
     this.root = root;
     this.callbacks = callbacks;
-    window.addEventListener('pointermove', this.handleWindowPointerMove);
-    window.addEventListener('pointerup', this.handleWindowPointerUp);
-    window.addEventListener('pointercancel', this.handleWindowPointerCancel);
-    window.addEventListener('keydown', this.handleKeyDown);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pointerdown', this.handleWindowPointerDown, true);
+      window.addEventListener('pointermove', this.handleWindowPointerMove);
+      window.addEventListener('pointerup', this.handleWindowPointerUp);
+      window.addEventListener('pointercancel', this.handleWindowPointerCancel);
+      window.addEventListener('blur', this.handleWindowBlur);
+      window.addEventListener('keydown', this.handleKeyDown);
+    }
   }
 
   setCallbacks(callbacks: CargoGridV2Callbacks): void {
@@ -302,18 +347,33 @@ export class CargoGridV2Component {
     }
   }
 
+  private flushSpringBackCleanups(): void {
+    if (this.springBackCleanups.size === 0) return;
+    const fns = [...this.springBackCleanups];
+    this.springBackCleanups.clear();
+    for (const fn of fns) {
+      fn();
+    }
+  }
+
   destroy(): void {
     this.destroyed = true;
-    window.removeEventListener('pointermove', this.handleWindowPointerMove);
-    window.removeEventListener('pointerup', this.handleWindowPointerUp);
-    window.removeEventListener('pointercancel', this.handleWindowPointerCancel);
-    window.removeEventListener('keydown', this.handleKeyDown);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('pointerdown', this.handleWindowPointerDown, true);
+      window.removeEventListener('pointermove', this.handleWindowPointerMove);
+      window.removeEventListener('pointerup', this.handleWindowPointerUp);
+      window.removeEventListener('pointercancel', this.handleWindowPointerCancel);
+      window.removeEventListener('blur', this.handleWindowBlur);
+      window.removeEventListener('keydown', this.handleKeyDown);
+    }
     this.boardEl?.removeEventListener('pointerdown', this.handleBoardPointerDown);
     this.stagingEl?.removeEventListener('pointerdown', this.handleStagingPointerDown);
     this.stagingEl?.removeEventListener('click', this.handleStagingClick);
     this.inspectorEl?.removeEventListener('click', this.handleInspectorClick);
     this.cancelPendingDeltaJob();
     this.clearDragGhost();
+    this.flushSpringBackCleanups();
+    this.previewPartnerIds.clear();
     this.drag = null;
     this.clearInvalidToast();
     if (this.inspectorEl?.parentNode) {
@@ -519,6 +579,14 @@ export class CargoGridV2Component {
     }
   }
 
+  public collapseDetailsDrawer(): void {
+    if (!this.showItemDetailsDrawer) return;
+    this.showItemDetailsDrawer = false;
+    if (!this.destroyed && this.bay) {
+      this.renderSelectedInspector(this.editable, this.activeDelta);
+    }
+  }
+
   render(
     bay: V2CargoBayState,
     editable: boolean,
@@ -543,6 +611,7 @@ export class CargoGridV2Component {
 
     if (shipChanged || modeChanged) {
       this.clearDragGhost();
+      this.flushSpringBackCleanups();
       this.drag = null;
       this.carrying = false;
       this.lastSnappedId = null;
@@ -552,11 +621,14 @@ export class CargoGridV2Component {
       this.activeDelta = null;
       this.activeDeltaKey = null;
       this.recommendedCellKeys.clear();
+      this.showRecommendHint = false;
+      this.showItemDetailsDrawer = false;
       if (modeChanged) {
         this.selected = null;
       }
     } else if (editableDisabled) {
       this.clearDragGhost();
+      this.flushSpringBackCleanups();
       this.drag = null;
       this.carrying = false;
       this.lastSnappedId = null;
@@ -578,7 +650,32 @@ export class CargoGridV2Component {
       this.carrying = false;
     }
 
-    // Validate selection still exists
+    // Validate active/pending drag & selection still exist with matching identity & transform in updated bay
+    let dragCancelledInRender = false;
+    if (this.drag) {
+      const dragValid =
+        this.drag.zone === 'grid'
+          ? bay.placed.some(
+              (p) =>
+                p.item.instanceId === this.drag?.item.instanceId &&
+                p.item.definitionId === this.drag.item.definitionId &&
+                p.rotation === this.drag.rotation &&
+                p.x === this.drag.originX &&
+                p.y === this.drag.originY
+            )
+          : bay.staging.some(
+              (s) =>
+                s.item.instanceId === this.drag?.item.instanceId &&
+                s.item.definitionId === this.drag.item.definitionId &&
+                s.rotation === this.drag.rotation
+            );
+      if (!dragValid) {
+        this.clearDragGhost();
+        this.flushSpringBackCleanups();
+        this.drag = null;
+        dragCancelledInRender = true;
+      }
+    }
     if (this.selected) {
       const exists =
         this.selected.zone === 'grid'
@@ -587,6 +684,7 @@ export class CargoGridV2Component {
       if (!exists) {
         this.selected = null;
         this.carrying = false;
+        this.showItemDetailsDrawer = false;
       }
     }
 
@@ -597,6 +695,7 @@ export class CargoGridV2Component {
 
     // Auto-select first staging item when editable for 1-tap placement convenience
     if (editable && !this.selected && bay.staging.length > 0) {
+      this.showItemDetailsDrawer = false;
       this.selected = { zone: 'staging', instanceId: bay.staging[0].item.instanceId };
     }
 
@@ -621,15 +720,29 @@ export class CargoGridV2Component {
       placedUiChanged || !this.lastStats ? calculateV2BuildStats(bay) : this.lastStats;
     this.lastStats = stats;
 
+    const nextLinkSignatures = new Set(
+      stats.links.map((l) => `${l.sourceInstanceId}->${l.targetInstanceId}:${l.sourceKind}`)
+    );
     const forceSnapReplay = this.pendingSnapFeedback;
     if (isFirstRender || shipChanged || modeChanged) {
       this.prevLinkCount = stats.links.length;
+      this.prevLinkSignatures = nextLinkSignatures;
       this.pendingSnapFeedback = false;
     } else {
-      if (this.pendingSnapFeedback && this.lastSnappedId && stats.links.length > this.prevLinkCount) {
+      let formedNewLink = stats.links.length > this.prevLinkCount;
+      if (!formedNewLink) {
+        for (const sig of nextLinkSignatures) {
+          if (!this.prevLinkSignatures.has(sig)) {
+            formedNewLink = true;
+            break;
+          }
+        }
+      }
+      if (this.pendingSnapFeedback && this.lastSnappedId && formedNewLink) {
         soundEngine.play('energyLink');
       }
       this.prevLinkCount = stats.links.length;
+      this.prevLinkSignatures = nextLinkSignatures;
       this.pendingSnapFeedback = false;
     }
 
@@ -703,6 +816,10 @@ export class CargoGridV2Component {
       }
     }
 
+    if (dragCancelledInRender) {
+      this.rescheduleDeltaIfIdle();
+    }
+
     this.updateCellVisualFocusAndPreview();
 
     if (wasCellFocused && this.gridHasFocus) {
@@ -746,42 +863,58 @@ export class CargoGridV2Component {
       stats.empJammers.reduce((sum, e) => sum + e.damage, 0) +
       stats.salvageGrapples.reduce((sum, g) => sum + g.damage, 0);
 
-    this.statsEl.innerHTML = `
-      <div class="stat-chip">
-        <span class="k">常规/构筑火力</span>
-        <span class="v num">${regularDps}</span>
-        <span class="sub">${attackSubParts.length > 0 ? attackSubParts.join(' · ') : `舰核 ${stats.coreAttack}`}</span>
-      </div>
-      <div class="stat-chip">
-        <span class="k">护盾/反击</span>
-        <span class="v num">${stats.effectiveShield}</span>
-        <span class="sub ${stats.shieldCapped ? 'cap' : ''}">${
-      stats.bestActiveCounter
-        ? `反击 ${Math.round(stats.bestActiveCounter.ratio * 100)}%`
-        : stats.endOfRoundShieldRegen > 0
-        ? `每轮回盾 +${stats.endOfRoundShieldRegen}`
-        : stats.shieldCapped
-        ? `已达上限 ${V2_MAX_BATTLE_SHIELD}`
-        : `上限 ${V2_MAX_BATTLE_SHIELD}`
-    }</span>
-      </div>
-      <div class="stat-chip">
-        <span class="k">胜后维修</span>
-        <span class="v num">+${stats.effectiveRepair}</span>
-        <span class="sub ${stats.repairCapped ? 'cap' : ''}">${
+    const attackTitle = `常规火力 ${regularDps}（${
+      attackSubParts.length > 0 ? attackSubParts.join(' · ') : `舰核 ${stats.coreAttack}`
+    }）`;
+    const shieldDetail = stats.bestActiveCounter
+      ? `反击 ${Math.round(stats.bestActiveCounter.ratio * 100)}%`
+      : stats.endOfRoundShieldRegen > 0
+      ? `每轮回盾 +${stats.endOfRoundShieldRegen}`
+      : stats.shieldCapped
+      ? `已达上限 ${V2_MAX_BATTLE_SHIELD}`
+      : `上限 ${V2_MAX_BATTLE_SHIELD}`;
+    const shieldTitle = `护盾 ${stats.effectiveShield}（${shieldDetail}）`;
+    const repairTitle = `胜后维修 +${stats.effectiveRepair}（${
       stats.repairCapped ? `已达上限 ${V2_MAX_POST_WIN_REPAIR}` : `上限 ${V2_MAX_POST_WIN_REPAIR}`
-    }</span>
-      </div>
-      <div class="stat-chip">
-        <span class="k">舱格/供能</span>
-        <span class="v num">${occ.occupiedCells}/${occ.totalCells}</span>
-        <span class="sub">${
+    }）`;
+    const capDetail =
       stats.powerCellBoostedIds.length > 0
-        ? `⚡供能×${stats.powerCellBoostedIds.length}${stats.links.length > 0 ? ` · 链×${stats.links.length}` : ''}`
+        ? `供能×${stats.powerCellBoostedIds.length}${stats.links.length > 0 ? ` · 联动×${stats.links.length}` : ''}`
         : stats.links.length > 0
-        ? `联动 ×${stats.links.length}`
-        : `可售 ${stats.nonLoanBayValue}¤`
-    }</span>
+        ? `联动×${stats.links.length}`
+        : `可售 ${stats.nonLoanBayValue}¤`;
+    const capTitle = `舱格 ${occ.occupiedCells}/${occ.totalCells}（${capDetail}）`;
+    const linkBadge =
+      stats.links.length > 0 || stats.powerCellBoostedIds.length > 0
+        ? `<span class="v3-stat-link-tag" title="${capDetail}">${svgIcon('bolt', 11)}${
+            stats.links.length + stats.powerCellBoostedIds.length
+          }</span>`
+        : '';
+
+    this.statsEl.innerHTML = `
+      <div class="v3-compact-stats-row" data-testid="cargo-compact-stats" role="list" aria-label="船舱构筑遥测">
+        <span class="v3-stat-cell" role="listitem" data-stat="attack" title="${attackTitle}" aria-label="${attackTitle}">
+          ${svgIcon('cannon', 13)}
+          <span class="v3-stat-k">火</span>
+          <strong class="v3-stat-v num">${regularDps}</strong>
+          ${attackSubParts.length > 0 ? `<span class="v3-stat-mini">+</span>` : ''}
+        </span>
+        <span class="v3-stat-cell ${stats.shieldCapped ? 'is-cap' : ''}" role="listitem" data-stat="shield" title="${shieldTitle}" aria-label="${shieldTitle}">
+          ${svgIcon('shield', 13)}
+          <span class="v3-stat-k">盾</span>
+          <strong class="v3-stat-v num">${stats.effectiveShield}</strong>
+        </span>
+        <span class="v3-stat-cell ${stats.repairCapped ? 'is-cap' : ''}" role="listitem" data-stat="repair" title="${repairTitle}" aria-label="${repairTitle}">
+          ${svgIcon('wrench', 13)}
+          <span class="v3-stat-k">修</span>
+          <strong class="v3-stat-v num">+${stats.effectiveRepair}</strong>
+        </span>
+        <span class="v3-stat-cell" role="listitem" data-stat="capacity" title="${capTitle}" aria-label="${capTitle}">
+          ${svgIcon('grid', 13)}
+          <span class="v3-stat-k">舱</span>
+          <strong class="v3-stat-v num">${occ.occupiedCells}/${occ.totalCells}</strong>
+          ${linkBadge}
+        </span>
       </div>
     `;
   }
@@ -911,13 +1044,104 @@ export class CargoGridV2Component {
     }
   }
 
+  private computeProspectiveHoverSynergy(): {
+    readonly bay: V2CargoBayState;
+    readonly stats: ReturnType<typeof calculateV2BuildStats>;
+    readonly activeItemId: string;
+    readonly hoverKey: string;
+  } | null {
+    if (!this.bay || !this.editable) return null;
+    let candidateItem: V2ItemInstance | null = null;
+    let candidateZone: 'grid' | 'staging' = 'grid';
+    let candidateX: number | null = null;
+    let candidateY: number | null = null;
+    let candidateRot: V2Rotation = 0;
+
+    if (this.drag?.active && this.drag.hoverOriginX !== null && this.drag.hoverOriginY !== null) {
+      candidateItem = this.drag.item;
+      candidateZone = this.drag.zone;
+      candidateX = this.drag.hoverOriginX;
+      candidateY = this.drag.hoverOriginY;
+      candidateRot = this.drag.rotation;
+    } else if (this.carrying && this.gridHasFocus) {
+      const sel = this.getSelectedItemInfo();
+      if (sel) {
+        candidateItem = sel.item;
+        candidateZone = sel.zone;
+        candidateX = this.focusedCell.x;
+        candidateY = this.focusedCell.y;
+        candidateRot = sel.rotation;
+      }
+    }
+
+    if (!candidateItem || candidateX === null || candidateY === null) return null;
+
+    const chk = validateV2Placement(
+      this.bay,
+      candidateItem.definitionId,
+      candidateX,
+      candidateY,
+      candidateRot,
+      candidateZone === 'grid' ? candidateItem.instanceId : undefined
+    );
+    if (!chk.valid) return null;
+
+    const nextPlaced: V2PlacedItem[] =
+      candidateZone === 'grid'
+        ? this.bay.placed.map((p) =>
+            p.item.instanceId === candidateItem!.instanceId
+              ? { ...p, x: candidateX!, y: candidateY!, rotation: candidateRot }
+              : p
+          )
+        : [
+            ...this.bay.placed,
+            {
+              item: { ...candidateItem, location: 'bay' },
+              x: candidateX,
+              y: candidateY,
+              rotation: candidateRot,
+            },
+          ];
+
+    const prospectiveBay: V2CargoBayState = { ...this.bay, placed: nextPlaced };
+    // S07: Strictly fast pure calculateV2BuildStats ONLY — ZERO simulateV2Combat calls during drag/hover!
+    const stats = calculateV2BuildStats(prospectiveBay);
+    return {
+      bay: prospectiveBay,
+      stats,
+      activeItemId: candidateItem.instanceId,
+      hoverKey: `${candidateItem.instanceId}@${candidateX},${candidateY},${candidateRot}`,
+    };
+  }
+
   private renderSynergySvg(
     bay: V2CargoBayState | null = this.bay,
     stats: ReturnType<typeof calculateV2BuildStats> | null = this.lastStats
   ): void {
     const svg = this.synergySvgEl;
     if (!svg || !bay || !stats) return;
-    if (stats.links.length === 0) {
+
+    const prospective = this.computeProspectiveHoverSynergy();
+    const effectiveBay = prospective ? prospective.bay : bay;
+    const effectiveStats = prospective ? prospective.stats : stats;
+    const previewItemId = prospective ? prospective.activeItemId : null;
+
+    // Update live hover partner highlights on placed tiles
+    this.previewPartnerIds.clear();
+    if (previewItemId) {
+      for (const lnk of effectiveStats.links) {
+        if (lnk.sourceInstanceId === previewItemId) {
+          this.previewPartnerIds.add(lnk.targetInstanceId);
+        } else if (lnk.targetInstanceId === previewItemId) {
+          this.previewPartnerIds.add(lnk.sourceInstanceId);
+        }
+      }
+    }
+    this.placedTileElements.forEach((tile, instanceId) => {
+      tile.classList.toggle('synergy-preview-partner', this.previewPartnerIds.has(instanceId));
+    });
+
+    if (effectiveStats.links.length === 0) {
       if (this.lastSynergyRenderKey !== 'empty') {
         svg.innerHTML = '';
         svg.style.display = 'none';
@@ -929,19 +1153,22 @@ export class CargoGridV2Component {
     const focusIds = new Set<string>();
     if (this.selected?.zone === 'grid') focusIds.add(this.selected.instanceId);
     if (this.drag?.active) focusIds.add(this.drag.item.instanceId);
+    if (previewItemId) focusIds.add(previewItemId);
     if (this.lastSnappedId) focusIds.add(this.lastSnappedId);
 
-    const renderKey = `${this.lastBayCombatHash}|${[...focusIds].sort().join(',')}|${stats.links.length}`;
+    const renderKey = `${this.lastBayCombatHash}|${prospective?.hoverKey ?? 'base'}|${[...focusIds]
+      .sort()
+      .join(',')}|${effectiveStats.links.length}`;
     if (renderKey === this.lastSynergyRenderKey) return;
     this.lastSynergyRenderKey = renderKey;
 
-    const ship = V2_SHIPS[bay.shipId];
+    const ship = V2_SHIPS[effectiveBay.shipId];
     svg.setAttribute('viewBox', `0 0 ${ship.cols * 100} ${ship.rows * 100}`);
     svg.style.display = '';
     svg.innerHTML = '';
 
     const centerOf = (instanceId: string): { x: number; y: number } | null => {
-      const p = bay.placed.find((item) => item.item.instanceId === instanceId);
+      const p = effectiveBay.placed.find((item) => item.item.instanceId === instanceId);
       if (!p) return null;
       const cells = getV2PlacedCells(p);
       if (cells.length === 0) return null;
@@ -951,8 +1178,8 @@ export class CargoGridV2Component {
     };
 
     const seamMidpointOf = (idA: string, idB: string): { x: number; y: number } | null => {
-      const pA = bay.placed.find((item) => item.item.instanceId === idA);
-      const pB = bay.placed.find((item) => item.item.instanceId === idB);
+      const pA = effectiveBay.placed.find((item) => item.item.instanceId === idA);
+      const pB = effectiveBay.placed.find((item) => item.item.instanceId === idB);
       if (!pA || !pB) return null;
       const cellsA = getV2PlacedCells(pA);
       const cellsB = getV2PlacedCells(pB);
@@ -966,14 +1193,17 @@ export class CargoGridV2Component {
       return null;
     };
 
-    for (const lnk of stats.links) {
+    for (const lnk of effectiveStats.links) {
       const p1 = centerOf(lnk.sourceInstanceId);
       const p2 = centerOf(lnk.targetInstanceId);
       const seam = seamMidpointOf(lnk.sourceInstanceId, lnk.targetInstanceId);
       if (!p1 || !p2) continue;
       const col = computeSynergyColor(lnk.sourceKind);
+      const isPreviewLink =
+        previewItemId !== null &&
+        (lnk.sourceInstanceId === previewItemId || lnk.targetInstanceId === previewItemId);
       const highlighted =
-        focusIds.has(lnk.sourceInstanceId) || focusIds.has(lnk.targetInstanceId);
+        isPreviewLink || focusIds.has(lnk.sourceInstanceId) || focusIds.has(lnk.targetInstanceId);
 
       if (highlighted) {
         const glow = document.createElementNS('http://www.w3.org/2000/svg', 'line');
@@ -982,21 +1212,30 @@ export class CargoGridV2Component {
         glow.setAttribute('x2', String(p2.x));
         glow.setAttribute('y2', String(p2.y));
         glow.setAttribute('stroke', col);
-        glow.setAttribute('stroke-width', '10');
+        glow.setAttribute('stroke-width', isPreviewLink ? '12' : '10');
         glow.setAttribute('stroke-linecap', 'round');
-        glow.setAttribute('opacity', '0.26');
+        glow.setAttribute('opacity', isPreviewLink ? '0.38' : '0.26');
         svg.appendChild(glow);
 
         const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('class', isPreviewLink ? 'energy-link-line is-preview' : 'energy-link-line');
+        if (isPreviewLink) {
+          line.setAttribute('data-link-preview', 'true');
+        }
+        if (typeof line.style?.setProperty === 'function') {
+          line.style.setProperty('--link-color', col);
+        } else {
+          line.setAttribute('style', `--link-color:${col};`);
+        }
         line.setAttribute('x1', String(p1.x));
         line.setAttribute('y1', String(p1.y));
         line.setAttribute('x2', String(p2.x));
         line.setAttribute('y2', String(p2.y));
         line.setAttribute('stroke', col);
-        line.setAttribute('stroke-width', '4.5');
+        line.setAttribute('stroke-width', isPreviewLink ? '5' : '4.5');
         line.setAttribute('stroke-linecap', 'round');
         line.setAttribute('stroke-dasharray', '10 6');
-        line.setAttribute('opacity', '0.95');
+        line.setAttribute('opacity', '0.96');
         svg.appendChild(line);
 
         const midX = seam ? seam.x : (p1.x + p2.x) * 0.5;
@@ -1011,6 +1250,9 @@ export class CargoGridV2Component {
         pill.setAttribute('fill', '#0D1726');
         pill.setAttribute('stroke', col);
         pill.setAttribute('stroke-width', '2.5');
+        if (isPreviewLink) {
+          pill.setAttribute('data-link-preview', 'true');
+        }
         svg.appendChild(pill);
 
         const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -1126,7 +1368,8 @@ export class CargoGridV2Component {
 
   private updateRecommendedCells(delta: V2TacticalDelta | null): void {
     this.recommendedCellKeys.clear();
-    if (!this.editable || !delta?.recommendedSpot) return;
+    // S07: recommendedSpot is strictly OPT-IN (OFF by default until player enables 推荐提示)
+    if (!this.editable || !this.showRecommendHint || !delta?.recommendedSpot) return;
     const sel = this.getSelectedItemInfo();
     if (!sel) return;
     const sDef = getAnyV2ItemDef(sel.item.definitionId);
@@ -1149,6 +1392,7 @@ export class CargoGridV2Component {
   }
 
   private scheduleTacticalDeltaUpdate(): void {
+    if (this.drag) return;
     const sel = this.getSelectedItemInfo();
     const provider = this.callbacks.getTacticalDelta;
     if (!this.bay || !sel || !provider) return;
@@ -1165,6 +1409,10 @@ export class CargoGridV2Component {
     let jobRan = false;
     const runJob = (): void => {
       if (this.destroyed || token !== this.deltaJobToken) return;
+      if (this.drag) {
+        this.pendingDeltaHandle = null;
+        return;
+      }
       jobRan = true;
       this.pendingDeltaHandle = null;
       if (!this.bay || this.lastBayCombatHash !== expectedBayHash) return;
@@ -1211,6 +1459,7 @@ export class CargoGridV2Component {
     if (nextKey === this.renderedSelectedKey) return;
 
     this.selected = nextSel;
+    this.showItemDetailsDrawer = false;
     this.renderedSelectedKey = nextKey;
     this.lastSelectedItemMetaKey = this.computeSelectedItemMetaKey();
     if (opts?.clearSnap !== false) {
@@ -1218,7 +1467,7 @@ export class CargoGridV2Component {
       this.pendingSnapFeedback = false;
     }
     if (opts?.playSfx) {
-      soundEngine.play('click');
+      soundEngine.play(this.editable ? 'pickup' : 'click');
     }
 
     this.updateSelectionAndDragClasses();
@@ -1308,7 +1557,9 @@ export class CargoGridV2Component {
     }
 
     const deltaKeyPart = delta
-      ? `${delta.positiveImpact ? 1 : 0}|${delta.synergyLine}|${delta.combatDeltaLine}|${delta.spaceLine}|${
+      ? `${delta.positiveImpact ? 1 : 0}|${delta.synergyLine}|${delta.qualitativeDeltaLine ?? delta.combatDeltaLine}|${
+          delta.trendDirection ?? ''
+        }|${delta.afterThreat ?? ''}|${delta.detailSummary ?? ''}|${delta.spaceLine}|${
           delta.recommendedSpot
             ? `${delta.recommendedSpot.x},${delta.recommendedSpot.y},${delta.recommendedSpot.rotation}`
             : ''
@@ -1318,18 +1569,52 @@ export class CargoGridV2Component {
       sel.item.quality
     }:${sel.item.origin}:${sel.item.fixedValue}|e=${editable ? 1 : 0}|pm=${
       this.prepareMode ? 1 : 0
-    }|pr=${hasPrepareRemove ? 1 : 0}|pb=${isSelectedPowerBoosted ? 1 : 0}|d=${deltaKeyPart}|sac=${sacrificeText}`;
+    }|pr=${hasPrepareRemove ? 1 : 0}|pb=${isSelectedPowerBoosted ? 1 : 0}|idw=${
+      this.showItemDetailsDrawer ? 1 : 0
+    }|rh=${this.showRecommendHint ? 1 : 0}|d=${deltaKeyPart}|sac=${sacrificeText}`;
     if (this.lastInspectorStateKey === stateKey) return;
     this.lastInspectorStateKey = stateKey;
     box.style.display = '';
 
     const eqDef = sel.item.category === 'equipment' ? V2_EQUIPMENT_DEFS[sel.item.definitionId] : undefined;
 
+    const layer1SynergyLine = delta
+      ? this.showRecommendHint
+        ? delta.synergyLine
+        : delta.synergyLine
+            .replace('推荐格位可触发联动', '贴邻配对可触发联动')
+            .replace('移至高亮位即可激活联动！', '拖至正交相邻格即可激活联动')
+      : '';
+    const layer1DeltaLine = delta ? delta.qualitativeDeltaLine ?? delta.combatDeltaLine : '';
+    const trendBadgeHtml =
+      delta?.trendDirection
+        ? `<span class="v3-trend-badge trend-${delta.trendDirection}" data-trend="${delta.trendDirection}">${
+            delta.trendDirection === 'up' ? '↑ 提升' : delta.trendDirection === 'down' ? '↓ 下降' : '= 持平'
+          }</span>`
+        : '';
+    const afterThreatMeta = delta?.afterThreat ? getV2ThreatTierMeta(delta.afterThreat) : null;
+    const afterThreatHtml = afterThreatMeta
+      ? `<span class="v3-threat-pill threat-${afterThreatMeta.tier}" data-threat-tier="${afterThreatMeta.tier}">${afterThreatMeta.symbol} ${afterThreatMeta.label}</span>`
+      : '';
+    const itemDetailsToggleHtml = delta?.detailSummary
+      ? `<div class="v3-item-details-wrap">
+          <button type="button" class="btn btn-sm btn-ghost v3-item-details-toggle" id="btn-v2-delta-details" data-testid="btn-toggle-item-details" aria-expanded="${
+            this.showItemDetailsDrawer ? 'true' : 'false'
+          }">${this.showItemDetailsDrawer ? '收起推演明细' : '明细（不干预结果）'}</button>
+          ${
+            this.showItemDetailsDrawer
+              ? `<div class="v3-item-details-drawer" data-testid="item-details-drawer">${delta.detailSummary}</div>`
+              : ''
+          }
+        </div>`
+      : '';
+
     const deltaHtml = delta
       ? `<div class="v2-delta-strip ${delta.positiveImpact ? 'positive' : ''}" data-testid="tactical-delta">
-          <div class="v2-delta-row"><span class="v2-delta-k">联动</span><span>${delta.synergyLine}</span></div>
-          <div class="v2-delta-row"><span class="v2-delta-k">收益</span><strong>${delta.combatDeltaLine}</strong></div>
+          <div class="v2-delta-row"><span class="v2-delta-k">联动</span><span>${layer1SynergyLine}</span></div>
+          <div class="v2-delta-row"><span class="v2-delta-k">趋势</span><span class="v3-delta-qual-wrap">${trendBadgeHtml}${afterThreatHtml}<strong>${layer1DeltaLine}</strong></span></div>
           <div class="v2-delta-row"><span class="v2-delta-k">舱位</span><span>${delta.spaceLine}</span></div>
+          ${itemDetailsToggleHtml}
         </div>`
       : `<div class="inspector-desc">${def.summary}${
           sel.item.fixedValue > 0 ? ` · 回收估价 <strong>${sel.item.fixedValue}¤</strong>` : ''
@@ -1338,6 +1623,8 @@ export class CargoGridV2Component {
     const sacrificeHtml = sacrificeText
       ? `<div class="v2-sacrifice-preview" data-testid="sacrifice-preview">${sacrificeText}</div>`
       : '';
+
+    const showOptInRecommendedBtn = Boolean(this.showRecommendHint && delta?.recommendedSpot);
 
     box.innerHTML = `
       <div class="inspector-main">
@@ -1369,16 +1656,28 @@ export class CargoGridV2Component {
         editable
           ? `<div class="inspector-actions">
               <button type="button" class="btn btn-sm btn-secondary" id="btn-v2-rotate">↻ 旋转 (R)</button>
+              <button type="button" class="btn btn-sm ${
+                this.showRecommendHint ? 'btn-secondary active' : 'btn-ghost'
+              }" id="btn-v2-toggle-recommend" data-testid="btn-toggle-recommend-hint" aria-pressed="${
+                this.showRecommendHint ? 'true' : 'false'
+              }">${this.showRecommendHint ? '✦ 隐藏推荐' : '✦ 推荐提示'}</button>
               ${
                 sel.zone === 'staging'
-                  ? `<button type="button" class="btn btn-sm btn-primary" id="btn-v2-autoplace">${
-                      delta?.recommendedSpot ? '↓ 装入推荐位' : '↓ 放入船舱'
-                    }</button>`
-                  : this.prepareMode
-                  ? hasPrepareRemove
-                    ? `<button type="button" class="btn btn-sm btn-danger" id="btn-v2-prep-remove">✕ 移出配装</button>`
-                    : `<span class="v2-origin-chip origin-loan" style="align-self:center;">全息模板锁定 · 可拖动/旋转</span>`
-                  : `<button type="button" class="btn btn-sm btn-ghost" id="btn-v2-to-staging">↑ 移至暂存</button>`
+                  ? `<button type="button" class="btn btn-sm btn-primary" id="btn-v2-autoplace" ${
+                      showOptInRecommendedBtn ? 'data-testid="btn-install-recommended"' : ''
+                    }>${showOptInRecommendedBtn ? '↓ 装入推荐位' : '↓ 放入船舱'}</button>`
+                  : showOptInRecommendedBtn
+                  ? `<button type="button" class="btn btn-sm btn-primary" id="btn-v2-apply-recommended" data-testid="btn-install-recommended">↓ 装入推荐位</button>`
+                  : ''
+              }
+              ${
+                sel.zone === 'grid'
+                  ? this.prepareMode
+                    ? hasPrepareRemove
+                      ? `<button type="button" class="btn btn-sm btn-danger" id="btn-v2-prep-remove">✕ 移出配装</button>`
+                      : `<span class="v2-origin-chip origin-loan" style="align-self:center;">全息模板锁定 · 可拖动/旋转</span>`
+                    : `<button type="button" class="btn btn-sm btn-ghost" id="btn-v2-to-staging">↑ 移至暂存</button>`
+                  : ''
               }
               ${
                 !this.prepareMode
@@ -1439,7 +1738,7 @@ export class CargoGridV2Component {
       this.pendingSnapFeedback = false;
       this.selected = null;
       this.carrying = false;
-      soundEngine.play('click');
+      soundEngine.play('clampPop');
       this.callbacks.onBayChange(res.bay);
     }
   }
@@ -1460,7 +1759,7 @@ export class CargoGridV2Component {
       this.pendingSnapFeedback = true;
       this.selected = { zone: 'grid', instanceId: sel.item.instanceId };
       this.carrying = false;
-      soundEngine.play('place');
+      soundEngine.play(isHeavyPlacementItem(sel.item) ? 'placeHeavy' : 'place');
       this.callbacks.onBayChange(res.bay);
       return true;
     }
@@ -1482,7 +1781,7 @@ export class CargoGridV2Component {
     this.lastSnappedId = sel.item.instanceId;
     this.pendingSnapFeedback = true;
     this.carrying = false;
-    soundEngine.play('place');
+    soundEngine.play(isHeavyPlacementItem(sel.item) ? 'placeHeavy' : 'place');
     this.callbacks.onBayChange(res.bay);
     return true;
   }
@@ -1589,6 +1888,13 @@ export class CargoGridV2Component {
       y: (this.focusedCell.y + dy + ship.rows) % ship.rows,
     };
     this.updateCellVisualFocusAndPreview();
+    if (this.carrying) {
+      const pv = this.computeActivePreview();
+      if (pv?.valid) {
+        soundEngine.play('hoverValid');
+      }
+      this.renderSynergySvg();
+    }
     const targetCell = this.cellElements.get(`${this.focusedCell.x},${this.focusedCell.y}`);
     if (targetCell && document.activeElement !== targetCell) {
       targetCell.focus({ preventScroll: true });
@@ -1629,24 +1935,69 @@ export class CargoGridV2Component {
     this.renderToast();
   }
 
+  private getBoardCellMetrics(): {
+    readonly rect: DOMRect | null;
+    readonly cellW: number;
+    readonly cellH: number;
+  } {
+    if (this.boardEl && this.bay) {
+      const rect = this.boardEl.getBoundingClientRect();
+      const ship = V2_SHIPS[this.bay.shipId];
+      if (rect.width > 0 && rect.height > 0) {
+        return { rect, cellW: rect.width / ship.cols, cellH: rect.height / ship.rows };
+      }
+    }
+    return { rect: null, cellW: 64, cellH: 64 };
+  }
+
   private ensureDragGhost(drag: DragState): HTMLElement {
     if (drag.ghostEl) return drag.ghostEl;
     const def = getAnyV2ItemDef(drag.item.definitionId);
-    const bounds = def ? getV2ShapeBounds(def.shapeId, drag.rotation) : { width: 1, height: 1 };
-    const cellPx = this.boardEl && this.bay
-      ? this.boardEl.getBoundingClientRect().width / V2_SHIPS[this.bay.shipId].cols
-      : 64;
+    const shapeId = def?.shapeId ?? '1x1';
+    const bounds = getV2ShapeBounds(shapeId, drag.rotation);
+    const occupied = getV2OccupiedCells(shapeId, 0, 0, drag.rotation);
+    const { cellW, cellH } = this.getBoardCellMetrics();
     const ghost = document.createElement('div');
-    ghost.className = 'drag-ghost';
-    ghost.style.width = `${bounds.width * cellPx}px`;
-    ghost.style.height = `${bounds.height * cellPx}px`;
+    ghost.className = 'drag-ghost v2-drag-ghost';
+    ghost.dataset.shapeId = shapeId;
+    ghost.dataset.rotation = String(drag.rotation);
+    ghost.style.width = `${bounds.width * cellW}px`;
+    ghost.style.height = `${bounds.height * cellH}px`;
+
+    // S07: Render occupied-cell-only subcells so L3/T4 shapes preserve transparent cutouts!
+    for (const c of occupied) {
+      const sub = document.createElement('div');
+      sub.className = 'drag-ghost-subcell';
+      sub.dataset.subX = String(c.x);
+      sub.dataset.subY = String(c.y);
+      sub.style.left = `${(c.x / bounds.width) * 100}%`;
+      sub.style.top = `${(c.y / bounds.height) * 100}%`;
+      sub.style.width = `${(1 / bounds.width) * 100}%`;
+      sub.style.height = `${(1 / bounds.height) * 100}%`;
+      ghost.appendChild(sub);
+    }
+
+    const baseBounds = getV2ShapeBounds(shapeId, 0);
+    const isSwapped = drag.rotation === 1 || drag.rotation === 3;
+    const spriteWrap = document.createElement('div');
+    spriteWrap.className = 'placed-sprite-wrap drag-ghost-sprite-wrap';
     const img = document.createElement('img');
+    img.className = 'placed-sprite';
     img.src = getItemImageUrl(drag.item.definitionId);
-    img.style.width = '100%';
-    img.style.height = '100%';
-    img.style.objectFit = 'contain';
-    img.style.transform = `rotate(${drag.rotation * 90}deg)`;
-    ghost.appendChild(img);
+    img.alt = '';
+    img.draggable = false;
+    if (isSwapped) {
+      img.style.width = `${(baseBounds.width / bounds.width) * 100}%`;
+      img.style.height = `${(baseBounds.height / bounds.height) * 100}%`;
+      img.style.transform = `translate(-50%, -50%) rotate(${drag.rotation * 90}deg)`;
+    } else {
+      img.style.width = '100%';
+      img.style.height = '100%';
+      img.style.transform = `translate(-50%, -50%) rotate(${drag.rotation * 90}deg)`;
+    }
+    spriteWrap.appendChild(img);
+    ghost.appendChild(spriteWrap);
+
     document.body.appendChild(ghost);
     drag.ghostEl = ghost;
     return ghost;
@@ -1659,15 +2010,131 @@ export class CargoGridV2Component {
     }
   }
 
+  private rescheduleDeltaIfIdle(): void {
+    if (this.bay && this.selected && !this.activeDelta && !this.pendingDeltaHandle) {
+      this.scheduleTacticalDeltaUpdate();
+    }
+  }
+
+  public cancelActiveDrag(rescheduleDelta = true): void {
+    this.flushSpringBackCleanups();
+    if (this.destroyed || !this.drag) return;
+    const wasActive = this.drag.active;
+    this.clearDragGhost();
+    this.drag = null;
+    if (wasActive && this.bay) {
+      this.updateSelectionAndDragClasses();
+      this.updateCellVisualFocusAndPreview();
+      this.renderSynergySvg();
+    }
+    if (rescheduleDelta) {
+      this.rescheduleDeltaIfIdle();
+    }
+  }
+
+  private containsTarget(container: HTMLElement | null, target: unknown): boolean {
+    if (!container || !target) return false;
+    if (container === target) return true;
+    if (typeof container.contains === 'function') {
+      try {
+        if (container.contains(target as Node)) return true;
+      } catch {
+        // Fallback to parent chain traversal for lightweight DOM stubs
+      }
+    }
+    let cur = target as { parentElement?: unknown; parentNode?: unknown } | null;
+    while (cur) {
+      if (cur === container) return true;
+      cur = (cur.parentElement ?? cur.parentNode ?? null) as {
+        parentElement?: unknown;
+        parentNode?: unknown;
+      } | null;
+    }
+    return false;
+  }
+
+  private handleWindowPointerDown = (e: PointerEvent): void => {
+    if (this.destroyed || !this.drag) return;
+    if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
+    const pointerId = e.pointerId ?? 0;
+    if (pointerId !== this.drag.pointerId) return;
+    if (this.containsTarget(this.boardEl, e.target) || this.containsTarget(this.stagingEl, e.target)) {
+      return; // board/staging handlers recover with rescheduleDelta=false to preserve D8.4 0-sim gap
+    }
+    this.cancelActiveDrag(true);
+  };
+
+  private launchInvalidSpringBack(drag: DragState, isInvalidDrop: boolean): void {
+    const ghost = drag.ghostEl;
+    drag.ghostEl = null;
+    const reducedMotion =
+      typeof document !== 'undefined' && document.body.classList.contains('reduced-motion');
+
+    if (!ghost) return;
+    if (reducedMotion || !drag.sourceRect) {
+      ghost.remove();
+      return;
+    }
+
+    ghost.classList.remove('is-valid');
+    ghost.classList.add('is-spring-back');
+    if (isInvalidDrop) {
+      ghost.classList.add('is-invalid');
+    }
+    ghost.dataset.springBack = 'true';
+    ghost.style.left = `${drag.sourceRect.left}px`;
+    ghost.style.top = `${drag.sourceRect.top}px`;
+    ghost.style.opacity = '0.2';
+    ghost.style.transform = 'scale(0.94)';
+
+    const sourceEl =
+      isInvalidDrop
+        ? drag.zone === 'grid'
+          ? this.placedTileElements.get(drag.item.instanceId) ?? null
+          : this.stagingChipElements.get(drag.item.instanceId) ?? null
+        : null;
+    if (sourceEl) {
+      sourceEl.classList.add('invalid-shake');
+    }
+
+    let cleaned = false;
+    let timerId: ReturnType<typeof globalThis.setTimeout> | null = null;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      if (timerId !== null) {
+        globalThis.clearTimeout(timerId);
+        timerId = null;
+      }
+      ghost.remove();
+      sourceEl?.classList.remove('invalid-shake');
+      this.springBackCleanups.delete(cleanup);
+    };
+
+    timerId = globalThis.setTimeout(cleanup, 240);
+    this.springBackCleanups.add(cleanup);
+  }
+
   private handleBoardPointerDown = (e: PointerEvent): void => {
     if (this.destroyed || !this.bay || hasOpenModal()) return;
     if (e.button !== 0 && e.pointerType === 'mouse') return;
+    const pointerId = e.pointerId ?? 0;
+    let recoveredDrag = false;
+    if (this.drag) {
+      if (pointerId !== this.drag.pointerId) return;
+      this.cancelActiveDrag(false);
+      recoveredDrag = true;
+    }
     const cell = this.clientPointToCell(e.clientX, e.clientY);
-    if (!cell) return;
+    if (!cell) {
+      if (recoveredDrag) this.rescheduleDeltaIfIdle();
+      return;
+    }
     this.focusedCell = cell;
 
     if (isCellDisabledForShip(this.bay.shipId, cell.x, cell.y)) {
       this.showInvalidReason('disabled_cell');
+      if (recoveredDrag) this.rescheduleDeltaIfIdle();
       return;
     }
 
@@ -1677,6 +2144,7 @@ export class CargoGridV2Component {
       if (occupant) {
         this.selectItem({ zone: 'grid', instanceId: occupant.item.instanceId }, { playSfx: false });
       }
+      if (recoveredDrag) this.rescheduleDeltaIfIdle();
       return;
     }
 
@@ -1684,8 +2152,17 @@ export class CargoGridV2Component {
       const isSameSelected =
         this.selected?.zone === 'grid' && this.selected.instanceId === occupant.item.instanceId;
       this.carrying = false;
+      const def = getAnyV2ItemDef(occupant.item.definitionId);
+      const bounds = getV2ShapeBounds(def?.shapeId ?? '1x1', occupant.rotation);
+      const { rect, cellW, cellH } = this.getBoardCellMetrics();
+      const tileW = bounds.width * cellW;
+      const tileH = bounds.height * cellH;
+      const tileLeft = rect ? rect.left + occupant.x * cellW : e.clientX - (cell.x - occupant.x + 0.5) * cellW;
+      const tileTop = rect ? rect.top + occupant.y * cellH : e.clientY - (cell.y - occupant.y + 0.5) * cellH;
+      const grabOffsetPxX = Math.max(0, Math.min(tileW, e.clientX - tileLeft));
+      const grabOffsetPxY = Math.max(0, Math.min(tileH, e.clientY - tileTop));
       this.drag = {
-        pointerId: e.pointerId,
+        pointerId,
         pointerType: e.pointerType,
         zone: 'grid',
         item: occupant.item,
@@ -1696,9 +2173,13 @@ export class CargoGridV2Component {
         startClientY: e.clientY,
         grabOffsetCellX: cell.x - occupant.x,
         grabOffsetCellY: cell.y - occupant.y,
+        grabOffsetPxX,
+        grabOffsetPxY,
+        sourceRect: { left: tileLeft, top: tileTop, width: tileW, height: tileH },
         active: false,
         hoverOriginX: occupant.x,
         hoverOriginY: occupant.y,
+        lastValidHoverKey: null,
         ghostEl: null,
       };
       this.selectItem(
@@ -1711,22 +2192,52 @@ export class CargoGridV2Component {
     if (this.selected) {
       this.tryPlaceSelectedAt(cell.x, cell.y);
     }
+    if (recoveredDrag) {
+      this.rescheduleDeltaIfIdle();
+    }
   };
 
   private handleStagingPointerDown = (ev: PointerEvent): void => {
     if (this.destroyed || !this.editable || !this.bay || hasOpenModal()) return;
     if (ev.button !== 0 && ev.pointerType === 'mouse') return;
+    const pointerId = ev.pointerId ?? 0;
+    let recoveredDrag = false;
+    if (this.drag) {
+      if (pointerId !== this.drag.pointerId) return;
+      this.cancelActiveDrag(false);
+      recoveredDrag = true;
+    }
     const target = ev.target as HTMLElement | null;
     const chip = target?.closest<HTMLButtonElement>('[data-staging-id]');
-    if (!chip) return;
+    if (!chip) {
+      if (recoveredDrag) this.rescheduleDeltaIfIdle();
+      return;
+    }
     const stagingId = chip.dataset.stagingId;
-    if (!stagingId) return;
+    if (!stagingId) {
+      if (recoveredDrag) this.rescheduleDeltaIfIdle();
+      return;
+    }
     const st = this.bay.staging.find((item) => item.item.instanceId === stagingId);
-    if (!st) return;
+    if (!st) {
+      if (recoveredDrag) this.rescheduleDeltaIfIdle();
+      return;
+    }
+
+    const def = getAnyV2ItemDef(st.item.definitionId);
+    const bounds = getV2ShapeBounds(def?.shapeId ?? '1x1', st.rotation);
+    const { cellW, cellH } = this.getBoardCellMetrics();
+    const ghostW = bounds.width * cellW;
+    const ghostH = bounds.height * cellH;
+    const chipRect = chip.getBoundingClientRect();
+    const sourceRect: DragSourceRect | null =
+      chipRect.width > 0 && chipRect.height > 0
+        ? { left: chipRect.left, top: chipRect.top, width: ghostW, height: ghostH }
+        : { left: ev.clientX - ghostW * 0.5, top: ev.clientY - ghostH * 0.5, width: ghostW, height: ghostH };
 
     this.carrying = false;
     this.drag = {
-      pointerId: ev.pointerId,
+      pointerId,
       pointerType: ev.pointerType,
       zone: 'staging',
       item: st.item,
@@ -1735,16 +2246,20 @@ export class CargoGridV2Component {
       startClientY: ev.clientY,
       grabOffsetCellX: 0,
       grabOffsetCellY: 0,
+      grabOffsetPxX: ghostW * 0.5,
+      grabOffsetPxY: ghostH * 0.5,
+      sourceRect,
       active: false,
       hoverOriginX: null,
       hoverOriginY: null,
+      lastValidHoverKey: null,
       ghostEl: null,
     };
     this.selectItem({ zone: 'staging', instanceId: st.item.instanceId }, { playSfx: false });
   };
 
   private handleStagingClick = (ev: MouseEvent): void => {
-    if (this.destroyed || !this.bay) return;
+    if (this.destroyed || !this.bay || this.drag) return;
     const target = ev.target as HTMLElement | null;
     const undoBtn = target?.closest<HTMLButtonElement>('#btn-v2-undo-discard');
     if (undoBtn) {
@@ -1753,7 +2268,7 @@ export class CargoGridV2Component {
       if (res.ok) {
         this.lastSnappedId = null;
         this.pendingSnapFeedback = false;
-        soundEngine.play('click');
+        soundEngine.play('pickup');
         this.callbacks.onBayChange(res.bay);
       }
       return;
@@ -1767,18 +2282,36 @@ export class CargoGridV2Component {
     if (!st) return;
 
     this.carrying = false;
-    soundEngine.play('click');
+    soundEngine.play('pickup');
     this.selectItem({ zone: 'staging', instanceId: st.item.instanceId }, { playSfx: false });
   };
 
   private handleInspectorClick = (ev: MouseEvent): void => {
-    if (this.destroyed || !this.editable || !this.bay) return;
+    if (this.destroyed || !this.bay || this.drag) return;
     const target = ev.target as HTMLElement | null;
     const btn = target?.closest<HTMLButtonElement>('button[id]');
     if (!btn) return;
     const sel = this.getSelectedItemInfo();
     if (!sel) return;
 
+    // S06: On-demand item details drawer works in both editable and read-only bays
+    if (btn.id === 'btn-v2-delta-details') {
+      this.showItemDetailsDrawer = !this.showItemDetailsDrawer;
+      soundEngine.play('click');
+      this.renderSelectedInspector(this.editable, this.activeDelta);
+      return;
+    }
+
+    if (!this.editable) return;
+
+    if (btn.id === 'btn-v2-toggle-recommend') {
+      this.showRecommendHint = !this.showRecommendHint;
+      soundEngine.play('click');
+      this.updateRecommendedCells(this.activeDelta);
+      this.renderSelectedInspector(this.editable, this.activeDelta);
+      this.updateCellVisualFocusAndPreview();
+      return;
+    }
     if (btn.id === 'btn-v2-rotate') {
       this.rotateSelected();
       return;
@@ -1786,7 +2319,8 @@ export class CargoGridV2Component {
     if (btn.id === 'btn-v2-autoplace') {
       if (sel.zone !== 'staging') return;
       const spot =
-        this.activeDelta?.recommendedSpot ?? findFirstLegalV2Placement(this.bay, sel.item.definitionId);
+        (this.showRecommendHint ? this.activeDelta?.recommendedSpot : null) ??
+        findFirstLegalV2Placement(this.bay, sel.item.definitionId);
       if (!spot) {
         this.showInvalidReason('overlap');
         return;
@@ -1802,8 +2336,22 @@ export class CargoGridV2Component {
         this.lastSnappedId = sel.item.instanceId;
         this.pendingSnapFeedback = true;
         this.selected = { zone: 'grid', instanceId: sel.item.instanceId };
-        soundEngine.play('place');
+        soundEngine.play(isHeavyPlacementItem(sel.item) ? 'placeHeavy' : 'place');
         this.callbacks.onBayChange(res.bay);
+      }
+      return;
+    }
+    if (btn.id === 'btn-v2-apply-recommended') {
+      if (sel.zone !== 'grid' || !this.showRecommendHint || !this.activeDelta?.recommendedSpot) return;
+      const spot = this.activeDelta.recommendedSpot;
+      const res = moveV2PlacedItem(this.bay, sel.item.instanceId, spot.x, spot.y, spot.rotation);
+      if (res.ok) {
+        this.lastSnappedId = sel.item.instanceId;
+        this.pendingSnapFeedback = true;
+        soundEngine.play(isHeavyPlacementItem(sel.item) ? 'placeHeavy' : 'place');
+        this.callbacks.onBayChange(res.bay);
+      } else {
+        this.showInvalidReason('overlap');
       }
       return;
     }
@@ -1814,7 +2362,7 @@ export class CargoGridV2Component {
         this.lastSnappedId = null;
         this.pendingSnapFeedback = false;
         this.selected = { zone: 'staging', instanceId: sel.item.instanceId };
-        soundEngine.play('click');
+        soundEngine.play('pickup');
         this.callbacks.onBayChange(res.bay);
       }
       return;
@@ -1824,7 +2372,7 @@ export class CargoGridV2Component {
       this.lastSnappedId = null;
       this.pendingSnapFeedback = false;
       this.selected = null;
-      soundEngine.play('click');
+      soundEngine.play('pickup');
       this.callbacks.onPrepareRemoveItem?.(sel.item.instanceId);
       return;
     }
@@ -1834,67 +2382,145 @@ export class CargoGridV2Component {
   };
 
   private handleWindowPointerMove = (e: PointerEvent): void => {
-    if (this.destroyed || !this.drag || !this.bay || e.pointerId !== this.drag.pointerId) return;
+    if (this.destroyed || !this.drag) return;
+    if (hasOpenModal()) {
+      this.cancelActiveDrag(true);
+      return;
+    }
+    const pointerId = e.pointerId ?? 0;
+    if (!this.bay || pointerId !== this.drag.pointerId) return;
     const dist = Math.hypot(e.clientX - this.drag.startClientX, e.clientY - this.drag.startClientY);
     let justActivated = false;
     if (!this.drag.active && dist >= 8) {
       this.drag.active = true;
       justActivated = true;
+      this.cancelPendingDeltaJob();
+      soundEngine.play('pickup');
     }
     if (!this.drag.active) return;
 
-    const liftY = this.drag.pointerType === 'touch' ? 48 : 0;
+    const { rect, cellW, cellH } = this.getBoardCellMetrics();
+    const liftY = this.drag.pointerType === 'touch' ? Math.max(56, Math.round(cellH * 0.85)) : 0;
     const ghost = this.ensureDragGhost(this.drag);
-    ghost.style.left = `${e.clientX}px`;
-    ghost.style.top = `${e.clientY - liftY}px`;
+    const ghostLeft = e.clientX - this.drag.grabOffsetPxX;
+    const ghostTop = e.clientY - liftY - this.drag.grabOffsetPxY;
+    ghost.style.left = `${ghostLeft}px`;
+    ghost.style.top = `${ghostTop}px`;
+    ghost.classList.toggle('is-touch-lifted', this.drag.pointerType === 'touch');
 
     const hoverCell = this.clientPointToCell(e.clientX, e.clientY - liftY);
-    if (hoverCell) {
+    if (hoverCell && rect && rect.width > 0 && rect.height > 0) {
+      this.drag.hoverOriginX = Math.round((ghostLeft - rect.left) / cellW);
+      this.drag.hoverOriginY = Math.round((ghostTop - rect.top) / cellH);
+    } else if (hoverCell) {
       this.drag.hoverOriginX = hoverCell.x - this.drag.grabOffsetCellX;
       this.drag.hoverOriginY = hoverCell.y - this.drag.grabOffsetCellY;
     } else {
       this.drag.hoverOriginX = null;
       this.drag.hoverOriginY = null;
     }
+
+    const preview = this.computeActivePreview();
+    ghost.classList.toggle('is-valid', Boolean(preview?.valid));
+    ghost.classList.toggle('is-invalid', Boolean(preview && !preview.valid));
+    ghost.dataset.valid = preview ? (preview.valid ? 'true' : 'false') : 'none';
+
+    if (preview?.valid && this.drag.hoverOriginX !== null && this.drag.hoverOriginY !== null) {
+      const hoverKey = `${this.drag.hoverOriginX},${this.drag.hoverOriginY},${this.drag.rotation}`;
+      if (hoverKey !== this.drag.lastValidHoverKey) {
+        this.drag.lastValidHoverKey = hoverKey;
+        soundEngine.play('hoverValid');
+      }
+    } else {
+      this.drag.lastValidHoverKey = null;
+    }
+
     if (justActivated) {
       this.updateSelectionAndDragClasses();
-      this.renderSynergySvg();
     }
     this.updateCellVisualFocusAndPreview();
+    this.renderSynergySvg();
   };
 
   private handleWindowPointerUp = (e: PointerEvent): void => {
-    if (this.destroyed || !this.drag || e.pointerId !== this.drag.pointerId) return;
+    if (this.destroyed || !this.drag) return;
+    if (hasOpenModal()) {
+      this.cancelActiveDrag(true);
+      return;
+    }
+    const pointerId = e.pointerId ?? 0;
+    if (pointerId !== this.drag.pointerId) return;
     const drag = this.drag;
-    this.clearDragGhost();
     this.drag = null;
 
-    if (!drag.active || !this.bay || !this.editable) return;
+    if (!drag.active || !this.bay || !this.editable) {
+      if (drag.ghostEl) {
+        drag.ghostEl.remove();
+        drag.ghostEl = null;
+      }
+      this.rescheduleDeltaIfIdle();
+      return;
+    }
 
     if (drag.hoverOriginX !== null && drag.hoverOriginY !== null) {
+      const preCheck = validateV2Placement(
+        this.bay,
+        drag.item.definitionId,
+        drag.hoverOriginX,
+        drag.hoverOriginY,
+        drag.rotation,
+        drag.zone === 'grid' ? drag.item.instanceId : undefined
+      );
       const ok = this.tryPlaceSelectedAt(drag.hoverOriginX, drag.hoverOriginY);
-      if (!ok) {
+      this.callbacks.onDragAttempt?.({
+        zone: drag.zone,
+        itemDefId: drag.item.definitionId,
+        success: ok,
+        reason: ok ? undefined : preCheck.reason ?? 'overlap',
+      });
+      if (ok) {
+        if (drag.ghostEl) {
+          drag.ghostEl.remove();
+          drag.ghostEl = null;
+        }
+        if (this.pendingSnapFeedback) {
+          this.pendingSnapFeedback = false;
+          this.updateSelectionAndDragClasses();
+          this.updateCellVisualFocusAndPreview();
+          this.renderSynergySvg();
+        }
+        this.rescheduleDeltaIfIdle();
+      } else {
+        this.launchInvalidSpringBack(drag, true);
         this.updateSelectionAndDragClasses();
         this.updateCellVisualFocusAndPreview();
         this.renderSynergySvg();
+        this.rescheduleDeltaIfIdle();
       }
     } else {
+      this.callbacks.onDragAttempt?.({
+        zone: drag.zone,
+        itemDefId: drag.item.definitionId,
+        success: false,
+        reason: 'outside_board',
+      });
+      this.launchInvalidSpringBack(drag, false);
       this.updateSelectionAndDragClasses();
       this.updateCellVisualFocusAndPreview();
       this.renderSynergySvg();
+      this.rescheduleDeltaIfIdle();
     }
   };
 
-  private handleWindowPointerCancel = (): void => {
+  private handleWindowPointerCancel = (e?: PointerEvent): void => {
     if (this.destroyed || !this.drag) return;
-    const wasActive = this.drag.active;
-    this.clearDragGhost();
-    this.drag = null;
-    if (wasActive && this.bay) {
-      this.updateSelectionAndDragClasses();
-      this.updateCellVisualFocusAndPreview();
-      this.renderSynergySvg();
-    }
+    if (e && e.pointerId !== undefined && e.pointerId !== this.drag.pointerId) return;
+    this.cancelActiveDrag(true);
+  };
+
+  private handleWindowBlur = (): void => {
+    if (this.destroyed) return;
+    this.cancelActiveDrag(true);
   };
 
   private handleKeyDown = (e: KeyboardEvent): void => {
@@ -1907,6 +2533,7 @@ export class CargoGridV2Component {
     ) {
       return;
     }
+    if (this.drag && e.key !== 'Escape') return;
 
     // Grid navigation when focus is on grid (zero DOM rebuilds & zero simulateV2Combat calls!)
     if (this.gridHasFocus) {
@@ -1943,12 +2570,10 @@ export class CargoGridV2Component {
         const occ = findV2ItemAtCell(this.bay, this.focusedCell.x, this.focusedCell.y);
         if (occ) {
           this.carrying = true;
-          const prevKey = this.renderedSelectedKey;
-          this.selectItem({ zone: 'grid', instanceId: occ.item.instanceId }, { playSfx: true });
-          if (prevKey === this.renderedSelectedKey) {
-            soundEngine.play('click');
-          }
+          this.selectItem({ zone: 'grid', instanceId: occ.item.instanceId }, { playSfx: false });
+          soundEngine.play('pickup');
           this.updateCellVisualFocusAndPreview();
+          this.renderSynergySvg();
         } else if (this.selected) {
           this.tryPlaceSelectedAt(this.focusedCell.x, this.focusedCell.y);
         }
@@ -1971,6 +2596,7 @@ export class CargoGridV2Component {
             this.lastSnappedId = null;
             this.pendingSnapFeedback = false;
             this.selected = null;
+            soundEngine.play('pickup');
             this.callbacks.onPrepareRemoveItem(sel.item.instanceId);
           }
         } else {

@@ -1,3 +1,5 @@
+import { getItemImageUrl } from '../../../assets/itemArt';
+import { soundEngine } from '../../../audio/soundEngine';
 import { V2_EQUIPMENT_DEFS } from '../../data/equipment';
 import { V3_FACTIONS } from '../../data/factions';
 import { getV3EndlessMutatorDef } from '../../data/sectors';
@@ -29,6 +31,139 @@ export interface SettlementViewActions {
   readonly onShowcaseRetry: () => void;
   readonly onShowcaseToBase: () => void;
   readonly onConfirmSettlement: () => void;
+  readonly onSkipRollup?: () => void;
+}
+
+/**
+ * Deterministic, RAF-free sequential settlement bill rollup controller (S09):
+ * - Plays staggered `creditTick` SFX as bill rows reveal, ending with a single `cashRegister`.
+ * - Instant & 0 timers in `reducedMotion`.
+ * - Skippable on click/key/disposition-change with 0 trailing audio or leaked timers.
+ */
+export class SettlementBillRollupController {
+  private timers: ReturnType<typeof globalThis.setTimeout>[] = [];
+  private active = false;
+  private finalCredits = 0;
+  private cashRegisterPlayed = false;
+  private stepEls: HTMLElement[] = [];
+  private totalEl: HTMLElement | null = null;
+  private onCompleteCb: (() => void) | null = null;
+
+  isActive(): boolean {
+    return this.active;
+  }
+
+  start(
+    containerEl: HTMLElement,
+    finalCredits: number,
+    reducedMotion: boolean,
+    opts?: { readonly onComplete?: () => void }
+  ): void {
+    this.cancel();
+    this.finalCredits = Math.max(0, Math.round(finalCredits));
+    this.cashRegisterPlayed = false;
+    this.onCompleteCb = opts?.onComplete ?? null;
+    this.totalEl = containerEl.querySelector<HTMLElement>('[data-testid="settlement-total-credits"]');
+    const totalsBox = containerEl.querySelector<HTMLElement>('.v2-settle-totals');
+    this.stepEls = totalsBox
+      ? Array.from(totalsBox.querySelectorAll<HTMLElement>('[data-bill-step]'))
+      : [];
+
+    if (reducedMotion || this.stepEls.length === 0) {
+      for (const el of this.stepEls) {
+        el.classList.remove('is-rollup-pending');
+        el.classList.add('is-rollup-revealed');
+      }
+      if (this.totalEl) {
+        this.totalEl.textContent = `+${this.finalCredits}¤`;
+        this.totalEl.dataset.rollupDone = 'true';
+      }
+      if (this.finalCredits > 0) {
+        this.cashRegisterPlayed = true;
+        soundEngine.play('cashRegister');
+      }
+      this.active = false;
+      this.onCompleteCb?.();
+      this.onCompleteCb = null;
+      return;
+    }
+
+    this.active = true;
+    for (const el of this.stepEls) {
+      el.classList.add('is-rollup-pending');
+      el.classList.remove('is-rollup-revealed');
+    }
+    if (this.totalEl) {
+      this.totalEl.textContent = '+0¤';
+      this.totalEl.dataset.rollupDone = 'false';
+    }
+
+    const stepCount = this.stepEls.length;
+    const intervalMs = Math.max(55, Math.min(110, Math.floor(620 / Math.max(1, stepCount))));
+    let runningCredits = 0;
+
+    this.stepEls.forEach((stepEl, idx) => {
+      const delayMs = intervalMs * (idx + 1);
+      const stepCredits = Number(stepEl.dataset.stepCredits ?? '0') || 0;
+      const tid = globalThis.setTimeout(() => {
+        if (!this.active) return;
+        stepEl.classList.remove('is-rollup-pending');
+        stepEl.classList.add('is-rollup-revealed');
+        runningCredits = Math.min(this.finalCredits, runningCredits + Math.max(0, stepCredits));
+        if (this.totalEl) {
+          this.totalEl.textContent = `+${runningCredits}¤`;
+        }
+        soundEngine.play('creditTick');
+      }, delayMs);
+      this.timers.push(tid);
+    });
+
+    const finalDelayMs = Math.min(750, intervalMs * (stepCount + 1));
+    const finalTid = globalThis.setTimeout(() => {
+      if (!this.active) return;
+      this.finishRollup(false);
+    }, finalDelayMs);
+    this.timers.push(finalTid);
+  }
+
+  skip(opts?: { readonly silentCashRegister?: boolean }): void {
+    if (!this.active) return;
+    this.finishRollup(Boolean(opts?.silentCashRegister));
+  }
+
+  cancel(): void {
+    for (const tid of this.timers) {
+      globalThis.clearTimeout(tid);
+    }
+    this.timers = [];
+    this.active = false;
+    this.stepEls = [];
+    this.totalEl = null;
+    this.onCompleteCb = null;
+  }
+
+  private finishRollup(silentCashRegister: boolean): void {
+    for (const tid of this.timers) {
+      globalThis.clearTimeout(tid);
+    }
+    this.timers = [];
+    this.active = false;
+    for (const el of this.stepEls) {
+      el.classList.remove('is-rollup-pending');
+      el.classList.add('is-rollup-revealed');
+    }
+    if (this.totalEl) {
+      this.totalEl.textContent = `+${this.finalCredits}¤`;
+      this.totalEl.dataset.rollupDone = 'true';
+    }
+    if (!silentCashRegister && !this.cashRegisterPlayed && this.finalCredits > 0) {
+      this.cashRegisterPlayed = true;
+      soundEngine.play('cashRegister');
+    }
+    const cb = this.onCompleteCb;
+    this.onCompleteCb = null;
+    cb?.();
+  }
 }
 
 function dispositionLabel(
@@ -72,9 +207,17 @@ export function renderSettlementView(
   const isSafe = summary.reason === 'safe_return';
   const warehouseCap = getEffectiveWarehouseCapacity(p);
 
-  // Partition strictly loan items into a compact 1-line collapsible summary; keep mission/loot/owned visible!
-  const actionableLines = summary.lines.filter((l) => l.item.origin !== 'loan');
-  const loanLines = summary.lines.filter((l) => l.item.origin === 'loan');
+  // S09 3-bucket partition:
+  // 1) decisionLines: allowedDispositions.length > 1 (real player choice, <= 1 <button> each!)
+  // 2) autoNonLoanLines: allowedDispositions.length <= 1 && origin !== 'loan' (0 <button>s!)
+  // 3) loanLines: allowedDispositions.length <= 1 && origin === 'loan' (0 <button>s!)
+  const decisionLines = summary.lines.filter((l) => l.allowedDispositions.length > 1);
+  const autoNonLoanLines = summary.lines.filter(
+    (l) => l.allowedDispositions.length <= 1 && l.item.origin !== 'loan'
+  );
+  const loanLines = summary.lines.filter(
+    (l) => l.allowedDispositions.length <= 1 && l.item.origin === 'loan'
+  );
 
   const loanCollapseHtml =
     loanLines.length > 0
@@ -92,10 +235,129 @@ export function renderSettlementView(
         </details>`
       : '';
 
+  const autoResolvedHtml =
+    autoNonLoanLines.length > 0
+      ? `<div class="v3-auto-resolved-list" data-testid="settlement-auto-resolved">
+          <div class="v3-auto-resolved-head">已自动归档（${autoNonLoanLines.length} 件无需手动确认）</div>
+          ${autoNonLoanLines
+            .map(
+              (line) => `<div class="v2-settle-row is-auto-resolved">
+                <div class="v2-settle-item-info">
+                  <img class="v3-settle-thumb" src="${getItemImageUrl(line.item.definitionId)}" alt="" draggable="false" />
+                  <span class="v2-origin-badge origin-${line.item.origin}">${originTagText(
+                line.item.origin
+              )}</span>
+                  <strong>${line.name}</strong>
+                </div>
+                <span class="v2-settle-auto-badge">自动：${dispositionLabel(
+                  line.selectedDisposition,
+                  line.item,
+                  p,
+                  run.shipId
+                )}</span>
+              </div>`
+            )
+            .join('')}
+        </div>`
+      : '';
+
+  const decisionRowsHtml = decisionLines
+    .map((line) => {
+      const id = line.item.instanceId;
+      const lockHintHtml =
+        isSafe &&
+        !run.isShowcase &&
+        line.item.category === 'equipment' &&
+        line.item.origin === 'loot' &&
+        !p.buildings.research_lab
+          ? `<span class="v2-settle-lock-hint" title="在基地花费 100¤ 建造研究台后，可将拾获设备入库并研究永久蓝图">建成研究台(100¤)可入库</span>`
+          : '';
+
+      let controlsHtml = '';
+      if (line.allowedDispositions.length === 2) {
+        const alt = line.allowedDispositions.find((d) => d !== line.selectedDisposition) ?? line.allowedDispositions[0];
+        const altTestId =
+          alt === 'dismantle'
+            ? `data-testid="btn-dismantle-${id}"`
+            : alt === 'store'
+            ? `data-testid="btn-store-${id}"`
+            : '';
+        const altAction = alt === 'dismantle' ? 'dismantle' : `settle-${alt}`;
+        controlsHtml = `
+          <span class="v2-settle-current-choice">当前：${dispositionLabel(
+            line.selectedDisposition,
+            line.item,
+            p,
+            run.shipId
+          )}</span>
+          <button type="button" class="btn btn-sm btn-secondary" data-settle-item="${id}" data-settle-disp="${alt}" data-action="${altAction}" ${altTestId} ${
+          readOnly ? 'disabled' : ''
+        }>改为${dispositionLabel(alt, line.item, p, run.shipId)}</button>
+          ${lockHintHtml}
+        `;
+      } else {
+        // 3+ legal dispositions: accessible tactile segmented radio group (0 <button> elements!)
+        controlsHtml = `
+          <div class="v2-settle-disp-seg" role="radiogroup" aria-label="选择「${line.name}」去向">
+            ${line.allowedDispositions
+              .map((d) => {
+                const selected = line.selectedDisposition === d;
+                const optTestId =
+                  d === 'dismantle'
+                    ? `data-testid="btn-dismantle-${id}"`
+                    : d === 'store'
+                    ? `data-testid="btn-store-${id}"`
+                    : '';
+                const optAction = d === 'dismantle' ? 'dismantle' : `settle-${d}`;
+                return `<label class="v2-settle-seg-opt ${
+                  selected ? 'is-selected' : ''
+                }" data-settle-item="${id}" data-settle-disp="${d}" data-action="${optAction}" ${optTestId}>
+                  <input type="radio" data-settle-radio="1" data-settle-item="${id}" data-settle-disp="${d}" name="settle_disp_${id}" value="${d}" ${
+                  selected ? 'checked' : ''
+                } ${readOnly ? 'disabled' : ''} />
+                  <span>${dispositionLabel(d, line.item, p, run.shipId)}</span>
+                </label>`;
+              })
+              .join('')}
+          </div>
+          ${lockHintHtml}
+        `;
+      }
+
+      return `<div class="v2-settle-row is-decision-row">
+        <div class="v2-settle-item-info">
+          <img class="v3-settle-thumb" src="${getItemImageUrl(line.item.definitionId)}" alt="" draggable="false" />
+          <span class="v2-origin-badge origin-${line.item.origin}">${originTagText(
+        line.item.origin
+      )}</span>
+          <strong>${line.name}</strong>
+          ${
+            line.item.category === 'equipment'
+              ? `<span class="v2-q-tag">${line.item.quality === 'improved' ? '良' : '普'}</span>`
+              : line.item.category === 'gadget'
+              ? `<span class="v2-q-tag">装置</span>`
+              : ''
+          }
+        </div>
+        <div class="v2-settle-disp-btns">
+          ${controlsHtml}
+        </div>
+      </div>`;
+    })
+    .join('');
+
+  let stepIdx = 0;
+  const nextStepAttr = (credits: number) =>
+    `data-bill-step="${stepIdx++}" data-step-credits="${Math.max(0, Math.round(credits))}"`;
+
   const bonusRowHtml =
     isSafe && summary.bonusObjective && !run.isTutorial
       ? summary.bonusObjective.completed && summary.contractCompleted
-        ? `<div class="v2-mig-row v3-bonus-row is-done"><span>额外目标（已达成 · ${summary.bonusObjective.label}）</span><strong class="num">+${summary.bonusObjectiveCredits}¤ 加赏</strong></div>`
+        ? `<div class="v2-mig-row v3-bonus-row is-done" ${nextStepAttr(
+            summary.bonusObjectiveCredits
+          )}><span>额外目标（已达成 · ${summary.bonusObjective.label}）</span><strong class="num">+${
+            summary.bonusObjectiveCredits
+          }¤ 加赏</strong></div>`
         : `<div class="v2-mig-row v3-bonus-row is-missed"><span>额外目标（未达成 · ${summary.bonusObjective.label}）</span><strong class="num">+0¤</strong></div>`
       : '';
 
@@ -108,7 +370,7 @@ export function renderSettlementView(
       ? factionRepEntries
           .map(
             ([fid, delta]) =>
-              `<div class="v2-mig-row v3-faction-rep-row"><span>${svgIcon('faction', 12)} ${
+              `<div class="v2-mig-row v3-faction-rep-row" ${nextStepAttr(0)}><span>${svgIcon('faction', 12)} ${
                 V3_FACTIONS[fid]?.name ?? fid
               } 声望</span><strong class="num">+${delta}</strong></div>`
           )
@@ -117,7 +379,7 @@ export function renderSettlementView(
 
   const partsRowHtml =
     summary.totalSalvagePartsEarned > 0
-      ? `<div class="v2-mig-row v3-parts-row"><span>${svgIcon('parts', 12)} 精密零件入账${
+      ? `<div class="v2-mig-row v3-parts-row" ${nextStepAttr(0)}><span>${svgIcon('parts', 12)} 精密零件入账${
           summary.dismantledPartsEarned > 0
             ? `（含现场分解 +${summary.dismantledPartsEarned}）`
             : ''
@@ -135,7 +397,11 @@ export function renderSettlementView(
       : '战败 · 紧急拖回结算'
   }</h2>
         <span class="panel-sub">${
-          run.isShowcase ? '独立试玩 · 不影响正式存档' : '每件战利品择一去向'
+          run.isShowcase
+            ? '独立试玩 · 不影响正式存档'
+            : decisionLines.length > 0
+            ? `仅 ${decisionLines.length} 件需选择去向`
+            : '全部物资已自动清点完毕'
         }</span>
       </div>
 
@@ -181,30 +447,50 @@ export function renderSettlementView(
         }
 
         <div class="v2-settle-totals">
-          <div class="v2-mig-row"><span>航行钱包结余</span><strong class="num">${summary.walletCredits}¤</strong></div>
+          <div class="v2-mig-row" ${nextStepAttr(summary.walletCredits)}><span>航行钱包结余</span><strong class="num">${
+    summary.walletCredits
+  }¤</strong></div>
           ${
             isSafe
               ? `
-                <div class="v2-mig-row"><span>出售物品收益</span><strong class="num">+${summary.soldItemsCredits}¤</strong></div>
+                <div class="v2-mig-row" ${nextStepAttr(summary.soldItemsCredits)}><span>出售物品收益</span><strong class="num">+${
+                  summary.soldItemsCredits
+                }¤</strong></div>
                 ${
                   (summary.crewMasteryBonusCredits ?? 0) > 0
-                    ? `<div class="v2-mig-row"><span>苏岚专精估价加成 (+15%)</span><strong class="num">+${summary.crewMasteryBonusCredits}¤</strong></div>`
+                    ? `<div class="v2-mig-row" ${nextStepAttr(
+                        summary.crewMasteryBonusCredits ?? 0
+                      )}><span>苏岚专精估价加成 (+15%)</span><strong class="num">+${
+                        summary.crewMasteryBonusCredits
+                      }¤</strong></div>`
                     : ''
                 }
                 ${
                   summary.contractRewardCredits > 0
-                    ? `<div class="v2-mig-row"><span>委托悬赏奖金</span><strong class="num">+${summary.contractRewardCredits}¤</strong></div>`
+                    ? `<div class="v2-mig-row" ${nextStepAttr(
+                        summary.contractRewardCredits
+                      )}><span>委托悬赏奖金</span><strong class="num">+${
+                        summary.contractRewardCredits
+                      }¤</strong></div>`
                     : ''
                 }
                 ${bonusRowHtml}
                 ${
                   (summary.factionContractBonusCredits ?? 0) > 0
-                    ? `<div class="v2-mig-row"><span>星港行会 Lv.3 委托加赏 (+10%)</span><strong class="num">+${summary.factionContractBonusCredits}¤</strong></div>`
+                    ? `<div class="v2-mig-row" ${nextStepAttr(
+                        summary.factionContractBonusCredits ?? 0
+                      )}><span>星港行会 Lv.3 委托加赏 (+10%)</span><strong class="num">+${
+                        summary.factionContractBonusCredits
+                      }¤</strong></div>`
                     : ''
                 }
                 ${
                   summary.tutorialBonusCredits > 0
-                    ? `<div class="v2-mig-row"><span>首航交付奖励</span><strong class="num">+${summary.tutorialBonusCredits}¤</strong></div>`
+                    ? `<div class="v2-mig-row" ${nextStepAttr(
+                        summary.tutorialBonusCredits
+                      )}><span>首航交付奖励</span><strong class="num">+${
+                        summary.tutorialBonusCredits
+                      }¤</strong></div>`
                     : ''
                 }
                 ${partsRowHtml}
@@ -217,10 +503,16 @@ export function renderSettlementView(
                     : ''
                 }
               `
-              : `<div class="v2-mig-row"><span>可回收总额 × 40%</span><strong class="num">${summary.defeatRecoverableBase} × 40%</strong></div>
+              : `<div class="v2-mig-row" ${nextStepAttr(
+                  summary.finalCreditsEarned
+                )}><span>可回收总额 × 40%</span><strong class="num">${
+                  summary.defeatRecoverableBase
+                } × 40%</strong></div>
                  ${partsRowHtml}`
           }
-          <div class="v2-mig-row total"><span>本次实得总计</span><strong class="num">+${summary.finalCreditsEarned}¤</strong></div>
+          <div class="v2-mig-row total"><span>本次实得总计</span><strong class="num" data-testid="settlement-total-credits" data-final-credits="${
+            summary.finalCreditsEarned
+          }">+${summary.finalCreditsEarned}¤</strong></div>
         </div>
 
         ${
@@ -253,61 +545,11 @@ export function renderSettlementView(
         }
 
         <div class="v2-settle-items">
-          <div class="v2-prep-label">战利品去向对比（出售 / 入库 / 转化为精密零件）</div>
+          <div class="v2-prep-label">战利品清点清单</div>
           ${
             summary.lines.length === 0
               ? `<div class="v2-empty-inline">本次船舱为空。</div>`
-              : `${
-                  actionableLines.length === 0
-                    ? `<div class="v2-empty-inline">本次无额外拾获物或任务物资。</div>`
-                    : actionableLines
-                        .map(
-                          (line) => `<div class="v2-settle-row">
-                            <div class="v2-settle-item-info">
-                              <span class="v2-origin-badge origin-${line.item.origin}">${originTagText(
-                            line.item.origin
-                          )}</span>
-                              <strong>${line.name}</strong>
-                              ${
-                                line.item.category === 'equipment'
-                                  ? `<span class="v2-q-tag">${
-                                      line.item.quality === 'improved' ? '良' : '普'
-                                    }</span>`
-                                  : line.item.category === 'gadget'
-                                  ? `<span class="v2-q-tag">装置</span>`
-                                  : ''
-                              }
-                            </div>
-                            <div class="v2-settle-disp-btns">
-                              ${line.allowedDispositions
-                                .map((d) => {
-                                  const isDismantle = d === 'dismantle';
-                                  return `<button type="button" class="btn btn-sm ${
-                                    line.selectedDisposition === d ? 'btn-primary' : 'btn-secondary'
-                                  }" data-settle-item="${line.item.instanceId}" data-settle-disp="${d}" ${
-                                    isDismantle
-                                      ? `data-testid="btn-dismantle-${line.item.instanceId}" data-action="dismantle"`
-                                      : ''
-                                  } ${
-                                    readOnly || line.allowedDispositions.length <= 1 ? 'disabled' : ''
-                                  }>${dispositionLabel(d, line.item, p, run.shipId)}</button>`;
-                                })
-                                .join('')}
-                              ${
-                                isSafe &&
-                                !run.isShowcase &&
-                                line.item.category === 'equipment' &&
-                                line.item.origin === 'loot' &&
-                                !p.buildings.research_lab
-                                  ? `<button type="button" class="btn btn-sm btn-ghost" disabled title="在基地花费 100¤ 建造研究台后，可将拾获设备入库并研究永久蓝图">建成研究台(100¤)可入库</button>`
-                                  : ''
-                              }
-                            </div>
-                          </div>`
-                        )
-                        .join('')
-                }
-                ${loanCollapseHtml}`
+              : `${decisionRowsHtml}${autoResolvedHtml}${loanCollapseHtml}`
           }
         </div>
       </div>
@@ -326,7 +568,7 @@ export function renderSettlementView(
                 <button type="button" class="btn btn-secondary" id="v2-showcase-retry">${svgIcon('bolt', 14)} 换套流派再试一次</button>
                 <button type="button" class="btn btn-primary btn-launch-hero" id="v2-showcase-to-base">${svgIcon('rocket', 15)} 进入正式星港基地</button>
               </div>`
-            : `<button type="button" class="btn btn-primary btn-launch-hero" id="v2-btn-confirm-settle" data-testid="btn-confirm-settlement" ${
+            : `<button type="button" class="btn btn-primary btn-launch-hero" id="v2-btn-confirm-settle" data-testid="btn-confirm-settlement" data-action="confirm-settlement" ${
                 readOnly || summary.warehouseOverflow ? 'disabled' : ''
               }>${readOnly ? '只读锁定' : `${svgIcon('beacon', 15)} 确认入账 · 返回星港基地`}</button>`
         }
@@ -334,13 +576,43 @@ export function renderSettlementView(
     </div>
   `;
 
-  leftPanelEl.querySelectorAll<HTMLButtonElement>('[data-settle-item]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      actions.onChangeDisposition(
-        btn.dataset.settleItem!,
-        btn.dataset.settleDisp as V2SettlementDisposition
-      );
+  const selectedByItem = new Map<string, V2SettlementDisposition>(
+    summary.lines.map((l) => [l.item.instanceId, l.selectedDisposition])
+  );
+
+  leftPanelEl
+    .querySelectorAll<HTMLElement>('button[data-settle-item], label[data-settle-item]')
+    .forEach((el) => {
+      el.addEventListener('click', (ev) => {
+        if (readOnly) return;
+        const iid = el.dataset.settleItem;
+        const disp = el.dataset.settleDisp as V2SettlementDisposition | undefined;
+        if (!iid || !disp) return;
+        if (el.tagName.toLowerCase() === 'label') {
+          ev.preventDefault();
+          const radio = el.querySelector<HTMLInputElement>('input[data-settle-radio]');
+          if (radio) radio.checked = true;
+        }
+        if (selectedByItem.get(iid) === disp) return;
+        selectedByItem.set(iid, disp);
+        actions.onChangeDisposition(iid, disp);
+      });
     });
+
+  leftPanelEl.querySelectorAll<HTMLInputElement>('input[data-settle-radio]').forEach((input) => {
+    input.addEventListener('change', () => {
+      if (readOnly || !input.checked) return;
+      const iid = input.dataset.settleItem;
+      const disp = input.dataset.settleDisp as V2SettlementDisposition | undefined;
+      if (!iid || !disp) return;
+      if (selectedByItem.get(iid) === disp) return;
+      selectedByItem.set(iid, disp);
+      actions.onChangeDisposition(iid, disp);
+    });
+  });
+
+  leftPanelEl.querySelector<HTMLElement>('.v2-settle-totals')?.addEventListener('click', () => {
+    actions.onSkipRollup?.();
   });
 
   leftPanelEl

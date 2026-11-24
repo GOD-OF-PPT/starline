@@ -51,7 +51,7 @@ export function renderTitleView(
           </div>
 
           <div class="title-actions">
-            <button type="button" class="btn btn-primary btn-launch-hero" id="v2-title-enter" data-testid="btn-enter-station">
+            <button type="button" class="btn btn-primary btn-launch-hero" id="v2-title-enter" data-testid="btn-enter-station" data-action="enter-station">
               ${svgIcon('rocket', 16)} ${ctaText}
             </button>
             <div class="title-sub-actions">

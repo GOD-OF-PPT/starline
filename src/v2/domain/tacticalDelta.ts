@@ -75,25 +75,46 @@ function lruSet<V>(cache: Map<string, V>, key: string, value: V): void {
 }
 
 function cloneTacticalDelta(delta: V2TacticalDelta): V2TacticalDelta {
-  if (delta.recommendedSpot) {
-    return {
-      synergyLine: delta.synergyLine,
-      combatDeltaLine: delta.combatDeltaLine,
-      spaceLine: delta.spaceLine,
-      recommendedSpot: {
-        x: delta.recommendedSpot.x,
-        y: delta.recommendedSpot.y,
-        rotation: delta.recommendedSpot.rotation,
-      },
-      positiveImpact: delta.positiveImpact,
-    };
-  }
-  return {
+  const base: {
+    synergyLine: string;
+    combatDeltaLine: string;
+    spaceLine: string;
+    positiveImpact: boolean;
+    recommendedSpot?: { readonly x: number; readonly y: number; readonly rotation: V2Rotation };
+    qualitativeDeltaLine?: string;
+    trendDirection?: V2TacticalTrendDirection;
+    beforeThreat?: V2CombatThreatTier;
+    afterThreat?: V2CombatThreatTier;
+    detailSummary?: string;
+  } = {
     synergyLine: delta.synergyLine,
     combatDeltaLine: delta.combatDeltaLine,
     spaceLine: delta.spaceLine,
     positiveImpact: delta.positiveImpact,
   };
+  if (delta.recommendedSpot) {
+    base.recommendedSpot = {
+      x: delta.recommendedSpot.x,
+      y: delta.recommendedSpot.y,
+      rotation: delta.recommendedSpot.rotation,
+    };
+  }
+  if (delta.qualitativeDeltaLine !== undefined) {
+    base.qualitativeDeltaLine = delta.qualitativeDeltaLine;
+  }
+  if (delta.trendDirection !== undefined) {
+    base.trendDirection = delta.trendDirection;
+  }
+  if (delta.beforeThreat !== undefined) {
+    base.beforeThreat = delta.beforeThreat;
+  }
+  if (delta.afterThreat !== undefined) {
+    base.afterThreat = delta.afterThreat;
+  }
+  if (delta.detailSummary !== undefined) {
+    base.detailSummary = delta.detailSummary;
+  }
+  return base;
 }
 
 function cacheAndReturnDelta(key: string, value: V2TacticalDelta): V2TacticalDelta {
@@ -197,17 +218,29 @@ function withPlacedItem(
   };
 }
 
+export type V2TacticalTrendDirection = 'up' | 'down' | 'neutral';
+
 export interface V2TacticalDelta {
   /** Fact 1: Direct adjacency synergy effect or partner hint */
   readonly synergyLine: string;
-  /** Fact 2: Authoritative simulated next-battle delta (or value-per-cell for pure cargo) */
+  /** Fact 2 (Layer 2 exact): Authoritative simulated next-battle delta (used in Details Drawer & domain checks) */
   readonly combatDeltaLine: string;
   /** Fact 3: Space / fit summary */
   readonly spaceLine: string;
-  /** Optional best legal placement spot for staging items (used to softly highlight a synergy slot) */
+  /** Optional best legal placement spot for staging items (opt-in highlight in S07) */
   readonly recommendedSpot?: { readonly x: number; readonly y: number; readonly rotation: V2Rotation };
   /** Whether installing/placing this item improves next battle */
   readonly positiveImpact: boolean;
+  /** Layer-1 qualitative threat/trend headline (ZERO exact HP or round numbers — S06 / D1=b) */
+  readonly qualitativeDeltaLine?: string;
+  /** Directional trend indicator for colorblind-safe ↑/↓/= badges */
+  readonly trendDirection?: V2TacticalTrendDirection;
+  /** Baseline qualitative threat tier before applying item */
+  readonly beforeThreat?: V2CombatThreatTier;
+  /** Resulting qualitative threat tier after applying item */
+  readonly afterThreat?: V2CombatThreatTier;
+  /** Layer-2 on-demand details drawer readout explicitly labeled '不干预时结果' */
+  readonly detailSummary?: string;
 }
 
 interface ReferenceEncounter {
@@ -445,9 +478,71 @@ function formatSimComparison(
       positive: false,
     };
   }
+  const positive =
+    before.outcome === 'defeat' && after.outcome === 'defeat'
+      ? after.roundsCount > before.roundsCount
+      : hpSaved > 0 || (hpSaved === 0 && roundDiff > 0);
   return {
     line: `${prefix}${parts.join('，')}`,
-    positive: roundDiff > 0 || hpSaved > 0,
+    positive,
+  };
+}
+
+function formatQualitativeComparison(
+  label: string,
+  before: ReturnType<typeof combatV2.simulateV2Combat>,
+  after: ReturnType<typeof combatV2.simulateV2Combat>,
+  maxHp: number,
+  mode: 'install' | 'installed_value',
+  exactLine: string
+): {
+  readonly qualitativeDeltaLine: string;
+  readonly trendDirection: V2TacticalTrendDirection;
+  readonly beforeThreat: V2CombatThreatTier;
+  readonly afterThreat: V2CombatThreatTier;
+  readonly detailSummary: string;
+} {
+  const beforeClass = classifyV2CombatThreat(
+    { outcome: before.outcome, playerFinalHp: before.finalPlayerHpAfterRepair },
+    maxHp
+  );
+  const afterClass = classifyV2CombatThreat(
+    { outcome: after.outcome, playerFinalHp: after.finalPlayerHpAfterRepair },
+    maxHp
+  );
+  const beforeMeta = getV2ThreatTierMeta(beforeClass.tier);
+  const afterMeta = getV2ThreatTierMeta(afterClass.tier);
+
+  const trendDirection = classifyV2CombatDeltaTrend({
+    beforeOutcome: before.outcome,
+    afterOutcome: after.outcome,
+    beforeHp: before.finalPlayerHpAfterRepair,
+    afterHp: after.finalPlayerHpAfterRepair,
+    beforeRounds: before.roundsCount,
+    afterRounds: after.roundsCount,
+    maxHp,
+  });
+
+  const prefix = mode === 'install' ? `装入对「${label}」：` : `对「${label}」：`;
+  let qualitativeBody: string;
+  if (afterMeta.rank < beforeMeta.rank) {
+    qualitativeBody = `↑ 威胁缓和（${beforeMeta.label} → ${afterMeta.label}）`;
+  } else if (afterMeta.rank > beforeMeta.rank) {
+    qualitativeBody = `↓ 风险上升（${beforeMeta.label} → ${afterMeta.label}）`;
+  } else if (trendDirection === 'up') {
+    qualitativeBody = `↑ 压制提升（${afterMeta.symbol} ${afterMeta.label}）`;
+  } else if (trendDirection === 'down') {
+    qualitativeBody = `↓ 战力回落（${afterMeta.symbol} ${afterMeta.label}）`;
+  } else {
+    qualitativeBody = `= 威胁持平（${afterMeta.symbol} ${afterMeta.label}）`;
+  }
+
+  return {
+    qualitativeDeltaLine: `${prefix}${qualitativeBody}`,
+    trendDirection,
+    beforeThreat: beforeClass.tier,
+    afterThreat: afterClass.tier,
+    detailSummary: `不干预时结果 · ${exactLine}`,
   };
 }
 
@@ -496,29 +591,42 @@ export function computeV2PlacementTacticalDelta(params: {
       result = {
         synergyLine: '委托专属大件 · 不参战，安全带回即可交付悬赏',
         combatDeltaLine: '占据核心装载区，可能需要取舍部分旧货或副装备',
+        qualitativeDeltaLine: '↑ 委托交付必需（占据大面积舱格）',
+        trendDirection: 'up',
         spaceLine: fit,
         positiveImpact: true,
+        detailSummary: `不干预时结果 · 委托大件占 ${cellCount} 格，安全带回即可完成交付`,
       };
     } else if (params.item.category === 'gadget') {
       result = {
         synergyLine: `一次性战术消耗装置 · ${def?.gadgetDef?.shortEffectLabel ?? '主动消耗使用'}`,
         combatDeltaLine: def?.summary ?? '装入船舱后可在对应阶段主动触发并消耗',
+        qualitativeDeltaLine: `↑ 战术储备（${def?.gadgetDef?.shortEffectLabel ?? '主动消耗使用'}）`,
+        trendDirection: 'up',
         spaceLine:
           params.zone === 'grid'
             ? `已占 ${cellCount} 格 · 船舱剩余 ${freeInfo.free}/${freeInfo.total} 格`
             : `占 ${cellCount} 格 · 当前船舱剩余 ${freeInfo.free}/${freeInfo.total} 格`,
         positiveImpact: true,
+        detailSummary: `不干预时结果 · ${def?.summary ?? '一次性消耗装置'}`,
       };
     } else {
       const perCell = (params.item.fixedValue / Math.max(1, cellCount)).toFixed(1);
+      const merchantVal = Math.floor(params.item.fixedValue * 0.8);
       result = {
-        synergyLine: `高价货物 · 不参战，回收均价 ${perCell}¤/格`,
-        combatDeltaLine: `安全返航出售 +${params.item.fixedValue}¤（商人收购 ${Math.floor(params.item.fixedValue * 0.8)}¤）`,
+        synergyLine: '高价货物 · 不参战，安全带回可换取信用点',
+        combatDeltaLine: `安全返航出售 +${params.item.fixedValue}¤（商人收购 ${merchantVal}¤）`,
+        qualitativeDeltaLine:
+          params.item.fixedValue > 0
+            ? `↑ 航行收益提升（安全带回 +${params.item.fixedValue}¤）`
+            : '= 基础货品（不参战）',
+        trendDirection: params.item.fixedValue > 0 ? 'up' : 'neutral',
         spaceLine:
           params.zone === 'grid'
             ? `已占 ${cellCount} 格 · 船舱剩余 ${freeInfo.free}/${freeInfo.total} 格`
             : `占 ${cellCount} 格 · 当前船舱剩余 ${freeInfo.free}/${freeInfo.total} 格`,
         positiveImpact: params.item.fixedValue > 0,
+        detailSummary: `不干预时结果 · 单格均价 ${perCell}¤/格 · 安全返航 +${params.item.fixedValue}¤（商人收购 ${merchantVal}¤）`,
       };
     }
 
@@ -618,8 +726,11 @@ export function computeV2PlacementTacticalDelta(params: {
             ? `可与「${V2_EQUIPMENT_DEFS[`equipment.${partnerKinds[0]}.common`].name}」正交联动`
             : eqDef.summary,
         combatDeltaLine: '当前船舱无合法空位，请先移位或舍弃旧件腾出格位',
+        qualitativeDeltaLine: '= 船舱无合法空位，需先腾舱',
+        trendDirection: 'neutral',
         spaceLine: `需 ${cellCount} 格（${V2_SHAPES[eqDef.shapeId].label}）· 当前余 ${freeInfo.free}/${freeInfo.total} 格`,
         positiveImpact: false,
+        detailSummary: '不干预时结果 · 当前船舱无合法空位，无法评估装入后的战局变化',
       };
       return cacheAndReturnDelta(eqCacheKey, noSpaceResult);
     }
@@ -653,10 +764,23 @@ export function computeV2PlacementTacticalDelta(params: {
       stargateRelayTier: simCtx.stargateRelayTier,
     });
     const cmp = formatSimComparison(ref.label, baselineSim, afterSim, 'install');
+    const qual = formatQualitativeComparison(
+      ref.label,
+      baselineSim,
+      afterSim,
+      params.maxHp,
+      'install',
+      cmp.line
+    );
 
     const stagingResult: V2TacticalDelta = {
       synergyLine,
       combatDeltaLine: cmp.line,
+      qualitativeDeltaLine: qual.qualitativeDeltaLine,
+      trendDirection: qual.trendDirection,
+      beforeThreat: qual.beforeThreat,
+      afterThreat: qual.afterThreat,
+      detailSummary: qual.detailSummary,
       spaceLine: `占 ${cellCount} 格 · 装入后余 ${Math.max(0, freeInfo.free - cellCount)}/${freeInfo.total} 格`,
       recommendedSpot: { x: chosenSpot.x, y: chosenSpot.y, rotation: chosenSpot.rotation },
       positiveImpact: cmp.positive || activeLinks.length > 0,
@@ -754,9 +878,22 @@ export function computeV2PlacementTacticalDelta(params: {
   }
 
   const cmp = formatSimComparison(ref.label, simWithout, simCurrent, 'installed_value');
+  const qual = formatQualitativeComparison(
+    ref.label,
+    simWithout,
+    simCurrent,
+    params.maxHp,
+    'installed_value',
+    cmp.line
+  );
   const gridResult: V2TacticalDelta = {
     synergyLine,
     combatDeltaLine: cmp.line,
+    qualitativeDeltaLine: qual.qualitativeDeltaLine,
+    trendDirection: qual.trendDirection,
+    beforeThreat: qual.beforeThreat,
+    afterThreat: qual.afterThreat,
+    detailSummary: qual.detailSummary,
     spaceLine: `已占 ${cellCount} 格（${V2_SHAPES[eqDef.shapeId].label}）· 船舱余 ${freeInfo.free}/${freeInfo.total} 格`,
     recommendedSpot,
     positiveImpact: cmp.positive || currentLinks.length > 0,
@@ -770,6 +907,94 @@ export interface V2CombatThreatClassification {
   readonly tier: V2CombatThreatTier;
   readonly label: '稳' | '吃力' | '危险' | '致命';
   readonly riskClass: 'ok' | 'warn' | 'risk';
+}
+
+export interface V2ThreatTierVisualMeta {
+  readonly tier: V2CombatThreatTier;
+  readonly label: '稳' | '吃力' | '危险' | '致命';
+  readonly symbol: '●' | '▲' | '◆' | '✕';
+  readonly rank: 0 | 1 | 2 | 3;
+  readonly riskClass: 'ok' | 'warn' | 'risk';
+  readonly layer1Summary: string;
+}
+
+const THREAT_TIER_VISUAL_META: Readonly<Record<V2CombatThreatTier, V2ThreatTierVisualMeta>> = {
+  steady: {
+    tier: 'steady',
+    label: '稳',
+    symbol: '●',
+    rank: 0,
+    riskClass: 'ok',
+    layer1Summary: '胜算充足 · 舰体损耗可控',
+  },
+  strained: {
+    tier: 'strained',
+    label: '吃力',
+    symbol: '▲',
+    rank: 1,
+    riskClass: 'warn',
+    layer1Summary: '可获胜但舰体承压',
+  },
+  danger: {
+    tier: 'danger',
+    label: '危险',
+    symbol: '◆',
+    rank: 2,
+    riskClass: 'risk',
+    layer1Summary: '舰体风险高 · 建议先调舱或用指令',
+  },
+  lethal: {
+    tier: 'lethal',
+    label: '致命',
+    symbol: '✕',
+    rank: 3,
+    riskClass: 'risk',
+    layer1Summary: '预计战败 · 务必调舱或规避',
+  },
+};
+
+export function getV2ThreatTierMeta(tier: V2CombatThreatTier): V2ThreatTierVisualMeta {
+  return THREAT_TIER_VISUAL_META[tier];
+}
+
+export function classifyV2CombatDeltaTrend(params: {
+  readonly beforeOutcome: 'victory' | 'defeat';
+  readonly afterOutcome: 'victory' | 'defeat';
+  readonly beforeHp: number;
+  readonly afterHp: number;
+  readonly beforeRounds: number;
+  readonly afterRounds: number;
+  readonly maxHp: number;
+}): V2TacticalTrendDirection {
+  const beforeTier = classifyV2CombatThreat(
+    { outcome: params.beforeOutcome, playerFinalHp: params.beforeHp },
+    params.maxHp
+  ).tier;
+  const afterTier = classifyV2CombatThreat(
+    { outcome: params.afterOutcome, playerFinalHp: params.afterHp },
+    params.maxHp
+  ).tier;
+  const beforeRank = THREAT_TIER_VISUAL_META[beforeTier].rank;
+  const afterRank = THREAT_TIER_VISUAL_META[afterTier].rank;
+  if (afterRank < beforeRank) return 'up';
+  if (afterRank > beforeRank) return 'down';
+
+  // Defeat -> Defeat: surviving more rounds is better; dying faster is worse.
+  if (params.beforeOutcome === 'defeat' && params.afterOutcome === 'defeat') {
+    if (params.afterRounds > params.beforeRounds) return 'up';
+    if (params.afterRounds < params.beforeRounds) return 'down';
+    return 'neutral';
+  }
+
+  // Same-tier Victory -> Victory (or stalemate): prioritize HP saved first;
+  // use fewer combat rounds only as a tie-breaker when final HP is equal.
+  const hpSaved = params.afterHp - params.beforeHp;
+  if (hpSaved > 0) return 'up';
+  if (hpSaved < 0) return 'down';
+  const roundDiff = params.beforeRounds - params.afterRounds;
+  if (roundDiff > 0) return 'up';
+  if (roundDiff < 0) return 'down';
+  return 'neutral';
 }
 
 /**
