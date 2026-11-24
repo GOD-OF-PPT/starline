@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // V2CombatScene, BaseScene, PhaserHost, SoundEngine, manifest, combatV2 execute!)
 // ---------------------------------------------------------------------------
 
-const { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, mockTexturesDisabled } = vi.hoisted(() => {
+const { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, mockTexturesDisabled, lastCreatedMockGameRef } = vi.hoisted(() => {
   const MOCK_SCENE_STATUS = {
     PENDING: 0,
     INIT: 1,
@@ -534,6 +534,7 @@ const { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, mockTexturesDisabled
     };
 
     constructor(config: { scene?: MockPhaserScene[] }) {
+      lastCreatedMockGameRef.current = this;
       for (const s of config.scene ?? []) {
         s.game = this;
         this.scenes.set(s.sceneKey, s);
@@ -543,6 +544,10 @@ const { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, mockTexturesDisabled
       });
     }
 
+    getScene(key: string): MockPhaserScene | undefined {
+      return this.scenes.get(key);
+    }
+
     destroy(_removeCanvas?: boolean): void {
       for (const key of this.scenes.keys()) {
         this.scene.stop(key);
@@ -550,7 +555,9 @@ const { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, mockTexturesDisabled
     }
   }
 
-  return { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, mockTexturesDisabled };
+  const lastCreatedMockGameRef: { current: MockPhaserGame | null } = { current: null };
+
+  return { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, mockTexturesDisabled, lastCreatedMockGameRef };
 });
 
 vi.mock('phaser', () => ({
@@ -596,8 +603,11 @@ import {
   type V2BaseDioramaState,
 } from '../src/scenes/BaseScene';
 import { PhaserHost } from '../src/scenes/PhaserHost';
-import type { V2EnemyUnitSpec } from '../src/v2/data/enemies';
+import { buildEncounterUnits, type V2EnemyUnitSpec } from '../src/v2/data/enemies';
 import { V2_SHIP_ORDER } from '../src/v2/data/ships';
+import { simulateV2Combat } from '../src/v2/domain/combatV2';
+import { addV2ItemToStaging, createEmptyV2Bay, placeV2FromStaging } from '../src/v2/domain/inventoryV2';
+import { createV2EquipmentInstance } from '../src/v2/domain/itemCatalog';
 import type { V2CombatRoundLog, V2CombatSimulation } from '../src/v2/domain/types';
 import {
   VFX_HIT_FLASH_DURATION_MS,
@@ -609,11 +619,15 @@ import {
   V2CombatScene,
   VfxParticlePool,
   allocateNonOverlappingPopupPos,
+  applyHpChangeToTrail,
   computeHitstopDurationMs,
   computeHpBarTickRatios,
+  computeSplitHullHalvesSpec,
   computeThreeLayerBeamStrokes,
   getDamagePopupStyle,
   resolveHitFlashDecision,
+  sanitizeCombatSpeed,
+  stepHpTrailState,
   type V2StagePlayback,
 } from '../src/v2/scenes/V2CombatScene';
 
@@ -2193,15 +2207,41 @@ describe('A08-code — BaseScene 4-Joint Articulated Crane, Smooth Overlay Cross
       } as unknown as HTMLElement;
       const host = new PhaserHost(container);
       await Promise.resolve();
-      host.showV2Base({
+      const baseInitState: V2BaseDioramaState = {
         activeShipId: 'cannon_skiff',
-        facilityTiers: { workbench: 0, display: 0, drydock: 0, stargate_relay: 0 },
+        facilityTiers: { workbench: 1, display: 0, drydock: 0, stargate_relay: 0 },
         restoredRelicIds: [],
         campaignAct: 'act1',
         stargatePowered: false,
         settings: makeSettings({ reducedMotion: false }),
+      };
+      host.showV2Base(baseInitState);
+      const hostedBase = lastCreatedMockGameRef.current?.getScene('BaseScene') as unknown as BaseScene | undefined;
+      expect(hostedBase).toBeDefined();
+      const hostedAccess = asAccess(hostedBase!);
+
+      // Trigger in-flight display_empty power-up scanline transition
+      host.showV2Base({
+        ...baseInitState,
+        facilityTiers: { ...baseInitState.facilityTiers, display: 1 },
       });
-      expect(() => host.updateCombatSettings(makeSettings({ reducedMotion: true }))).not.toThrow();
+      hostedBase!.update(0, 180);
+      const midHostOv = hostedBase!.getOverlayTransitionSnapshot();
+      expect(midHostOv.display_empty.alpha).toBeGreaterThan(0);
+      expect(midHostOv.display_empty.alpha).toBeLessThan(1);
+      expect(midHostOv.display_empty.poweringUp).toBe(true);
+      const hostedDispImg = hostedAccess.createdObjects.find((o) => o.textureKey === 'base.overlay.display_empty')!;
+      expect(hostedDispImg.lastCrop).not.toBeNull();
+
+      // PhaserHost.updateCombatSettings({ reducedMotion: true }) MUST snap overlay alpha & clear residual setCrop()!
+      host.updateCombatSettings(makeSettings({ reducedMotion: true }));
+      const snappedHostOv = hostedBase!.getOverlayTransitionSnapshot();
+      expect(snappedHostOv.display_empty.alpha).toBe(1);
+      expect(snappedHostOv.display_empty.poweringUp).toBe(false);
+      expect(hostedDispImg.lastCrop).toBeNull();
+      const hostedScanGfx = hostedAccess.createdObjects.find((o) => o.kind === 'graphics' && o.depth === 3.5)!;
+      expect(hostedScanGfx.drawOps).toHaveLength(0);
+
       host.destroy();
     } finally {
       if (originalWindow === undefined) {
@@ -2524,3 +2564,671 @@ describe('A10 — WebAudio Bus Graph, Compressor, Ambient Bed, Pitch Jitter & 34
     expect(playSpy).toHaveBeenCalledWith('wreckCut');
   });
 });
+
+// ===========================================================================
+// 8. Iteration 2 Remediation & End-to-End Parity Regressions
+// ===========================================================================
+describe('Iteration 2 Regressions — HP Trails, Breakup Permanence, Real simulateV2Combat, Corners/NaN, Crane IK & Audio', () => {
+  it('A04: preserves player & enemy HP trails PAST Beat 5 (resolve @ 590ms, resolveFast @ 300ms, same-round 0-hull multi-hit, counter-attack) and snaps on resumeFromRound > 0', () => {
+    // 1. Retaliation round (resolve @ 590ms) + counterAttack at Beat 4 (510ms)
+    const tank = makeEnemyUnit({ enemyId: 'e_tr1', maxHp: 40, armor: 1, spriteArchetype: 'frigate' });
+    const round1: V2CombatRoundLog = {
+      round: 1,
+      droneCountsByHangar: {},
+      heavyChargingIds: [],
+      playerAttacks: [
+        { sourceKind: 'laser', sourceInstanceId: 'l1', targetEnemyId: 'e_tr1', rawDamage: 10, appliedDamage: 10, armorBlocked: 0, targetHpAfter: 30, targetKilled: false },
+        // Same-round 0-hull follow-up (shield-only absorb) MUST NOT wipe the enemy trail!
+        { sourceKind: 'laser', sourceInstanceId: 'l2', targetEnemyId: 'e_tr1', rawDamage: 4, appliedDamage: 4, shieldDamaged: 4, armorBlocked: 0, targetHpAfter: 30, targetKilled: false },
+      ],
+      enemyAttacks: [
+        { enemyId: 'e_tr1', rawDamage: 7, pierceDamage: 0, shieldAbsorbed: 0, hullDamage: 7 },
+      ],
+      counterAttack: {
+        sourceKind: 'counter',
+        sourceInstanceId: 'cnt1',
+        targetEnemyId: 'e_tr1',
+        rawDamage: 6,
+        appliedDamage: 6,
+        armorBlocked: 0,
+        targetHpAfter: 24,
+        targetKilled: false,
+      },
+      shieldAbsorbedTotal: 0,
+      playerHpAfter: 23,
+      playerShieldAfter: 0,
+      enemiesAfter: [{ enemyId: 'e_tr1', name: tank.name, spriteArchetype: 'frigate', hp: 24, maxHp: 40, damagePerRound: 7, armor: 1, pierceRatio: 0 }],
+    };
+    // Round 2: no enemy retaliation -> resolveFast @ 300ms
+    const round2Fast: V2CombatRoundLog = {
+      round: 2,
+      droneCountsByHangar: {},
+      heavyChargingIds: [],
+      playerAttacks: [
+        { sourceKind: 'laser', sourceInstanceId: 'l1', targetEnemyId: 'e_tr1', rawDamage: 9, appliedDamage: 9, armorBlocked: 0, targetHpAfter: 15, targetKilled: false },
+      ],
+      enemyAttacks: [],
+      counterAttack: null,
+      shieldAbsorbedTotal: 0,
+      playerHpAfter: 23,
+      playerShieldAfter: 0,
+      enemiesAfter: [{ enemyId: 'e_tr1', name: tank.name, spriteArchetype: 'frigate', hp: 15, maxHp: 40, damagePerRound: 7, armor: 1, pierceRatio: 0 }],
+    };
+
+    const sim = makeSimulation([tank], [round1, round2Fast], { startingPlayerHp: 30, startingPlayerShield: 0 });
+    const { scene, access } = mountCombatScene({
+      shipId: 'cannon_skiff',
+      sectorIndex: 1,
+      eventBackdrop: null,
+      units: [tank],
+      simulation: sim,
+      settings: makeSettings({ reducedMotion: false, combatSpeed: 1 }),
+    });
+
+    scene.update(0, 260); // kicks off Round 1
+    access.time.advance(180); // Beat 2: player_impact (10 hull + 0-hull follow-up)
+    const at180 = scene.getStagePresentationSnapshot();
+    expect(at180.enemiesState[0].hp).toBe(30);
+    expect(at180.enemiesState[0].trailHp).toBe(40); // Survived same-round 0-hull follow-up!
+
+    // Advance to Beat 4 (enemy_impact @ 510ms): player drops 30 -> 23 AND counter drops enemy 30 -> 24 immediately!
+    access.time.advance(330);
+    const at510 = scene.getStagePresentationSnapshot();
+    expect(at510.playerHp).toBe(23);
+    expect(at510.playerTrailHp).toBe(30);
+    expect(at510.enemiesState[0].hp).toBe(24);
+    expect(at510.enemiesState[0].trailHp).toBeGreaterThan(24);
+
+    // Advance PAST Beat 5 (resolve @ 590ms) — BOTH player & enemy trails MUST survive resolve!
+    access.time.advance(80);
+    const at590 = scene.getStagePresentationSnapshot();
+    expect(at590.playerHp).toBe(23);
+    expect(at590.playerTrailHp).toBe(30);
+    expect(at590.enemiesState[0].hp).toBe(24);
+    expect(at590.enemiesState[0].trailHp).toBeGreaterThan(24);
+
+    // Drain player & enemy trails smoothly across frames (past 150ms holdMs)
+    let sawPlayerMidDrain = false;
+    let sawEnemyMidDrain = false;
+    for (let i = 0; i < 30; i++) {
+      scene.update(600 + i * 32, 32);
+      const snap = scene.getStagePresentationSnapshot();
+      if (snap.playerTrailHp < 30 && snap.playerTrailHp > 23) sawPlayerMidDrain = true;
+      if (snap.enemiesState[0].trailHp < 40 && snap.enemiesState[0].trailHp > 24) sawEnemyMidDrain = true;
+      if (snap.playerTrailHp === 23 && snap.enemiesState[0].trailHp === 24) break;
+    }
+    expect(sawPlayerMidDrain).toBe(true);
+    expect(sawEnemyMidDrain).toBe(true);
+    expect(scene.getStagePresentationSnapshot().playerTrailHp).toBe(23);
+    expect(scene.getStagePresentationSnapshot().enemiesState[0].trailHp).toBe(24);
+
+    // Advance into Round 2 (resolveFast @ 300ms) -> enemy trail MUST survive Beat 5 fast resolve!
+    scene.update(2000, 500);
+    access.time.advance(180); // player_impact: enemy 24 -> 15
+    expect(scene.getStagePresentationSnapshot().enemiesState[0].hp).toBe(15);
+    expect(scene.getStagePresentationSnapshot().enemiesState[0].trailHp).toBe(24);
+    access.time.advance(120); // Beat 5 resolveFast @ 300ms
+    const afterFastResolve = scene.getStagePresentationSnapshot();
+    expect(afterFastResolve.enemiesState[0].hp).toBe(15);
+    expect(afterFastResolve.enemiesState[0].trailHp).toBe(24); // Survived resolveFast!
+
+    // Smoothly drains to 15 over subsequent update frames
+    for (let i = 0; i < 30; i++) {
+      scene.update(2500 + i * 32, 32);
+    }
+    expect(scene.getStagePresentationSnapshot().enemiesState[0].trailHp).toBe(15);
+
+    // resumeFromRound > 0 MUST snap past-round trails immediately (zero phantom trail from completed Round 1)
+    const { scene: resumeScene } = mountCombatScene({
+      shipId: 'cannon_skiff',
+      sectorIndex: 1,
+      eventBackdrop: null,
+      units: [tank],
+      simulation: sim,
+      resumeFromRound: 1,
+      settings: makeSettings({ reducedMotion: false }),
+    });
+    const resumedSnap = resumeScene.getStagePresentationSnapshot();
+    expect(resumedSnap.playerHp).toBe(23);
+    expect(resumedSnap.playerTrailHp).toBe(23);
+    expect(resumedSnap.enemiesState[0].hp).toBe(24);
+    expect(resumedSnap.enemiesState[0].trailHp).toBe(24);
+  });
+
+  it('A04: keeps broken-apart dead enemy hidden on Round 2+, clears death choreos immediately on mid-death reducedMotion toggle, and forwards settings in setPlayback dedup', () => {
+    const e1 = makeEnemyUnit({ enemyId: 'e_r1_die', maxHp: 12, spriteArchetype: 'scout' });
+    const e2 = makeEnemyUnit({ enemyId: 'e_r2_live', maxHp: 30, spriteArchetype: 'frigate' });
+
+    const r1: V2CombatRoundLog = {
+      round: 1,
+      droneCountsByHangar: {},
+      heavyChargingIds: [],
+      playerAttacks: [
+        { sourceKind: 'heavy', sourceInstanceId: 'h1', targetEnemyId: 'e_r1_die', rawDamage: 15, appliedDamage: 15, armorBlocked: 0, targetHpAfter: 0, targetKilled: true },
+      ],
+      enemyAttacks: [
+        { enemyId: 'e_r2_live', rawDamage: 4, pierceDamage: 0, shieldAbsorbed: 0, hullDamage: 4 },
+      ],
+      counterAttack: null,
+      shieldAbsorbedTotal: 0,
+      playerHpAfter: 26,
+      playerShieldAfter: 0,
+      enemiesAfter: [
+        { enemyId: 'e_r1_die', name: e1.name, spriteArchetype: 'scout', hp: 0, maxHp: 12, damagePerRound: 4, armor: 0, pierceRatio: 0 },
+        { enemyId: 'e_r2_live', name: e2.name, spriteArchetype: 'frigate', hp: 30, maxHp: 30, damagePerRound: 4, armor: 0, pierceRatio: 0 },
+      ],
+    };
+    const r2: V2CombatRoundLog = {
+      round: 2,
+      droneCountsByHangar: {},
+      heavyChargingIds: [],
+      playerAttacks: [
+        { sourceKind: 'laser', sourceInstanceId: 'l1', targetEnemyId: 'e_r2_live', rawDamage: 10, appliedDamage: 10, armorBlocked: 0, targetHpAfter: 20, targetKilled: false },
+      ],
+      enemyAttacks: [
+        { enemyId: 'e_r2_live', rawDamage: 4, pierceDamage: 0, shieldAbsorbed: 0, hullDamage: 4 },
+      ],
+      counterAttack: null,
+      shieldAbsorbedTotal: 0,
+      playerHpAfter: 22,
+      playerShieldAfter: 0,
+      enemiesAfter: [
+        { enemyId: 'e_r1_die', name: e1.name, spriteArchetype: 'scout', hp: 0, maxHp: 12, damagePerRound: 4, armor: 0, pierceRatio: 0 },
+        { enemyId: 'e_r2_live', name: e2.name, spriteArchetype: 'frigate', hp: 20, maxHp: 30, damagePerRound: 4, armor: 0, pierceRatio: 0 },
+      ],
+    };
+
+    const sim = makeSimulation([e1, e2], [r1, r2], { startingPlayerHp: 30, startingPlayerShield: 0 });
+    const { scene, access } = mountCombatScene({
+      shipId: 'cannon_skiff',
+      sectorIndex: 1,
+      eventBackdrop: null,
+      units: [e1, e2],
+      simulation: sim,
+      settings: makeSettings({ reducedMotion: false, combatSpeed: 1 }),
+    });
+
+    const e1Sprite = access.createdObjects.find((o) => o.kind === 'image' && o.textureKey === 'ship.enemy.scout')!;
+    expect(e1Sprite.visible).toBe(true);
+
+    // Round 1 kills e1 -> split-hull breakup hides e1Sprite and completes over ~0.9s
+    scene.update(0, 260);
+    access.time.advance(180); // player_impact kills e1
+    expect(scene.getStagePresentationSnapshot().activeDeathChoreos).toBe(1);
+    expect(e1Sprite.visible).toBe(false);
+    access.time.advance(410); // resolve @ 590ms
+
+    // Finish split-hull breakup completely (~1.1s of fx frames) before Round 2 resolve
+    for (let i = 0; i < 12; i++) {
+      scene.update(600 + i * 100, 100);
+    }
+    expect(scene.getStagePresentationSnapshot().activeDeathChoreos).toBe(0);
+    expect(e1Sprite.visible).toBe(false);
+
+    // Round 2 executes and resolves -> e1Sprite MUST remain invisible (NEVER resurrected as 0.18 ghost!)
+    access.time.advance(600);
+    expect(e1Sprite.visible).toBe(false);
+
+    // Mid-death reducedMotion toggle immediately clears active death choreos & destroys half sprites
+    const { scene: midScene, access: midAccess } = mountCombatScene({
+      shipId: 'cannon_skiff',
+      sectorIndex: 1,
+      eventBackdrop: null,
+      units: [e1, e2],
+      simulation: sim,
+      settings: makeSettings({ reducedMotion: false }),
+    });
+    midScene.update(0, 260);
+    midAccess.time.advance(180);
+    expect(midScene.getStagePresentationSnapshot().activeDeathChoreos).toBe(1);
+    midScene.updateSettings(makeSettings({ reducedMotion: true }));
+    expect(midScene.getStagePresentationSnapshot().activeDeathChoreos).toBe(0);
+
+    // Direct setPlayback() F02 dedup path also forwards updated settings (parity with PhaserHost.showV2Stage)
+    const { scene: staticScene } = mountCombatScene({
+      playbackKey: 'map|dedup_settings',
+      shipId: 'cannon_skiff',
+      sectorIndex: 1,
+      eventBackdrop: null,
+      units: [e2],
+      simulation: null,
+      settings: makeSettings({ reducedMotion: false, lowQuality: false }),
+    });
+    staticScene.update(0, 120);
+    expect(Math.abs(staticScene.getStagePresentationSnapshot().playerAngle)).toBeGreaterThan(0);
+    staticScene.setPlayback({
+      playbackKey: 'map|dedup_settings',
+      shipId: 'cannon_skiff',
+      sectorIndex: 1,
+      eventBackdrop: null,
+      units: [e2],
+      simulation: null,
+      settings: makeSettings({ reducedMotion: true, lowQuality: false }),
+    });
+    staticScene.update(120, 100);
+    expect(staticScene.getStagePresentationSnapshot().playerAngle).toBe(0);
+  });
+
+  it('A02: replays real simulateV2Combat() output end-to-end across 1x, 2x & mid-round skipPlayback with exact parity, and sanitizes degenerate combatSpeed (0, -1, NaN)', () => {
+    // Build a real V2CargoBayState with real equipment items & synergy
+    let bay = createEmptyV2Bay('cannon_skiff');
+    const laser = createV2EquipmentInstance({
+      instanceId: 'eq_laser_1',
+      kind: 'laser',
+      quality: 'common',
+      origin: 'owned',
+      acquiredDepth: 1,
+      location: 'staging',
+    });
+    const battery = createV2EquipmentInstance({
+      instanceId: 'eq_bat_1',
+      kind: 'battery',
+      quality: 'common',
+      origin: 'owned',
+      acquiredDepth: 1,
+      location: 'staging',
+    });
+    const shield = createV2EquipmentInstance({
+      instanceId: 'eq_shd_1',
+      kind: 'shield',
+      quality: 'common',
+      origin: 'owned',
+      acquiredDepth: 1,
+      location: 'staging',
+    });
+    const counter = createV2EquipmentInstance({
+      instanceId: 'eq_cnt_1',
+      kind: 'counter',
+      quality: 'common',
+      origin: 'owned',
+      acquiredDepth: 1,
+      location: 'staging',
+    });
+    for (const item of [laser, battery, shield, counter]) {
+      bay = addV2ItemToStaging(bay, item);
+    }
+    const p1 = placeV2FromStaging(bay, laser.instanceId, 0, 0, 0);
+    expect(p1.ok).toBe(true);
+    const p2 = placeV2FromStaging(p1.bay, battery.instanceId, 1, 0, 0);
+    expect(p2.ok).toBe(true);
+    const p3 = placeV2FromStaging(p2.bay, shield.instanceId, 2, 0, 0);
+    expect(p3.ok).toBe(true);
+    const p4 = placeV2FromStaging(p3.bay, counter.instanceId, 3, 0, 0);
+    expect(p4.ok).toBe(true);
+
+    const realUnits = buildEncounterUnits('swarm', 2, 'N_L2_SWARM');
+    const realSim = simulateV2Combat({
+      resultId: 'real_replay_parity',
+      bay: p4.bay,
+      startingHp: 34,
+      maxHp: 34,
+      units: realUnits,
+      targetPolicy: 'weakest',
+      sectorId: 'near_orbit',
+      crewId: 'engineer',
+    });
+    expect(realSim.rounds.length).toBeGreaterThanOrEqual(2);
+    const lastRound = realSim.rounds[realSim.rounds.length - 1];
+
+    const runRealReplay = (mode: '1x' | '2x' | 'skip') => {
+      const steps: number[] = [];
+      let completes = 0;
+      const { scene, access } = mountCombatScene({
+        shipId: 'cannon_skiff',
+        sectorIndex: 1,
+        eventBackdrop: null,
+        units: realUnits,
+        simulation: realSim,
+        settings: makeSettings({ combatSpeed: mode === '2x' ? 2 : 1, reducedMotion: false }),
+        onRoundStep: (idx) => steps.push(idx),
+        onComplete: () => {
+          completes += 1;
+        },
+      });
+      if (mode === 'skip') {
+        scene.update(0, 260); // start Round 0
+        access.time.advance(180); // mid-round
+        scene.skipPlayback();
+      } else {
+        for (let frame = 0; frame < 800 && completes === 0; frame++) {
+          scene.update(frame * 16, 16);
+          access.time.advance(16);
+        }
+      }
+      return {
+        snap: scene.getStagePresentationSnapshot(),
+        steps,
+        completes,
+        clockPending: access.time.getPendingCount(),
+      };
+    };
+
+    const res1x = runRealReplay('1x');
+    const res2x = runRealReplay('2x');
+    const resSkip = runRealReplay('skip');
+
+    const expectedSteps = realSim.rounds.map((_, idx) => idx);
+    for (const res of [res1x, res2x, resSkip]) {
+      expect(res.completes).toBe(1);
+      expect(res.steps).toEqual(expectedSteps);
+      expect(res.snap.pendingTimers).toBe(0);
+      expect(res.clockPending).toBe(0);
+      expect(res.snap.playerHp).toBe(lastRound.playerHpAfter);
+      expect(res.snap.playerShield).toBe(lastRound.playerShieldAfter);
+      for (const expectedEnemy of lastRound.enemiesAfter) {
+        const rendered = res.snap.enemiesState.find((e) => e.enemyId === expectedEnemy.enemyId);
+        expect(rendered).toBeDefined();
+        expect(rendered!.hp).toBe(expectedEnemy.hp);
+        expect(rendered!.dead).toBe(expectedEnemy.hp <= 0);
+      }
+    }
+
+    // Degenerate combatSpeed sanitization (0, -1, NaN) -> clean 1x fallback, zero hang, zero frame collapse!
+    expect(sanitizeCombatSpeed(0)).toBe(1);
+    expect(sanitizeCombatSpeed(-1)).toBe(1);
+    expect(sanitizeCombatSpeed(Number.NaN)).toBe(1);
+    expect(sanitizeCombatSpeed(Number.POSITIVE_INFINITY)).toBe(1);
+    expect(sanitizeCombatSpeed(0.25)).toBe(0.5);
+    expect(sanitizeCombatSpeed(2)).toBe(2);
+
+    for (const badSpeed of [0, -1, Number.NaN]) {
+      let completes = 0;
+      let framesUsed = 0;
+      const steps: number[] = [];
+      const { scene, access } = mountCombatScene({
+        shipId: 'cannon_skiff',
+        sectorIndex: 1,
+        eventBackdrop: null,
+        units: realUnits,
+        simulation: realSim,
+        settings: makeSettings({ combatSpeed: badSpeed as unknown as 1 | 2 }),
+        onRoundStep: (idx) => steps.push(idx),
+        onComplete: () => {
+          completes += 1;
+        },
+      });
+      for (let f = 0; f < 1000 && completes === 0; f++) {
+        framesUsed += 1;
+        scene.update(f * 16, 16);
+        access.time.advance(16);
+      }
+      expect(completes).toBe(1);
+      expect(steps).toEqual(expectedSteps);
+      expect(framesUsed).toBeGreaterThan(realSim.rounds.length * 40); // Genuine 1x pacing, NOT negative-timer frame collapse!
+      expect(scene.getStagePresentationSnapshot().pendingTimers).toBe(0);
+      expect(access.time.getPendingCount()).toBe(0);
+    }
+  });
+
+  it('A03/A04: guarantees 0 corner overlaps for 12 simultaneous popups on 390x240 & 1280x720 and full NaN immunity across particle pool & pure VFX helpers', () => {
+    // 1. 12 simultaneous popups at ALL 4 corners on BOTH 390x240 and 1280x720
+    const viewports = [
+      { w: 390, h: 240 },
+      { w: 1280, h: 720 },
+    ] as const;
+
+    for (const vp of viewports) {
+      const corners = [
+        { x: 0, y: 0 },
+        { x: vp.w, y: 0 },
+        { x: 0, y: vp.h },
+        { x: vp.w, y: vp.h },
+      ];
+      for (const corner of corners) {
+        const placed: { x: number; y: number }[] = [];
+        for (let i = 0; i < 12; i++) {
+          const p = allocateNonOverlappingPopupPos({
+            desiredX: corner.x,
+            desiredY: corner.y,
+            existing: placed,
+            viewW: vp.w,
+            viewH: vp.h,
+          });
+          expect(Number.isFinite(p.x)).toBe(true);
+          expect(Number.isFinite(p.y)).toBe(true);
+          expect(p.x).toBeGreaterThanOrEqual(28);
+          expect(p.x).toBeLessThanOrEqual(vp.w - 28);
+          expect(p.y).toBeGreaterThanOrEqual(16);
+          expect(p.y).toBeLessThanOrEqual(vp.h - 16);
+          placed.push(p);
+        }
+        let overlaps = 0;
+        for (let i = 0; i < placed.length; i++) {
+          for (let j = i + 1; j < placed.length; j++) {
+            if (Math.abs(placed[i].x - placed[j].x) < 42 && Math.abs(placed[i].y - placed[j].y) < 18) {
+              overlaps += 1;
+            }
+          }
+        }
+        expect(overlaps).toBe(0);
+      }
+    }
+
+    // 2. VfxParticlePool NaN immunity (zero immortal zombie particles!)
+    const nanCapPool = new VfxParticlePool(Number.NaN);
+    expect(nanCapPool.capacity).toBe(VFX_MAX_ACTIVE_PARTICLES);
+    const zeroCapPool = new VfxParticlePool(0);
+    expect(zeroCapPool.capacity).toBe(0);
+    expect(zeroCapPool.spawnBurst({ kind: 'spark', x: 0, y: 0, count: 10, color: 0xffffff, lowQuality: false })).toBe(0);
+
+    const pool = new VfxParticlePool();
+    pool.spawnBurst({ kind: 'spark', x: 100, y: 100, count: 24, color: 0xf6b852, lowQuality: false });
+    expect(pool.getActiveCount()).toBe(24);
+    pool.step(Number.NaN);
+    expect(pool.getActiveCount()).toBe(24); // Untouched by NaN dt
+    pool.step(10); // Cleanly expires ALL 24 particles (0 zombies!)
+    expect(pool.getActiveCount()).toBe(0);
+
+    pool.spawnBurst({
+      kind: 'spark',
+      x: Number.NaN,
+      y: Number.POSITIVE_INFINITY,
+      count: 10,
+      color: Number.NaN,
+      lowQuality: false,
+      lifeSec: Number.NaN,
+      speedMin: Number.NaN,
+      speedMax: Number.NaN,
+      sizeMin: Number.NaN,
+      sizeMax: Number.NaN,
+    });
+    expect(pool.getActiveCount()).toBe(10);
+    pool.forEachActive((p) => {
+      expect(Number.isFinite(p.x)).toBe(true);
+      expect(Number.isFinite(p.y)).toBe(true);
+      expect(Number.isFinite(p.vx)).toBe(true);
+      expect(Number.isFinite(p.vy)).toBe(true);
+      expect(Number.isFinite(p.life)).toBe(true);
+      expect(p.life).toBeGreaterThan(0);
+    });
+    pool.step(10);
+    expect(pool.getActiveCount()).toBe(0); // 0 zombies!
+
+    // 3. Pure helper NaN immunity
+    const tr = { hp: 20, maxHp: 40, trailHp: 30, holdMs: 150 };
+    applyHpChangeToTrail(tr, Number.NaN, false);
+    expect(tr).toEqual({ hp: 20, maxHp: 40, trailHp: 30, holdMs: 150 });
+    stepHpTrailState(tr, Number.NaN, false);
+    expect(tr).toEqual({ hp: 20, maxHp: 40, trailHp: 30, holdMs: 150 });
+
+    const beam = computeThreeLayerBeamStrokes(Number.NaN, Number.NaN, Number.NaN);
+    expect(Number.isFinite(beam.outerGlow.width)).toBe(true);
+    expect(Number.isFinite(beam.coloredCore.alpha)).toBe(true);
+    expect(Number.isFinite(beam.whiteCenter.width)).toBe(true);
+
+    const split = computeSplitHullHalvesSpec({
+      texWidth: Number.NaN,
+      texHeight: Number.NaN,
+      splitRatioX: Number.NaN,
+      baseX: Number.NaN,
+      baseY: Number.NaN,
+      displayWidth: Number.NaN,
+      displayHeight: Number.NaN,
+      isBoss: false,
+      hasDedicatedPlates: false,
+    });
+    expect(Number.isFinite(split.fore.cropW)).toBe(true);
+    expect(Number.isFinite(split.aft.cropW)).toBe(true);
+    expect(Number.isFinite(split.fore.startX)).toBe(true);
+    expect(computeHpBarTickRatios(Number.NaN)).toEqual([]);
+  });
+
+  it('A08-code: guards cableDrop/base/target NaN/Infinity, satisfies close-range crane IK invariants across 2,000+ targets, and handles re-entrant skipReturnDocking in onProgress(1)', () => {
+    // 1. Non-finite cableDrop, base, target guards
+    for (const badDrop of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const pose = solveArticulatedCranePose({
+        base: { x: 435, y: 410 },
+        target: { x: 600, y: 300 },
+        scale: 1,
+        cableDrop: badDrop,
+        mode: 'docking',
+      });
+      for (const v of [pose.turntable, pose.shoulder, pose.elbow, pose.trolley, pose.hook]) {
+        expect(Number.isFinite(v.x)).toBe(true);
+        expect(Number.isFinite(v.y)).toBe(true);
+      }
+      expect(Number.isFinite(pose.cableLength)).toBe(true);
+    }
+
+    const nanCoordsPose = solveArticulatedCranePose({
+      base: { x: Number.NaN, y: Number.POSITIVE_INFINITY },
+      target: { x: Number.NEGATIVE_INFINITY, y: Number.NaN },
+      scale: Number.NaN,
+      mode: 'idle',
+    });
+    for (const v of [nanCoordsPose.turntable, nanCoordsPose.shoulder, nanCoordsPose.elbow, nanCoordsPose.trolley, nanCoordsPose.hook]) {
+      expect(Number.isFinite(v.x)).toBe(true);
+      expect(Number.isFinite(v.y)).toBe(true);
+    }
+
+    // 2. Deterministic minimal repro (base=(435,410), target=(435,411), dist=1 < 3.92*s) & 2,000+ randomized close-range targets
+    const verifyPose = (pose: ReturnType<typeof solveArticulatedCranePose>) => {
+      for (const v of [pose.turntable, pose.shoulder, pose.elbow, pose.trolley, pose.hook]) {
+        expect(Number.isFinite(v.x)).toBe(true);
+        expect(Number.isFinite(v.y)).toBe(true);
+      }
+      const actualBoom = Math.hypot(pose.elbow.x - pose.shoulder.x, pose.elbow.y - pose.shoulder.y);
+      const actualJib = Math.hypot(pose.trolley.x - pose.elbow.x, pose.trolley.y - pose.elbow.y);
+      expect(Math.abs(actualBoom - pose.lowerBoomLength)).toBeLessThanOrEqual(1e-3);
+      expect(Math.abs(actualJib - pose.upperJibLength)).toBeLessThanOrEqual(1e-3);
+      const chordMidY = (pose.shoulder.y + pose.trolley.y) * 0.5;
+      expect(pose.elbow.y).toBeLessThanOrEqual(chordMidY + 1e-3);
+      expect(pose.elbow.y).toBeLessThanOrEqual(Math.max(pose.shoulder.y, pose.trolley.y) + 1e-3);
+    };
+
+    verifyPose(
+      solveArticulatedCranePose({
+        base: { x: 435, y: 410 },
+        target: { x: 435, y: 411 },
+        scale: 1,
+        cableDrop: 26,
+        mode: 'idle',
+      })
+    );
+    // Exact coincident shoulder === trolley (dist === 0)
+    verifyPose(
+      solveArticulatedCranePose({
+        base: { x: 435, y: 410 },
+        target: { x: 435, y: 410 },
+        scale: 1,
+        cableDrop: 26,
+        mode: 'idle',
+      })
+    );
+
+    // 2,000+ deterministic PRNG close-range targets across [1e-4, 22 * s] (heavily sampling [1e-4, 4 * s])
+    let seed = 0x1234abcd;
+    const nextRand = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 0x100000000;
+    };
+    for (let i = 0; i < 2048; i++) {
+      const s = 0.4 + nextRand() * 2.0;
+      const dist = i < 1200 ? 1e-4 + nextRand() * (4 * s) : 1e-4 + nextRand() * (21.5 * s);
+      const angle = nextRand() * Math.PI * 2;
+      const base = { x: 435, y: 410 };
+      const cableDrop = 26 * s;
+      const approxShoulderY = base.y - 26 * s;
+      const target = {
+        x: base.x + Math.cos(angle) * dist,
+        y: approxShoulderY + Math.sin(angle) * dist + cableDrop,
+      };
+      verifyPose(solveArticulatedCranePose({ base, target, scale: s, cableDrop, mode: 'idle' }));
+    }
+
+    // 3. Re-entrant skipReturnDocking() inside onProgress(1) -> zero throw and onFinish called ONCE!
+    const { scene } = mountBaseScene({
+      v2State: {
+        activeShipId: 'cannon_skiff',
+        facilityTiers: { workbench: 1, display: 0, drydock: 0, stargate_relay: 0 },
+        restoredRelicIds: [],
+        campaignAct: 'act1',
+        stargatePowered: false,
+        settings: makeSettings({ reducedMotion: false }),
+      },
+    });
+    const onFinish = vi.fn();
+    scene.startReturnDocking({
+      earnedCredits: 100,
+      crateCount: 2,
+      hasKeptRelic: false,
+      wasDefeat: false,
+      onProgress: (p) => {
+        if (p >= 1) {
+          scene.skipReturnDocking();
+        }
+      },
+      onFinish,
+    });
+    expect(() => {
+      scene.update(0, 500);
+      scene.update(500, 500);
+      scene.update(1000, 500);
+    }).not.toThrow();
+    expect(onFinish).toHaveBeenCalledTimes(1);
+  });
+
+  it('A10: unlocks BGM/ambient via play() when sfxMuted && !bgmMuted, resets ambientMuteExplicit in setMuted(), isolates throwing BGM ticks, and cross-fades ambient loop seam', () => {
+    const harness = createWindowAudioHarness();
+    activeWindowCleanup = harness.restore;
+
+    // 1. sfxMuted: true, bgmMuted: false -> play('click') unlocks AudioContext, starts ambient & BGM, emits 0 SFX voices!
+    const engine = new SoundEngine({ randomFn: () => 0.5 });
+    engine.setMute(true, false);
+    engine.setTrack('base');
+    engine.play('click'); // Simulates V2 user gesture click WITHOUT separate unlock()
+    expect(harness.createdContexts).toHaveLength(1);
+    const ctx = harness.createdContexts[0];
+    expect(engine.getAudioGraphState().initialized).toBe(true);
+    expect(engine.getAudioGraphState().ambientRunning).toBe(true);
+    expect(ctx.oscillators).toHaveLength(0); // 0 SFX voices!
+    harness.tickIntervals(1);
+    expect(ctx.oscillators.length).toBeGreaterThan(0); // BGM plays cleanly!
+
+    // Ambient loop buffer seam is cross-faded cleanly toward data[0] (zero click)
+    const ambSource = ctx.bufferSources.find((s) => s.loop && s.buffer !== null);
+    expect(ambSource).toBeDefined();
+    const ambData = ambSource!.buffer!.getChannelData(0);
+    expect(Math.abs(ambData[ambData.length - 1] - ambData[0])).toBeLessThan(1e-5);
+
+    // 2. setMuted(true) followed by 2-arg setMute(false, false) MUST restore ambientMuted: false & ambientRunning: true!
+    engine.setMuted(true);
+    expect(engine.isMuted()).toBe(true);
+    expect(engine.getAudioGraphState().ambientRunning).toBe(false);
+    engine.setMute(false, false);
+    expect(engine.isAmbientMuted()).toBe(false);
+    expect(engine.getAudioGraphState().ambientRunning).toBe(true);
+
+    // 3. Throwing ctx.createOscillator() inside BGM setInterval tick is cleanly isolated (zero uncaught error)
+    engine.setTrack('boss');
+    const origCreateOsc = ctx.createOscillator.bind(ctx);
+    ctx.createOscillator = () => {
+      throw new Error('Degraded closing AudioContext');
+    };
+    expect(() => harness.tickIntervals(3)).not.toThrow();
+    ctx.createOscillator = origCreateOsc;
+
+    engine.dispose();
+  });
+});
+
