@@ -23,6 +23,7 @@ import type {
 } from '../domain/types';
 
 export interface V2StagePlayback {
+  readonly playbackKey?: string;
   readonly shipId: V2ShipId;
   readonly shipVisualSpec?: V2ShipVisualSpec | null;
   readonly sectorId?: SectorId;
@@ -127,6 +128,7 @@ const BG_TEX_H = 720;
  */
 export class V2CombatScene extends Phaser.Scene {
   private playback: V2StagePlayback | null = null;
+  private appliedPlaybackKey: string | null = null;
   private bgImage: Phaser.GameObjects.Image | null = null;
   private bgGraphics!: Phaser.GameObjects.Graphics;
   private fxGraphics!: Phaser.GameObjects.Graphics;
@@ -198,14 +200,19 @@ export class V2CombatScene extends Phaser.Scene {
     this.viewH = h;
     if (dpr !== undefined) this.dpr = dpr;
     this.applyCameraViewport();
-    if (this.scene.isActive() && this.texturesReady) {
+    if (this.scene?.isActive() && this.texturesReady) {
       this.layoutAll();
     }
   }
 
-  init(data?: { playback?: V2StagePlayback; onAssetError?: (key: string) => void }): void {
-    if (data?.playback) {
-      this.playback = data.playback;
+  init(data?: {
+    playback?: V2StagePlayback;
+    getLatestPlayback?: () => V2StagePlayback | null;
+    onAssetError?: (key: string) => void;
+  }): void {
+    const latest = data?.getLatestPlayback?.() ?? data?.playback;
+    if (latest) {
+      this.playback = latest;
     }
     if (data?.onAssetError) {
       this.onAssetError = data.onAssetError;
@@ -285,6 +292,7 @@ export class V2CombatScene extends Phaser.Scene {
     this.scale.on('resize', this.handleResize, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.texturesReady = false;
+      this.appliedPlaybackKey = null;
       this.playbackActive = false;
       this.waitingCompletion = false;
       this.decisionPaused = false;
@@ -302,7 +310,7 @@ export class V2CombatScene extends Phaser.Scene {
   }
 
   private handleResize(gameSize?: Phaser.Structs.Size): void {
-    if (!this.scene.isActive()) return;
+    if (!this.scene?.isActive()) return;
     const dpr = (this.game.registry.get('dpr') as number) || this.dpr || 1;
     if (gameSize && gameSize.width > 0 && gameSize.height > 0) {
       this.syncViewport(Math.round(gameSize.width / dpr), Math.round(gameSize.height / dpr), dpr);
@@ -316,8 +324,24 @@ export class V2CombatScene extends Phaser.Scene {
   }
 
   setPlayback(playback: V2StagePlayback): void {
+    const nextStaticKey = !playback.simulation ? (playback.playbackKey ?? null) : null;
+    if (
+      this.scene?.isActive() &&
+      this.texturesReady &&
+      nextStaticKey !== null &&
+      nextStaticKey === this.appliedPlaybackKey
+    ) {
+      this.playback = {
+        ...(this.playback ?? playback),
+        shipVisualSpec: playback.shipVisualSpec ?? null,
+        settings: playback.settings,
+        playbackKey: nextStaticKey,
+      };
+      this.updateShipVisualSpec(playback.shipVisualSpec ?? null);
+      return;
+    }
     this.playback = playback;
-    if (this.scene.isActive() && this.texturesReady) {
+    if (this.scene?.isActive() && this.texturesReady) {
       this.applyPlayback();
     }
   }
@@ -326,7 +350,7 @@ export class V2CombatScene extends Phaser.Scene {
   updateShipVisualSpec(spec: V2ShipVisualSpec | null): void {
     if (!this.playback) return;
     this.playback = { ...this.playback, shipVisualSpec: spec };
-    if (this.scene.isActive() && this.texturesReady) {
+    if (this.scene?.isActive() && this.texturesReady) {
       this.rebuildModuleSprites();
       this.layoutModules();
     }
@@ -338,11 +362,34 @@ export class V2CombatScene extends Phaser.Scene {
     }
   }
 
+  /** Read-only presentation state snapshot for deterministic stage verification */
+  getStagePresentationSnapshot(): {
+    readonly appliedPlaybackKey: string | null;
+    readonly activeRings: number;
+    readonly activeBeams: number;
+    readonly activeSmokes: number;
+    readonly activePopups: number;
+    readonly enemyCount: number;
+    readonly moduleCount: number;
+    readonly playerVisible: boolean;
+  } {
+    return {
+      appliedPlaybackKey: this.appliedPlaybackKey,
+      activeRings: this.rings.length,
+      activeBeams: this.beams.length,
+      activeSmokes: this.smokes.length,
+      activePopups: this.popups.length,
+      enemyCount: this.enemies.length,
+      moduleCount: this.moduleSprites.length,
+      playerVisible: Boolean(this.playerSprite?.visible),
+    };
+  }
+
   /**
    * Plays short mechanical cutting spark burst on wreck backdrop when player cuts a room open.
    */
   triggerWreckCutFx(normX: number, normY: number): void {
-    if (!this.scene.isActive() || !this.texturesReady) return;
+    if (!this.scene?.isActive() || !this.texturesReady) return;
     const x = this.viewW * normX;
     const y = this.viewH * normY;
     this.rings.push({ x, y, maxR: 38, color: 0xf6b852, life: 0.36, maxLife: 0.36 });
@@ -582,7 +629,15 @@ export class V2CombatScene extends Phaser.Scene {
   private rebuildModuleSprites(): void {
     this.destroyModuleSprites();
     const spec = this.playback?.shipVisualSpec;
-    if (!spec || !this.playerSprite || !this.playerSprite.scene) return;
+    if (
+      !spec ||
+      !this.playerSprite ||
+      !this.playerSprite.scene ||
+      !this.playerSprite.visible ||
+      this.playback?.eventBackdrop === 'wreck'
+    ) {
+      return;
+    }
 
     const addMount = (
       kind: MountedModuleEntry['kind'],
@@ -758,7 +813,11 @@ export class V2CombatScene extends Phaser.Scene {
     this.shakeTimerMs = 0;
 
     const pb = this.playback;
-    if (!pb) return;
+    if (!pb) {
+      this.appliedPlaybackKey = null;
+      return;
+    }
+    this.appliedPlaybackKey = !pb.simulation ? (pb.playbackKey ?? null) : null;
 
     // Backdrop: event scene or sector deep-space
     const bgKey = pb.eventBackdrop

@@ -172,9 +172,11 @@ import { renderPrepareView } from './screens/PrepareView';
 import { renderRewardView } from './screens/RewardView';
 import {
   NODE_TYPE_META,
+  V2StaticStageSyncTracker,
   type NextBaseGoal,
   type V2PrepareDraft,
   type V2ReturnDockingNotice,
+  type V2StaticStageMode,
 } from './screens/screenTypes';
 import { renderSettlementView } from './screens/SettlementView';
 import { renderShopView } from './screens/ShopView';
@@ -256,6 +258,7 @@ export class V2AppController {
 
   // Live combat playback display telemetry (pure presentation)
   private activeCombatPlaybackKey: string | null = null;
+  private readonly staticStageTracker = new V2StaticStageSyncTracker();
   private liveCombatRound = 0;
   private liveCombatPlayerHp = 30;
   private liveCombatPlayerShield = 0;
@@ -359,11 +362,15 @@ export class V2AppController {
         error: loaded.error,
         hasBackup: true,
         onRestoreBackup: () => {
+          this.staticStageTracker.reset();
+          this.activeCombatPlaybackKey = null;
           this.save = loaded.backup;
           this.persist();
           this.syncAll();
         },
         onResetFresh: () => {
+          this.staticStageTracker.reset();
+          this.activeCombatPlaybackKey = null;
           clearV2SaveData(window.localStorage);
           this.save = createFreshV2SaveData();
           this.persist();
@@ -377,6 +384,8 @@ export class V2AppController {
         error: loaded.error,
         hasBackup: false,
         onResetFresh: () => {
+          this.staticStageTracker.reset();
+          this.activeCombatPlaybackKey = null;
           clearV2SaveData(window.localStorage);
           this.save = createFreshV2SaveData();
           this.persist();
@@ -450,6 +459,8 @@ export class V2AppController {
       window.clearTimeout(this.actionToastTimer);
       this.actionToastTimer = null;
     }
+    this.staticStageTracker.reset();
+    this.activeCombatPlaybackKey = null;
     this.teardownCargoBay();
     this.tabGuard.destroy();
     this.phaserHost?.destroy();
@@ -877,6 +888,8 @@ export class V2AppController {
   }
 
   private startShowcaseRun(trialId: V2TrialBuildId): void {
+    this.staticStageTracker.reset();
+    this.activeCombatPlaybackKey = null;
     this.titleEntered = true;
     this.writeTitleSession(true);
     this.prepareDraft = null;
@@ -1018,6 +1031,7 @@ export class V2AppController {
     this.topHudEl.querySelector('#v2-btn-exit-showcase')?.addEventListener('click', () => {
       soundEngine.play('click');
       this.showcaseRun = null;
+      this.staticStageTracker.reset();
       this.activeCombatPlaybackKey = null;
       this.awaitingEliteDecision = false;
       this.syncAll();
@@ -1153,6 +1167,7 @@ export class V2AppController {
       if (latest.status === 'loaded') {
         this.save = latest.data;
       }
+      this.staticStageTracker.reset();
       this.tabGuard.takeOver();
       this.isReadOnlyTab = !this.tabGuard.canWrite();
       this.phaserHost?.setCombatPaused(this.isReadOnlyTab);
@@ -1217,6 +1232,7 @@ export class V2AppController {
 
     // 1. BASE HERO STAGE (Native V2 Diorama Parity — Contract #4)
     if (!run && !this.prepareDraft) {
+      this.staticStageTracker.reset();
       this.activeCombatPlaybackKey = null;
       this.awaitingEliteDecision = false;
       this.phaserHost.showV2Base(this.buildV2DioramaState());
@@ -1234,6 +1250,7 @@ export class V2AppController {
       const ship = V2_SHIPS[draft.shipId];
 
       if (draft.playingDemo && draft.trialBuildId) {
+        this.staticStageTracker.reset();
         const trial = V2_TRIAL_BUILDS[draft.trialBuildId];
         const demoUnits = getTrialDemoUnits(draft.trialBuildId);
         const demoKey = `demo_${draft.shipId}_${draft.trialBuildId}`;
@@ -1283,16 +1300,31 @@ export class V2AppController {
 
       draft.demoPlaybackKey = null;
       const prepSector = getV3SectorDef(draft.sectorId);
-      this.phaserHost.showV2Stage({
-        shipId: draft.shipId,
-        shipVisualSpec: visualSpec,
-        sectorId: draft.sectorId,
-        sectorIndex: prepSector.primaryBgIndex,
-        eventBackdrop: null,
-        units: [],
-        simulation: null,
-        settings: this.save.settings,
-      });
+      this.staticStageTracker.sync(
+        this.phaserHost,
+        {
+          mode: 'prepare',
+          runId: 'prepare',
+          nodeId: 'none',
+          shipId: draft.shipId,
+          sectorId: draft.sectorId,
+          sectorIndex: prepSector.primaryBgIndex,
+          eventBackdrop: null,
+          units: [],
+        },
+        visualSpec,
+        (playbackKey) => ({
+          playbackKey,
+          shipId: draft.shipId,
+          shipVisualSpec: visualSpec,
+          sectorId: draft.sectorId,
+          sectorIndex: prepSector.primaryBgIndex,
+          eventBackdrop: null,
+          units: [],
+          simulation: null,
+          settings: this.save.settings,
+        })
+      );
 
       const mountChips =
         visualSpec.mountSummaryTags.length > 0
@@ -1315,6 +1347,7 @@ export class V2AppController {
 
     // 3. LIVE COMBAT HERO STAGE
     if (run.phase === 'ENCOUNTER' && run.activeCombat && currentNode?.combat) {
+      this.staticStageTracker.reset();
       const activeCombat = run.activeCombat;
       const sim = activeCombat.simulation;
       const pending = activeCombat.pendingDecision;
@@ -1468,16 +1501,32 @@ export class V2AppController {
       !currentNode.combat
     ) {
       this.activeCombatPlaybackKey = null;
-      this.phaserHost.showV2Stage({
-        shipId: run.shipId,
-        shipVisualSpec: visualSpec,
-        sectorId: run.sectorId,
-        sectorIndex,
-        eventBackdrop: 'wreck',
-        units: [],
-        simulation: null,
-        settings: this.save.settings,
-      });
+      this.awaitingEliteDecision = false;
+      this.staticStageTracker.sync(
+        this.phaserHost,
+        {
+          mode: 'wreck',
+          runId: run.runId,
+          nodeId: currentNode.nodeId,
+          shipId: run.shipId,
+          sectorId: run.sectorId,
+          sectorIndex,
+          eventBackdrop: 'wreck',
+          units: [],
+        },
+        visualSpec,
+        (playbackKey) => ({
+          playbackKey,
+          shipId: run.shipId,
+          shipVisualSpec: visualSpec,
+          sectorId: run.sectorId,
+          sectorIndex,
+          eventBackdrop: 'wreck' as const,
+          units: [],
+          simulation: null,
+          settings: this.save.settings,
+        })
+      );
       this.renderWreckOverlay(run, currentNode);
       return;
     }
@@ -1494,17 +1543,46 @@ export class V2AppController {
         : null;
     const previewUnits =
       run.phase === 'ENCOUNTER' && currentNode?.combat ? currentNode.combat.units : [];
+    const stageMode: V2StaticStageMode =
+      run.phase === 'MAP'
+        ? 'map'
+        : run.phase === 'SHOP'
+        ? 'shop'
+        : run.phase === 'REWARD'
+        ? 'reward'
+        : run.phase === 'ARRANGE'
+        ? 'arrange'
+        : run.phase === 'SETTLEMENT'
+        ? 'settlement'
+        : currentNode?.combat
+        ? 'pre_combat'
+        : 'event';
 
-    this.phaserHost.showV2Stage({
-      shipId: run.shipId,
-      shipVisualSpec: visualSpec,
-      sectorId: run.sectorId,
-      sectorIndex,
-      eventBackdrop: eventBg,
-      units: previewUnits,
-      simulation: null,
-      settings: this.save.settings,
-    });
+    this.staticStageTracker.sync(
+      this.phaserHost,
+      {
+        mode: stageMode,
+        runId: run.runId,
+        nodeId: currentNode?.nodeId ?? 'none',
+        shipId: run.shipId,
+        sectorId: run.sectorId,
+        sectorIndex,
+        eventBackdrop: eventBg,
+        units: previewUnits,
+      },
+      visualSpec,
+      (playbackKey) => ({
+        playbackKey,
+        shipId: run.shipId,
+        shipVisualSpec: visualSpec,
+        sectorId: run.sectorId,
+        sectorIndex,
+        eventBackdrop: eventBg,
+        units: previewUnits,
+        simulation: null,
+        settings: this.save.settings,
+      })
+    );
 
     const stageLabel =
       run.phase === 'MAP'
@@ -2463,9 +2541,6 @@ export class V2AppController {
           },
           onCutSpot: (spotId: V2WreckSpotId) => {
             if (!this.canMutate()) return;
-            const spotCoords =
-              spotId === 'armory' ? [0.22, 0.48] : spotId === 'cargo' ? [0.78, 0.5] : [0.5, 0.45];
-            this.phaserHost?.triggerV2WreckCutFx(spotCoords[0], spotCoords[1]);
             const res = cutV2WreckHotspot(
               run,
               spotId,
@@ -2479,11 +2554,16 @@ export class V2AppController {
             if (res.ambushTriggered) {
               soundEngine.play('bossAlarm');
               this.showToast('残骸警报触发！敌舰伏击来袭，战利品已暂封待战后返还！');
-            } else if (res.tookHazard) {
-              soundEngine.play('hullHit');
-              if (res.summaryText) this.showToast(res.summaryText);
             } else {
-              soundEngine.play('place');
+              const spotCoords =
+                spotId === 'armory' ? [0.22, 0.48] : spotId === 'cargo' ? [0.78, 0.5] : [0.5, 0.45];
+              this.phaserHost?.triggerV2WreckCutFx(spotCoords[0], spotCoords[1]);
+              if (res.tookHazard) {
+                soundEngine.play('hullHit');
+                if (res.summaryText) this.showToast(res.summaryText);
+              } else {
+                soundEngine.play('place');
+              }
             }
             this.syncAll();
           },
@@ -3188,6 +3268,8 @@ export class V2AppController {
       onOpenMigration: this.v1Inspection.hasV1Save ? () => this.openMigrationWizard() : undefined,
       onResetV2Save: () => {
         if (!this.canMutate()) return;
+        this.staticStageTracker.reset();
+        this.activeCombatPlaybackKey = null;
         clearV2SaveData(window.localStorage);
         this.save = createFreshV2SaveData();
         this.showcaseRun = null;
@@ -3378,6 +3460,8 @@ export class V2AppController {
           return;
         }
         const migrated = migrateV1ToV2SaveData(this.v1Inspection.v1Save);
+        this.staticStageTracker.reset();
+        this.activeCombatPlaybackKey = null;
         this.save = migrated;
         this.migrationPromptDismissed = true;
         this.persist();

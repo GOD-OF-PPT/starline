@@ -26,6 +26,7 @@ export class PhaserHost {
   private rafHandle: number | null = null;
 
   private currentMode: ActiveSceneMode | null = null;
+  private activeV2StageKey: string | null = null;
   private pendingBase: BaseSceneState | null = null;
   private pendingV2Base: V2BaseDioramaState | null = null;
   private pendingCombat: CombatScenePlayback | null = null;
@@ -116,6 +117,7 @@ export class PhaserHost {
         this.game.scene.stop('BaseScene');
         this.game.scene.start('V2CombatScene', {
           playback: this.pendingV2Stage,
+          getLatestPlayback: () => this.pendingV2Stage,
           onAssetError: this.handleSceneAssetError,
         });
         this.currentMode = 'v2_stage';
@@ -226,6 +228,10 @@ export class PhaserHost {
     return null;
   }
 
+  isV2StageMode(): boolean {
+    return this.currentMode === 'v2_stage';
+  }
+
   onBuildingClick(handler: (id: BuildingId) => void): void {
     this.buildingClickHandler = handler;
     this.baseScene.setClickHandler(handler);
@@ -265,6 +271,7 @@ export class PhaserHost {
     } else if (this.currentMode === 'v2_stage' && this.pendingV2Stage) {
       this.game.scene.start('V2CombatScene', {
         playback: this.pendingV2Stage,
+        getLatestPlayback: () => this.pendingV2Stage,
         onAssetError: this.handleSceneAssetError,
       });
     }
@@ -273,6 +280,7 @@ export class PhaserHost {
 
   /** Legacy V1 base stage — preserved 100% intact for ?mode=v1 */
   showBase(state: BaseSceneState): void {
+    this.activeV2StageKey = null;
     this.pendingBase = state;
     this.pendingV2Base = null;
     const switching = this.currentMode !== 'base';
@@ -303,6 +311,7 @@ export class PhaserHost {
 
   /** Native V2/V3 Orbital Station Diorama stage (Contract #4) */
   showV2Base(state: V2BaseDioramaState): void {
+    this.activeV2StageKey = null;
     this.pendingV2Base = state;
     this.pendingBase = null;
     const switching = this.currentMode !== 'base';
@@ -332,6 +341,7 @@ export class PhaserHost {
   }
 
   showCombat(playback: CombatScenePlayback): void {
+    this.activeV2StageKey = null;
     this.pendingCombat = playback;
     const switching = this.currentMode !== 'combat';
     this.currentMode = 'combat';
@@ -350,6 +360,24 @@ export class PhaserHost {
   }
 
   showV2Stage(playback: V2StagePlayback): void {
+    const nextStaticKey = !playback.simulation ? (playback.playbackKey ?? null) : null;
+    if (
+      this.currentMode === 'v2_stage' &&
+      nextStaticKey !== null &&
+      nextStaticKey === this.activeV2StageKey
+    ) {
+      this.pendingV2Stage = {
+        ...(this.pendingV2Stage ?? playback),
+        shipVisualSpec: playback.shipVisualSpec ?? null,
+        settings: playback.settings,
+        playbackKey: nextStaticKey,
+      };
+      this.updateV2ShipVisualSpec(playback.shipVisualSpec ?? null);
+      this.updateCombatSettings(playback.settings);
+      return;
+    }
+
+    this.activeV2StageKey = nextStaticKey;
     this.pendingV2Stage = playback;
     const switching = this.currentMode !== 'v2_stage';
     this.currentMode = 'v2_stage';
@@ -358,16 +386,27 @@ export class PhaserHost {
     if (switching) {
       if (this.game.scene.isActive('BaseScene')) this.game.scene.stop('BaseScene');
       if (this.game.scene.isActive('CombatScene')) this.game.scene.stop('CombatScene');
-      this.game.scene.start('V2CombatScene', { playback, onAssetError: this.handleSceneAssetError });
+      this.game.scene.start('V2CombatScene', {
+        playback: this.pendingV2Stage,
+        getLatestPlayback: () => this.pendingV2Stage,
+        onAssetError: this.handleSceneAssetError,
+      });
     } else if (this.game.scene.isActive('V2CombatScene')) {
       this.v2CombatScene.setPlayback(playback);
     } else {
-      this.game.scene.start('V2CombatScene', { playback, onAssetError: this.handleSceneAssetError });
+      this.game.scene.start('V2CombatScene', {
+        playback: this.pendingV2Stage,
+        getLatestPlayback: () => this.pendingV2Stage,
+        onAssetError: this.handleSceneAssetError,
+      });
     }
     this.scheduleResize();
   }
 
   updateCombatSettings(settings: GameSettings): void {
+    if (this.pendingV2Stage) {
+      this.pendingV2Stage = { ...this.pendingV2Stage, settings };
+    }
     if (this.lowQuality !== settings.lowQuality) {
       this.lowQuality = settings.lowQuality;
       this.scheduleResize();
@@ -375,7 +414,7 @@ export class PhaserHost {
     if (this.ready && this.game.scene.isActive('CombatScene')) {
       this.combatScene.updateSettings(settings);
     }
-    if (this.ready && this.game.scene.isActive('V2CombatScene')) {
+    if (this.currentMode === 'v2_stage') {
       this.v2CombatScene.updateSettings(settings);
     }
   }
@@ -395,7 +434,10 @@ export class PhaserHost {
   }
 
   updateV2ShipVisualSpec(spec: import('../v2/domain/shipVisualSpec').V2ShipVisualSpec | null): void {
-    if (this.ready && this.game.scene.isActive('V2CombatScene')) {
+    if (this.pendingV2Stage) {
+      this.pendingV2Stage = { ...this.pendingV2Stage, shipVisualSpec: spec };
+    }
+    if (this.currentMode === 'v2_stage') {
       this.v2CombatScene.updateShipVisualSpec(spec);
     }
   }
@@ -420,6 +462,7 @@ export class PhaserHost {
   }
 
   destroy(): void {
+    this.activeV2StageKey = null;
     if (this.rafHandle !== null) {
       cancelAnimationFrame(this.rafHandle);
       this.rafHandle = null;
