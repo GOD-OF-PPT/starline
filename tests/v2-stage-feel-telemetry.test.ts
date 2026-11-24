@@ -1486,6 +1486,100 @@ describe('M1B Stage, Feel, Feedback & Telemetry Suite (S03, S06, S07, S08, S09, 
       expect(mountEl.querySelector('[data-testid="context-dock"]')!.getAttribute('data-stage-region')).toBe('context-dock');
       expect(mountEl.querySelector('[data-testid="hold-view"]')!.getAttribute('data-stage-region')).toBe('hold-view');
     });
+
+    it('keeps mobile portrait HoldView-hiding CSS disjoint from 844x390 landscape, scopes v3-endgame threat pills, and preserves mobile touch targets (D1, D2)', async () => {
+      const fsModuleId: string = 'node:fs';
+      const { readFileSync } = (await import(/* @vite-ignore */ fsModuleId)) as {
+        readonly readFileSync: (path: URL, encoding: string) => string;
+      };
+      const layoutCss = readFileSync(new URL('../src/v2/ui/styles/v3-layout.css', import.meta.url), 'utf-8');
+      const endgameCss = readFileSync(new URL('../src/v2/ui/styles/v3-endgame.css', import.meta.url), 'utf-8');
+      expect(layoutCss.length).toBeGreaterThan(1000);
+      expect(endgameCss.length).toBeGreaterThan(1000);
+
+      // Helper: extract top-level @media blocks cleanly using brace depth
+      const extractMediaBlocks = (css: string): Array<{ readonly query: string; readonly body: string }> => {
+        const blocks: Array<{ readonly query: string; readonly body: string }> = [];
+        const re = /@media\s+([^{]+)\{/g;
+        let match: RegExpExecArray | null;
+        while ((match = re.exec(css)) !== null) {
+          const query = match[1].trim();
+          let depth = 1;
+          let i = re.lastIndex;
+          while (i < css.length && depth > 0) {
+            if (css[i] === '{') depth += 1;
+            else if (css[i] === '}') depth -= 1;
+            i += 1;
+          }
+          blocks.push({ query, body: css.slice(re.lastIndex, i - 1) });
+        }
+        return blocks;
+      };
+
+      const evalSingleQuery = (q: string, w: number, h: number): boolean =>
+        q.split(/\band\b/i).every((clause) => {
+          const m = clause.trim().match(/^\(\s*(min|max)-(width|height)\s*:\s*(\d+)px\s*\)$/i);
+          if (!m) return false;
+          const bound = Number(m[3]);
+          const val = m[2].toLowerCase() === 'width' ? w : h;
+          return m[1].toLowerCase() === 'min' ? val >= bound : val <= bound;
+        });
+      const mediaMatches = (query: string, w: number, h: number): boolean =>
+        query.split(',').some((branch) => evalSingleQuery(branch.trim(), w, h));
+
+      const layoutMedia = extractMediaBlocks(layoutCss);
+      const holdHidingBlocks = layoutMedia.filter((b) =>
+        b.body.includes('.panel-right.v3-hold-view') && b.body.includes('visibility: hidden') && !b.body.includes('.phase-combat-live .panel-right.v3-hold-view')
+      );
+      expect(holdHidingBlocks.length).toBe(1);
+      // Disjointness at all 3 required breakpoints: portrait hides HoldView at 390x844 ONLY, NEVER at 844x390 or 1366x768!
+      expect(mediaMatches(holdHidingBlocks[0].query, 390, 844)).toBe(true);
+      expect(mediaMatches(holdHidingBlocks[0].query, 844, 390)).toBe(false);
+      expect(mediaMatches(holdHidingBlocks[0].query, 1366, 768)).toBe(false);
+      // Mobile portrait extends >=44px touch targets to HoldView inspector buttons and Settlement segmented radios
+      expect(holdHidingBlocks[0].body).toContain('.panel-right.v3-hold-view .v3-item-details-toggle');
+      expect(holdHidingBlocks[0].body).toContain('[data-testid="btn-toggle-recommend-hint"]');
+      expect(holdHidingBlocks[0].body).toContain('.inspector-actions .btn');
+      expect(holdHidingBlocks[0].body).toContain('.v2-shell .v2-settle-seg-opt');
+
+      // Mobile landscape block matches 844x390, restores HoldView visible side-by-side, and caps phase-wreck-hero height
+      const landscapeBlocks = layoutMedia.filter(
+        (b) => mediaMatches(b.query, 844, 390) && b.body.includes('.panel-right.v3-hold-view')
+      );
+      expect(landscapeBlocks.length).toBe(1);
+      expect(mediaMatches(landscapeBlocks[0].query, 390, 844)).toBe(false);
+      expect(mediaMatches(landscapeBlocks[0].query, 1366, 768)).toBe(false);
+      expect(landscapeBlocks[0].body).toContain('opacity: 1');
+      expect(landscapeBlocks[0].body).toContain('visibility: visible');
+      expect(landscapeBlocks[0].body).toContain('pointer-events: auto');
+      expect(landscapeBlocks[0].body).toContain('.phase-wreck-hero .panel-left.v3-context-dock');
+      expect(landscapeBlocks[0].body).toContain('max-height: 52%');
+
+      // D2: No duplicate base `.v2-shell .v3-threat-pill {` block in v3-layout.css, and S06 badge locks padding/cursor/min-height
+      const layoutThreatBaseMatches = layoutCss.match(/\.v2-shell\s+\.v3-threat-pill\s*\{/g) ?? [];
+      expect(layoutThreatBaseMatches.length).toBe(1);
+      const layoutThreatRule = layoutCss.match(/\.v2-shell\s+\.v3-threat-pill\s*\{([^}]*)\}/)!;
+      expect(layoutThreatRule).not.toBeNull();
+      expect(layoutThreatRule[1]).toContain('padding: 2px 7px');
+      expect(layoutThreatRule[1]).toContain('cursor: default');
+      expect(layoutThreatRule[1]).toContain('min-height: 0');
+
+      // D2: ZERO unscoped `.v3-threat-pill` rules in v3-endgame.css; all scoped under `.v3-threat-pills`
+      const unscopedEndgameThreat = endgameCss.match(/\.v2-shell\s+\.v3-threat-pill(?!s)/g) ?? [];
+      expect(unscopedEndgameThreat).toEqual([]);
+      const scopedEndgameThreat = endgameCss.match(/\.v2-shell\s+\.v3-threat-pills\s+\.v3-threat-pill/g) ?? [];
+      expect(scopedEndgameThreat.length).toBe(4);
+      const endgameThreatBase = endgameCss.match(/\.v2-shell\s+\.v3-threat-pills\s+\.v3-threat-pill\s*\{([^}]*)\}/)!;
+      expect(endgameThreatBase).not.toBeNull();
+      expect(endgameThreatBase[1]).toContain('display: block');
+      expect(endgameThreatBase[1]).toContain('white-space: normal');
+
+      // D5 CSS: top-level `.v2-settle-seg-opt` has `position: relative` and `:focus-within` outline
+      const segOptBase = layoutCss.match(/^\.v2-shell\s+\.v2-settle-seg-opt\s*\{([^}]*)\}/m)!;
+      expect(segOptBase).not.toBeNull();
+      expect(segOptBase[1]).toContain('position: relative');
+      expect(layoutCss).toContain('.v2-shell .v2-settle-seg-opt:focus-within');
+    });
   });
 
   // =========================================================================
@@ -1636,6 +1730,149 @@ describe('M1B Stage, Feel, Feedback & Telemetry Suite (S03, S06, S07, S08, S09, 
         expect(tb.textContent).not.toMatch(/余\s*\d+\s*HP/);
         expect(tb.textContent).not.toMatch(/\(\d+轮\)/);
       }
+    });
+
+    it('classifies defeat-to-defeat duration and HP-first victory trends accurately, and resets CargoGridV2 item details drawer on node transition and staging replacement (D10)', async () => {
+      // D10a: Trend classifier sign invariants
+      expect(
+        classifyV2CombatDeltaTrend({
+          beforeOutcome: 'defeat',
+          afterOutcome: 'defeat',
+          beforeHp: 0,
+          afterHp: 0,
+          beforeRounds: 5,
+          afterRounds: 2,
+          maxHp: 30,
+        })
+      ).toBe('down');
+      expect(
+        classifyV2CombatDeltaTrend({
+          beforeOutcome: 'defeat',
+          afterOutcome: 'defeat',
+          beforeHp: 0,
+          afterHp: 0,
+          beforeRounds: 2,
+          afterRounds: 5,
+          maxHp: 30,
+        })
+      ).toBe('up');
+      expect(
+        classifyV2CombatDeltaTrend({
+          beforeOutcome: 'defeat',
+          afterOutcome: 'defeat',
+          beforeHp: 0,
+          afterHp: 0,
+          beforeRounds: 3,
+          afterRounds: 3,
+          maxHp: 30,
+        })
+      ).toBe('neutral');
+      expect(
+        classifyV2CombatDeltaTrend({
+          beforeOutcome: 'victory',
+          afterOutcome: 'victory',
+          beforeHp: 28,
+          afterHp: 19,
+          beforeRounds: 4,
+          afterRounds: 3,
+          maxHp: 30,
+        })
+      ).toBe('down');
+      expect(
+        classifyV2CombatDeltaTrend({
+          beforeOutcome: 'victory',
+          afterOutcome: 'victory',
+          beforeHp: 22,
+          afterHp: 22,
+          beforeRounds: 4,
+          afterRounds: 3,
+          maxHp: 30,
+        })
+      ).toBe('up');
+      expect(
+        classifyV2CombatDeltaTrend({
+          beforeOutcome: 'victory',
+          afterOutcome: 'victory',
+          beforeHp: 22,
+          afterHp: 22,
+          beforeRounds: 3,
+          afterRounds: 4,
+          maxHp: 30,
+        })
+      ).toBe('down');
+
+      // D10b: Staging replacement resets open item-details-drawer before auto-selecting next item
+      const run = createV2TutorialRun('run_d10_staging');
+      const st1 = createV2EquipmentInstance({
+        instanceId: 'st_d10_1',
+        kind: 'battery',
+        quality: 'common',
+        origin: 'loot',
+        acquiredDepth: 1,
+        location: 'staging',
+      });
+      const st2 = createV2EquipmentInstance({
+        instanceId: 'st_d10_2',
+        kind: 'shield',
+        quality: 'common',
+        origin: 'loot',
+        acquiredDepth: 1,
+        location: 'staging',
+      });
+      let bay1: V2CargoBayState = {
+        ...run.bay,
+        staging: [{ item: st1, rotation: 0 }],
+      };
+      const mount = dom.document.createElement('div');
+      dom.document.body.appendChild(mount);
+      const grid = new CargoGridV2Component(mount as unknown as HTMLElement, {
+        onBayChange: (nextBay) => {
+          bay1 = nextBay;
+        },
+        getTacticalDelta: (item, zone) =>
+          computeV2PlacementTacticalDelta({
+            run,
+            bay: bay1,
+            startingHp: run.hp,
+            maxHp: run.maxHp,
+            targetPolicy: run.targetPolicy,
+            item,
+            zone,
+          }),
+      });
+      grid.render(bay1, true);
+      vi.advanceTimersByTime(50);
+      mount.querySelector('[data-testid="btn-toggle-item-details"]')!.click();
+      expect(mount.querySelector('[data-testid="item-details-drawer"]')).not.toBeNull();
+
+      bay1 = { ...run.bay, staging: [{ item: st2, rotation: 0 }] };
+      grid.render(bay1, true);
+      vi.advanceTimersByTime(50);
+      expect(mount.querySelector('[data-testid="item-details-drawer"]')).toBeNull();
+      grid.destroy();
+
+      // D10c: MAP -> ENCOUNTER node transition collapses CargoGridV2 details drawer cleanly
+      const tut = createV2TutorialRun('run_d10_node_jump');
+      const mapRun: V2RunState = {
+        ...tut,
+        phase: 'MAP',
+        bay: { ...tut.bay, staging: [] },
+      };
+      const { mountEl } = mountController({ ...createFreshV2SaveData(), activeRun: mapRun });
+      await flushMicrotasks();
+
+      const board = mountEl.querySelector('.v2-cargo-board')!;
+      const laserPt = cellCenter(4, 4, 0, 0);
+      board.dispatchEvent(new MiniEvent('pointerdown', { bubbles: true, clientX: laserPt.x, clientY: laserPt.y }));
+      dom.window.dispatchEvent(new MiniEvent('pointerup', { bubbles: true, clientX: laserPt.x, clientY: laserPt.y }));
+      vi.advanceTimersByTime(50);
+      mountEl.querySelector('[data-testid="btn-toggle-item-details"]')!.click();
+      expect(mountEl.querySelector('[data-testid="item-details-drawer"]')).not.toBeNull();
+
+      mountEl.querySelector('[data-testid="btn-jump-node"]')!.click();
+      vi.advanceTimersByTime(150);
+      expect(mountEl.querySelector('[data-testid="combat-screen"]')).not.toBeNull();
+      expect(mountEl.querySelector('[data-testid="item-details-drawer"]')).toBeNull();
     });
   });
 
@@ -1864,6 +2101,123 @@ describe('M1B Stage, Feel, Feedback & Telemetry Suite (S03, S06, S07, S08, S09, 
 
       grid.destroy();
     });
+
+    it('fires ZERO simulateV2Combat calls when grabbing an unselected item and dragging immediately, recovers delta on cancel, and ignores R mid-drag (D8, D9)', () => {
+      clearTacticalDeltaCache();
+      const simSpy = vi.spyOn(combatV2, 'simulateV2Combat');
+      const run = createV2TutorialRun('run_d8_d9');
+
+      const laserItem = createV2EquipmentInstance({
+        instanceId: 'd8_laser',
+        kind: 'laser',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const batteryItem = createV2EquipmentInstance({
+        instanceId: 'd8_batt',
+        kind: 'battery',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const repairL3 = createV2EquipmentInstance({
+        instanceId: 'd8_repair_l3',
+        kind: 'repair',
+        quality: 'common',
+        origin: 'loot',
+        acquiredDepth: 1,
+        location: 'staging',
+      });
+
+      let bay: V2CargoBayState = {
+        shipId: 'cannon_skiff',
+        placed: [
+          { item: laserItem, x: 0, y: 0, rotation: 0 },
+          { item: batteryItem, x: 2, y: 0, rotation: 0 },
+        ],
+        staging: [{ item: repairL3, rotation: 0 }],
+        discardedThisArrange: [],
+      };
+
+      const mount = dom.document.createElement('div');
+      dom.document.body.appendChild(mount);
+      const grid = new CargoGridV2Component(mount as unknown as HTMLElement, {
+        onBayChange: (nextBay) => {
+          bay = nextBay;
+          grid.render(bay, true);
+        },
+        getTacticalDelta: (item, zone) =>
+          computeV2PlacementTacticalDelta({
+            run,
+            bay,
+            startingHp: 30,
+            maxHp: 30,
+            targetPolicy: 'weakest',
+            item,
+            zone,
+          }),
+      });
+      // Initial render auto-selects staging item `d8_repair_l3`; flush initial delta
+      grid.render(bay, true);
+      vi.advanceTimersByTime(200);
+
+      // D8: Grab UNSELECTED battery at (2,0) and immediately drag to (1,0) & (0,1) while holding across idle ticks
+      simSpy.mockClear();
+      const board = mount.querySelector('.v2-cargo-board')!;
+      const startPt = cellCenter(4, 4, 2, 0);
+      const hover1 = cellCenter(4, 4, 1, 0);
+      const hover2 = cellCenter(4, 4, 0, 1);
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 11, pointerType: 'mouse', clientX: startPt.x, clientY: startPt.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 11, pointerType: 'mouse', clientX: hover1.x, clientY: hover1.y })
+      );
+      vi.advanceTimersByTime(200);
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 11, pointerType: 'mouse', clientX: hover2.x, clientY: hover2.y })
+      );
+      vi.advanceTimersByTime(200);
+
+      expect(dom.document.querySelector('.v2-drag-ghost')).not.toBeNull();
+      expect(simSpy).toHaveBeenCalledTimes(0);
+
+      // Cancel drag via pointercancel -> rescheduled idle delta computes cleanly after drag ends
+      dom.window.dispatchEvent(new MiniEvent('pointercancel', { bubbles: true, pointerId: 11 }));
+      expect(dom.document.querySelector('.v2-drag-ghost')).toBeNull();
+      vi.advanceTimersByTime(150);
+      expect(mount.querySelector('[data-testid="btn-toggle-item-details"]')).not.toBeNull();
+
+      // D9: Pressing R mid-drag on staging L3 item must NOT mutate bay rotation or desync .v2-drag-ghost
+      const l3Chip = mount.querySelector('[data-staging-id="d8_repair_l3"]')!;
+      l3Chip.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 12, pointerType: 'mouse', clientX: 20, clientY: 320 })
+      );
+      const midBoard = cellCenter(4, 4, 2, 2);
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 12, pointerType: 'mouse', clientX: midBoard.x, clientY: midBoard.y })
+      );
+      const ghostBefore = dom.document.querySelector('.v2-drag-ghost')!;
+      expect(ghostBefore.getAttribute('data-rotation')).toBe('0');
+
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'r' }));
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 12, pointerType: 'mouse', clientX: midBoard.x + 5, clientY: midBoard.y })
+      );
+      expect(bay.staging[0].rotation).toBe(0);
+      expect(dom.document.querySelector('.v2-drag-ghost')!.getAttribute('data-rotation')).toBe('0');
+
+      // Cancel drag, select staging chip normally, and confirm R still rotates when not dragging
+      dom.window.dispatchEvent(new MiniEvent('pointercancel', { bubbles: true, pointerId: 12 }));
+      mount.querySelector('[data-staging-id="d8_repair_l3"]')!.click();
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'r' }));
+      expect(bay.staging[0].rotation).toBe(1);
+
+      grid.destroy();
+    });
   });
 
   // =========================================================================
@@ -1970,6 +2324,70 @@ describe('M1B Stage, Feel, Feedback & Telemetry Suite (S03, S06, S07, S08, S09, 
       expect(sfxCalls).toContain('wreckCut');
       expect(sfxCalls).toContain('clampPop');
       expect(redMount.querySelector('[data-testid="wreck-spot-armory"]')!.getAttribute('data-compartment-state')).toBe('cutaway');
+      expect(dom.document.querySelectorAll('[data-testid="wreck-flip-ghost"]').length).toBe(0);
+    });
+
+    it('recovers Wreck UI cleanly when opening & closing Help modal mid-600ms cut (D3) and forces layout flush before FLIP target transform (D4)', async () => {
+      // D3: Modal open mid-600ms-cut must cancel cut AND re-sync Wreck overlay, panel, and Phaser compartments
+      const { mountEl } = mountController({
+        ...createFreshV2SaveData(),
+        activeRun: createWreckTestRun(),
+      });
+      await flushMicrotasks();
+
+      mountEl.querySelector('[data-testid="wreck-cut-armory"]')!.click();
+      vi.advanceTimersByTime(200);
+      expect(mountEl.querySelector('[data-testid="wreck-cut-armory"]')!.disabled).toBe(true);
+      expect(mountEl.querySelector('[data-testid="btn-wreck-extract"]')!.disabled).toBe(true);
+      expect(mountEl.querySelector('[data-testid="wreck-spot-armory"]')!.getAttribute('data-compartment-state')).toBe('cutting');
+      expect(mountEl.querySelector('[data-testid="btn-skip-wreck-cut"]')).not.toBeNull();
+
+      // Open Help modal mid-cut, then close it
+      mountEl.querySelector('#v2-hud-help')!.click();
+      mountEl.querySelector('.modal-close-btn')!.click();
+
+      expect(mountEl.querySelector('[data-testid="wreck-cut-armory"]')!.disabled).toBe(false);
+      expect(mountEl.querySelector('[data-testid="wreck-cut-cargo"]')!.disabled).toBe(false);
+      expect(mountEl.querySelector('[data-testid="btn-wreck-extract"]')!.disabled).toBe(false);
+      expect(mountEl.querySelector('[data-testid="btn-skip-wreck-cut"]')).toBeNull();
+      expect(mountEl.querySelector('[data-testid="wreck-spot-armory"]')!.getAttribute('data-compartment-state')).toBe('closed');
+
+      // D4: Subsequent cut completes AND launchWreckFlipGhosts forces getBoundingClientRect() AFTER appendChild and BEFORE .is-flying / target transform
+      const origGetRect = MiniElement.prototype.getBoundingClientRect;
+      const ghostFlushSnapshots: Array<{
+        readonly inBody: boolean;
+        readonly hasFlyingClass: boolean;
+        readonly transform: string;
+      }> = [];
+      const rectSpy = vi.spyOn(MiniElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: MiniElement) {
+        if (this.getAttribute('data-testid') === 'wreck-flip-ghost') {
+          ghostFlushSnapshots.push({
+            inBody: this.parentNode === dom.document.body,
+            hasFlyingClass: this.classList.contains('is-flying'),
+            transform: this.style.transform,
+          });
+        }
+        return origGetRect.call(this);
+      });
+
+      mountEl.querySelector('[data-testid="wreck-cut-armory"]')!.click();
+      vi.advanceTimersByTime(610);
+
+      expect(ghostFlushSnapshots.length).toBeGreaterThanOrEqual(1);
+      expect(ghostFlushSnapshots[0]).toEqual({
+        inBody: true,
+        hasFlyingClass: false,
+        transform: 'translate(0px, 0px) scale(1)',
+      });
+      const spawnedGhost = dom.document.querySelector('[data-testid="wreck-flip-ghost"]')!;
+      expect(spawnedGhost.classList.contains('is-flying')).toBe(true);
+      expect(spawnedGhost.style.opacity).toBe('0.25');
+
+      rectSpy.mockRestore();
+
+      // Advance past 260ms FLIP -> cut commits cleanly to cutaway!
+      vi.advanceTimersByTime(270);
+      expect(mountEl.querySelector('[data-testid="wreck-spot-armory"]')!.getAttribute('data-compartment-state')).toBe('cutaway');
       expect(dom.document.querySelectorAll('[data-testid="wreck-flip-ghost"]').length).toBe(0);
     });
   });
@@ -2209,6 +2627,97 @@ describe('M1B Stage, Feel, Feedback & Telemetry Suite (S03, S06, S07, S08, S09, 
       expect(dockArg.items!.length).toBeGreaterThan(0);
       expect(dockArg.items!.some((it) => it.definitionId === 'cargo.ancient_navigator')).toBe(true);
     });
+
+    it('invokes onChangeDisposition and SFX strictly ONCE on 3-option segmented radio <label> activation, preserves keyboard radio change, and guards rollup keys/resize (D5 + Polish Guards)', async () => {
+      const sfxCalls: SfxKind[] = [];
+      vi.spyOn(soundEngine, 'play').mockImplementation((k: SfxKind) => {
+        sfxCalls.push(k);
+      });
+
+      const baseProfile = createFreshV2SaveData().profile;
+      const profile3 = {
+        ...baseProfile,
+        buildings: { ...baseProfile.buildings, research_lab: true },
+      };
+      const run3 = createSettlementTestRun({ withLootEquipment: true, withRelic: true, withExtraCargo: true });
+      const sum3 = calculateV2Settlement(run3, profile3, {});
+
+      // Standalone SettlementView: simulate full HTML <label> activation (label click + bubbled input click + input change)
+      const host = dom.document.createElement('div');
+      const calls: Array<{ readonly id: string; readonly disp: string }> = [];
+      renderSettlementView(
+        host as unknown as HTMLElement,
+        {
+          run: run3,
+          profile: profile3,
+          summary: sum3,
+          nextGoal: { title: 't', detail: 'd', actionKind: 'facilities', ready: true },
+          readOnly: false,
+        },
+        {
+          onChangeDisposition: (id, disp) => {
+            calls.push({ id, disp });
+          },
+          onShowcaseRetry: () => {},
+          onShowcaseToBase: () => {},
+          onConfirmSettlement: () => {},
+        }
+      );
+
+      const dismantleLabel = host.querySelector('[data-testid="btn-dismantle-loot_eq_1"]')!;
+      const dismantleInput = dismantleLabel.querySelector('input[data-settle-radio]')!;
+      const labelClickEv = new MiniEvent('click', { bubbles: true });
+      dismantleLabel.dispatchEvent(labelClickEv);
+      // Even if a browser/harness still dispatches bubbled input click & change after label click, callback fires strictly ONCE!
+      dismantleInput.dispatchEvent(new MiniEvent('click', { bubbles: true }));
+      dismantleInput.checked = true;
+      dismantleInput.dispatchEvent(new MiniEvent('change', { bubbles: true }));
+
+      expect(labelClickEv.defaultPrevented).toBe(true);
+      expect(calls).toEqual([{ id: 'loot_eq_1', disp: 'dismantle' }]);
+
+      // Keyboard arrow-key navigation on a sibling radio still triggers change cleanly once
+      const storeLabel = host.querySelector('[data-testid="btn-store-loot_eq_1"]')!;
+      const storeInput = storeLabel.querySelector('input[data-settle-radio]')!;
+      storeInput.checked = true;
+      storeInput.dispatchEvent(new MiniEvent('change', { bubbles: true }));
+      expect(calls).toEqual([
+        { id: 'loot_eq_1', disp: 'dismantle' },
+        { id: 'loot_eq_1', disp: 'store' },
+      ]);
+
+      // Live V2AppController: 3-option label activation fires clampPop strictly ONCE; modal open guards rollup key; breakpoint resize skips active rollup cleanly
+      const { mountEl } = mountController({
+        ...createFreshV2SaveData(),
+        profile: profile3,
+        activeRun: run3,
+      });
+      await flushMicrotasks();
+
+      // Polish Guard 1: Space key while modal is open does NOT get swallowed by handleSettlementRollupKey
+      mountEl.querySelector('#v2-hud-help')!.click();
+      const modalSpaceEv = new MiniEvent('keydown', { key: ' ' });
+      dom.window.dispatchEvent(modalSpaceEv);
+      expect(modalSpaceEv.defaultPrevented).toBe(false);
+      mountEl.querySelector('.modal-close-btn')!.click();
+
+      // Polish Guard 2: Breakpoint-flip resize mid-rollup cleanly skips active rollup with 0 trailing creditTick sounds
+      sfxCalls.length = 0;
+      dom.window.innerWidth = 390;
+      dom.window.dispatchEvent(new MiniEvent('resize'));
+      vi.advanceTimersByTime(1500);
+      expect(sfxCalls.filter((s) => s === 'creditTick').length).toBe(0);
+
+      // Live 3-option label click + simulated bubbled input click + change plays clampPop strictly ONCE
+      sfxCalls.length = 0;
+      const liveLabel = mountEl.querySelector('[data-testid="btn-dismantle-loot_eq_1"]')!;
+      const liveInput = liveLabel.querySelector('input[data-settle-radio]')!;
+      liveLabel.dispatchEvent(new MiniEvent('click', { bubbles: true }));
+      liveInput.dispatchEvent(new MiniEvent('click', { bubbles: true }));
+      liveInput.checked = true;
+      liveInput.dispatchEvent(new MiniEvent('change', { bubbles: true }));
+      expect(sfxCalls.filter((s) => s === 'clampPop').length).toBe(1);
+    });
   });
 
   // =========================================================================
@@ -2324,6 +2833,11 @@ describe('M1B Stage, Feel, Feedback & Telemetry Suite (S03, S06, S07, S08, S09, 
       expect(parsed.summary.totalClicks).toBeGreaterThanOrEqual(3);
       expect(parsed.summary.pureConfirmClicks).toBeGreaterThanOrEqual(1);
       expect(parsed.summary.postSettlementReplayStarts).toBe(1);
+      expect(parsed.summary.replayedAfterSettlement).toBe(true);
+      expect(typeof parsed.summary.timeToFirstMeaningfulActionMs).toBe('number');
+      expect(typeof parsed.summary.dragSuccesses).toBe('number');
+      expect(typeof parsed.summary.avgPureConfirmPerNode).toBe('number');
+      expect(parsed.summary.pureConfirmClicksByNode).toBeDefined();
       expect(dom.window.localStorage.getItem(PLAYTEST_LOG_STORAGE_KEY)).not.toBeNull();
 
       // Launch expedition helper check (ensures launchV2Expedition stays pure & clean)
@@ -2339,6 +2853,96 @@ describe('M1B Stage, Feel, Feedback & Telemetry Suite (S03, S06, S07, S08, S09, 
         seed: 12345,
       });
       expect(launchCheck.ok).toBe(true);
+    });
+
+    it('computes timeToFirstMeaningfulActionMs, pureConfirmClicksByNode, avgPureConfirmPerNode, dragSuccesses, replayedAfterSettlement, records click nodeId, and ignores inert screen-container clicks (D6, D7)', async () => {
+      // D6: Pure PlaytestTelemetryLogger & computePlaytestSummary edge cases
+      const storage = new MiniStorage();
+      let fakeNow = 1000;
+      const logger = new PlaytestTelemetryLogger({
+        enabled: true,
+        storage: storage as unknown as Storage,
+        now: () => fakeNow,
+      });
+
+      // Before any meaningful action: timeToFirstMeaningfulActionMs is null, replayedAfterSettlement is false, avgPureConfirmPerNode is 0
+      logger.recordPhase('title');
+      fakeNow += 500; // 1500
+      logger.recordClick('enter-station', 'btn-enter-station'); // pure confirm, nodeId: null
+      const preActionSummary = computePlaytestSummary(logger.getEvents());
+      expect(preActionSummary.timeToFirstMeaningfulActionMs).toBeNull();
+      expect(preActionSummary.pureConfirmClicks).toBe(1);
+      expect(preActionSummary.pureConfirmClicksByNode).toEqual({});
+      expect(preActionSummary.avgPureConfirmPerNode).toBe(0);
+      expect(preActionSummary.dragSuccesses).toBe(0);
+      expect(preActionSummary.replayedAfterSettlement).toBe(false);
+
+      // Enter node L1A, record meaningful action at t=3200 (+2200ms from t=1000), then pure confirm on L1A, then enter L2A with 0 pure confirms
+      fakeNow = 2000;
+      logger.recordPhase('MAP', { runId: 'r_d6', nodeId: 'L1A' });
+      fakeNow = 3200;
+      logger.recordClick('jump-node', 'btn-jump-node'); // meaningful click on L1A
+      fakeNow = 3500;
+      logger.recordPhase('ENCOUNTER:COMBAT_PRE', { runId: 'r_d6', nodeId: 'L1A' });
+      fakeNow = 4000;
+      logger.recordClick('start-combat', 'btn-start-combat'); // pure confirm on L1A
+      fakeNow = 5000;
+      logger.recordPhase('ENCOUNTER:WRECK', { runId: 'r_d6', nodeId: 'L2A' });
+      logger.recordDragAttempt({ zone: 'grid', itemDefId: 'equipment.battery.common', success: true });
+      logger.recordDragAttempt({
+        zone: 'staging',
+        itemDefId: 'mission.sealed_reactor',
+        success: false,
+        reason: 'overlap',
+      });
+      logger.recordReplayStart(1, 'expedition');
+
+      const clickEvents = logger.getEvents().filter((e) => e.type === 'click');
+      expect(clickEvents[0].nodeId).toBeNull();
+      expect(clickEvents[1].nodeId).toBe('L1A');
+      expect(clickEvents[2].nodeId).toBe('L1A');
+
+      const summary = computePlaytestSummary(logger.getEvents());
+      expect(summary.timeToFirstMeaningfulActionMs).toBe(2200);
+      expect(summary.pureConfirmClicks).toBe(2);
+      expect(summary.pureConfirmClicksByNode).toEqual({ L1A: 1 });
+      expect(summary.avgPureConfirmPerNode).toBe(0.5); // 1 pure-confirm across 2 distinct nodes (L1A, L2A)
+      expect(summary.dragAttempts).toBe(2);
+      expect(summary.dragSuccesses).toBe(1);
+      expect(summary.dragFailures).toBe(1);
+      expect(summary.replayedAfterSettlement).toBe(true);
+
+      // D7: Live V2AppController capture-phase click handler ignores inert screen containers ([data-testid="map-screen"], .panel-header)
+      teardownMiniDom();
+      dom = installMiniDom('?playtest=1');
+      dom.window.sessionStorage.setItem('starline_v2_title_entered', '1');
+      const tut = createV2TutorialRun('run_d7_inert');
+      const mapRun: V2RunState = {
+        ...tut,
+        phase: 'MAP',
+        bay: { ...tut.bay, staging: [] },
+      };
+      const { mountEl, controller } = mountController({ ...createFreshV2SaveData(), activeRun: mapRun });
+      await flushMicrotasks();
+
+      const beforeCount = JSON.parse(controller.getPlaytestTelemetryExportJson()!).summary.totalClicks;
+      const mapScreen = mountEl.querySelector('[data-testid="map-screen"]')!;
+      const panelHeader = mapScreen.querySelector('.panel-header')!;
+      mapScreen.click();
+      panelHeader.click();
+
+      const afterInert = JSON.parse(controller.getPlaytestTelemetryExportJson()!);
+      expect(afterInert.summary.totalClicks).toBe(beforeCount);
+      expect(
+        afterInert.events.some(
+          (e: { type: string; action?: string }) => e.type === 'click' && e.action === 'map-screen'
+        )
+      ).toBe(false);
+
+      // Clicking a real interactive button DOES increment totalClicks by 1
+      mountEl.querySelector('[data-testid="btn-jump-node"]')!.click();
+      const afterInteractive = JSON.parse(controller.getPlaytestTelemetryExportJson()!);
+      expect(afterInteractive.summary.totalClicks).toBe(beforeCount + 1);
     });
   });
 });
