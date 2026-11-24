@@ -49,8 +49,8 @@ import {
 import {
   abortActiveV2Contract,
   countEscapePodsInBay,
-  getAvailableContractBoard,
   performSurveyAtCurrentNode,
+  pickRecommendedV2ContractId,
 } from '../domain/contracts';
 import {
   craftV2EquipmentWithParts,
@@ -746,19 +746,7 @@ export class V2AppController {
   }
 
   private pickRecommendedContractId(p: V2ProfileState): string {
-    const board = getAvailableContractBoard(p);
-    const nextStd = board.standardTemplates.find(
-      (c) => !p.completedContractIds.includes(c.templateId)
-    );
-    if (nextStd) return nextStd.templateId;
-    if (board.deepUnlocked) {
-      const nextDeep = board.deepTemplates.find(
-        (c) => !p.completedContractIds.includes(c.templateId)
-      );
-      if (nextDeep) return nextDeep.templateId;
-      return board.deepTemplates[0]?.templateId ?? 'transport_std';
-    }
-    return board.standardTemplates[0]?.templateId ?? 'transport_std';
+    return pickRecommendedV2ContractId(p);
   }
 
   private buildShellDom(): void {

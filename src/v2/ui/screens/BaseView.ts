@@ -103,7 +103,7 @@ export function renderBaseHeroView(
     campaignObjective: camp,
   } = props;
   const relicSum = getV2RelicSummary(p);
-  const recTpl = V2_CONTRACT_TEMPLATES[recommendedContractId] ?? V2_CONTRACT_TEMPLATES.transport_std;
+  const recTpl = V2_CONTRACT_TEMPLATES[recommendedContractId] ?? V2_CONTRACT_TEMPLATES.rescue_std;
 
   const isTutorialFocus = !p.tutorialCompleted;
   const dockingHtml = renderDockingNoticeHtml(activeDockingNotice);
@@ -128,7 +128,9 @@ export function renderBaseHeroView(
         recTpl.rewardCredits > 0 ? `+${recTpl.rewardCredits}¤` : '自由打捞'
       }</div>
         <div class="v2-cmd-title">${recTpl.name}</div>
-        <div class="v2-cmd-desc">${recTpl.gameplayNote}</div>
+        <div class="v2-cmd-desc">${recTpl.gameplayNote}${
+        recTpl.spaceNote ? ` · ${recTpl.spaceNote}` : ''
+      }</div>
         <div class="v2-cmd-actions">
           <button type="button" class="btn btn-primary btn-launch-hero" id="v2-base-launch-rec" data-testid="btn-start-recommended" ${
             readOnly ? 'disabled' : ''
