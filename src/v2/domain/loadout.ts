@@ -21,6 +21,7 @@ import { isFinalCampaignMissionUnlocked, shouldTriggerRelicPitySignal } from './
 import { createV2ContractInstance, generateContractBonusObjective } from './contracts';
 import { getEffectiveShipLoadoutBudget, getEffectiveShipMaxHp } from './dismantle';
 import {
+  areV2PlacedItemsAdjacent,
   createEmptyV2Bay,
   findFirstLegalV2Placement,
   validateV2Placement,
@@ -90,9 +91,51 @@ export function parseV3CustomSeedInput(raw: string | undefined | null): number |
   return Math.min(0xffffffff, num) >>> 0;
 }
 
+function findFirstLegalPlacementAvoiding(
+  bay: V2CargoBayState,
+  defId: string,
+  avoidTargets: readonly V2PlacedItem[]
+): { readonly x: number; readonly y: number; readonly rotation: V2Rotation } | null {
+  if (avoidTargets.length === 0) {
+    return findFirstLegalV2Placement(bay, defId);
+  }
+  const ship = V2_SHIPS[bay.shipId];
+  const probeItem = createV2EquipmentInstance({
+    instanceId: '__probe_avoid__',
+    kind: 'battery',
+    quality: 'common',
+    origin: 'loan',
+    acquiredDepth: 0,
+    location: 'bay',
+  });
+  const rotations: readonly V2Rotation[] = [0, 1, 2, 3];
+  for (const rotation of rotations) {
+    for (let y = 0; y < ship.rows; y += 1) {
+      for (let x = 0; x < ship.cols; x += 1) {
+        if (!validateV2Placement(bay, defId, x, y, rotation).valid) continue;
+        const candidate: V2PlacedItem = {
+          item: { ...probeItem, definitionId: defId },
+          x,
+          y,
+          rotation,
+        };
+        const touchesAvoid = avoidTargets.some((target) =>
+          areV2PlacedItemsAdjacent(candidate, target)
+        );
+        if (!touchesAvoid) {
+          return { x, y, rotation };
+        }
+      }
+    }
+  }
+  return findFirstLegalV2Placement(bay, defId);
+}
+
 /**
  * Builds a guaranteed-free, budget-legal starter loadout using unlocked common blueprints
  * so even a bankrupt player (0 credits, 0 warehouse items) can ALWAYS launch (§6.1 & AC12).
+ * S07: Places default laser & battery non-adjacently (leaving an open link pocket) so players
+ * discover adjacency synergies organically by dragging rather than starting pre-linked.
  */
 export function buildFreeFallbackPrepareSlots(
   shipId: V2ShipId,
@@ -106,16 +149,23 @@ export function buildFreeFallbackPrepareSlots(
   const out: V2PrepareSlotEntry[] = [];
 
   // Default balanced free combo within ship budget:
-  // cannon_skiff (6): laser(2) + battery(1) + shield(2) = 5 (or 2x laser + battery = 5)
+  // cannon_skiff (6): laser(2) + battery(1) + shield(2) = 5
   // shield_cruiser (6): laser(2) + battery(1) + shield(2) = 5
   // heavy_freighter (5): laser(2) + battery(1) + shield(2) = 5
+  // stargate_cruiser (8): laser(2) + battery(1) + shield(2) = 5
   const desired: readonly V2EquipmentKind[] = ['laser', 'battery', 'shield'];
   let idx = 1;
   for (const kind of desired) {
     if (!blueprints.includes(kind)) continue;
     const def = V2_EQUIPMENT_DEFS[`equipment.${kind}.common`];
     if (!def || usedBudget + def.budgetCost > budget) continue;
-    const spot = findFirstLegalV2Placement(tempBay, def.defId);
+    const placedLasers = tempBay.placed.filter((p) =>
+      p.item.definitionId.startsWith('equipment.laser.')
+    );
+    const spot =
+      kind === 'battery' || kind === 'shield'
+        ? findFirstLegalPlacementAvoiding(tempBay, def.defId, placedLasers)
+        : findFirstLegalV2Placement(tempBay, def.defId);
     if (!spot) continue;
     const dummy = createV2EquipmentInstance({
       instanceId: `prep_free_${idx}`,

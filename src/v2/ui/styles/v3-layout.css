@@ -1073,7 +1073,8 @@ body.reduced-motion .v2-shell.phase-voyage.is-hold-zoomed .scene-card.v3-ship-st
 }
 
 /* 1-Row Compact Telemetry Bar replacing 4 tall .stat-chip blocks in V2 CargoGrid */
-.v2-shell .cargo-stats-strip {
+.v2-shell .cargo-stats-strip,
+.v2-shell .v2-stats-strip {
   display: block;
 }
 
@@ -1129,4 +1130,106 @@ body.reduced-motion .v2-shell.phase-voyage.is-hold-zoomed .scene-card.v3-ship-st
   font-size: 10.5px;
   font-weight: 700;
   color: #62d6df;
+}
+
+/* ==========================================================================
+   S07 — Tactile Drag Ghost Mask, Live Hover Energy Links & Spring-Back
+   Strictly scoped to .v2-shell / .v2-drag-ghost (V1 styles 100% isolated).
+   ========================================================================== */
+
+.v2-shell .synergy-overlay-svg .energy-link-line {
+  stroke: var(--link-color, var(--accent-energy, #62d6df));
+  stroke-width: 4.5;
+  stroke-linecap: round;
+  stroke-dasharray: 10 6;
+  animation: energyFlow 700ms linear infinite;
+}
+
+.v2-shell .synergy-overlay-svg .energy-link-line.is-preview {
+  stroke-width: 5;
+  filter: drop-shadow(0 0 6px var(--link-color, #62d6df));
+  animation-duration: 520ms;
+}
+
+.v2-shell .v2-placed-item.synergy-preview-partner .placed-subcell {
+  border-color: rgba(98, 214, 223, 0.88);
+  box-shadow: inset 0 0 12px rgba(98, 214, 223, 0.34), 0 0 10px rgba(98, 214, 223, 0.36);
+}
+
+.v2-drag-ghost {
+  position: fixed;
+  z-index: 950;
+  pointer-events: none;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  overflow: visible;
+  will-change: left, top, transform, opacity;
+}
+
+.v2-drag-ghost.is-touch-lifted {
+  filter: drop-shadow(0 14px 18px rgba(4, 10, 20, 0.65));
+}
+
+.v2-drag-ghost .drag-ghost-subcell {
+  position: absolute;
+  box-sizing: border-box;
+  border-radius: 6px;
+  background: rgba(24, 46, 72, 0.72);
+  border: 1.5px solid rgba(126, 178, 224, 0.72);
+  box-shadow: 0 4px 12px rgba(5, 10, 20, 0.45);
+}
+
+.v2-drag-ghost.is-valid .drag-ghost-subcell {
+  background: rgba(34, 88, 66, 0.54);
+  border-color: rgba(122, 229, 130, 0.88);
+}
+
+.v2-drag-ghost.is-invalid .drag-ghost-subcell {
+  background: rgba(108, 34, 34, 0.56);
+  border-color: rgba(242, 117, 100, 0.92);
+}
+
+.v2-drag-ghost .drag-ghost-sprite-wrap {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.v2-drag-ghost.is-spring-back {
+  transition:
+    left 220ms cubic-bezier(0.22, 1.32, 0.36, 1),
+    top 220ms cubic-bezier(0.22, 1.32, 0.36, 1),
+    opacity 220ms ease-out,
+    transform 220ms ease-out;
+}
+
+@keyframes v3InvalidShake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-5px);
+  }
+  55% {
+    transform: translateX(5px);
+  }
+  80% {
+    transform: translateX(-3px);
+  }
+}
+
+.v2-shell .v2-placed-item.invalid-shake,
+.v2-shell .v2-staging-card.invalid-shake {
+  animation: v3InvalidShake 220ms ease-out;
+}
+
+body.reduced-motion .v2-shell .synergy-overlay-svg .energy-link-line,
+body.reduced-motion .v2-shell .synergy-overlay-svg .energy-link-line.is-preview,
+body.reduced-motion .v2-drag-ghost.is-spring-back,
+body.reduced-motion .v2-shell .v2-placed-item.invalid-shake,
+body.reduced-motion .v2-shell .v2-staging-card.invalid-shake {
+  animation: none !important;
+  transition: none !important;
 }
