@@ -16,7 +16,6 @@ import { getV3GadgetDef } from '../data/gadgets';
 import { getV3SectorDef } from '../data/sectors';
 import { calculateV2BuildStats } from './buildStatsV2';
 import {
-  canPerformSurveyAtCurrentNode,
   computeV2JumpFuelCost,
   freezeRunBonusObjectiveForSettlement,
   grantContractObjectiveItemsForNode,
@@ -26,8 +25,12 @@ import {
   buildFallbackEventStateFromLegacyNode,
   computeNextStipendSpent,
   evaluateV2EventOption,
+  hasActiveEngineerOffer,
+  isAtTerminalLayer,
   maybeCreateEngineerSwapOffer,
+  resolvePostEncounterPhase,
   resolveV2EventOption,
+  shouldAutoSkipArrange,
 } from './events';
 import {
   getEffectiveMerchantEquipmentPrice,
@@ -48,7 +51,15 @@ import type {
   V2WreckState,
 } from './types';
 
-export { evaluateV2EventOption, maybeCreateEngineerSwapOffer, resolveV2EventOption };
+export {
+  evaluateV2EventOption,
+  hasActiveEngineerOffer,
+  isAtTerminalLayer,
+  maybeCreateEngineerSwapOffer,
+  resolvePostEncounterPhase,
+  resolveV2EventOption,
+  shouldAutoSkipArrange,
+};
 
 export interface V2ActionOutcome {
   readonly ok: boolean;
@@ -68,12 +79,6 @@ export function getReachableNextNodeIds(run: V2RunState): readonly string[] {
   }
   const cur = run.graph.nodes[run.currentNodeId];
   return cur ? cur.nextNodeIds : [];
-}
-
-export function isAtTerminalLayer(run: V2RunState): boolean {
-  if (!run.currentNodeId) return false;
-  const cur = run.graph.nodes[run.currentNodeId];
-  return Boolean(cur && cur.layer >= run.graph.maxLayers);
 }
 
 
@@ -199,6 +204,13 @@ export function selectV2MapNode(
     activeEvent = node.eventState ?? buildFallbackEventStateFromLegacyNode(run, node);
   }
 
+  const nextDiscardedCount =
+    (run.discardedCountThisRun ?? 0) + run.bay.discardedThisArrange.length;
+  const cleanBay =
+    run.bay.discardedThisArrange.length > 0
+      ? { ...run.bay, discardedThisArrange: [] }
+      : run.bay;
+
   return {
     ok: true,
     run: {
@@ -208,6 +220,8 @@ export function selectV2MapNode(
       navigatorFreeJumpUsed: run.navigatorFreeJumpUsed || fuelCalc.navigatorDiscountApplied,
       currentNodeId: targetNodeId,
       visitedNodeIds: [...run.visitedNodeIds, targetNodeId],
+      bay: cleanBay,
+      discardedCountThisRun: nextDiscardedCount,
       phase: nextPhase,
       activeCombat: null,
       overchargeCellActive: false,
@@ -624,19 +638,7 @@ export function extractV2Wreck(run: V2RunState): V2ActionOutcome {
   };
 
   nextRun = grantContractObjectiveItemsForNode(nextRun, updatedNode);
-
-  const shouldArrange =
-    nextRun.bay.staging.length > 0 || canPerformSurveyAtCurrentNode(nextRun).canSurvey;
-  if (shouldArrange) {
-    nextRun = { ...nextRun, phase: 'ARRANGE' };
-  } else if (isAtTerminalLayer(nextRun)) {
-    nextRun = freezeRunBonusObjectiveForSettlement(
-      { ...nextRun, phase: 'SETTLEMENT', settlementReason: 'safe_return' },
-      'safe_return'
-    );
-  } else {
-    nextRun = { ...nextRun, phase: 'MAP' };
-  }
+  nextRun = resolvePostEncounterPhase(nextRun);
 
   return { ok: true, run: nextRun };
 }
@@ -717,7 +719,6 @@ export function resolveV2WreckChoice(
     fuel: nextFuel,
     hp: nextHp,
     bay: nextBay,
-    phase: 'ARRANGE',
     claimedEventIds: [...run.claimedEventIds, claimKey],
     recentEquipmentKinds: nextRecentKinds,
     graph: {
@@ -730,6 +731,7 @@ export function resolveV2WreckChoice(
     nextRun = maybeCreateEngineerSwapOffer(nextRun, acquiredEq, unlockedFamilies);
   }
   nextRun = maybeGrantContractObjectiveItems(nextRun, updatedNode);
+  nextRun = resolvePostEncounterPhase(nextRun);
 
   return { ok: true, run: nextRun };
 }
@@ -794,7 +796,6 @@ export function resolveV2AnomalyChoice(
     fuel: nextFuel,
     hp: nextHp,
     bay: nextBay,
-    phase: 'ARRANGE',
     claimedEventIds: [...run.claimedEventIds, claimKey],
     graph: {
       ...run.graph,
@@ -803,6 +804,7 @@ export function resolveV2AnomalyChoice(
   };
 
   nextRun = maybeGrantContractObjectiveItems(nextRun, updatedNode);
+  nextRun = resolvePostEncounterPhase(nextRun);
   return { ok: true, run: nextRun };
 }
 
@@ -856,7 +858,6 @@ export function resolveV2DistressChoice(
     fuel: nextFuel,
     hp: nextHp,
     bay: nextBay,
-    phase: 'ARRANGE',
     claimedEventIds: [...run.claimedEventIds, claimKey],
     graph: {
       ...run.graph,
@@ -865,6 +866,7 @@ export function resolveV2DistressChoice(
   };
 
   nextRun = maybeGrantContractObjectiveItems(nextRun, updatedNode);
+  nextRun = resolvePostEncounterPhase(nextRun);
   return { ok: true, run: nextRun };
 }
 
@@ -1118,12 +1120,20 @@ export function sellV2ItemToMerchant(
     return { ok: false, run, error: '该物品无可售价值' };
   }
 
+  const nextEngineerOffer =
+    run.activeEngineerOffer &&
+    !run.activeEngineerOffer.used &&
+    run.activeEngineerOffer.targetInstanceId === instanceId
+      ? { ...run.activeEngineerOffer, used: true }
+      : run.activeEngineerOffer;
+
   return {
     ok: true,
     run: {
       ...run,
       wallet: run.wallet + payout,
       bay: removeV2ItemById(run.bay, instanceId),
+      activeEngineerOffer: nextEngineerOffer,
       transactionIds: [...run.transactionIds, transactionId],
     },
   };
@@ -1140,13 +1150,13 @@ export function finishV2MerchantVisit(run: V2RunState): V2ActionOutcome {
   const updatedNode: V2MapNode = { ...node, resolved: true };
   let nextRun: V2RunState = {
     ...run,
-    phase: 'ARRANGE',
     graph: {
       ...run.graph,
       nodes: { ...run.graph.nodes, [node.nodeId]: updatedNode },
     },
   };
   nextRun = maybeGrantContractObjectiveItems(nextRun, updatedNode);
+  nextRun = resolvePostEncounterPhase(nextRun);
   return { ok: true, run: nextRun };
 }
 
@@ -1291,7 +1301,6 @@ export function pickV2CombatReward(
     ...run,
     hp: nextHp,
     bay: nextBay,
-    phase: 'ARRANGE',
     activeWreck: nextActiveWreck,
     wrecksDissectedThisRun: nextWrecksDissected,
     pendingReward: { ...run.pendingReward, chosen: choice },
@@ -1306,6 +1315,7 @@ export function pickV2CombatReward(
     nextRun = maybeCreateEngineerSwapOffer(nextRun, acquiredEq, unlockedFamilies);
   }
   nextRun = maybeGrantContractObjectiveItems(nextRun, updatedNode);
+  nextRun = resolvePostEncounterPhase(nextRun);
   return { ok: true, run: nextRun };
 }
 

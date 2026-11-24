@@ -2458,24 +2458,33 @@ export class V2AppController {
           if (!this.canMutate()) return;
           const latest = this.getCurrentRun();
           if (!latest || latest.phase !== 'MAP') return;
-          const res = selectV2MapNode(latest, nid, {
-            bonusBossCharges: this.getBonusBossCharges(),
-            profile: this.save.profile,
-          });
-          if (!res.ok) {
-            this.showToast(res.error ?? '无法跃迁至该节点');
-            return;
+          const executeJump = () => {
+            const cur = this.getCurrentRun();
+            if (!cur || cur.phase !== 'MAP') return;
+            const res = selectV2MapNode(cur, nid, {
+              bonusBossCharges: this.getBonusBossCharges(),
+              profile: this.save.profile,
+            });
+            if (!res.ok) {
+              this.showToast(res.error ?? '无法跃迁至该节点');
+              return;
+            }
+            this.selectedMapNodeId = null;
+            this.selectedWreckHotspot = 'armory';
+            const enteredNode = res.run.graph.nodes[nid];
+            const bossId = enteredNode?.combat?.bossId ?? enteredNode?.bossId;
+            if (bossId === 'boss_anvil') this.triggerCrewComm('act1_boss_intro');
+            else if (bossId === 'boss_dreadnought') this.triggerCrewComm('act2_boss_intro');
+            else if (bossId === 'boss_leviathan') this.triggerCrewComm('act3_boss_intro');
+            this.setCurrentRun(res.run);
+            soundEngine.play('warpJump');
+            this.syncAll();
+          };
+          if (latest.bay.discardedThisArrange.length > 0) {
+            openV2DiscardConfirmModal(this.modalHostEl, latest.bay.discardedThisArrange, executeJump);
+          } else {
+            executeJump();
           }
-          this.selectedMapNodeId = null;
-          this.selectedWreckHotspot = 'armory';
-          const enteredNode = res.run.graph.nodes[nid];
-          const bossId = enteredNode?.combat?.bossId ?? enteredNode?.bossId;
-          if (bossId === 'boss_anvil') this.triggerCrewComm('act1_boss_intro');
-          else if (bossId === 'boss_dreadnought') this.triggerCrewComm('act2_boss_intro');
-          else if (bossId === 'boss_leviathan') this.triggerCrewComm('act3_boss_intro');
-          this.setCurrentRun(res.run);
-          soundEngine.play('warpJump');
-          this.syncAll();
         },
         onUseGadget: (instanceId) => {
           const latest = this.getCurrentRun();
@@ -2486,12 +2495,25 @@ export class V2AppController {
           if (!this.canMutate()) return;
           const latest = this.getCurrentRun();
           if (!latest || latest.phase !== 'MAP') return;
-          const res = initiateV2SafeReturnFromMap(latest);
-          if (!res.ok) return this.showToast(res.error ?? '当前无法返航');
-          this.settlementDispositions = {};
-          this.setCurrentRun(res.run);
-          soundEngine.play('returnDock');
-          this.syncAll();
+          const executeSafeReturn = () => {
+            const cur = this.getCurrentRun();
+            if (!cur || cur.phase !== 'MAP') return;
+            const res = initiateV2SafeReturnFromMap(cur);
+            if (!res.ok) return this.showToast(res.error ?? '当前无法返航');
+            this.settlementDispositions = {};
+            this.setCurrentRun(res.run);
+            soundEngine.play('returnDock');
+            this.syncAll();
+          };
+          if (latest.bay.discardedThisArrange.length > 0) {
+            openV2DiscardConfirmModal(
+              this.modalHostEl,
+              latest.bay.discardedThisArrange,
+              executeSafeReturn
+            );
+          } else {
+            executeSafeReturn();
+          }
         },
         onAbortContract: () => {
           if (!this.canMutate()) return;
@@ -2510,9 +2532,28 @@ export class V2AppController {
       }
     );
 
-    this.mountV2CargoBay(run.bay, false, {
+    this.mountV2CargoBay(run.bay, !readOnly, {
       title: `当前船舱 · ${V2_SHIPS[run.shipId].name}`,
-      statusBadge: '航行中',
+      statusBadge: readOnly ? '只读观察' : '航行中 · 可调整',
+      getTacticalDelta: (item, zone) => {
+        const activeRun = this.getCurrentRun() ?? run;
+        return computeV2PlacementTacticalDelta({
+          run: activeRun,
+          bay: activeRun.bay,
+          startingHp: activeRun.hp,
+          maxHp: activeRun.maxHp,
+          targetPolicy: activeRun.targetPolicy,
+          item,
+          zone,
+          stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
+        });
+      },
+      onChange: (nextBay) => {
+        if (!this.canMutate()) return;
+        const curRun = this.getCurrentRun();
+        if (!curRun || curRun.phase !== 'MAP') return;
+        this.syncMapLocal({ ...curRun, bay: nextBay });
+      },
     });
   }
 
@@ -2677,6 +2718,9 @@ export class V2AppController {
           if (!this.canMutate()) return;
           const res = resolveV2AnomalyChoice(run, choice);
           if (!res.ok) return this.showToast(res.error ?? '操作失败');
+          if (res.run.phase === 'SETTLEMENT') {
+            this.settlementDispositions = {};
+          }
           this.setCurrentRun(res.run);
           soundEngine.play('place');
           this.syncAll();
@@ -2685,6 +2729,9 @@ export class V2AppController {
           if (!this.canMutate()) return;
           const res = resolveV2DistressChoice(run, choice);
           if (!res.ok) return this.showToast(res.error ?? '操作失败');
+          if (res.run.phase === 'SETTLEMENT') {
+            this.settlementDispositions = {};
+          }
           this.setCurrentRun(res.run);
           soundEngine.play('place');
           this.syncAll();
@@ -2768,8 +2815,13 @@ export class V2AppController {
         onEngineerSwap: (kind) => this.handleEngineerSwap(run, kind),
         onFinish: () => {
           if (!this.canMutate()) return;
-          const res = finishV2MerchantVisit(run);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'SHOP') return;
+          const res = finishV2MerchantVisit(latest);
           if (!res.ok) return this.showToast(res.error ?? '无法离开商人节点');
+          if (res.run.phase === 'SETTLEMENT') {
+            this.settlementDispositions = {};
+          }
           this.setCurrentRun(res.run);
           soundEngine.play('click');
           this.syncAll();
@@ -2814,8 +2866,13 @@ export class V2AppController {
       {
         onPickReward: (choice) => {
           if (!this.canMutate()) return;
-          const res = pickV2CombatReward(run, choice, this.save.profile.unlockedFamilies);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'REWARD') return;
+          const res = pickV2CombatReward(latest, choice, this.save.profile.unlockedFamilies);
           if (!res.ok) return this.showToast(res.error ?? '领取奖励失败');
+          if (res.run.phase === 'SETTLEMENT') {
+            this.settlementDispositions = {};
+          }
           this.setCurrentRun(res.run);
           soundEngine.play('place');
           this.syncAll();
@@ -3134,6 +3191,19 @@ export class V2AppController {
       this.renderBanners();
     }
     this.renderArrangePhase(nextRun);
+  }
+
+  private syncMapLocal(nextRun: V2RunState): void {
+    const prevStorageError = this.storageError;
+    this.setCurrentRun(nextRun);
+    const visualSpec = deriveV2ShipVisualSpec(nextRun.bay);
+    this.phaserHost?.updateV2ShipVisualSpec(visualSpec);
+    this.updateStageMountStrip(visualSpec);
+    this.renderTopHud();
+    if (this.storageError !== prevStorageError) {
+      this.renderBanners();
+    }
+    this.renderMapPhase(nextRun);
   }
 
   private syncShopLocal(nextRun: V2RunState): void {

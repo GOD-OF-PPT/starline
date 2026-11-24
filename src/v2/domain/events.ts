@@ -38,6 +38,86 @@ export interface V2EventResolveResult {
 }
 
 /**
+ * Returns true when the current node is at the final layer or has no outgoing edges.
+ * Returns false when `currentNodeId === null` (e.g., pre-L1 tutorial ARRANGE).
+ */
+export function isAtTerminalLayer(run: V2RunState): boolean {
+  if (!run.currentNodeId) return false;
+  const cur = run.graph.nodes[run.currentNodeId];
+  if (!cur) return false;
+  return cur.layer >= run.graph.maxLayers || cur.nextNodeIds.length === 0;
+}
+
+/**
+ * Returns true when an unused Engineer Swap offer is active on the run.
+ */
+export function hasActiveEngineerOffer(run: V2RunState): boolean {
+  return Boolean(run.activeEngineerOffer && !run.activeEngineerOffer.used);
+}
+
+/**
+ * Pure S02 auto-skip predicate: skip empty ARRANGE ONLY when staging is empty,
+ * no unused Engineer Swap offer is pending, and no Survey scan can be performed here.
+ */
+export function shouldAutoSkipArrange(run: V2RunState): boolean {
+  return (
+    run.bay.staging.length === 0 &&
+    !hasActiveEngineerOffer(run) &&
+    !canPerformSurveyAtCurrentNode(run).canSurvey
+  );
+}
+
+/**
+ * Unified post-encounter phase transition (S02):
+ * MUST be invoked AFTER marking node `resolved: true`, restoring ambush stashed items,
+ * creating any Engineer Swap offer, and granting contract objective items!
+ */
+export function resolvePostEncounterPhase(run: V2RunState): V2RunState {
+  if (run.hp <= 0) {
+    return freezeRunBonusObjectiveForSettlement(
+      {
+        ...run,
+        hp: 0,
+        phase: 'SETTLEMENT',
+        settlementReason: 'defeat',
+      },
+      'defeat'
+    );
+  }
+
+  if (!shouldAutoSkipArrange(run)) {
+    return { ...run, phase: 'ARRANGE' };
+  }
+
+  const nextDiscardedCount =
+    (run.discardedCountThisRun ?? 0) + run.bay.discardedThisArrange.length;
+  const cleanBay =
+    run.bay.discardedThisArrange.length > 0
+      ? { ...run.bay, discardedThisArrange: [] }
+      : run.bay;
+
+  if (isAtTerminalLayer(run)) {
+    return freezeRunBonusObjectiveForSettlement(
+      {
+        ...run,
+        bay: cleanBay,
+        discardedCountThisRun: nextDiscardedCount,
+        phase: 'SETTLEMENT',
+        settlementReason: 'safe_return',
+      },
+      'safe_return'
+    );
+  }
+
+  return {
+    ...run,
+    bay: cleanBay,
+    discardedCountThisRun: nextDiscardedCount,
+    phase: 'MAP',
+  };
+}
+
+/**
  * Computes updated `stipendSpentCredits` when spending `spent` credits from `run.wallet`
  * using stipend-first accounting (clamped to `[0, startingStipendCredits]`).
  */
@@ -346,21 +426,7 @@ export function resolveV2EventOption(
     nextRun = maybeCreateEngineerSwapOffer(nextRun, eq, unlockedFamilies);
   }
   nextRun = grantContractObjectiveItemsForNode(nextRun, updatedNode);
-
-  const shouldArrange =
-    nextRun.bay.staging.length > 0 || canPerformSurveyAtCurrentNode(nextRun).canSurvey;
-  const isTerminal = node.layer >= nextRun.graph.maxLayers;
-
-  if (shouldArrange) {
-    nextRun = { ...nextRun, phase: 'ARRANGE' };
-  } else if (isTerminal) {
-    nextRun = freezeRunBonusObjectiveForSettlement(
-      { ...nextRun, phase: 'SETTLEMENT', settlementReason: 'safe_return' },
-      'safe_return'
-    );
-  } else {
-    nextRun = { ...nextRun, phase: 'MAP' };
-  }
+  nextRun = resolvePostEncounterPhase(nextRun);
 
   return {
     ok: true,
