@@ -249,7 +249,8 @@ export class SoundEngine {
   }
 
   setMuted(muted: boolean): void {
-    this.setMute(muted, muted, muted);
+    this.ambientMuteExplicit = false;
+    this.setMute(muted, muted);
   }
 
   isSfxMuted(): boolean {
@@ -332,7 +333,12 @@ export class SoundEngine {
   }
 
   play(kind: SfxKind): void {
-    if (this.sfxMuted) return;
+    if (this.sfxMuted) {
+      if (!this.bgmMuted || !this.ambientMuted) {
+        this.unlock();
+      }
+      return;
+    }
     this.unlock();
     const ctx = this.ctx;
     if (!ctx || ctx.state !== 'running') return;
@@ -644,6 +650,15 @@ export class SoundEngine {
       for (let i = 0; i < length; i++) {
         data[i] *= norm;
       }
+      // Smoothly cross-fade the final 5% of the 2s loop toward data[0] to prevent any audible seam click
+      const fadeSamples = Math.max(16, Math.floor(length * 0.05));
+      const fadeStart = length - fadeSamples;
+      const startSample = data[0];
+      for (let i = 0; i < fadeSamples; i++) {
+        const t = (i + 1) / fadeSamples;
+        const idx = fadeStart + i;
+        data[idx] = data[idx] * (1 - t) + startSample * t;
+      }
       this.ambientBuffer = buffer;
       this.ambientBufferCtx = ctx;
       return buffer;
@@ -803,42 +818,46 @@ export class SoundEngine {
     const stepMs =
       this.currentTrack === 'base' ? 1400 : this.currentTrack === 'boss' ? 420 : 750;
     this.bgmTimer = window.setInterval(() => {
-      if (this.bgmMuted || !this.ctx || this.ctx.state !== 'running') return;
-      this.ensureGraph(this.ctx);
-      const dest = this.bgmBus;
-      if (!dest) return;
+      try {
+        if (this.bgmMuted || !this.ctx || this.ctx.state !== 'running') return;
+        this.ensureGraph(this.ctx);
+        const dest = this.bgmBus;
+        if (!dest) return;
 
-      const stepIdx = this.bgmStep;
-      this.bgmStep += 1;
-      const now = this.ctx.currentTime;
+        const stepIdx = this.bgmStep;
+        this.bgmStep += 1;
+        const now = this.ctx.currentTime;
 
-      // BGM notes stay strictly unrandomized (pitch = 1.0) so harmony never drifts
-      if (this.currentTrack === 'boss') {
-        const bassFreq = bossBass[stepIdx % bossBass.length];
-        const arpFreq = bossArp[stepIdx % bossArp.length];
-        this.tone(this.ctx, dest, 'sawtooth', bassFreq, bassFreq * 0.985, 0.34, 0.024, now);
-        if (stepIdx % 4 === 0) {
-          this.tone(this.ctx, dest, 'sine', bassFreq * 0.5, bassFreq * 0.5, 0.38, 0.022, now);
+        // BGM notes stay strictly unrandomized (pitch = 1.0) so harmony never drifts
+        if (this.currentTrack === 'boss') {
+          const bassFreq = bossBass[stepIdx % bossBass.length];
+          const arpFreq = bossArp[stepIdx % bossArp.length];
+          this.tone(this.ctx, dest, 'sawtooth', bassFreq, bassFreq * 0.985, 0.34, 0.024, now);
+          if (stepIdx % 4 === 0) {
+            this.tone(this.ctx, dest, 'sine', bassFreq * 0.5, bassFreq * 0.5, 0.38, 0.022, now);
+          }
+          this.tone(this.ctx, dest, 'triangle', arpFreq, arpFreq, 0.22, 0.015, now + 0.16);
+          return;
         }
-        this.tone(this.ctx, dest, 'triangle', arpFreq, arpFreq, 0.22, 0.015, now + 0.16);
-        return;
-      }
 
-      const notes = this.currentTrack === 'base' ? baseNotes : expNotes;
-      const freq = notes[stepIdx % notes.length];
-      const dur = this.currentTrack === 'base' ? 1.3 : 0.65;
-      this.tone(
-        this.ctx,
-        dest,
-        this.currentTrack === 'base' ? 'sine' : 'triangle',
-        freq,
-        freq,
-        dur,
-        this.currentTrack === 'base' ? 0.024 : 0.028,
-        now
-      );
-      if (this.currentTrack === 'base' && this.bgmStep % 2 === 0) {
-        this.tone(this.ctx, dest, 'sine', freq * 2, freq * 2, 0.9, 0.012, now + 0.15);
+        const notes = this.currentTrack === 'base' ? baseNotes : expNotes;
+        const freq = notes[stepIdx % notes.length];
+        const dur = this.currentTrack === 'base' ? 1.3 : 0.65;
+        this.tone(
+          this.ctx,
+          dest,
+          this.currentTrack === 'base' ? 'sine' : 'triangle',
+          freq,
+          freq,
+          dur,
+          this.currentTrack === 'base' ? 0.024 : 0.028,
+          now
+        );
+        if (this.currentTrack === 'base' && this.bgmStep % 2 === 0) {
+          this.tone(this.ctx, dest, 'sine', freq * 2, freq * 2, 0.9, 0.012, now + 0.15);
+        }
+      } catch {
+        // Never allow degraded/closing WebAudio context errors during BGM ticks to break gameplay
       }
     }, stepMs);
   }

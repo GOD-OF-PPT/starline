@@ -187,24 +187,32 @@ function clampVal(v: number, lo: number, hi: number): number {
 export function solveArticulatedCranePose(input: ArticulatedCraneInput): ArticulatedCranePose {
   const s = Math.max(0.25, Number.isFinite(input.scale) ? input.scale : 1);
   const mode = input.mode ?? 'idle';
-  const turntable: CranePoint2D = { x: input.base.x, y: input.base.y };
+  const baseX = Number.isFinite(input.base.x) ? input.base.x : 0;
+  const baseY = Number.isFinite(input.base.y) ? input.base.y : 0;
+  const targetX = Number.isFinite(input.target.x) ? input.target.x : baseX;
+  const targetY = Number.isFinite(input.target.y) ? input.target.y : baseY;
+  const turntable: CranePoint2D = { x: baseX, y: baseY };
 
   const mastHeight = (mode === 'stowed' ? 20 : 26) * s;
-  const slewLean = clampVal((input.target.x - turntable.x) * 0.08, -8 * s, 8 * s);
+  const slewLean = clampVal((targetX - turntable.x) * 0.08, -8 * s, 8 * s);
   const shoulder: CranePoint2D = {
     x: turntable.x + slewLean,
     y: turntable.y - mastHeight,
   };
 
-  const cableLength = Math.max(10 * s, input.cableDrop ?? (mode === 'stowed' ? 12 * s : 26 * s));
+  const defaultDrop = mode === 'stowed' ? 12 * s : 26 * s;
+  const cableLength = Math.max(
+    10 * s,
+    Number.isFinite(input.cableDrop) ? (input.cableDrop as number) : defaultDrop
+  );
   const trolley: CranePoint2D = {
-    x: input.target.x,
-    y: input.target.y - cableLength,
+    x: targetX,
+    y: targetY - cableLength,
   };
   const swayX = Number.isFinite(input.swayX) ? (input.swayX ?? 0) : 0;
   const hook: CranePoint2D = {
     x: trolley.x + swayX,
-    y: input.target.y,
+    y: targetY,
   };
 
   let lowerBoomLength = 152 * s;
@@ -221,17 +229,23 @@ export function solveArticulatedCranePose(input: ArticulatedCraneInput): Articul
     // Telescope upper jib smoothly for distant targets (e.g., relic display dome) while keeping elbow arch
     upperJibLength = dist - lowerBoomLength + 20 * s;
   } else if (dist < minReach) {
-    // Retract stowed/close-range boom proportionally so elbow folds neatly without NaN
+    // Retract stowed/close-range boom & equalize links so |lower - upper| === 0 <= dist < lower + upper ALWAYS holds
     const ratio = Math.max(0.28, (dist + 24 * s) / (lowerBoomLength + upperJibLength));
-    lowerBoomLength *= ratio;
-    upperJibLength *= ratio;
+    const retracted = Math.max(lowerBoomLength * ratio, dist * 0.6 + 8 * s);
+    lowerBoomLength = retracted;
+    upperJibLength = retracted;
+  } else if (dy > 0 && lowerBoomLength * lowerBoomLength - upperJibLength * upperJibLength > dist * dist) {
+    // Prevent obtuse elbow overhang below trolley when reaching steeply downward at mid-short distance
+    upperJibLength = lowerBoomLength;
   }
 
   let elbow: CranePoint2D;
   if (dist < 1e-4) {
+    const ux = -0.4;
+    const uy = -Math.sqrt(1 - ux * ux);
     elbow = {
-      x: shoulder.x - lowerBoomLength * 0.4,
-      y: shoulder.y - lowerBoomLength * 0.9,
+      x: shoulder.x + lowerBoomLength * ux,
+      y: shoulder.y + lowerBoomLength * uy,
     };
   } else {
     const a = lowerBoomLength;
@@ -626,6 +640,7 @@ export class BaseScene extends Phaser.Scene {
     }
 
     if (this.dockingPlayback) {
+      const pb = this.dockingPlayback;
       this.dockingElapsedMs += Math.min(elapsedMs, 500);
       const p = Math.min(1, this.dockingElapsedMs / this.dockingDurationMs);
       // Stage-gated crane servo audio during active crane unload (1–2 triggers max per docking, 0 idle/post-skip)
@@ -635,14 +650,13 @@ export class BaseScene extends Phaser.Scene {
       } else if (
         p >= 0.74 &&
         this.dockingServoStage < 2 &&
-        (this.dockingPlayback.crateCount >= 3 || this.dockingPlayback.hasKeptRelic)
+        (pb.crateCount >= 3 || pb.hasKeptRelic)
       ) {
         this.dockingServoStage = 2;
         this.triggerCraneServo();
       }
-      this.dockingPlayback.onProgress?.(p);
-      if (p >= 1) {
-        const pb = this.dockingPlayback;
+      pb.onProgress?.(p);
+      if (p >= 1 && this.dockingPlayback === pb) {
         this.dockingPlayback = null;
         this.dockingServoStage = 2;
         if (this.arrivalShipSprite) this.arrivalShipSprite.setVisible(false);
