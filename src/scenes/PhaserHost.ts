@@ -406,6 +406,12 @@ export class PhaserHost {
     if (this.pendingV2Stage) {
       this.pendingV2Stage = { ...this.pendingV2Stage, settings };
     }
+    if (this.pendingBase) {
+      this.pendingBase = { ...this.pendingBase, settings };
+    }
+    if (this.pendingV2Base) {
+      this.pendingV2Base = { ...this.pendingV2Base, settings };
+    }
     if (this.lowQuality !== settings.lowQuality) {
       this.lowQuality = settings.lowQuality;
       this.scheduleResize();
@@ -415,6 +421,9 @@ export class PhaserHost {
     }
     if (this.currentMode === 'v2_stage') {
       this.v2CombatScene.updateSettings(settings);
+    }
+    if (this.currentMode === 'base') {
+      this.baseScene.updateSettings(settings);
     }
   }
 
