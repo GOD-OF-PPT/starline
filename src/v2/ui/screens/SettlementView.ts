@@ -472,7 +472,11 @@ export class SettlementPhaseView
       this.pendingClickDedup.disp === disp &&
       this.pendingClickDedup.suppressChange
     ) {
+      const wasUncommitted = this.pendingClickDedup.uncommitted;
       this.pendingClickDedup.suppressChange = false;
+      if (wasUncommitted) {
+        this.syncRadiogroupChecked(iid, this.selectedByItem.get(iid));
+      }
       return;
     }
 

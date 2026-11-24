@@ -770,6 +770,9 @@ export class V2AppController {
     document.body.classList.toggle('reduced-motion', this.save.settings.reducedMotion);
     document.body.classList.toggle('low-quality', this.save.settings.lowQuality);
     this.phaserHost?.updateCombatSettings(this.save.settings);
+    if (this.save.settings.reducedMotion) {
+      this.phaserHost?.skipBaseReturnDocking();
+    }
   }
 
   private computeNextBaseGoal(p: V2ProfileState, projectedCredits = p.credits): NextBaseGoal {
@@ -1477,6 +1480,8 @@ export class V2AppController {
         this.save = latest.data;
       }
       this.staticStageTracker.reset();
+      this.activeDockingNotice = null;
+      this.phaserHost?.skipBaseReturnDocking();
       this.tabGuard.takeOver();
       this.isReadOnlyTab = !this.tabGuard.canWrite();
       this.phaserHost?.setCombatPaused(this.isReadOnlyTab);
