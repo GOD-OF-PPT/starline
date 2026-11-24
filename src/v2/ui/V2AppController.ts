@@ -2,7 +2,7 @@ import { getItemImageUrl } from '../../assets/itemArt';
 import { soundEngine } from '../../audio/soundEngine';
 import { createRandomSeed } from '../../domain/rng';
 import { MultiTabGuard } from '../../domain/tabLock';
-import type { V2BaseDioramaState } from '../../scenes/BaseScene';
+import type { ReturnDockingCargoItem, V2BaseDioramaState } from '../../scenes/BaseScene';
 import { PhaserHost } from '../../scenes/PhaserHost';
 import { hasOpenModal, registerModalBackgroundRoot } from '../../ui/Modals';
 import { CAMPAIGN_CHAPTERS, type CampaignCommTrigger } from '../data/campaign';
@@ -156,7 +156,11 @@ import {
   type V2WreckSpotId,
   type V3HullTuningTrack,
 } from '../domain/types';
-import { CargoGridV2Component, type CargoGridV2Callbacks } from './CargoGridV2';
+import {
+  CargoGridV2Component,
+  isHeavyPlacementItem,
+  type CargoGridV2Callbacks,
+} from './CargoGridV2';
 import { crewPortraitSvg, svgIcon } from './icons';
 import {
   buildV2InspectSnapshot,
@@ -187,7 +191,10 @@ import {
   type V2ReturnDockingNotice,
   type V2StaticStageMode,
 } from './screens/screenTypes';
-import { renderSettlementView } from './screens/SettlementView';
+import {
+  SettlementBillRollupController,
+  renderSettlementView,
+} from './screens/SettlementView';
 import { renderShopView } from './screens/ShopView';
 import { renderTitleView } from './screens/TitleView';
 import {
@@ -283,6 +290,8 @@ export class V2AppController {
   private activeCombatPlaybackKey: string | null = null;
   private readonly staticStageTracker = new V2StaticStageSyncTracker();
   private readonly preCombatAutoEngage: PreCombatAutoEngageController;
+  private readonly settlementRollup = new SettlementBillRollupController();
+  private settledRollupRunId: string | null = null;
   private unsubscribeModalOpen: (() => void) | null = null;
   private liveCombatRound = 0;
   private liveCombatPlayerHp = 30;
@@ -521,6 +530,7 @@ export class V2AppController {
     this.unsubscribeModalOpen?.();
     this.unsubscribeModalOpen = null;
     this.cancelInFlightWreckCut();
+    this.cancelSettlementRollup();
     this.preCombatAutoEngage.destroy();
     if (this.actionToastTimer !== null) {
       window.clearTimeout(this.actionToastTimer);
@@ -604,7 +614,7 @@ export class V2AppController {
       return false;
     }
     this.setCurrentRun(res.run);
-    soundEngine.play('click');
+    soundEngine.play('chargeUp');
     this.syncAll();
     return true;
   }
@@ -955,7 +965,7 @@ export class V2AppController {
       },
       {
         onEnterStation: () => {
-          soundEngine.play('click');
+          soundEngine.play('returnDock');
           this.titleEntered = true;
           this.writeTitleSession(true);
           this.syncAll();
@@ -2286,6 +2296,7 @@ export class V2AppController {
       this.cancelInFlightWreckCut();
     }
     if (!run) {
+      this.cancelSettlementRollup();
       if (this.prepareDraft) {
         this.renderPreparePanels();
       } else {
@@ -2299,6 +2310,9 @@ export class V2AppController {
 
     if (run.phase !== 'ENCOUNTER') {
       this.preCombatAutoEngage.reset();
+    }
+    if (run.phase !== 'SETTLEMENT') {
+      this.cancelSettlementRollup();
     }
 
     if (run.phase === 'MAP') {
@@ -2697,7 +2711,11 @@ export class V2AppController {
               rotation: spot.rotation,
             },
           ];
-          soundEngine.play('place');
+          soundEngine.play(
+            isHeavyPlacementItem({ definitionId: defId, category: 'equipment' })
+              ? 'placeHeavy'
+              : 'place'
+          );
           this.syncAll();
         },
         onAddOwned: (instId) => {
@@ -2723,7 +2741,7 @@ export class V2AppController {
               rotation: spot.rotation,
             },
           ];
-          soundEngine.play('place');
+          soundEngine.play(isHeavyPlacementItem(w) ? 'placeHeavy' : 'place');
           this.syncAll();
         },
         onSavePreset: (name) => {
@@ -2915,7 +2933,7 @@ export class V2AppController {
         },
         onSelectNode: (nid) => {
           this.selectedMapNodeId = nid;
-          soundEngine.play('click');
+          soundEngine.play('hoverValid');
           const latest = this.getCurrentRun();
           if (latest && latest.phase === 'MAP') {
             this.renderMapPhase(latest);
@@ -3073,7 +3091,7 @@ export class V2AppController {
             if (!latest || latest.phase !== 'ENCOUNTER' || latest.activeCombat) return;
             this.preCombatAutoEngage.pause('policy');
             this.setCurrentRun({ ...latest, targetPolicy: policy });
-            soundEngine.play('click');
+            soundEngine.play('tacticalOrder');
             this.syncAll();
           },
           onToggleLog: () => {
@@ -3255,7 +3273,7 @@ export class V2AppController {
           );
           if (!res.ok) return this.showToast(res.error ?? '购买失败');
           this.setCurrentRun(res.run);
-          soundEngine.play('place');
+          soundEngine.play('cashRegister');
           this.syncAll();
         },
         onBuyFuel: () => {
@@ -3263,7 +3281,7 @@ export class V2AppController {
           const res = buyV2MerchantFuel(run, `tx_fuel_${node.nodeId}`, guildRep);
           if (!res.ok) return this.showToast(res.error ?? '无法购买燃料');
           this.setCurrentRun(res.run);
-          soundEngine.play('click');
+          soundEngine.play('cashRegister');
           this.syncAll();
         },
         onBuyRepair: () => {
@@ -3271,7 +3289,7 @@ export class V2AppController {
           const res = buyV2MerchantRepair(run, `tx_repair_${node.nodeId}`, guildRep);
           if (!res.ok) return this.showToast(res.error ?? '无法购买维修');
           this.setCurrentRun(res.run);
-          soundEngine.play('click');
+          soundEngine.play('repairPulse');
           this.syncAll();
         },
         onSellLoot: (iid) => {
@@ -3279,7 +3297,7 @@ export class V2AppController {
           const res = sellV2ItemToMerchant(run, iid, `tx_sell_${node.nodeId}_${iid}`);
           if (!res.ok) return this.showToast(res.error ?? '出售失败');
           this.setCurrentRun(res.run);
-          soundEngine.play('click');
+          soundEngine.play('cashRegister');
           this.syncAll();
         },
         onEngineerSwap: (kind) => this.handleEngineerSwap(run, kind),
@@ -3299,7 +3317,7 @@ export class V2AppController {
               this.settlementDispositions = {};
             }
             this.setCurrentRun(res.run);
-            soundEngine.play('click');
+            soundEngine.play(res.run.phase === 'SETTLEMENT' ? 'returnDock' : 'warpJump');
             this.syncAll();
           };
           if (latest.bay.discardedThisArrange.length > 0 && preview.run.phase !== 'ARRANGE') {
@@ -3360,7 +3378,7 @@ export class V2AppController {
             this.settlementDispositions = {};
           }
           this.setCurrentRun(res.run);
-          soundEngine.play('place');
+          soundEngine.play(choice === 'repair' ? 'repairPulse' : 'rewardRare');
           this.syncAll();
         },
       }
@@ -3428,7 +3446,7 @@ export class V2AppController {
               this.settlementDispositions = {};
             }
             this.setCurrentRun(res.run);
-            soundEngine.play('click');
+            soundEngine.play(res.run.phase === 'SETTLEMENT' ? 'returnDock' : 'tacticalOrder');
             this.syncAll();
           };
           if (latest.bay.discardedThisArrange.length > 0) {
@@ -3470,6 +3488,48 @@ export class V2AppController {
     });
   }
 
+  private readonly handleSettlementRollupKey = (ev: KeyboardEvent): void => {
+    if (!this.settlementRollup.isActive()) return;
+    if (ev.key === ' ' || ev.key === 'Enter' || ev.key === 'Escape') {
+      ev.preventDefault();
+      this.settlementRollup.skip();
+      window.removeEventListener('keydown', this.handleSettlementRollupKey);
+    }
+  };
+
+  private cancelSettlementRollup(): void {
+    this.settlementRollup.cancel();
+    this.settledRollupRunId = null;
+    window.removeEventListener('keydown', this.handleSettlementRollupKey);
+  }
+
+  private buildDockingCargoItems(
+    summary: ReturnType<typeof calculateV2Settlement>
+  ): readonly ReturnDockingCargoItem[] {
+    const nonLoan = summary.lines.filter((l) => l.item.origin !== 'loan');
+    const pool = nonLoan.length > 0 ? nonLoan : summary.lines;
+    const priorityOf = (l: (typeof summary.lines)[number]): number => {
+      if (l.selectedDisposition === 'keep_relic' || l.relicId) return 0;
+      if (l.item.category === 'mission' || l.item.origin === 'mission') return 1;
+      return 2;
+    };
+    const sorted = [...pool].sort((a, b) => {
+      const pa = priorityOf(a);
+      const pb = priorityOf(b);
+      if (pa !== pb) return pa - pb;
+      return b.item.fixedValue - a.item.fixedValue;
+    });
+    return sorted.slice(0, 5).map((l) => ({
+      instanceId: l.item.instanceId,
+      definitionId: l.item.definitionId,
+      name: l.name,
+      artUrl: getItemImageUrl(l.item.definitionId),
+      isRelic: Boolean(l.relicId || l.selectedDisposition === 'keep_relic'),
+      isMission: l.item.category === 'mission' || l.item.origin === 'mission',
+      toDisplay: l.selectedDisposition === 'keep_relic',
+    }));
+  }
+
   private renderSettlementPhase(run: V2RunState): void {
     this.unmountActiveLeftPhaseView();
     const p = this.save.profile;
@@ -3485,17 +3545,31 @@ export class V2AppController {
       {
         onChangeDisposition: (iid, disp) => {
           if (!this.canMutate()) return;
+          this.settlementRollup.skip({ silentCashRegister: true });
+          window.removeEventListener('keydown', this.handleSettlementRollupKey);
           this.settlementDispositions[iid] = disp;
-          soundEngine.play('click');
+          soundEngine.play(
+            disp === 'dismantle'
+              ? 'clampPop'
+              : disp === 'keep_relic'
+              ? 'relicRestore'
+              : 'creditTick'
+          );
           this.renderTopHud();
           this.renderSettlementPhase(run);
         },
+        onSkipRollup: () => {
+          this.settlementRollup.skip();
+          window.removeEventListener('keydown', this.handleSettlementRollupKey);
+        },
         onShowcaseRetry: () => {
+          this.cancelSettlementRollup();
           soundEngine.play('click');
           openV2ShowcasePickerModal(this.modalHostEl, (tid) => this.startShowcaseRun(tid));
         },
         onShowcaseToBase: () => {
-          soundEngine.play('click');
+          this.cancelSettlementRollup();
+          soundEngine.play('returnDock');
           this.showcaseRun = null;
           this.settlementDispositions = {};
           this.syncAll();
@@ -3503,6 +3577,8 @@ export class V2AppController {
         onConfirmSettlement: () => {
           if (!this.canMutate()) return;
           if (!this.save.activeRun || this.save.activeRun.phase !== 'SETTLEMENT') return;
+
+          this.cancelSettlementRollup();
 
           const creditsBefore = this.save.profile.credits;
           const result = applyV2Settlement(
@@ -3515,6 +3591,7 @@ export class V2AppController {
             return;
           }
 
+          const dockingItems = this.buildDockingCargoItems(result.summary);
           const wasTutorialCompleted = this.save.profile.tutorialCompleted;
           this.save = {
             ...this.save,
@@ -3577,7 +3654,7 @@ export class V2AppController {
             earnedParts: result.summary.totalSalvagePartsEarned,
             contractCompleted: result.summary.contractCompleted,
             unlockedText: unlockedParts.length > 0 ? unlockedParts.join(' · ') : null,
-            crateCount: Math.max(1, result.summary.lines.length),
+            crateCount: Math.max(1, dockingItems.length || result.summary.lines.length),
             hasKeptRelic: Object.keys(result.summary.keptRelicsById).length > 0,
             wasDefeat: result.summary.reason === 'defeat',
             animating: !reduced,
@@ -3609,6 +3686,7 @@ export class V2AppController {
               crateCount: notice.crateCount,
               hasKeptRelic: notice.hasKeptRelic,
               wasDefeat: notice.wasDefeat,
+              items: dockingItems,
               onProgress: (prog) => {
                 if (this.activeDockingNotice !== notice) return;
                 notice.progress = prog;
@@ -3627,6 +3705,23 @@ export class V2AppController {
         },
       }
     );
+
+    if (this.settledRollupRunId !== run.runId) {
+      this.settledRollupRunId = run.runId;
+      this.settlementRollup.start(
+        this.leftPanelEl,
+        summary.finalCreditsEarned,
+        this.save.settings.reducedMotion,
+        {
+          onComplete: () => {
+            window.removeEventListener('keydown', this.handleSettlementRollupKey);
+          },
+        }
+      );
+      if (this.settlementRollup.isActive()) {
+        window.addEventListener('keydown', this.handleSettlementRollupKey);
+      }
+    }
 
     this.mountV2CargoBay(run.bay, false, {
       title: isSafe ? '返航船舱清点' : '战败前最终布局',
@@ -4012,7 +4107,7 @@ export class V2AppController {
         if (res.ok) {
           this.save = { ...this.save, profile: res.profile };
           this.persist();
-          soundEngine.play('place');
+          soundEngine.play('wreckCut');
           this.syncAll();
         }
         return res;
@@ -4038,7 +4133,7 @@ export class V2AppController {
         if (res.ok) {
           this.save = { ...this.save, profile: res.profile };
           this.persist();
-          soundEngine.play('click');
+          soundEngine.play('cashRegister');
           this.syncAll();
         }
         return res;
@@ -4064,7 +4159,7 @@ export class V2AppController {
         if (res.ok) {
           this.save = { ...this.save, profile: res.profile };
           this.persist();
-          soundEngine.play('click');
+          soundEngine.play('cashRegister');
           this.syncAll();
         }
         return res;
