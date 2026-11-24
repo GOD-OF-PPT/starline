@@ -39,6 +39,7 @@ export type PlaytestEvent =
       readonly type: 'click';
       readonly ts: number;
       readonly phase: string;
+      readonly nodeId?: string | null;
       readonly action: string;
       readonly testId?: string | null;
       readonly isPureConfirm: boolean;
@@ -69,10 +70,24 @@ export type PlaytestEvent =
 export interface PlaytestSummary {
   readonly totalEvents: number;
   readonly phaseDwellMs: Readonly<Record<string, number>>;
+  /**
+   * Elapsed ms from session start (earliest `phase_enter` timestamp, falling back to earliest
+   * event timestamp) to the first meaningful player action (non-pure-confirm `click`,
+   * `drag_attempt`, or `branch_choice`), or `null` if none recorded yet.
+   */
+  readonly timeToFirstMeaningfulActionMs: number | null;
   readonly totalClicks: number;
   readonly pureConfirmClicks: number;
   readonly pureConfirmRatio: number;
+  /** Pure-confirm clicks grouped by non-empty voyage `nodeId`. */
+  readonly pureConfirmClicksByNode: Readonly<Record<string, number>>;
+  /**
+   * Average pure-confirm clicks per distinct non-empty voyage node encountered across
+   * `phase_enter` / `phase_leave` / `click` / `branch_choice` events (`0` when no nodes encountered).
+   */
+  readonly avgPureConfirmPerNode: number;
   readonly dragAttempts: number;
+  readonly dragSuccesses: number;
   readonly dragFailures: number;
   readonly dragFailureRate: number;
   readonly dragFailureReasons: Readonly<Record<string, number>>;
@@ -82,6 +97,7 @@ export interface PlaytestSummary {
     readonly other: number;
   };
   readonly postSettlementReplayStarts: number;
+  readonly replayedAfterSettlement: boolean;
 }
 
 export interface PlaytestExportPayload {
@@ -139,6 +155,9 @@ export function computePlaytestSummary(events: readonly PlaytestEvent[]): Playte
   const phaseDwellMs: Record<string, number> = {};
   let totalClicks = 0;
   let pureConfirmClicks = 0;
+  const pureConfirmClicksByNode: Record<string, number> = {};
+  const encounteredNodeIds = new Set<string>();
+  let nodePureConfirmTotal = 0;
   let dragAttempts = 0;
   let dragFailures = 0;
   const dragFailureReasons: Record<string, number> = {};
@@ -147,20 +166,63 @@ export function computePlaytestSummary(events: readonly PlaytestEvent[]): Playte
   let other = 0;
   let postSettlementReplayStarts = 0;
 
+  let earliestEventTs: number | null = null;
+  let earliestPhaseEnterTs: number | null = null;
+  let firstMeaningfulActionTs: number | null = null;
+
+  const trackNodeId = (nodeId?: string | null): string | null => {
+    if (typeof nodeId !== 'string') return null;
+    const trimmed = nodeId.trim();
+    if (!trimmed) return null;
+    encounteredNodeIds.add(trimmed);
+    return trimmed;
+  };
+
   for (const ev of events) {
+    if (Number.isFinite(ev.ts)) {
+      if (earliestEventTs === null || ev.ts < earliestEventTs) {
+        earliestEventTs = ev.ts;
+      }
+    }
     switch (ev.type) {
+      case 'phase_enter': {
+        if (Number.isFinite(ev.ts)) {
+          if (earliestPhaseEnterTs === null || ev.ts < earliestPhaseEnterTs) {
+            earliestPhaseEnterTs = ev.ts;
+          }
+        }
+        trackNodeId(ev.nodeId);
+        break;
+      }
       case 'phase_leave': {
         const ms = Number.isFinite(ev.dwellMs) && ev.dwellMs > 0 ? ev.dwellMs : 0;
         phaseDwellMs[ev.phase] = (phaseDwellMs[ev.phase] ?? 0) + ms;
+        trackNodeId(ev.nodeId);
         break;
       }
       case 'click': {
         totalClicks += 1;
-        if (ev.isPureConfirm) pureConfirmClicks += 1;
+        const nid = trackNodeId(ev.nodeId);
+        if (ev.isPureConfirm) {
+          pureConfirmClicks += 1;
+          if (nid !== null) {
+            pureConfirmClicksByNode[nid] = (pureConfirmClicksByNode[nid] ?? 0) + 1;
+            nodePureConfirmTotal += 1;
+          }
+        } else if (Number.isFinite(ev.ts)) {
+          if (firstMeaningfulActionTs === null || ev.ts < firstMeaningfulActionTs) {
+            firstMeaningfulActionTs = ev.ts;
+          }
+        }
         break;
       }
       case 'drag_attempt': {
         dragAttempts += 1;
+        if (Number.isFinite(ev.ts)) {
+          if (firstMeaningfulActionTs === null || ev.ts < firstMeaningfulActionTs) {
+            firstMeaningfulActionTs = ev.ts;
+          }
+        }
         if (!ev.success) {
           dragFailures += 1;
           const r = ev.reason ?? 'unknown';
@@ -169,6 +231,12 @@ export function computePlaytestSummary(events: readonly PlaytestEvent[]): Playte
         break;
       }
       case 'branch_choice': {
+        trackNodeId(ev.nodeId);
+        if (Number.isFinite(ev.ts)) {
+          if (firstMeaningfulActionTs === null || ev.ts < firstMeaningfulActionTs) {
+            firstMeaningfulActionTs = ev.ts;
+          }
+        }
         if (ev.choiceKind === 'safe_return') safeReturn += 1;
         else if (ev.choiceKind === 'risk_branch') riskBranch += 1;
         else other += 1;
@@ -178,23 +246,37 @@ export function computePlaytestSummary(events: readonly PlaytestEvent[]): Playte
         postSettlementReplayStarts += 1;
         break;
       }
-      case 'phase_enter':
-        break;
     }
   }
+
+  const startTs = earliestPhaseEnterTs ?? earliestEventTs;
+  const timeToFirstMeaningfulActionMs =
+    startTs !== null && firstMeaningfulActionTs !== null
+      ? Math.max(0, firstMeaningfulActionTs - startTs)
+      : null;
+  const dragSuccesses = Math.max(0, dragAttempts - dragFailures);
+  const avgPureConfirmPerNode =
+    encounteredNodeIds.size > 0
+      ? Number((nodePureConfirmTotal / encounteredNodeIds.size).toFixed(4))
+      : 0;
 
   return {
     totalEvents: events.length,
     phaseDwellMs,
+    timeToFirstMeaningfulActionMs,
     totalClicks,
     pureConfirmClicks,
     pureConfirmRatio: totalClicks > 0 ? Number((pureConfirmClicks / totalClicks).toFixed(4)) : 0,
+    pureConfirmClicksByNode,
+    avgPureConfirmPerNode,
     dragAttempts,
+    dragSuccesses,
     dragFailures,
     dragFailureRate: dragAttempts > 0 ? Number((dragFailures / dragAttempts).toFixed(4)) : 0,
     dragFailureReasons,
     branchChoices: { safeReturn, riskBranch, other },
     postSettlementReplayStarts,
+    replayedAfterSettlement: postSettlementReplayStarts > 0,
   };
 }
 
@@ -286,6 +368,7 @@ export class PlaytestTelemetryLogger {
       type: 'click',
       ts: this.now(),
       phase: this.activePhase?.phase ?? 'unknown',
+      nodeId: this.activePhase?.nodeId ?? null,
       action,
       testId: testId ?? null,
       isPureConfirm: classifyPureConfirmAction(action, testId),

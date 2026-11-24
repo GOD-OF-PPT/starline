@@ -524,7 +524,24 @@ export class V2AppController {
       if (this.preCombatAutoEngage.pause('modal')) {
         this.refreshPreCombatAutoEngageUi();
       }
+      const hadInFlightCut = this.inFlightWreckCut !== null;
       this.cancelInFlightWreckCut();
+      if (hadInFlightCut) {
+        const run = this.getCurrentRun();
+        const node = run?.currentNodeId ? run.graph.nodes[run.currentNodeId] ?? null : null;
+        if (
+          run &&
+          run.phase === 'ENCOUNTER' &&
+          node &&
+          node.type === 'wreck' &&
+          !node.resolved &&
+          !node.combat
+        ) {
+          this.syncWreckCompartmentsToPhaser(run, node, null);
+          this.renderWreckOverlay(run, node);
+          this.renderEncounterPhase(run);
+        }
+      }
     });
 
     this.syncAll();
@@ -900,6 +917,7 @@ export class V2AppController {
     if (this.lastViewportPhaseKey !== phaseKey) {
       this.lastViewportPhaseKey = phaseKey;
       this.mobileHoldZoomed = false;
+      this.cargoGrid?.collapseDetailsDrawer();
     }
     const isHoldZoomed = Boolean(isVoyage && !isLiveCombat && (isArrange || this.mobileHoldZoomed));
     const collapsed = isArrange && this.isArrangeSceneCollapsed();
@@ -938,11 +956,14 @@ export class V2AppController {
     }
   }
 
+  private static readonly PLAYTEST_INTERACTIVE_SELECTOR =
+    'button, [data-action], a, input, select, [role="button"], label[data-settle-item], [data-select-node], [data-jump-node], [data-wreck-cut], [data-pick-reward], [data-elite-tactic], [data-staging-id]';
+
   private readonly handlePlaytestMountClick = (ev: MouseEvent): void => {
     if (!this.playtestTelemetry.isEnabled()) return;
     const target = ev.target as HTMLElement | null;
     if (!target) return;
-    const actionable = target.closest<HTMLElement>('[data-action], [data-testid], button');
+    const actionable = target.closest<HTMLElement>(V2AppController.PLAYTEST_INTERACTIVE_SELECTOR);
     if (!actionable) return;
     const action =
       actionable.dataset.action ||
@@ -1139,6 +1160,7 @@ export class V2AppController {
     this.selectedWreckHotspot = 'armory';
     this.awaitingEliteDecision = false;
     this.showCombatLogDetails = false;
+    this.cargoGrid?.collapseDetailsDrawer();
     this.showcaseRun = createV2ShowcaseRun(trialId);
     soundEngine.play('warpJump');
     this.syncAll();
@@ -1715,6 +1737,7 @@ export class V2AppController {
               this.activeCombatPlaybackKey = null;
               this.awaitingEliteDecision = false;
               this.showCombatLogDetails = false;
+              this.cargoGrid?.collapseDetailsDrawer();
               this.livePhaseBannerText = null;
               this.liveEnemySnapshots = [];
               if (isRunPendingCampaignEnding(res.run)) {
@@ -1947,6 +1970,7 @@ export class V2AppController {
     this.save = { ...this.save, activeRun: run };
     this.activeDockingNotice = null;
     this.showCombatLogDetails = false;
+    this.cargoGrid?.collapseDetailsDrawer();
     this.persist();
     soundEngine.play('warpJump');
     this.syncAll();
@@ -2139,7 +2163,10 @@ export class V2AppController {
       document.body.appendChild(ghost);
       created.push(ghost);
 
-      // Apply FLIP destination transform (triggers CSS transition in real browser, inspectable immediately in tests)
+      // Force synchronous style/layout flush so real browsers compute before-change styles
+      // and genuinely execute the 260ms CSS FLIP flight transition.
+      void ghost.getBoundingClientRect();
+
       ghost.classList.add('is-flying');
       ghost.style.transform = `translate(${Math.round(dx)}px, ${Math.round(dy)}px) scale(0.55)`;
       ghost.style.opacity = '0.25';
@@ -2566,6 +2593,7 @@ export class V2AppController {
     this.settlementDispositions = {};
     this.selectedMapNodeId = null;
     this.showCombatLogDetails = false;
+    this.cargoGrid?.collapseDetailsDrawer();
     this.cancelInFlightWreckCut();
 
     const hasRelicSignal = Object.values(res.run.graph.nodes).some((n) => Boolean(n.hasRelicSignal));
@@ -3037,6 +3065,7 @@ export class V2AppController {
             this.selectedMapNodeId = null;
             this.selectedWreckHotspot = 'armory';
             this.showCombatLogDetails = false;
+            this.cargoGrid?.collapseDetailsDrawer();
             const enteredNode = res.run.graph.nodes[nid];
             if (this.playtestTelemetry.isEnabled()) {
               const isSafeBeacon =
@@ -3598,6 +3627,7 @@ export class V2AppController {
   }
 
   private readonly handleSettlementRollupKey = (ev: KeyboardEvent): void => {
+    if (hasOpenModal()) return;
     if (!this.settlementRollup.isActive()) return;
     if (ev.key === ' ' || ev.key === 'Enter' || ev.key === 'Escape') {
       ev.preventDefault();
@@ -3643,6 +3673,12 @@ export class V2AppController {
 
   private renderSettlementPhase(run: V2RunState): void {
     this.unmountActiveLeftPhaseView();
+    if (this.settlementRollup.isActive() && this.settledRollupRunId === run.runId) {
+      this.settlementRollup.skip({ silentCashRegister: true });
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('keydown', this.handleSettlementRollupKey);
+      }
+    }
     const p = this.save.profile;
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const summary = calculateV2Settlement(run, p, this.settlementDispositions);

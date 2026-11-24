@@ -583,12 +583,18 @@ export function renderSettlementView(
   leftPanelEl
     .querySelectorAll<HTMLElement>('button[data-settle-item], label[data-settle-item]')
     .forEach((el) => {
-      el.addEventListener('click', () => {
+      el.addEventListener('click', (ev) => {
         if (readOnly) return;
         const iid = el.dataset.settleItem;
         const disp = el.dataset.settleDisp as V2SettlementDisposition | undefined;
         if (!iid || !disp) return;
+        if (el.tagName.toLowerCase() === 'label') {
+          ev.preventDefault();
+          const radio = el.querySelector<HTMLInputElement>('input[data-settle-radio]');
+          if (radio) radio.checked = true;
+        }
         if (selectedByItem.get(iid) === disp) return;
+        selectedByItem.set(iid, disp);
         actions.onChangeDisposition(iid, disp);
       });
     });
@@ -600,6 +606,7 @@ export function renderSettlementView(
       const disp = input.dataset.settleDisp as V2SettlementDisposition | undefined;
       if (!iid || !disp) return;
       if (selectedByItem.get(iid) === disp) return;
+      selectedByItem.set(iid, disp);
       actions.onChangeDisposition(iid, disp);
     });
   });
