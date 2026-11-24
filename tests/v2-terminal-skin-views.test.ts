@@ -607,6 +607,7 @@ import {
 } from '../src/v2/ui/screens/WreckView';
 import { V2AppController } from '../src/v2/ui/V2AppController';
 import {
+  openV2BackupRecoveryModal,
   openV2CodexModal,
   openV2ContractsDrawerModal,
   openV2DiscardConfirmModal,
@@ -1584,13 +1585,13 @@ describe('Suite A — A09 + M5-3 Industrial Terminal UI Skin, V1 Isolation & Art
       expect(rules.some((r) => r.selectors.includes(variant))).toBe(true);
     }
 
-    // 4. Hazard zebra stripes on destructive/lethal controls
+    // 4. Hazard zebra stripes on destructive/lethal controls (class-only specificity — ZERO #id selectors so :disabled wins!)
     const dangerBtn = rules.find((r) => r.selectors.includes('.v2-shell .btn.btn-danger'));
     expect(dangerBtn).toBeDefined();
     expect(dangerBtn!.body).toMatch(/repeating-linear-gradient\(\s*-45deg/);
-    expect(dangerBtn!.selectors).toContain('.v2-modal-card #v2-btn-reset');
-    expect(dangerBtn!.selectors).toContain('.v2-modal-card #v2-discard-ok');
-    expect(dangerBtn!.selectors).toContain('.v2-modal-card #v2-rec-fresh');
+    expect(dangerBtn!.selectors).toContain('.v2-modal-card .btn.btn-danger');
+    const idSelectors = rules.flatMap((r) => r.selectors).filter((s) => s.includes('#'));
+    expect(idSelectors).toEqual([]);
 
     const dangerBanner = rules.find((r) =>
       r.selectors.includes('.v2-shell .system-banner.banner-danger')
@@ -1875,6 +1876,259 @@ describe('Suite A — A09 + M5-3 Industrial Terminal UI Skin, V1 Isolation & Art
     expect(sec8).toContain('断电冷金属');
     expect(sec8).toContain('灰度');
     expect(sec8).toContain('prefers-reduced-motion');
+  });
+
+  it('Iter-2 CSS cascade regression: enforces zero #id selectors, real DOM class alignment, active-vs-disabled ordering, preserved (0,3,0) state variants & V2-scoped reduced-motion wildcard', async () => {
+    const skinCss = await readRepoText('src/v2/ui/styles/v3-terminal-skin.css');
+    const rules = parseCssRules(skinCss);
+    const allSelectors = rules.flatMap((r) => r.selectors);
+
+    // 1. R2-B1 / C1-#1: ZERO #id selectors in v3-terminal-skin.css; real modal danger buttons carry .btn.btn-danger & hover uses :hover:not(:disabled)
+    expect(allSelectors.filter((s) => s.includes('#'))).toEqual([]);
+    const modalHost = env.doc.createElement('div');
+    env.doc.body.appendChild(modalHost);
+
+    openV2SettingsModal(modalHost as unknown as HTMLElement, createFreshV2SaveData().settings, {
+      readOnly: true,
+      hasV1Save: false,
+      onChange: () => {},
+      onSwitchToV1: () => {},
+      onResetV2Save: () => {},
+    });
+    const resetBtn = modalHost.querySelector('#v2-btn-reset')!;
+    expect(resetBtn).not.toBeNull();
+    expect(resetBtn.classList.contains('btn')).toBe(true);
+    expect(resetBtn.classList.contains('btn-danger')).toBe(true);
+    expect(resetBtn.disabled).toBe(true);
+    modalHost.querySelector('.modal-close-btn')!.click();
+
+    openV2DiscardConfirmModal(modalHost as unknown as HTMLElement, [], () => {});
+    const discardOk = modalHost.querySelector('#v2-discard-ok')!;
+    expect(discardOk.classList.contains('btn')).toBe(true);
+    expect(discardOk.classList.contains('btn-danger')).toBe(true);
+    modalHost.querySelector('.modal-close-btn')!.click();
+
+    openV2BackupRecoveryModal(modalHost as unknown as HTMLElement, {
+      error: 'checksum',
+      hasBackup: false,
+      onResetFresh: () => {},
+    });
+    const recFresh = modalHost.querySelector('#v2-rec-fresh')!;
+    expect(recFresh.classList.contains('btn')).toBe(true);
+    expect(recFresh.classList.contains('btn-danger')).toBe(true);
+    recFresh.click();
+    expect(modalHost.children.length).toBe(0);
+
+    expect(
+      rules.some((r) => r.selectors.includes('.v2-modal-card .btn.btn-danger:hover:not(:disabled)'))
+    ).toBe(true);
+    expect(
+      rules.some((r) => r.selectors.some((s) => s.endsWith('.btn.btn-danger:hover')))
+    ).toBe(false);
+
+    // 2. R2-B2 + R1 note: Real DOM class alignment against MapPhaseView, CargoGridV2, CareerModal & EndingPhaseView
+    expect(skinCss).not.toContain('.v3-map-dest-card.is-selected');
+    expect(skinCss).not.toContain('.v2-placed-item.is-synergy');
+    expect(skinCss).not.toContain('.v3-cstat-v');
+
+    const profile = makeRichProfile();
+    const run = makeLaunchedRun(profile, 8881);
+    const layer1Node = Object.values(run.graph.nodes).find((n) => n.layer === 1)!;
+    const mapHost = env.doc.createElement('div');
+    const mapView = new MapPhaseView();
+    mapView.mount(mapHost as unknown as HTMLElement);
+    mapView.update(
+      {
+        run,
+        readOnly: false,
+        selectedMapNodeId: layer1Node.nodeId,
+        mobileMapShowFull: false,
+        isCompactViewport: false,
+        pureAutoCombat: true,
+      },
+      {
+        onToggleMobileMap: () => {},
+        onSelectNode: () => {},
+        onJumpNode: () => {},
+        onSafeReturn: () => {},
+        onAbortContract: () => {},
+      }
+    );
+    expect(mapHost.querySelector('.v3-map-dest-card.selected')).not.toBeNull();
+    mapView.unmount();
+
+    const gridHost = env.doc.createElement('div');
+    const laser = createV2EquipmentInstance({
+      instanceId: 'cls_laser',
+      kind: 'laser',
+      quality: 'common',
+      origin: 'loan',
+      acquiredDepth: 0,
+      location: 'bay',
+    });
+    const battery = createV2EquipmentInstance({
+      instanceId: 'cls_batt',
+      kind: 'battery',
+      quality: 'common',
+      origin: 'loan',
+      acquiredDepth: 0,
+      location: 'bay',
+    });
+    const gridComp = new CargoGridV2Component(gridHost as unknown as HTMLElement, {
+      onBayChange: () => {},
+    });
+    gridComp.render(
+      {
+        shipId: 'cannon_skiff',
+        placed: [
+          { item: laser, x: 0, y: 0, rotation: 0 },
+          { item: battery, x: 1, y: 0, rotation: 0 },
+        ],
+        staging: [],
+        discardedThisArrange: [],
+      },
+      true
+    );
+    expect(gridHost.querySelector('.v2-placed-item.synergy-active .placed-subcell')).not.toBeNull();
+    gridComp.destroy();
+
+    openV3CareerModal(modalHost as unknown as HTMLElement, () => profile, {
+      readOnly: false,
+      onClaimAchievement: () => ({ ok: false, rewardCredits: 0, rewardParts: 0 }),
+      onReplayEnding: () => {},
+    });
+    expect(modalHost.querySelector('.v3-cstat-card strong')).not.toBeNull();
+    modalHost.querySelector('.modal-close-btn')!.click();
+
+    const endingHost = env.doc.createElement('div');
+    const endingView = new EndingPhaseView();
+    endingView.mount(endingHost as unknown as HTMLElement);
+    endingView.update(
+      { profile, mode: 'gallery', selectedEndingId: 'free_haven', climaxRun: null, readOnly: false },
+      { onSelectEnding: () => {}, onClearSelection: () => {}, onContinueToBase: () => {} }
+    );
+    expect(endingHost.querySelector('.v3-ending-backdrop .v3-crew-portrait')).not.toBeNull();
+    endingView.unmount();
+
+    for (const alignedSel of [
+      '.v2-shell .v3-map-dest-card.selected:not(:disabled):not(.is-locked):not(.is-blocked)',
+      '.v2-shell .v2-placed-item.synergy-active .placed-subcell',
+      '.v2-modal-card .v2-placed-item.synergy-active .placed-subcell',
+      '.v2-shell .v2-placed-item.power-cell-boosted .placed-subcell',
+      '.v2-modal-card .v2-placed-item.power-cell-boosted .placed-subcell',
+      '.v2-modal-card .v3-cstat-card strong',
+      '.v2-ending-host .v3-crew-portrait',
+      '.v3-ending-backdrop .v3-crew-portrait',
+    ]) {
+      expect(allSelectors).toContain(alignedSel);
+    }
+
+    // 3. R2-B3 / C1-#2: Active/selected selectors guarded with :not(:disabled):not(.is-locked) AND Powered-Off Disabled appears STRICTLY AFTER them
+    const threatActiveIdx = rules.findIndex((r) =>
+      r.selectors.includes('.v2-shell .v3-threat-pills .v3-threat-pill.active:not(:disabled):not(.is-locked)')
+    );
+    const activeMultiCueIdx = rules.findIndex((r) =>
+      r.selectors.includes('.v2-shell .v2-choice-pill.active:not(:disabled):not(.is-locked)')
+    );
+    const disabledRuleIdx = rules.findIndex((r) =>
+      r.selectors.includes('.v2-shell .btn:disabled')
+    );
+    expect(threatActiveIdx).toBeGreaterThan(-1);
+    expect(activeMultiCueIdx).toBeGreaterThan(-1);
+    expect(disabledRuleIdx).toBeGreaterThan(threatActiveIdx);
+    expect(disabledRuleIdx).toBeGreaterThan(activeMultiCueIdx);
+    expect(rules[disabledRuleIdx]!.selectors).toContain('.v2-shell .v2-sector-chip.sector-frozen:disabled');
+    expect(rules[disabledRuleIdx]!.selectors).toContain('.v2-shell .v2-sector-chip.sector-abyss:disabled');
+    expect(rules[disabledRuleIdx]!.selectors).toContain('.v2-shell .v3-mode-btn.mode-final:disabled');
+    expect(rules[disabledRuleIdx]!.selectors).toContain('.v2-shell .v3-mode-btn.mode-endless:disabled');
+    expect(rules[disabledRuleIdx]!.selectors).toContain('.v2-shell .v3-tactical-options .v2-et-btn:disabled');
+    expect(rules[disabledRuleIdx]!.selectors).toContain('.v2-shell .v3-threat-pills .v3-threat-pill:disabled');
+
+    // 4. R2-B4: Base modal card framing does NOT clobber border-color, and ALL explicit (0,3,0) state variants are present
+    const modalCardsBase = rules.find((r) =>
+      r.selectors.includes('.v2-modal-card .v2-facility-card')
+    );
+    expect(modalCardsBase).toBeDefined();
+    expect(modalCardsBase!.body).not.toContain('border-color:');
+
+    for (const preservedVariant of [
+      '.v2-shell .v2-wreck-hotspot.active:not(:disabled)',
+      '.v2-shell .v2-dag-node.current',
+      '.v2-shell .v2-dag-node.selected',
+      '.v2-shell .v2-dock-btn:hover:not(:disabled)',
+      '.v2-shell .v2-next-goal-pill.is-ready:not(:disabled)',
+      '.v2-shell .v2-next-goal-pill:hover:not(:disabled)',
+      '.v2-shell .v3-event-choice-btn.is-fallback:not(:disabled):not(.is-unaffordable):not(.is-locked)',
+      '.v2-shell .v3-event-choice-btn.is-crew-bonus.is-matched:not(:disabled):not(.is-unaffordable):not(.is-locked)',
+      '.v2-shell .v2-delta-strip.positive',
+      '.v2-shell .v2-delta-strip.negative',
+      '.v2-shell .v3-wreck-stability-card.tone-warn',
+      '.v2-shell .v3-sector-env-card.env-cryo_ion',
+      '.v2-shell .v3-sector-env-card.env-gravity_tide',
+      '.v2-shell .v3-bonus-tracker-strip.is-met',
+      '.v2-shell .v3-bonus-tracker-strip.is-failed',
+      '.v2-shell .v3-wreck-cut-card.is-cut',
+      '.v2-modal-card .v2-facility-card.built',
+      '.v2-modal-card .relic-card.restored',
+      '.v2-modal-card .codex-card.seen',
+      '.v2-modal-card .v3-act-card.is-active',
+      '.v2-modal-card .v3-act-card.is-completed',
+      '.v2-modal-card .v3-pity-cell.is-ready',
+      '.v2-modal-card .v3-bestiary-card.is-boss',
+      '.v2-modal-card .v3-ending-gallery-card.is-unlocked',
+      '.v2-modal-card .v3-achievement-item.is-claimable',
+      '.v2-modal-card .v3-achievement-item.is-claimed',
+      '.v2-modal-card .v2-trial-card:hover:not(:disabled)',
+      '.v2-ending-host .v3-ending-card.tone-free_haven',
+      '.v3-ending-backdrop .v3-ending-card.tone-free_haven',
+      '.v2-ending-host .v3-ending-card.tone-fleet_heir',
+      '.v3-ending-backdrop .v3-ending-card.tone-fleet_heir',
+    ]) {
+      expect(allSelectors).toContain(preservedVariant);
+    }
+
+    // 5. C1-#3: @media (prefers-reduced-motion: reduce) includes V2/V3-scoped wildcard animation/transition kill
+    //    AND keeps transform: none !important OFF centered pins/ticker (.v3-wreck-compartment-pin, .v2-wreck-hotspot, .v2-combat-event-ticker)
+    const mediaReducedRules = rules.filter(
+      (r) => r.mediaQuery !== null && r.mediaQuery.includes('prefers-reduced-motion: reduce')
+    );
+    const wildcardKill = mediaReducedRules.find(
+      (r) => r.selectors.includes('.v2-shell *') && r.selectors.includes('.v2-modal-card *')
+    );
+    expect(wildcardKill).toBeDefined();
+    expect(wildcardKill!.body).toMatch(/animation:\s*none !important/);
+    expect(wildcardKill!.body).toMatch(/transition:\s*none !important/);
+    expect(wildcardKill!.body).not.toContain('transform:');
+    for (const rootWildcard of [
+      '.v2-shell *',
+      '.v2-shell *::before',
+      '.v2-shell *::after',
+      '.v2-title-host *',
+      '.v2-title-backdrop *',
+      '.v2-ending-host *',
+      '.v3-ending-backdrop *',
+      '.v2-modal-host *',
+      '.v2-modal-backdrop *',
+      '.v2-modal-card *',
+      '.v2-drag-ghost',
+      '.v2-drag-ghost *',
+      '.v3-wreck-flip-ghost',
+      '.v3-wreck-flip-ghost *',
+    ]) {
+      expect(wildcardKill!.selectors).toContain(rootWildcard);
+    }
+
+    const mediaTransformKill = mediaReducedRules.filter((r) => r.body.includes('transform:'));
+    expect(mediaTransformKill.length).toBeGreaterThanOrEqual(1);
+    for (const centeredEl of [
+      '.v3-wreck-compartment-pin',
+      '.v2-wreck-hotspot',
+      '.v2-combat-event-ticker',
+    ]) {
+      expect(
+        mediaTransformKill.some((r) => r.selectors.some((s) => s.includes(centeredEl)))
+      ).toBe(false);
+    }
   });
 });
 
@@ -3108,6 +3362,242 @@ describe('Suite B — M5-4 Stateful PhaseView Lifecycle Across All 12 Upgraded V
       )
     );
   });
+
+  it('Iter-2 Fix 6 & 7: SettlementPhaseView allows direct <input type="radio"> activation without preventDefault() and never poisons selectedByItem on rejected !canMutate() callbacks', () => {
+    const host = env.doc.createElement('div');
+    env.doc.body.appendChild(host);
+
+    const profile = makeRichProfile();
+    const baseRun = makeLaunchedRun(profile, 4242);
+    const lootEq = createV2EquipmentInstance({
+      instanceId: 'iter2_settle_eq',
+      kind: 'shield',
+      quality: 'common',
+      origin: 'loot',
+      acquiredDepth: 1,
+      location: 'bay',
+    });
+    const settleRun: V2RunState = {
+      ...baseRun,
+      phase: 'SETTLEMENT',
+      settlementReason: 'safe_return',
+      bay: {
+        ...baseRun.bay,
+        placed: [...baseRun.bay.placed, { item: lootEq, x: 2, y: 2, rotation: 0 }],
+      },
+    };
+
+    const disps: Record<string, 'sell' | 'store' | 'dismantle'> = {};
+    let rejectCallbacks = false;
+    const calls: Array<{ id: string; disp: string }> = [];
+    const view = new SettlementPhaseView();
+    view.mount(host as unknown as HTMLElement);
+
+    const syncView = () => {
+      const summary = calculateV2Settlement(settleRun, profile, disps);
+      view.update(
+        { run: settleRun, profile, summary, nextGoal: makeNextGoal(), readOnly: false },
+        {
+          onChangeDisposition: (id, disp) => {
+            if (rejectCallbacks) return;
+            calls.push({ id, disp });
+            disps[id] = disp as 'sell' | 'store' | 'dismantle';
+            syncView();
+          },
+          onShowcaseRetry: () => {},
+          onShowcaseToBase: () => {},
+          onConfirmSettlement: () => {},
+        }
+      );
+    };
+    syncView();
+
+    const sellLabel = host.querySelector(`label[data-settle-item="${lootEq.instanceId}"][data-settle-disp="sell"]`)!;
+    const storeLabel = host.querySelector(`label[data-settle-item="${lootEq.instanceId}"][data-settle-disp="store"]`)!;
+    const dismantleLabel = host.querySelector(`label[data-settle-item="${lootEq.instanceId}"][data-settle-disp="dismantle"]`)!;
+    const sellRadio = sellLabel.querySelector('input[data-settle-radio]')!;
+    const storeRadio = storeLabel.querySelector('input[data-settle-radio]')!;
+    const dismantleRadio = dismantleLabel.querySelector('input[data-settle-radio]')!;
+
+    // 1. Direct <input type="radio"> activation (ArrowRight / radio.click): MUST NOT call preventDefault(), commits once even with paired change
+    expect(sellRadio.checked).toBe(true);
+    storeRadio.checked = true;
+    const directRadioEv = new MiniEvent('click', { bubbles: true });
+    storeRadio.dispatchEvent(directRadioEv);
+    storeRadio.dispatchEvent(new MiniEvent('change', { bubbles: true }));
+    expect(directRadioEv.defaultPrevented).toBe(false);
+    expect(calls).toEqual([{ id: lootEq.instanceId, disp: 'store' }]);
+    expect(storeRadio.checked).toBe(true);
+    expect(sellRadio.checked).toBe(false);
+    expect(storeLabel.classList.contains('is-selected')).toBe(true);
+
+    // 2. Rejected (!canMutate) <label> click on dismantle: calls preventDefault(), does NOT poison selectedByItem, restores radio.checked to store!
+    rejectCallbacks = true;
+    const rejLabelEv = new MiniEvent('click', { bubbles: true });
+    dismantleLabel.dispatchEvent(rejLabelEv);
+    expect(rejLabelEv.defaultPrevented).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(dismantleRadio.checked).toBe(false);
+    expect(storeRadio.checked).toBe(true);
+    expect(dismantleLabel.classList.contains('is-selected')).toBe(false);
+
+    // 3. Immediately retrying the EXACT same <label> after unlocking succeeds without being swallowed!
+    rejectCallbacks = false;
+    const retryLabelEv = new MiniEvent('click', { bubbles: true });
+    dismantleLabel.dispatchEvent(retryLabelEv);
+    expect(retryLabelEv.defaultPrevented).toBe(true);
+    expect(calls).toEqual([
+      { id: lootEq.instanceId, disp: 'store' },
+      { id: lootEq.instanceId, disp: 'dismantle' },
+    ]);
+    expect(dismantleRadio.checked).toBe(true);
+    expect(storeRadio.checked).toBe(false);
+    expect(dismantleLabel.classList.contains('is-selected')).toBe(true);
+
+    // 4. Rejected direct <input> click on sell restores checked to dismantle and retrying direct <input> succeeds immediately!
+    rejectCallbacks = true;
+    sellRadio.checked = true;
+    const rejRadioEv = new MiniEvent('click', { bubbles: true });
+    sellRadio.dispatchEvent(rejRadioEv);
+    expect(rejRadioEv.defaultPrevented).toBe(false);
+    expect(calls).toHaveLength(2);
+    expect(sellRadio.checked).toBe(false);
+    expect(dismantleRadio.checked).toBe(true);
+
+    rejectCallbacks = false;
+    sellRadio.checked = true;
+    const retryRadioEv = new MiniEvent('click', { bubbles: true });
+    sellRadio.dispatchEvent(retryRadioEv);
+    sellRadio.dispatchEvent(new MiniEvent('change', { bubbles: true }));
+    expect(retryRadioEv.defaultPrevented).toBe(false);
+    expect(calls).toEqual([
+      { id: lootEq.instanceId, disp: 'store' },
+      { id: lootEq.instanceId, disp: 'dismantle' },
+      { id: lootEq.instanceId, disp: 'sell' },
+    ]);
+    expect(sellRadio.checked).toBe(true);
+    expect(dismantleRadio.checked).toBe(false);
+
+    view.unmount();
+  });
+
+  it('Iter-2 Fix 9: PreparePhaseView ignores programmatic input events on seed & preset inputs when readOnly === true', () => {
+    const host = env.doc.createElement('div');
+    env.doc.body.appendChild(host);
+    const profile = makeRichProfile();
+    const draft: V2PrepareDraft = {
+      ...makePrepareDraft(profile),
+      endlessThreat: 2,
+      customSeedInput: '884422',
+    };
+    const validation = validateV2PrepareLoadout(
+      profile,
+      draft.shipId,
+      draft.crewId,
+      draft.slots,
+      draft.trialBuildId,
+      draft.sectorId
+    );
+    const onChangeCustomSeed = vi.fn();
+    const actions = {
+      onBack: vi.fn(),
+      onPickTrial: vi.fn(),
+      onExitTrial: vi.fn(),
+      onSelectSector: vi.fn(),
+      onSelectStandardMode: vi.fn(),
+      onSelectFinalMissionMode: vi.fn(),
+      onSelectEndlessMode: vi.fn(),
+      onSelectEndlessThreat: vi.fn(),
+      onChangeCustomSeed,
+      onSelectShip: vi.fn(),
+      onSelectCrew: vi.fn(),
+      onSelectArchetype: vi.fn(),
+      onFallback: vi.fn(),
+      onClear: vi.fn(),
+      onAddLoan: vi.fn(),
+      onAddOwned: vi.fn(),
+      onSavePreset: vi.fn(),
+      onLoadPreset: vi.fn(),
+      onSubLoan: vi.fn(),
+      onDeletePreset: vi.fn(),
+      onLaunch: vi.fn(),
+    };
+
+    const view = new PreparePhaseView();
+    view.mount(host as unknown as HTMLElement);
+    view.update(
+      { profile, draft, readOnly: true, validation, effectivePreviewSeed: 884422, fallbackPreviewSeed: 424242 },
+      actions
+    );
+
+    const seedInput = host.querySelector('#v3-endless-seed-input')!;
+    const previewEl = host.querySelector('[data-testid="endless-mutator-preview"]')!;
+    const presetInput = host.querySelector('#v2-preset-name')!;
+    const previewBefore = previewEl.innerHTML;
+    expect(seedInput.disabled).toBe(true);
+    expect(presetInput.disabled).toBe(true);
+
+    // Programmatic input event while readOnly MUST be ignored!
+    seedInput.value = '999999';
+    seedInput.dispatchEvent(new MiniEvent('input', { bubbles: true }));
+    expect(onChangeCustomSeed).toHaveBeenCalledTimes(0);
+    expect(previewEl.innerHTML).toBe(previewBefore);
+
+    // Preset input event while readOnly MUST NOT flip userEditedPresetName (subsequent ship change still updates auto name)
+    presetInput.value = '篡改预设名';
+    presetInput.dispatchEvent(new MiniEvent('input', { bubbles: true }));
+    const nextDraft: V2PrepareDraft = { ...draft, shipId: 'shield_cruiser' };
+    view.update(
+      { profile, draft: nextDraft, readOnly: false, validation, effectivePreviewSeed: 884422, fallbackPreviewSeed: 424242 },
+      actions
+    );
+    expect(presetInput.value).toContain('护盾工程');
+
+    view.unmount();
+  });
+
+  it('Iter-2 Fix 11: EventPhaseView inserts relicBannerEl strictly BEFORE modernBodyEl when hasRelicSignal flips false -> true in-place', () => {
+    const host = env.doc.createElement('div');
+    env.doc.body.appendChild(host);
+    const profile = makeRichProfile();
+    const run = makeLaunchedRun(profile, 7373);
+    const eventNode = findNodeByTypeOrThrow(
+      run,
+      (n) => (n.type === 'anomaly' || n.type === 'distress') && Boolean(n.eventState),
+      'event'
+    );
+    const actions = {
+      onSelectEventOption: vi.fn(),
+      onAnomalyChoice: vi.fn(),
+      onDistressChoice: vi.fn(),
+      onAbandon: vi.fn(),
+    };
+
+    const view = new EventPhaseView();
+    view.mount(host as unknown as HTMLElement);
+    // First update with hasRelicSignal: false so modernBodyEl attaches first
+    view.update(
+      { run, node: { ...eventNode, hasRelicSignal: false }, readOnly: false },
+      actions
+    );
+    expect(host.querySelector('.v3-relic-pity-banner')).toBeNull();
+
+    // Flip hasRelicSignal -> true in-place
+    view.update(
+      { run, node: { ...eventNode, hasRelicSignal: true }, readOnly: false },
+      actions
+    );
+    const root = host.querySelector('[data-testid="event-screen"]')!;
+    const relicBanner = root.querySelector('.v3-relic-pity-banner')!;
+    const narrativeWrap = root.querySelector('.v3-event-narrative')!.parentElement!;
+    expect(relicBanner).not.toBeNull();
+    const relicIdx = root.children.indexOf(relicBanner);
+    const bodyIdx = root.children.indexOf(narrativeWrap);
+    expect(relicIdx).toBeGreaterThan(0);
+    expect(bodyIdx).toBeGreaterThan(relicIdx);
+
+    view.unmount();
+  });
 });
 
 // ===========================================================================
@@ -3402,5 +3892,246 @@ describe('Suite C — V2AppController Unified 4-Slot PhaseView Lifecycle Integra
     expect(launchBtn.disabled).toBe(true);
 
     ctrl.destroy();
+  });
+
+  it('Iter-2 Fix 8 (C2-#2): tears down CargoGridV2 and empties right panel on live Act III Boss -> Climax Ending transition', async () => {
+    vi.useFakeTimers();
+    const baseProfile = makeRichProfile();
+    const profile: V2ProfileState = {
+      ...baseProfile,
+      unlockedShips: ['cannon_skiff', 'shield_cruiser', 'stargate_cruiser'],
+      buildings: {
+        ...baseProfile.buildings,
+        workbench: true,
+        research_lab: true,
+        contract_hub: true,
+        drydock_tier2: true,
+      },
+      facilityTiers: {
+        ...baseProfile.facilityTiers,
+        workbench: 2,
+        research_lab: 2,
+        contract_hub: 2,
+        drydock_tier2: 2,
+        stargate_relay: 2,
+      },
+    };
+    const launched = launchV2Expedition({
+      profile,
+      contractTemplateId: 'bounty_std',
+      shipId: 'stargate_cruiser',
+      crewId: 'engineer',
+      primaryArchetype: 'laser',
+      slots: [...buildFreeFallbackPrepareSlots('stargate_cruiser', profile.blueprints, 8)],
+      trialBuildId: null,
+      sectorId: 'stargate_abyss',
+      isFinalCampaignRun: true,
+      seed: 6201,
+    });
+    expect(launched.ok).toBe(true);
+    const baseRun = launched.run!;
+    const bossNode = Object.values(baseRun.graph.nodes).find(
+      (n) => n.layer === 6 && n.bossId === 'boss_leviathan'
+    )!;
+    expect(bossNode).toBeDefined();
+
+    // Guaranteed 1-round victory at boss_leviathan so live combat transitions directly to Climax Ending
+    const bossUnit = bossNode.combat!.units.find((u) => u.isBoss) ?? bossNode.combat!.units[0]!;
+    const easyBossNode: V2MapNode = {
+      ...bossNode,
+      combat: {
+        ...bossNode.combat!,
+        units: [
+          { ...bossUnit, maxHp: 1, armor: 0, initialShield: 0, maxShield: 0, damagePerRound: 1 },
+        ],
+      },
+    };
+    const atClimaxBoss: V2RunState = {
+      ...baseRun,
+      phase: 'ENCOUNTER',
+      currentNodeId: easyBossNode.nodeId,
+      hp: 40,
+      maxHp: 40,
+      graph: {
+        ...baseRun.graph,
+        nodes: { ...baseRun.graph.nodes, [easyBossNode.nodeId]: easyBossNode },
+      },
+    };
+    const save: V2SaveData = {
+      ...createFreshV2SaveData(),
+      profile,
+      settings: { ...createFreshV2SaveData().settings, reducedMotion: true, pureAutoCombat: true },
+      activeRun: atClimaxBoss,
+    };
+    persistV2SaveData(env.win.localStorage as unknown as Storage, save);
+    env.win.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+    const cargoDestroy = vi.spyOn(CargoGridV2Component.prototype, 'destroy');
+    const ctrl = new V2AppController(env.mountEl as unknown as HTMLElement, {
+      onSwitchToV1: () => {},
+    });
+    ctrl.init();
+    await Promise.resolve();
+
+    // CargoGridV2 is mounted in .panel-right during pre-combat
+    const rightPanel = env.mountEl.querySelector('.panel-right')!;
+    expect(rightPanel.children.length).toBeGreaterThan(0);
+    expect(cargoDestroy).toHaveBeenCalledTimes(0);
+
+    // Start boss combat -> skip playback -> transitions LIVE from combat to Climax Ending!
+    env.mountEl.querySelector('[data-testid="btn-start-combat"]')!.click();
+    env.mountEl.querySelector('[data-testid="btn-combat-skip"]')!.click();
+    vi.advanceTimersByTime(1000);
+
+    expect(env.mountEl.querySelector('[data-testid="ending-screen"]')).not.toBeNull();
+    expect(cargoDestroy).toHaveBeenCalledTimes(1);
+    expect(rightPanel.children.length).toBe(0);
+
+    ctrl.destroy();
+  });
+
+  it('Iter-2 Fix 7 (live modal !canMutate): rejecting settlement radio while modal is open does NOT poison selection after closing modal', () => {
+    const profile = makeRichProfile();
+    const baseRun = makeLaunchedRun(profile, 5151);
+    const lootEq = createV2EquipmentInstance({
+      instanceId: 'live_modal_eq',
+      kind: 'shield',
+      quality: 'common',
+      origin: 'loot',
+      acquiredDepth: 1,
+      location: 'bay',
+    });
+    const settleRun: V2RunState = {
+      ...baseRun,
+      phase: 'SETTLEMENT',
+      settlementReason: 'safe_return',
+      bay: {
+        ...baseRun.bay,
+        placed: [...baseRun.bay.placed, { item: lootEq, x: 2, y: 2, rotation: 0 }],
+      },
+    };
+    const save: V2SaveData = {
+      ...createFreshV2SaveData(),
+      profile,
+      settings: { ...createFreshV2SaveData().settings, reducedMotion: true },
+      activeRun: settleRun,
+    };
+    persistV2SaveData(env.win.localStorage as unknown as Storage, save);
+    env.win.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+    const ctrl = new V2AppController(env.mountEl as unknown as HTMLElement, {
+      onSwitchToV1: () => {},
+    });
+    ctrl.init();
+
+    const dismantleLabel = env.mountEl.querySelector(`[data-testid="btn-dismantle-${lootEq.instanceId}"]`)!;
+    const dismantleRadio = dismantleLabel.querySelector('input[data-settle-radio]')!;
+    expect(dismantleLabel.classList.contains('is-selected')).toBe(false);
+
+    // Open Help modal (!canMutate()) and click dismantle -> rejected cleanly
+    env.mountEl.querySelector('#v2-hud-help')!.click();
+    dismantleLabel.click();
+    expect(dismantleLabel.classList.contains('is-selected')).toBe(false);
+    expect(dismantleRadio.checked).toBe(false);
+
+    // Close Help modal and click dismantle again -> succeeds immediately!
+    env.mountEl.querySelector('.modal-close-btn')!.click();
+    dismantleLabel.click();
+    expect(dismantleLabel.classList.contains('is-selected')).toBe(true);
+    expect(dismantleRadio.checked).toBe(true);
+
+    ctrl.destroy();
+  });
+
+  it('Iter-2 Fix 9 (live V2AppController): readOnly Prepare blocks custom seed input mutation and mutator preview rewrite', () => {
+    const profile = makeRichProfile();
+    const save: V2SaveData = {
+      ...createFreshV2SaveData(),
+      profile,
+      settings: { ...createFreshV2SaveData().settings, reducedMotion: true },
+    };
+    persistV2SaveData(env.win.localStorage as unknown as Storage, save);
+    env.win.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+    const ctrl = new V2AppController(env.mountEl as unknown as HTMLElement, {
+      onSwitchToV1: () => {},
+    });
+    ctrl.init();
+
+    env.mountEl.querySelector('[data-testid="btn-start-recommended"]')!.click();
+    env.mountEl.querySelector('[data-testid="btn-mode-endless"]')!.click();
+    const seedInput = env.mountEl.querySelector('#v3-endless-seed-input')!;
+    const previewEl = env.mountEl.querySelector('[data-testid="endless-mutator-preview"]')!;
+    seedInput.value = '884422';
+    seedInput.dispatchEvent(new MiniEvent('input', { bubbles: true }));
+    const lockedPreviewHtml = previewEl.innerHTML;
+
+    // Flip readOnly & sync -> programmatic input MUST NOT mutate prepareDraft.customSeedInput or preview
+    (ctrl as unknown as { isReadOnlyTab: boolean; syncAll: () => void }).isReadOnlyTab = true;
+    (ctrl as unknown as { syncAll: () => void }).syncAll();
+    expect(seedInput.disabled).toBe(true);
+
+    seedInput.value = '999999';
+    seedInput.dispatchEvent(new MiniEvent('input', { bubbles: true }));
+    expect(
+      (ctrl as unknown as { prepareDraft: V2PrepareDraft | null }).prepareDraft!.customSeedInput
+    ).toBe('884422');
+    expect(previewEl.innerHTML).toBe(lockedPreviewHtml);
+
+    ctrl.destroy();
+  });
+
+  it('Iter-2 Fix 10 (C2-#5): entering Ending Gallery cancels active Base return docking animation/audio and destroy() clears activeDockingNotice', () => {
+    vi.useFakeTimers();
+    const baseProfile = makeRichProfile();
+    const profile: V2ProfileState = {
+      ...baseProfile,
+      campaign: {
+        ...baseProfile.campaign,
+        endingsUnlocked: ['free_haven'],
+      },
+    };
+    const baseRun = makeLaunchedRun(profile, 6161);
+    const settleRun: V2RunState = {
+      ...baseRun,
+      phase: 'SETTLEMENT',
+      settlementReason: 'safe_return',
+      wallet: 90,
+    };
+    const save: V2SaveData = {
+      ...createFreshV2SaveData(),
+      profile,
+      settings: { ...createFreshV2SaveData().settings, reducedMotion: false },
+      activeRun: settleRun,
+    };
+    persistV2SaveData(env.win.localStorage as unknown as Storage, save);
+    env.win.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+    const playDockingSpy = vi.spyOn(PhaserHost.prototype, 'playBaseReturnDocking');
+    const skipDockingSpy = vi.spyOn(PhaserHost.prototype, 'skipBaseReturnDocking');
+
+    const ctrl = new V2AppController(env.mountEl as unknown as HTMLElement, {
+      onSwitchToV1: () => {},
+    });
+    ctrl.init();
+
+    // Confirm settlement in non-reducedMotion -> starts Base return docking!
+    env.mountEl.querySelector('[data-testid="btn-confirm-settlement"]')!.click();
+    expect(playDockingSpy).toHaveBeenCalledTimes(1);
+    expect((ctrl as unknown as { activeDockingNotice: unknown }).activeDockingNotice).not.toBeNull();
+
+    // Open Career Modal -> Endings tab -> Replay unlocked ending mid-docking!
+    env.mountEl.querySelector('[data-testid="btn-open-career"]')!.click();
+    env.mountEl.querySelector('[data-testid="career-tab-endings"]')!.click();
+    env.mountEl.querySelector('[data-replay-ending="free_haven"]')!.click();
+
+    expect(skipDockingSpy).toHaveBeenCalledTimes(1);
+    expect((ctrl as unknown as { activeDockingNotice: unknown }).activeDockingNotice).toBeNull();
+    expect(env.mountEl.querySelector('[data-testid="ending-screen"]')).not.toBeNull();
+
+    // Also verify destroy() clears activeDockingNotice unconditionally
+    (ctrl as unknown as { activeDockingNotice: unknown }).activeDockingNotice = { animating: true };
+    ctrl.destroy();
+    expect((ctrl as unknown as { activeDockingNotice: unknown }).activeDockingNotice).toBeNull();
   });
 });
