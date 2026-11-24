@@ -156,7 +156,7 @@ function computeSynergyColor(sourceKind: V2AdjacencyLink['sourceKind']): string 
  */
 export class CargoGridV2Component {
   private readonly root: HTMLElement;
-  private readonly callbacks: CargoGridV2Callbacks;
+  private callbacks: CargoGridV2Callbacks;
 
   private bay: V2CargoBayState | null = null;
   private editable = false;
@@ -167,11 +167,14 @@ export class CargoGridV2Component {
   private gridHasFocus = false;
   private drag: DragState | null = null;
   private lastSnappedId: string | null = null;
+  private pendingSnapFeedback = false;
+  private renderedShipId: V2CargoBayState['shipId'] | null = null;
   private invalidToastText: string | null = null;
-  private invalidToastTimer: number | null = null;
+  private invalidToastTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   private prevLinkCount = 0;
   private boardEl: HTMLElement | null = null;
   private lastExternalInspectorHost: HTMLElement | null = null;
+  private destroyed = false;
 
   constructor(root: HTMLElement, callbacks: CargoGridV2Callbacks) {
     this.root = root;
@@ -182,20 +185,51 @@ export class CargoGridV2Component {
     window.addEventListener('keydown', this.handleKeyDown);
   }
 
+  setCallbacks(callbacks: CargoGridV2Callbacks): void {
+    this.callbacks = callbacks;
+  }
+
+  getRoot(): HTMLElement {
+    return this.root;
+  }
+
+  getUiStateSnapshot(): {
+    readonly selected: { readonly zone: 'grid' | 'staging'; readonly instanceId: string } | null;
+    readonly focusedCell: V2GridCoord;
+    readonly prevLinkCount: number;
+    readonly lastSnappedId: string | null;
+    readonly carrying: boolean;
+  } {
+    return {
+      selected: this.selected ? { ...this.selected } : null,
+      focusedCell: { ...this.focusedCell },
+      prevLinkCount: this.prevLinkCount,
+      lastSnappedId: this.lastSnappedId,
+      carrying: this.carrying,
+    };
+  }
+
+  private clearInvalidToast(): void {
+    this.invalidToastText = null;
+    if (this.invalidToastTimer !== null) {
+      globalThis.clearTimeout(this.invalidToastTimer);
+      this.invalidToastTimer = null;
+    }
+  }
+
   destroy(): void {
+    this.destroyed = true;
     window.removeEventListener('pointermove', this.handleWindowPointerMove);
     window.removeEventListener('pointerup', this.handleWindowPointerUp);
     window.removeEventListener('pointercancel', this.handleWindowPointerCancel);
     window.removeEventListener('keydown', this.handleKeyDown);
     this.clearDragGhost();
+    this.drag = null;
     if (this.lastExternalInspectorHost) {
       this.lastExternalInspectorHost.innerHTML = '';
       this.lastExternalInspectorHost = null;
     }
-    if (this.invalidToastTimer !== null) {
-      window.clearTimeout(this.invalidToastTimer);
-      this.invalidToastTimer = null;
-    }
+    this.clearInvalidToast();
   }
 
   render(
@@ -203,13 +237,39 @@ export class CargoGridV2Component {
     editable: boolean,
     options?: { readonly prepareMode?: boolean; readonly restoreCellFocus?: boolean }
   ): void {
+    if (this.destroyed) return;
     const wasCellFocused =
       Boolean(options?.restoreCellFocus) ||
       (this.boardEl !== null && this.boardEl.contains(document.activeElement));
 
+    const nextPrepareMode = Boolean(options?.prepareMode);
+    const isFirstRender = this.bay === null;
+    const shipChanged = this.renderedShipId !== null && this.renderedShipId !== bay.shipId;
+    const modeChanged = !isFirstRender && this.prepareMode !== nextPrepareMode;
+    const editableDisabled = !isFirstRender && this.editable && !editable;
+
+    if (shipChanged || modeChanged) {
+      this.clearDragGhost();
+      this.drag = null;
+      this.carrying = false;
+      this.lastSnappedId = null;
+      this.pendingSnapFeedback = false;
+      this.clearInvalidToast();
+      if (modeChanged) {
+        this.selected = null;
+      }
+    } else if (editableDisabled) {
+      this.clearDragGhost();
+      this.drag = null;
+      this.carrying = false;
+      this.lastSnappedId = null;
+      this.pendingSnapFeedback = false;
+    }
+
     this.bay = bay;
     this.editable = editable;
-    this.prepareMode = Boolean(options?.prepareMode);
+    this.prepareMode = nextPrepareMode;
+    this.renderedShipId = bay.shipId;
 
     const ship = V2_SHIPS[bay.shipId];
     // Keep focused cell within current ship bounds
@@ -234,6 +294,11 @@ export class CargoGridV2Component {
       }
     }
 
+    if (this.lastSnappedId && !bay.placed.some((p) => p.item.instanceId === this.lastSnappedId)) {
+      this.lastSnappedId = null;
+      this.pendingSnapFeedback = false;
+    }
+
     // Auto-select first staging item when editable for 1-tap placement convenience
     if (editable && !this.selected && bay.staging.length > 0) {
       this.selected = { zone: 'staging', instanceId: bay.staging[0].item.instanceId };
@@ -241,10 +306,16 @@ export class CargoGridV2Component {
 
     const stats = calculateV2BuildStats(bay);
     const occ = getV2BayOccupancy(bay);
-    if (stats.links.length > this.prevLinkCount && this.prevLinkCount >= 0 && this.lastSnappedId) {
-      soundEngine.play('energyLink');
+    if (isFirstRender || shipChanged || modeChanged) {
+      this.prevLinkCount = stats.links.length;
+      this.pendingSnapFeedback = false;
+    } else {
+      if (this.pendingSnapFeedback && this.lastSnappedId && stats.links.length > this.prevLinkCount) {
+        soundEngine.play('energyLink');
+      }
+      this.prevLinkCount = stats.links.length;
+      this.pendingSnapFeedback = false;
     }
-    this.prevLinkCount = stats.links.length;
 
     this.root.innerHTML = '';
 
@@ -703,6 +774,13 @@ export class CargoGridV2Component {
 
       if (!this.editable) {
         if (occupant) {
+          if (
+            this.selected?.zone !== 'grid' ||
+            this.selected.instanceId !== occupant.item.instanceId
+          ) {
+            this.lastSnappedId = null;
+            this.pendingSnapFeedback = false;
+          }
           this.selected = { zone: 'grid', instanceId: occupant.item.instanceId };
           this.render(bay, this.editable, { prepareMode: this.prepareMode });
         }
@@ -732,6 +810,8 @@ export class CargoGridV2Component {
           ghostEl: null,
         };
         if (!isSameSelected) {
+          this.lastSnappedId = null;
+          this.pendingSnapFeedback = false;
           soundEngine.play('click');
         }
         this.render(bay, this.editable, { prepareMode: this.prepareMode });
@@ -820,6 +900,8 @@ export class CargoGridV2Component {
           chip.addEventListener('click', () => {
             this.selected = { zone: 'staging', instanceId: st.item.instanceId };
             this.carrying = false;
+            this.lastSnappedId = null;
+            this.pendingSnapFeedback = false;
             soundEngine.play('click');
             this.render(bay, this.editable, { prepareMode: this.prepareMode });
           });
@@ -833,6 +915,8 @@ export class CargoGridV2Component {
         if (!this.editable || !this.bay) return;
         const res = undoV2LastDiscard(this.bay);
         if (res.ok) {
+          this.lastSnappedId = null;
+          this.pendingSnapFeedback = false;
           soundEngine.play('click');
           this.callbacks.onBayChange(res.bay);
         }
@@ -978,6 +1062,7 @@ export class CargoGridV2Component {
         );
         if (res.ok) {
           this.lastSnappedId = sel.item.instanceId;
+          this.pendingSnapFeedback = true;
           this.selected = { zone: 'grid', instanceId: sel.item.instanceId };
           soundEngine.play('place');
           this.callbacks.onBayChange(res.bay);
@@ -987,6 +1072,8 @@ export class CargoGridV2Component {
         if (!this.bay || sel.zone !== 'grid') return;
         const res = moveV2PlacedToStaging(this.bay, sel.item.instanceId);
         if (res.ok) {
+          this.lastSnappedId = null;
+          this.pendingSnapFeedback = false;
           this.selected = { zone: 'staging', instanceId: sel.item.instanceId };
           soundEngine.play('click');
           this.callbacks.onBayChange(res.bay);
@@ -994,6 +1081,8 @@ export class CargoGridV2Component {
       });
       box.querySelector('#btn-v2-prep-remove')?.addEventListener('click', () => {
         if (sel.zone !== 'grid') return;
+        this.lastSnappedId = null;
+        this.pendingSnapFeedback = false;
         this.selected = null;
         soundEngine.play('click');
         this.callbacks.onPrepareRemoveItem?.(sel.item.instanceId);
@@ -1036,6 +1125,7 @@ export class CargoGridV2Component {
     const res = rotateV2PlacedItem(this.bay, sel.item.instanceId);
     if (res.ok) {
       this.lastSnappedId = sel.item.instanceId;
+      this.pendingSnapFeedback = true;
       soundEngine.play('rotate');
       this.callbacks.onBayChange(res.bay);
     } else {
@@ -1049,6 +1139,8 @@ export class CargoGridV2Component {
     if (!sel) return;
     const res = discardV2Item(this.bay, sel.item.instanceId);
     if (res.ok) {
+      this.lastSnappedId = null;
+      this.pendingSnapFeedback = false;
       this.selected = null;
       this.carrying = false;
       soundEngine.play('click');
@@ -1069,6 +1161,7 @@ export class CargoGridV2Component {
       const res = placeV2FromStaging(this.bay, sel.item.instanceId, x, y, sel.rotation);
       if (!res.ok) return false;
       this.lastSnappedId = sel.item.instanceId;
+      this.pendingSnapFeedback = true;
       this.selected = { zone: 'grid', instanceId: sel.item.instanceId };
       this.carrying = false;
       soundEngine.play('place');
@@ -1091,6 +1184,7 @@ export class CargoGridV2Component {
     const res = moveV2PlacedItem(this.bay, sel.item.instanceId, x, y, sel.rotation);
     if (!res.ok) return false;
     this.lastSnappedId = sel.item.instanceId;
+    this.pendingSnapFeedback = true;
     this.carrying = false;
     soundEngine.play('place');
     this.callbacks.onBayChange(res.bay);
@@ -1175,12 +1269,14 @@ export class CargoGridV2Component {
   }
 
   private showInvalidReason(reason?: 'out_of_bounds' | 'disabled_cell' | 'overlap'): void {
+    if (this.destroyed) return;
     this.invalidToastText = reasonToZh(reason);
     soundEngine.play('invalid');
     if (this.invalidToastTimer !== null) {
-      window.clearTimeout(this.invalidToastTimer);
+      globalThis.clearTimeout(this.invalidToastTimer);
     }
-    this.invalidToastTimer = window.setTimeout(() => {
+    this.invalidToastTimer = globalThis.setTimeout(() => {
+      if (this.destroyed) return;
       this.invalidToastText = null;
       this.invalidToastTimer = null;
       if (this.bay) {
@@ -1367,6 +1463,8 @@ export class CargoGridV2Component {
           if (!this.callbacks.onPrepareRemoveItem) return;
           const sel = this.getSelectedItemInfo();
           if (sel && sel.zone === 'grid') {
+            this.lastSnappedId = null;
+            this.pendingSnapFeedback = false;
             this.selected = null;
             this.callbacks.onPrepareRemoveItem(sel.item.instanceId);
           }
@@ -1379,6 +1477,8 @@ export class CargoGridV2Component {
         e.preventDefault();
         this.carrying = false;
         this.selected = null;
+        this.lastSnappedId = null;
+        this.pendingSnapFeedback = false;
         this.render(this.bay, this.editable, {
           prepareMode: this.prepareMode,
           restoreCellFocus: this.gridHasFocus,

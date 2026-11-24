@@ -153,7 +153,7 @@ import {
   type V2WreckSpotId,
   type V3HullTuningTrack,
 } from '../domain/types';
-import { CargoGridV2Component } from './CargoGridV2';
+import { CargoGridV2Component, type CargoGridV2Callbacks } from './CargoGridV2';
 import { crewPortraitSvg, svgIcon } from './icons';
 import {
   buildV2InspectSnapshot,
@@ -217,6 +217,9 @@ export class V2AppController {
   private showcaseRun: V2RunState | null = null;
   private phaserHost: PhaserHost | null = null;
   private cargoGrid: CargoGridV2Component | null = null;
+  private cargoHeaderTitleEl: HTMLElement | null = null;
+  private cargoHeaderSubEl: HTMLElement | null = null;
+  private cargoMountEl: HTMLElement | null = null;
   private tabGuard: MultiTabGuard;
 
   private sessionLaunchIndex = 0;
@@ -447,8 +450,7 @@ export class V2AppController {
       window.clearTimeout(this.actionToastTimer);
       this.actionToastTimer = null;
     }
-    this.cargoGrid?.destroy();
-    this.cargoGrid = null;
+    this.teardownCargoBay();
     this.tabGuard.destroy();
     this.phaserHost?.destroy();
     this.phaserHost = null;
@@ -1706,8 +1708,7 @@ export class V2AppController {
       if (this.prepareDraft) {
         this.renderPreparePanels();
       } else {
-        this.cargoGrid?.destroy();
-        this.cargoGrid = null;
+        this.teardownCargoBay();
         this.leftPanelEl.innerHTML = '';
         this.rightPanelEl.innerHTML = '';
       }
@@ -2246,6 +2247,8 @@ export class V2AppController {
           stargateRelayTier: getFacilityTier(p, 'stargate_relay'),
         }),
       onChange: (nextBay) => {
+        if (!this.canMutate() || this.prepareDraft !== draft) return;
+        const wasPlayingDemo = draft.playingDemo;
         draft.playingDemo = false;
         draft.demoPlaybackKey = null;
         draft.slots = nextBay.placed.map((pl) => {
@@ -2264,17 +2267,19 @@ export class V2AppController {
             rotation: pl.rotation,
           };
         });
-        this.syncAll();
+        this.syncPrepareLocal(draft, wasPlayingDemo);
       },
       onPrepareRemove: draft.trialBuildId
         ? undefined
         : (instanceId) => {
+            if (!this.canMutate() || this.prepareDraft !== draft) return;
+            const wasPlayingDemo = draft.playingDemo;
             draft.playingDemo = false;
             draft.demoPlaybackKey = null;
             draft.slots = draft.slots.filter(
               (s) => s.slotKey !== instanceId && s.warehouseInstanceId !== instanceId
             );
-            this.syncAll();
+            this.syncPrepareLocal(draft, wasPlayingDemo);
           },
     });
   }
@@ -2380,8 +2385,7 @@ export class V2AppController {
 
     if (node.combat) {
       if (run.activeCombat) {
-        this.cargoGrid?.destroy();
-        this.cargoGrid = null;
+        this.teardownCargoBay();
         this.leftPanelEl.innerHTML = '';
         this.rightPanelEl.innerHTML = '';
         return;
@@ -2646,8 +2650,9 @@ export class V2AppController {
         }),
       onChange: (nextBay) => {
         if (!this.canMutate()) return;
-        this.setCurrentRun({ ...run, bay: nextBay });
-        this.syncAll();
+        const curRun = this.getCurrentRun();
+        if (!curRun || curRun.phase !== 'SHOP') return;
+        this.syncShopLocal({ ...curRun, bay: nextBay });
       },
     });
   }
@@ -2749,9 +2754,9 @@ export class V2AppController {
         }),
       onChange: (nextBay) => {
         if (!this.canMutate()) return;
-        this.setCurrentRun({ ...run, bay: nextBay });
-        this.phaserHost?.updateV2ShipVisualSpec(deriveV2ShipVisualSpec(nextBay));
-        this.syncAll();
+        const curRun = this.getCurrentRun();
+        if (!curRun || curRun.phase !== 'ARRANGE') return;
+        this.syncArrangeLocal({ ...curRun, bay: nextBay });
       },
     });
   }
@@ -2917,6 +2922,74 @@ export class V2AppController {
 
   // --- Shared Right-Panel CargoGridV2 Mount ---
 
+  private teardownCargoBay(): void {
+    this.cargoGrid?.destroy();
+    this.cargoGrid = null;
+    this.cargoHeaderTitleEl = null;
+    this.cargoHeaderSubEl = null;
+    this.cargoMountEl = null;
+  }
+
+  private updateStageMountStrip(
+    visualSpec: ReturnType<typeof deriveV2ShipVisualSpec>,
+    fallbackMutedLabel?: string
+  ): void {
+    const existingStrip = this.sceneOverlayEl.querySelector<HTMLElement>('.v2-mount-strip');
+    if (visualSpec.mountSummaryTags.length === 0 && !fallbackMutedLabel) {
+      existingStrip?.remove();
+      return;
+    }
+    const html =
+      visualSpec.mountSummaryTags.length > 0
+        ? visualSpec.mountSummaryTags.map((t) => `<span class="v2-mount-pill">${t}</span>`).join('')
+        : `<span class="v2-mount-pill muted">${fallbackMutedLabel}</span>`;
+    if (existingStrip) {
+      existingStrip.innerHTML = html;
+    } else if (this.sceneOverlayEl.querySelector('.scene-stage-tag')) {
+      const strip = document.createElement('div');
+      strip.className = 'v2-mount-strip';
+      strip.innerHTML = html;
+      this.sceneOverlayEl.appendChild(strip);
+    }
+  }
+
+  private syncArrangeLocal(nextRun: V2RunState): void {
+    const prevStorageError = this.storageError;
+    this.setCurrentRun(nextRun);
+    const visualSpec = deriveV2ShipVisualSpec(nextRun.bay);
+    this.phaserHost?.updateV2ShipVisualSpec(visualSpec);
+    this.updateStageMountStrip(visualSpec);
+    this.renderTopHud();
+    if (this.storageError !== prevStorageError) {
+      this.renderBanners();
+    }
+    this.renderArrangePhase(nextRun);
+  }
+
+  private syncShopLocal(nextRun: V2RunState): void {
+    const prevStorageError = this.storageError;
+    this.setCurrentRun(nextRun);
+    const visualSpec = deriveV2ShipVisualSpec(nextRun.bay);
+    this.phaserHost?.updateV2ShipVisualSpec(visualSpec);
+    this.renderTopHud();
+    if (this.storageError !== prevStorageError) {
+      this.renderBanners();
+    }
+    this.renderShopPhase(nextRun);
+  }
+
+  private syncPrepareLocal(draft: V2PrepareDraft, wasPlayingDemo: boolean): void {
+    const previewBay = this.buildPreparePreviewBay(draft);
+    const visualSpec = deriveV2ShipVisualSpec(previewBay);
+    if (wasPlayingDemo) {
+      this.syncPhaserStage();
+    } else {
+      this.phaserHost?.updateV2ShipVisualSpec(visualSpec);
+      this.updateStageMountStrip(visualSpec, '仅舰载核心小炮');
+    }
+    this.renderPreparePanels();
+  }
+
   private mountV2CargoBay(
     bay: V2CargoBayState,
     editable: boolean,
@@ -2933,22 +3006,58 @@ export class V2AppController {
       readonly onPrepareRemove?: (instanceId: string) => void;
     }
   ): void {
-    this.rightPanelEl.innerHTML = `
-      <div class="panel-header">
-        <h2>${opts.title}</h2>
-        <span class="panel-sub">${opts.statusBadge ?? (editable ? '可调整' : '当前配置')}</span>
-      </div>
-      <div class="cargo-mount-root" id="v2-cargo-mount"></div>
-    `;
-    const mount = this.rightPanelEl.querySelector<HTMLElement>('#v2-cargo-mount')!;
-    this.cargoGrid?.destroy();
-    this.cargoGrid = new CargoGridV2Component(mount, {
+    const badgeText = opts.statusBadge ?? (editable ? '可调整' : '当前配置');
+    const callbacks: CargoGridV2Callbacks = {
       onBayChange: (nextBay) => opts.onChange?.(nextBay),
-      onPrepareRemoveItem: (id) => opts.onPrepareRemove?.(id),
+      onPrepareRemoveItem: opts.onPrepareRemove ? (id) => opts.onPrepareRemove?.(id) : undefined,
       getTacticalDelta: opts.getTacticalDelta,
       getInspectorHost: opts.getInspectorHost,
-    });
-    this.cargoGrid.render(bay, editable, { prepareMode: opts.prepareMode });
+    };
+
+    const canReuse =
+      this.cargoGrid !== null &&
+      this.cargoMountEl !== null &&
+      this.rightPanelEl.contains(this.cargoMountEl);
+
+    if (!canReuse) {
+      this.teardownCargoBay();
+      this.rightPanelEl.innerHTML = '';
+
+      const header = document.createElement('div');
+      header.className = 'panel-header';
+
+      const titleEl = document.createElement('h2');
+      titleEl.textContent = opts.title;
+
+      const subEl = document.createElement('span');
+      subEl.className = 'panel-sub';
+      subEl.textContent = badgeText;
+
+      header.appendChild(titleEl);
+      header.appendChild(subEl);
+
+      const mount = document.createElement('div');
+      mount.className = 'cargo-mount-root';
+      mount.id = 'v2-cargo-mount';
+
+      this.rightPanelEl.appendChild(header);
+      this.rightPanelEl.appendChild(mount);
+
+      this.cargoHeaderTitleEl = titleEl;
+      this.cargoHeaderSubEl = subEl;
+      this.cargoMountEl = mount;
+      this.cargoGrid = new CargoGridV2Component(mount, callbacks);
+    } else {
+      if (this.cargoHeaderTitleEl && this.cargoHeaderTitleEl.textContent !== opts.title) {
+        this.cargoHeaderTitleEl.textContent = opts.title;
+      }
+      if (this.cargoHeaderSubEl && this.cargoHeaderSubEl.textContent !== badgeText) {
+        this.cargoHeaderSubEl.textContent = badgeText;
+      }
+      this.cargoGrid!.setCallbacks(callbacks);
+    }
+
+    this.cargoGrid!.render(bay, editable, { prepareMode: opts.prepareMode });
   }
 
   // --- Modal Launchers ---
