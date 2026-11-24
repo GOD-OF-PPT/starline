@@ -30,6 +30,7 @@ import { getAnyV2ItemDef } from '../domain/itemCatalog';
 import {
   computeV2BayHash,
   computeV2ItemSacrificePreview,
+  getV2ThreatTierMeta,
   summarizeV2MissionSacrificeOptions,
   type V2TacticalDelta,
 } from '../domain/tacticalDelta';
@@ -39,6 +40,7 @@ import type {
   V2ItemOrigin,
   V2PlacedItem,
 } from '../domain/types';
+import { svgIcon } from './icons';
 
 export interface CargoGridV2Callbacks {
   readonly onBayChange: (nextBay: V2CargoBayState) => void;
@@ -187,6 +189,7 @@ export class CargoGridV2Component {
   private invalidToastText: string | null = null;
   private invalidToastTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   private prevLinkCount = 0;
+  private showItemDetailsDrawer = false;
 
   // Persistent sub-containers created once in ensureContainers()
   private containersReady = false;
@@ -554,6 +557,7 @@ export class CargoGridV2Component {
       this.recommendedCellKeys.clear();
       if (modeChanged) {
         this.selected = null;
+        this.showItemDetailsDrawer = false;
       }
     } else if (editableDisabled) {
       this.clearDragGhost();
@@ -746,42 +750,58 @@ export class CargoGridV2Component {
       stats.empJammers.reduce((sum, e) => sum + e.damage, 0) +
       stats.salvageGrapples.reduce((sum, g) => sum + g.damage, 0);
 
-    this.statsEl.innerHTML = `
-      <div class="stat-chip">
-        <span class="k">常规/构筑火力</span>
-        <span class="v num">${regularDps}</span>
-        <span class="sub">${attackSubParts.length > 0 ? attackSubParts.join(' · ') : `舰核 ${stats.coreAttack}`}</span>
-      </div>
-      <div class="stat-chip">
-        <span class="k">护盾/反击</span>
-        <span class="v num">${stats.effectiveShield}</span>
-        <span class="sub ${stats.shieldCapped ? 'cap' : ''}">${
-      stats.bestActiveCounter
-        ? `反击 ${Math.round(stats.bestActiveCounter.ratio * 100)}%`
-        : stats.endOfRoundShieldRegen > 0
-        ? `每轮回盾 +${stats.endOfRoundShieldRegen}`
-        : stats.shieldCapped
-        ? `已达上限 ${V2_MAX_BATTLE_SHIELD}`
-        : `上限 ${V2_MAX_BATTLE_SHIELD}`
-    }</span>
-      </div>
-      <div class="stat-chip">
-        <span class="k">胜后维修</span>
-        <span class="v num">+${stats.effectiveRepair}</span>
-        <span class="sub ${stats.repairCapped ? 'cap' : ''}">${
+    const attackTitle = `常规火力 ${regularDps}（${
+      attackSubParts.length > 0 ? attackSubParts.join(' · ') : `舰核 ${stats.coreAttack}`
+    }）`;
+    const shieldDetail = stats.bestActiveCounter
+      ? `反击 ${Math.round(stats.bestActiveCounter.ratio * 100)}%`
+      : stats.endOfRoundShieldRegen > 0
+      ? `每轮回盾 +${stats.endOfRoundShieldRegen}`
+      : stats.shieldCapped
+      ? `已达上限 ${V2_MAX_BATTLE_SHIELD}`
+      : `上限 ${V2_MAX_BATTLE_SHIELD}`;
+    const shieldTitle = `护盾 ${stats.effectiveShield}（${shieldDetail}）`;
+    const repairTitle = `胜后维修 +${stats.effectiveRepair}（${
       stats.repairCapped ? `已达上限 ${V2_MAX_POST_WIN_REPAIR}` : `上限 ${V2_MAX_POST_WIN_REPAIR}`
-    }</span>
-      </div>
-      <div class="stat-chip">
-        <span class="k">舱格/供能</span>
-        <span class="v num">${occ.occupiedCells}/${occ.totalCells}</span>
-        <span class="sub">${
+    }）`;
+    const capDetail =
       stats.powerCellBoostedIds.length > 0
-        ? `⚡供能×${stats.powerCellBoostedIds.length}${stats.links.length > 0 ? ` · 链×${stats.links.length}` : ''}`
+        ? `供能×${stats.powerCellBoostedIds.length}${stats.links.length > 0 ? ` · 联动×${stats.links.length}` : ''}`
         : stats.links.length > 0
-        ? `联动 ×${stats.links.length}`
-        : `可售 ${stats.nonLoanBayValue}¤`
-    }</span>
+        ? `联动×${stats.links.length}`
+        : `可售 ${stats.nonLoanBayValue}¤`;
+    const capTitle = `舱格 ${occ.occupiedCells}/${occ.totalCells}（${capDetail}）`;
+    const linkBadge =
+      stats.links.length > 0 || stats.powerCellBoostedIds.length > 0
+        ? `<span class="v3-stat-link-tag" title="${capDetail}">${svgIcon('bolt', 11)}${
+            stats.links.length + stats.powerCellBoostedIds.length
+          }</span>`
+        : '';
+
+    this.statsEl.innerHTML = `
+      <div class="v3-compact-stats-row" data-testid="cargo-compact-stats" role="list" aria-label="船舱构筑遥测">
+        <span class="v3-stat-cell" role="listitem" data-stat="attack" title="${attackTitle}" aria-label="${attackTitle}">
+          ${svgIcon('cannon', 13)}
+          <span class="v3-stat-k">火</span>
+          <strong class="v3-stat-v num">${regularDps}</strong>
+          ${attackSubParts.length > 0 ? `<span class="v3-stat-mini">+</span>` : ''}
+        </span>
+        <span class="v3-stat-cell ${stats.shieldCapped ? 'is-cap' : ''}" role="listitem" data-stat="shield" title="${shieldTitle}" aria-label="${shieldTitle}">
+          ${svgIcon('shield', 13)}
+          <span class="v3-stat-k">盾</span>
+          <strong class="v3-stat-v num">${stats.effectiveShield}</strong>
+        </span>
+        <span class="v3-stat-cell ${stats.repairCapped ? 'is-cap' : ''}" role="listitem" data-stat="repair" title="${repairTitle}" aria-label="${repairTitle}">
+          ${svgIcon('wrench', 13)}
+          <span class="v3-stat-k">修</span>
+          <strong class="v3-stat-v num">+${stats.effectiveRepair}</strong>
+        </span>
+        <span class="v3-stat-cell" role="listitem" data-stat="capacity" title="${capTitle}" aria-label="${capTitle}">
+          ${svgIcon('grid', 13)}
+          <span class="v3-stat-k">舱</span>
+          <strong class="v3-stat-v num">${occ.occupiedCells}/${occ.totalCells}</strong>
+          ${linkBadge}
+        </span>
       </div>
     `;
   }
@@ -1211,6 +1231,7 @@ export class CargoGridV2Component {
     if (nextKey === this.renderedSelectedKey) return;
 
     this.selected = nextSel;
+    this.showItemDetailsDrawer = false;
     this.renderedSelectedKey = nextKey;
     this.lastSelectedItemMetaKey = this.computeSelectedItemMetaKey();
     if (opts?.clearSnap !== false) {
@@ -1308,7 +1329,9 @@ export class CargoGridV2Component {
     }
 
     const deltaKeyPart = delta
-      ? `${delta.positiveImpact ? 1 : 0}|${delta.synergyLine}|${delta.combatDeltaLine}|${delta.spaceLine}|${
+      ? `${delta.positiveImpact ? 1 : 0}|${delta.synergyLine}|${delta.qualitativeDeltaLine ?? delta.combatDeltaLine}|${
+          delta.trendDirection ?? ''
+        }|${delta.afterThreat ?? ''}|${delta.detailSummary ?? ''}|${delta.spaceLine}|${
           delta.recommendedSpot
             ? `${delta.recommendedSpot.x},${delta.recommendedSpot.y},${delta.recommendedSpot.rotation}`
             : ''
@@ -1318,18 +1341,45 @@ export class CargoGridV2Component {
       sel.item.quality
     }:${sel.item.origin}:${sel.item.fixedValue}|e=${editable ? 1 : 0}|pm=${
       this.prepareMode ? 1 : 0
-    }|pr=${hasPrepareRemove ? 1 : 0}|pb=${isSelectedPowerBoosted ? 1 : 0}|d=${deltaKeyPart}|sac=${sacrificeText}`;
+    }|pr=${hasPrepareRemove ? 1 : 0}|pb=${isSelectedPowerBoosted ? 1 : 0}|idw=${
+      this.showItemDetailsDrawer ? 1 : 0
+    }|d=${deltaKeyPart}|sac=${sacrificeText}`;
     if (this.lastInspectorStateKey === stateKey) return;
     this.lastInspectorStateKey = stateKey;
     box.style.display = '';
 
     const eqDef = sel.item.category === 'equipment' ? V2_EQUIPMENT_DEFS[sel.item.definitionId] : undefined;
 
+    const layer1DeltaLine = delta ? delta.qualitativeDeltaLine ?? delta.combatDeltaLine : '';
+    const trendBadgeHtml =
+      delta?.trendDirection
+        ? `<span class="v3-trend-badge trend-${delta.trendDirection}" data-trend="${delta.trendDirection}">${
+            delta.trendDirection === 'up' ? '↑ 提升' : delta.trendDirection === 'down' ? '↓ 下降' : '= 持平'
+          }</span>`
+        : '';
+    const afterThreatMeta = delta?.afterThreat ? getV2ThreatTierMeta(delta.afterThreat) : null;
+    const afterThreatHtml = afterThreatMeta
+      ? `<span class="v3-threat-pill threat-${afterThreatMeta.tier}" data-threat-tier="${afterThreatMeta.tier}">${afterThreatMeta.symbol} ${afterThreatMeta.label}</span>`
+      : '';
+    const itemDetailsToggleHtml = delta?.detailSummary
+      ? `<div class="v3-item-details-wrap">
+          <button type="button" class="btn btn-sm btn-ghost v3-item-details-toggle" id="btn-v2-delta-details" data-testid="btn-toggle-item-details" aria-expanded="${
+            this.showItemDetailsDrawer ? 'true' : 'false'
+          }">${this.showItemDetailsDrawer ? '收起推演明细' : '明细（不干预结果）'}</button>
+          ${
+            this.showItemDetailsDrawer
+              ? `<div class="v3-item-details-drawer" data-testid="item-details-drawer">${delta.detailSummary}</div>`
+              : ''
+          }
+        </div>`
+      : '';
+
     const deltaHtml = delta
       ? `<div class="v2-delta-strip ${delta.positiveImpact ? 'positive' : ''}" data-testid="tactical-delta">
           <div class="v2-delta-row"><span class="v2-delta-k">联动</span><span>${delta.synergyLine}</span></div>
-          <div class="v2-delta-row"><span class="v2-delta-k">收益</span><strong>${delta.combatDeltaLine}</strong></div>
+          <div class="v2-delta-row"><span class="v2-delta-k">趋势</span><span class="v3-delta-qual-wrap">${trendBadgeHtml}${afterThreatHtml}<strong>${layer1DeltaLine}</strong></span></div>
           <div class="v2-delta-row"><span class="v2-delta-k">舱位</span><span>${delta.spaceLine}</span></div>
+          ${itemDetailsToggleHtml}
         </div>`
       : `<div class="inspector-desc">${def.summary}${
           sel.item.fixedValue > 0 ? ` · 回收估价 <strong>${sel.item.fixedValue}¤</strong>` : ''
@@ -1772,12 +1822,22 @@ export class CargoGridV2Component {
   };
 
   private handleInspectorClick = (ev: MouseEvent): void => {
-    if (this.destroyed || !this.editable || !this.bay) return;
+    if (this.destroyed || !this.bay) return;
     const target = ev.target as HTMLElement | null;
     const btn = target?.closest<HTMLButtonElement>('button[id]');
     if (!btn) return;
     const sel = this.getSelectedItemInfo();
     if (!sel) return;
+
+    // S06: On-demand item details drawer works in both editable and read-only bays
+    if (btn.id === 'btn-v2-delta-details') {
+      this.showItemDetailsDrawer = !this.showItemDetailsDrawer;
+      soundEngine.play('click');
+      this.renderSelectedInspector(this.editable, this.activeDelta);
+      return;
+    }
+
+    if (!this.editable) return;
 
     if (btn.id === 'btn-v2-rotate') {
       this.rotateSelected();

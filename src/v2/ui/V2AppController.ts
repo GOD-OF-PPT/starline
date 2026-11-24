@@ -1035,6 +1035,7 @@ export class V2AppController {
     this.selectedMapNodeId = null;
     this.selectedWreckHotspot = 'armory';
     this.awaitingEliteDecision = false;
+    this.showCombatLogDetails = false;
     this.showcaseRun = createV2ShowcaseRun(trialId);
     soundEngine.play('warpJump');
     this.syncAll();
@@ -1610,6 +1611,7 @@ export class V2AppController {
             if (res.ok) {
               this.activeCombatPlaybackKey = null;
               this.awaitingEliteDecision = false;
+              this.showCombatLogDetails = false;
               this.livePhaseBannerText = null;
               this.liveEnemySnapshots = [];
               if (isRunPendingCampaignEnding(res.run)) {
@@ -1837,6 +1839,7 @@ export class V2AppController {
     const run = createV2TutorialRun(`v2tut_${Date.now().toString(36)}`);
     this.save = { ...this.save, activeRun: run };
     this.activeDockingNotice = null;
+    this.showCombatLogDetails = false;
     this.persist();
     soundEngine.play('warpJump');
     this.syncAll();
@@ -2140,6 +2143,7 @@ export class V2AppController {
     this.prepareDraft = null;
     this.settlementDispositions = {};
     this.selectedMapNodeId = null;
+    this.showCombatLogDetails = false;
 
     const hasRelicSignal = Object.values(res.run.graph.nodes).some((n) => Boolean(n.hasRelicSignal));
     if (hasRelicSignal) {
@@ -2602,6 +2606,7 @@ export class V2AppController {
             }
             this.selectedMapNodeId = null;
             this.selectedWreckHotspot = 'armory';
+            this.showCombatLogDetails = false;
             const enteredNode = res.run.graph.nodes[nid];
             const bossId = enteredNode?.combat?.bossId ?? enteredNode?.bossId;
             if (bossId === 'boss_anvil') this.triggerCrewComm('act1_boss_intro');

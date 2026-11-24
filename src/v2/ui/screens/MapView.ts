@@ -16,7 +16,11 @@ import {
 } from '../../domain/contracts';
 import { canUseV3GadgetInRun, getReachableNextNodeIds } from '../../domain/encounter';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
-import { classifyV2CombatThreat, type V2CombatThreatTier } from '../../domain/tacticalDelta';
+import {
+  classifyV2CombatThreat,
+  getV2ThreatTierMeta,
+  type V2CombatThreatTier,
+} from '../../domain/tacticalDelta';
 import type { V2MapNode, V2RunState } from '../../domain/types';
 import { svgIcon } from '../icons';
 import { NODE_TYPE_META, type PhaseView } from './screenTypes';
@@ -49,6 +53,9 @@ interface NodeForecastSummary {
   readonly traitBadge?: string;
   readonly threatTier?: V2CombatThreatTier;
   readonly threatLabel?: '稳' | '吃力' | '危险' | '致命';
+  readonly threatSymbol?: '●' | '▲' | '◆' | '✕';
+  readonly previewFinalHp?: number;
+  readonly detailsDrawerHtml?: string;
   readonly relicRewardName?: string;
 }
 
@@ -71,7 +78,6 @@ function describeNodeForecast(
   if (n.combat) {
     const pv = previewV2CombatNode(run, n.nodeId, run.targetPolicy, { stargateRelayTier });
     const chargesMax = computeCombatTacticalChargesMax(n, run, bonusBossCharges);
-    const tacticPrefix = !pureAutoCombat ? `基础推演(含${chargesMax}指令)：` : '';
     const bossId = resolveNodeBossId(n, run);
     const bossDef = resolveV3BossDefForEncounter({
       encounterKind: n.combat.encounterKind,
@@ -82,7 +88,8 @@ function describeNodeForecast(
     const traitBadge = bossDef
       ? `首领 · ${bossDef.name} (${bossDef.phaseCountLabel})`
       : tpl.badge;
-    const unitBrief = n.combat.units
+    const unitNamesBrief = n.combat.units.map((u) => u.name).join(' + ');
+    const unitStatsBrief = n.combat.units
       .map(
         (u) =>
           `${u.name}(${u.maxHp}HP/${u.damagePerRound}攻${u.armor ? `/甲${u.armor}` : ''}${
@@ -97,20 +104,50 @@ function describeNodeForecast(
           run.maxHp
         )
       : { tier: 'danger' as const, label: '危险' as const, riskClass: 'risk' as const };
+    const threatMeta = getV2ThreatTierMeta(threat.tier);
+    const previewFinalHp = pv ? (pv.outcome === 'victory' ? pv.finalPlayerHpAfterRepair : 0) : 0;
     const relicRewardDef =
       n.hasRelicSignal && n.relicSignalDefId ? getAnyV2ItemDef(n.relicSignalDefId) : null;
     const relicRewardNote = relicRewardDef ? ` · 奖励实物：${relicRewardDef.name}` : '';
-    const brief =
-      pv?.outcome === 'victory'
-        ? `${tacticPrefix}[${threat.label}] 余 ${pv.finalPlayerHpAfterRepair}HP (${pv.roundsCount}轮) · +${effectiveBounty}¤`
-        : `${tacticPrefix}[${threat.label}] 高危战败风险 (${pv?.roundsCount ?? '?'}轮) · +${effectiveBounty}¤`;
+    const tacticNote = !pureAutoCombat ? `（含${chargesMax}战术指令）` : '';
+    const brief = `${threatMeta.symbol} ${threatMeta.label} · ${threatMeta.layer1Summary}${tacticNote} · +${effectiveBounty}¤`;
+    const roundsHtml = pv
+      ? pv.rounds
+          .slice(0, 6)
+          .map(
+            (r) =>
+              `<div class="v2-log-row">R${r.round}: 我方 ${r.playerAttacks.reduce(
+                (s, a) => s + a.appliedDamage,
+                0
+              )}伤 · 敌方 ${r.enemyAttacks.reduce((s, a) => s + a.hullDamage, 0)}直伤(盾吸${
+                r.shieldAbsorbedTotal
+              }) → ${r.playerHpAfter}HP</div>`
+          )
+          .join('')
+      : '';
+    const exactLine = pv
+      ? pv.outcome === 'victory'
+        ? `预计获胜 · 余 ${pv.finalPlayerHpAfterRepair}HP (${pv.roundsCount}轮)`
+        : `预计战败 · 余 0HP (${pv.roundsCount}轮)`
+      : '暂无推演数据';
+    const detailsDrawerHtml = `
+      <div class="v3-drawer-head">
+        <span class="v3-drawer-tag">不干预时结果</span>
+        <strong class="num">${exactLine}</strong>
+      </div>
+      <div class="v3-drawer-sub">敌方明细：${unitStatsBrief}</div>
+      ${roundsHtml ? `<div class="v2-combat-log-list">${roundsHtml}</div>` : ''}
+    `;
     return {
       brief,
-      cls: threat.riskClass,
-      detail: `${unitBrief}${relicRewardNote}`,
+      cls: threatMeta.riskClass,
+      detail: `敌舰编队：${unitNamesBrief}${relicRewardNote}`,
       traitBadge,
-      threatTier: threat.tier,
-      threatLabel: threat.label,
+      threatTier: threatMeta.tier,
+      threatLabel: threatMeta.label,
+      threatSymbol: threatMeta.symbol,
+      previewFinalHp,
+      detailsDrawerHtml,
       relicRewardName: relicRewardDef?.name,
     };
   }
@@ -221,8 +258,10 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
   private safeReturnLabelEl: HTMLSpanElement | null = null;
   private abortBtn: HTMLButtonElement | null = null;
 
+  private latestProps: MapViewProps | null = null;
   private latestActions: MapViewActions | null = null;
   private latestHasStagedItems = false;
+  private expandedDetailsNodeId: string | null = null;
   private readonly latestReachableSet = new Set<string>();
 
   private readonly handleRootClick = (ev: MouseEvent): void => {
@@ -239,6 +278,18 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       const nid = jumpBtn.dataset.jumpNode;
       if (nid && this.latestReachableSet.has(nid)) {
         this.latestActions.onJumpNode(nid);
+      }
+      return;
+    }
+
+    // 1.5 Check on-demand Details Drawer toggle BEFORE card selection (S06)
+    const detailsBtn = target.closest<HTMLButtonElement>('[data-toggle-map-details]');
+    if (detailsBtn) {
+      if (!this.rootEl.contains(detailsBtn)) return;
+      const nid = detailsBtn.dataset.toggleMapDetails;
+      if (nid && this.latestProps && this.latestActions) {
+        this.expandedDetailsNodeId = this.expandedDetailsNodeId === nid ? null : nid;
+        this.update(this.latestProps, this.latestActions);
       }
       return;
     }
@@ -646,6 +697,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       stargateRelayTier = 0,
     } = props;
 
+    this.latestProps = props;
     this.latestActions = actions;
 
     const reachableIds = getReachableNextNodeIds(run);
@@ -662,6 +714,10 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       selectedMapNodeId && this.latestReachableSet.has(selectedMapNodeId)
         ? selectedMapNodeId
         : reachableIds[0] ?? null;
+
+    if (this.expandedDetailsNodeId !== null && this.expandedDetailsNodeId !== effectiveSelectedId) {
+      this.expandedDetailsNodeId = null;
+    }
 
     // Header
     if (this.contractTitleEl) {
@@ -1060,6 +1116,19 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       }
       refs.cardEl.dataset.reachable = 'true';
       refs.cardEl.dataset.canJump = canActuallyJump ? 'true' : 'false';
+      if (rn.combat && fc.previewFinalHp !== undefined) {
+        refs.cardEl.dataset.previewFinalHp = String(fc.previewFinalHp);
+      } else {
+        delete refs.cardEl.dataset.previewFinalHp;
+      }
+      if (rn.combat && fc.threatTier) {
+        refs.cardEl.dataset.threatTier = fc.threatTier;
+      } else {
+        delete refs.cardEl.dataset.threatTier;
+      }
+
+      const showDetailsToggle = Boolean(active && rn.combat && fc.detailsDrawerHtml);
+      const isDetailsOpen = showDetailsToggle && this.expandedDetailsNodeId === rid;
 
       const bodyKey = [
         rn.type,
@@ -1073,12 +1142,17 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
         fc.traitBadge ?? '',
         fc.threatTier ?? '',
         fc.threatLabel ?? '',
+        fc.threatSymbol ?? '',
+        fc.previewFinalHp ?? '',
         rn.hasSupportGuarantee ? run.primaryArchetype : '',
         fuelInfo.navigatorDiscountApplied ? 1 : 0,
         fuelInfo.rescueSurcharge,
         fc.cls,
         fc.brief,
         fc.detail,
+        showDetailsToggle ? 1 : 0,
+        isDetailsOpen ? 1 : 0,
+        isDetailsOpen ? fc.detailsDrawerHtml ?? '' : '',
       ].join('|');
 
       if (refs.bodyKey !== bodyKey) {
@@ -1094,8 +1168,22 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
           : '';
         const threatBadgeHtml =
           rn.combat && fc.threatLabel && fc.threatTier
-            ? `<span class="v3-threat-pill threat-${fc.threatTier}">${fc.threatLabel}</span>`
+            ? `<span class="v3-threat-pill threat-${fc.threatTier}" data-threat-tier="${fc.threatTier}">${
+                fc.threatSymbol ?? ''
+              } ${fc.threatLabel}</span>`
             : '';
+        const detailsBlockHtml = showDetailsToggle
+          ? `<div class="v3-map-details-wrap">
+              <button type="button" class="btn btn-sm btn-ghost v3-forecast-details-btn" data-toggle-map-details="${rid}" data-testid="btn-toggle-forecast-details" aria-expanded="${
+                isDetailsOpen ? 'true' : 'false'
+              }">${isDetailsOpen ? '收起详细推演' : '查看不干预推演明细'}</button>
+              ${
+                isDetailsOpen
+                  ? `<div class="v3-forecast-details-drawer" data-testid="forecast-details-drawer">${fc.detailsDrawerHtml}</div>`
+                  : ''
+              }
+            </div>`
+          : '';
         refs.bodyEl.innerHTML = `
           <div class="v2-mc-head">
             <span class="v2-mc-head-left">${svgIcon(rm.icon, 14)} ${rn.lane === 0 ? 'A线' : 'B线'} · ${rm.label}</span>
@@ -1116,6 +1204,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
           </div>
           <div class="v2-mc-forecast ${fc.cls}">${fc.brief}</div>
           <div class="v3-map-card-detail">${fc.detail}</div>
+          ${detailsBlockHtml}
         `;
       }
 
@@ -1457,8 +1546,10 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
     this.safeReturnBtn = null;
     this.safeReturnLabelEl = null;
     this.abortBtn = null;
+    this.latestProps = null;
     this.latestActions = null;
     this.latestHasStagedItems = false;
+    this.expandedDetailsNodeId = null;
   }
 }
 
