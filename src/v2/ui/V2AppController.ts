@@ -174,33 +174,33 @@ import {
 import { openV3CampaignModal, type CampaignModalTab } from './modals/CampaignModal';
 import { openV3CareerModal, type CareerModalTab } from './modals/CareerModal';
 import { ArrangePhaseView } from './screens/ArrangeView';
-import { renderBaseHeroView, updateBaseDockingNotice } from './screens/BaseView';
+import { BasePhaseView } from './screens/BaseView';
 import {
+  CombatLivePhaseView,
+  CombatPrePhaseView,
   PreCombatAutoEngageController,
-  renderCombatLiveOverlay,
-  renderCombatPreView,
   updateCombatPreAutoEngageUi,
 } from './screens/CombatView';
-import { renderEndingView } from './screens/EndingView';
-import { renderEventView } from './screens/EventView';
+import { EndingPhaseView } from './screens/EndingView';
+import { EventPhaseView } from './screens/EventView';
 import { MapPhaseView } from './screens/MapView';
-import { renderPrepareView } from './screens/PrepareView';
-import { renderRewardView } from './screens/RewardView';
+import { PreparePhaseView } from './screens/PrepareView';
+import { RewardPhaseView } from './screens/RewardView';
 import {
+  ManagedViewSlot,
   NODE_TYPE_META,
   V2StaticStageSyncTracker,
   type NextBaseGoal,
-  type PhaseView,
   type V2PrepareDraft,
   type V2ReturnDockingNotice,
   type V2StaticStageMode,
 } from './screens/screenTypes';
 import {
   SettlementBillRollupController,
-  renderSettlementView,
+  SettlementPhaseView,
 } from './screens/SettlementView';
-import { renderShopView } from './screens/ShopView';
-import { renderTitleView } from './screens/TitleView';
+import { ShopPhaseView } from './screens/ShopView';
+import { TitlePhaseView } from './screens/TitleView';
 import {
   VFX_WRECK_CLAMP_POP_RATIO,
   VFX_WRECK_CUT_DURATION_MS,
@@ -209,8 +209,8 @@ import {
 } from '../scenes/v2CombatVfx';
 import {
   WRECK_SPOT_COORDS,
-  renderWreckHotspotOverlay,
-  renderWreckLeftPanel,
+  WreckOverlayPhaseView,
+  WreckPhaseView,
   type WreckHotspotId,
 } from './screens/WreckView';
 import { resolveV2BgmTrack } from './v2AudioTrack';
@@ -250,10 +250,36 @@ export class V2AppController {
   private cargoHeaderTitleEl: HTMLElement | null = null;
   private cargoHeaderSubEl: HTMLElement | null = null;
   private cargoMountEl: HTMLElement | null = null;
-  private activeLeftPhaseKey: 'MAP' | 'ARRANGE' | null = null;
-  private activeLeftPhaseView: PhaseView<unknown, unknown> | null = null;
+  private titleViewSlot!: ManagedViewSlot<'TITLE'>;
+  private endingViewSlot!: ManagedViewSlot<'ENDING'>;
+  private overlayViewSlot!: ManagedViewSlot<'BASE' | 'COMBAT_LIVE' | 'WRECK_OVERLAY'>;
+  private leftViewSlot!: ManagedViewSlot<
+    | 'PREPARE'
+    | 'MAP'
+    | 'COMBAT_PRE'
+    | 'WRECK'
+    | 'EVENT'
+    | 'SHOP'
+    | 'REWARD'
+    | 'ARRANGE'
+    | 'SETTLEMENT'
+  >;
+  private lastStaticOverlayKey: string | null = null;
+
+  private readonly titlePhaseView = new TitlePhaseView();
+  private readonly endingPhaseView = new EndingPhaseView();
+  private readonly basePhaseView = new BasePhaseView();
+  private readonly combatLivePhaseView = new CombatLivePhaseView();
+  private readonly wreckOverlayPhaseView = new WreckOverlayPhaseView();
+  private readonly preparePhaseView = new PreparePhaseView();
   private readonly mapPhaseView = new MapPhaseView();
+  private readonly combatPrePhaseView = new CombatPrePhaseView();
+  private readonly wreckPhaseView = new WreckPhaseView();
+  private readonly eventPhaseView = new EventPhaseView();
+  private readonly shopPhaseView = new ShopPhaseView();
+  private readonly rewardPhaseView = new RewardPhaseView();
   private readonly arrangePhaseView = new ArrangePhaseView();
+  private readonly settlementPhaseView = new SettlementPhaseView();
   private tabGuard: MultiTabGuard;
 
   private sessionLaunchIndex = 0;
@@ -579,7 +605,11 @@ export class V2AppController {
     }
     this.staticStageTracker.reset();
     this.activeCombatPlaybackKey = null;
-    this.unmountActiveLeftPhaseView();
+    this.lastStaticOverlayKey = null;
+    this.titleViewSlot?.unmount(true);
+    this.endingViewSlot?.unmount(true);
+    this.overlayViewSlot?.unmount(true);
+    this.leftViewSlot?.unmount(true);
     this.teardownCargoBay();
     this.tabGuard.destroy();
     this.phaserHost?.destroy();
@@ -878,19 +908,25 @@ export class V2AppController {
     this.appShellEl.appendChild(this.mainLayoutEl);
 
     this.titleHostEl = document.createElement('div');
-    this.titleHostEl.className = 'title-host';
+    this.titleHostEl.className = 'title-host v2-title-host';
 
     this.endingHostEl = document.createElement('div');
-    this.endingHostEl.className = 'ending-host';
+    this.endingHostEl.className = 'ending-host v2-ending-host';
     this.endingHostEl.style.display = 'none';
 
     this.modalHostEl = document.createElement('div');
-    this.modalHostEl.className = 'modal-host';
+    this.modalHostEl.className = 'modal-host v2-modal-host';
 
     this.mountEl.appendChild(this.appShellEl);
     this.mountEl.appendChild(this.titleHostEl);
     this.mountEl.appendChild(this.endingHostEl);
     this.mountEl.appendChild(this.modalHostEl);
+
+    this.titleViewSlot = new ManagedViewSlot(this.titleHostEl);
+    this.endingViewSlot = new ManagedViewSlot(this.endingHostEl);
+    this.overlayViewSlot = new ManagedViewSlot(this.sceneOverlayEl);
+    this.leftViewSlot = new ManagedViewSlot(this.leftPanelEl);
+    this.lastStaticOverlayKey = null;
 
     registerModalBackgroundRoot(this.appShellEl);
   }
@@ -1040,14 +1076,15 @@ export class V2AppController {
     const showTitle = this.computeCurrentScreen() === 'title';
 
     if (!showTitle) {
-      this.titleHostEl.innerHTML = '';
+      this.titleViewSlot.unmount(true);
       this.titleHostEl.style.display = 'none';
       return;
     }
 
     this.titleHostEl.style.display = 'block';
-    renderTitleView(
-      this.titleHostEl,
+    this.titleViewSlot.sync(
+      'TITLE',
+      this.titlePhaseView,
       {
         profile: this.save.profile,
         shouldOfferMigration: this.shouldOfferMigrationPrompt(),
@@ -1088,14 +1125,15 @@ export class V2AppController {
     const showEnding = isGallery || isClimax;
 
     if (!showEnding) {
-      this.endingHostEl.innerHTML = '';
+      this.endingViewSlot.unmount(true);
       this.endingHostEl.style.display = 'none';
       return;
     }
 
     this.endingHostEl.style.display = 'block';
-    renderEndingView(
-      this.endingHostEl,
+    this.endingViewSlot.sync(
+      'ENDING',
+      this.endingPhaseView,
       {
         profile: this.save.profile,
         mode: isGallery ? 'gallery' : 'climax',
@@ -1105,7 +1143,9 @@ export class V2AppController {
       },
       {
         onSelectEnding: (endingId) => {
-          if (isClimax && this.isReadOnlyTab) return;
+          const isGalleryNow = this.endingGalleryId !== null;
+          const isClimaxNow = !isGalleryNow && isRunPendingCampaignEnding(this.getCurrentRun());
+          if (isClimaxNow && this.isReadOnlyTab) return;
           this.selectedEndingId = endingId;
           soundEngine.play('relicRestore');
           this.renderEndingOverlay();
@@ -1116,7 +1156,7 @@ export class V2AppController {
           this.renderEndingOverlay();
         },
         onContinueToBase: () => {
-          if (isGallery) {
+          if (this.endingGalleryId !== null) {
             this.endingGalleryId = null;
             this.selectedEndingId = null;
             soundEngine.play('click');
@@ -1418,7 +1458,7 @@ export class V2AppController {
       }
       soundEngine.play('click');
       this.renderBanners();
-      if (!this.getCurrentRun() && !this.prepareDraft) {
+      if (this.computeCurrentScreen() === 'base') {
         this.renderBaseHeroOverlay();
       }
     });
@@ -1504,7 +1544,12 @@ export class V2AppController {
       this.activeCombatPlaybackKey = null;
       this.awaitingEliteDecision = false;
       this.phaserHost.showV2Base(this.buildV2DioramaState());
-      this.renderBaseHeroOverlay();
+      if (this.computeCurrentScreen() === 'base') {
+        this.renderBaseHeroOverlay();
+      } else {
+        this.overlayViewSlot.unmount(true);
+        this.lastStaticOverlayKey = null;
+      }
       return;
     }
 
@@ -1551,18 +1596,24 @@ export class V2AppController {
             },
           });
         }
-        this.sceneOverlayEl.innerHTML = `
-          <div class="scene-stage-tag">${svgIcon('bolt', 13)} 实战微演示 · ${trial.shortName} 对阵 ${trial.demoEnemyTitle}</div>
-          <div class="v2-demo-bar">
-            <span>${trial.demoHint}</span>
-            <button type="button" class="btn btn-sm btn-secondary" id="v2-stop-demo">跳过演示</button>
-          </div>
-        `;
-        this.sceneOverlayEl.querySelector('#v2-stop-demo')?.addEventListener('click', () => {
-          draft.playingDemo = false;
-          draft.demoPlaybackKey = null;
-          this.syncPhaserStage();
-        });
+        this.overlayViewSlot.unmount();
+        const demoOverlayKey = `demo:${trial.shortName}:${trial.demoEnemyTitle}:${trial.demoHint}`;
+        if (this.lastStaticOverlayKey !== demoOverlayKey) {
+          this.lastStaticOverlayKey = demoOverlayKey;
+          this.sceneOverlayEl.innerHTML = `
+            <div class="scene-stage-tag">${svgIcon('bolt', 13)} 实战微演示 · ${trial.shortName} 对阵 ${trial.demoEnemyTitle}</div>
+            <div class="v2-demo-bar">
+              <span>${trial.demoHint}</span>
+              <button type="button" class="btn btn-sm btn-secondary" id="v2-stop-demo">跳过演示</button>
+            </div>
+          `;
+          this.sceneOverlayEl.querySelector('#v2-stop-demo')?.addEventListener('click', () => {
+            if (this.prepareDraft !== draft) return;
+            draft.playingDemo = false;
+            draft.demoPlaybackKey = null;
+            this.syncPhaserStage();
+          });
+        }
         return;
       }
 
@@ -1594,19 +1645,28 @@ export class V2AppController {
         })
       );
 
+      this.overlayViewSlot.unmount();
       const mountChips =
         visualSpec.mountSummaryTags.length > 0
           ? visualSpec.mountSummaryTags.map((t) => `<span class="v2-mount-pill">${t}</span>`).join('')
           : `<span class="v2-mount-pill muted">仅舰载核心小炮</span>`;
-
-      this.sceneOverlayEl.innerHTML = `
-        <div class="scene-stage-tag">${svgIcon('rocket', 13)} ${ship.name} · ${prepSector.name} · 外部挂点实时联动</div>
-        <div class="v2-mount-strip">${mountChips}</div>
-      `;
+      const prepOverlayKey = `prepare:${ship.name}:${prepSector.name}:${visualSpec.mountSummaryTags.join('|')}`;
+      if (this.lastStaticOverlayKey !== prepOverlayKey) {
+        this.lastStaticOverlayKey = prepOverlayKey;
+        this.sceneOverlayEl.innerHTML = `
+          <div class="scene-stage-tag">${svgIcon('rocket', 13)} ${ship.name} · ${prepSector.name} · 外部挂点实时联动</div>
+          <div class="v2-mount-strip">${mountChips}</div>
+        `;
+      }
       return;
     }
 
     if (!run) return;
+    if (this.computeCurrentScreen() === 'ending') {
+      this.overlayViewSlot.unmount(true);
+      this.lastStaticOverlayKey = null;
+      return;
+    }
 
     const currentNode = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
     const activeSector = getV3SectorDef(run.sectorId);
@@ -1872,25 +1932,34 @@ export class V2AppController {
           }`
         : '深空巡航中';
 
+    this.overlayViewSlot.unmount();
     const showMountPills = run.phase === 'ARRANGE' || run.phase === 'MAP';
-    this.sceneOverlayEl.innerHTML = `
-      <div class="scene-stage-tag">${stageLabel}</div>
-      ${
-        showMountPills && visualSpec.mountSummaryTags.length > 0
-          ? `<div class="v2-mount-strip">${visualSpec.mountSummaryTags
-              .map((t) => `<span class="v2-mount-pill">${t}</span>`)
-              .join('')}</div>`
-          : ''
-      }
-    `;
+    const staticOverlayKey = `stage:${stageLabel}:${
+      showMountPills ? visualSpec.mountSummaryTags.join('|') : ''
+    }`;
+    if (this.lastStaticOverlayKey !== staticOverlayKey) {
+      this.lastStaticOverlayKey = staticOverlayKey;
+      this.sceneOverlayEl.innerHTML = `
+        <div class="scene-stage-tag">${stageLabel}</div>
+        ${
+          showMountPills && visualSpec.mountSummaryTags.length > 0
+            ? `<div class="v2-mount-strip">${visualSpec.mountSummaryTags
+                .map((t) => `<span class="v2-mount-pill">${t}</span>`)
+                .join('')}</div>`
+            : ''
+        }
+      `;
+    }
   }
 
   // --- Screen Delegations ---
 
   private renderBaseHeroOverlay(): void {
     const p = this.save.profile;
-    renderBaseHeroView(
-      this.sceneOverlayEl,
+    this.lastStaticOverlayKey = null;
+    this.overlayViewSlot.sync(
+      'BASE',
+      this.basePhaseView,
       {
         profile: p,
         readOnly: this.isReadOnlyTab,
@@ -1906,7 +1975,9 @@ export class V2AppController {
         },
         onCloseDocking: () => {
           this.activeDockingNotice = null;
-          this.renderBaseHeroOverlay();
+          if (this.computeCurrentScreen() === 'base') {
+            this.renderBaseHeroOverlay();
+          }
         },
         onStartTutorial: () => this.startTutorialRun(),
         onLaunchRecommended: (contractTemplateId) => {
@@ -1928,7 +1999,9 @@ export class V2AppController {
         onToggleCampaignBanner: () => {
           this.campaignBannerCollapsed = !this.campaignBannerCollapsed;
           soundEngine.play('click');
-          this.renderBaseHeroOverlay();
+          if (this.computeCurrentScreen() === 'base') {
+            this.renderBaseHeroOverlay();
+          }
         },
         onOpenCampaign: () => {
           soundEngine.play('click');
@@ -1980,8 +2053,10 @@ export class V2AppController {
   }
 
   private renderCombatPlaybackOverlay(run: V2RunState): void {
-    renderCombatLiveOverlay(
-      this.sceneOverlayEl,
+    this.lastStaticOverlayKey = null;
+    this.overlayViewSlot.sync(
+      'COMBAT_LIVE',
+      this.combatLivePhaseView,
       {
         run,
         liveCombatRound: this.liveCombatRound,
@@ -1996,10 +2071,16 @@ export class V2AppController {
       },
       {
         onPeekBay: () => {
+          const activeRun = this.getCurrentRun() ?? run;
           soundEngine.play('click');
-          openV2CargoPeekModal(this.modalHostEl, run.bay, `参战配装 · ${V2_SHIPS[run.shipId].name}`);
+          openV2CargoPeekModal(
+            this.modalHostEl,
+            activeRun.bay,
+            `参战配装 · ${V2_SHIPS[activeRun.shipId].name}`
+          );
         },
         onToggleSpeed: () => {
+          const activeRun = this.getCurrentRun() ?? run;
           const nextSpd = this.save.settings.combatSpeed === 1 ? 2 : 1;
           this.save = {
             ...this.save,
@@ -2007,7 +2088,7 @@ export class V2AppController {
           };
           this.applySettingsEffects();
           this.persist();
-          this.renderCombatPlaybackOverlay(run);
+          this.renderCombatPlaybackOverlay(activeRun);
         },
         onSkipPlayback: () => {
           if (this.awaitingEliteDecision) return;
@@ -2340,8 +2421,10 @@ export class V2AppController {
   }
 
   private renderWreckOverlay(run: V2RunState, node: V2MapNode): void {
-    renderWreckHotspotOverlay(
-      this.sceneOverlayEl,
+    this.lastStaticOverlayKey = null;
+    this.overlayViewSlot.sync(
+      'WRECK_OVERLAY',
+      this.wreckOverlayPhaseView,
       {
         run,
         node,
@@ -2352,10 +2435,13 @@ export class V2AppController {
       },
       {
         onSelectHotspot: (spot) => {
+          const latest = this.getCurrentRun() ?? run;
+          const latestNode =
+            (latest.currentNodeId ? latest.graph.nodes[latest.currentNodeId] : null) ?? node;
           this.selectedWreckHotspot = spot;
           soundEngine.play('hoverValid');
-          this.renderWreckOverlay(run, node);
-          this.renderEncounterPhase(run);
+          this.renderWreckOverlay(latest, latestNode);
+          this.renderEncounterPhase(latest);
         },
         onCutHotspot: (spot) => {
           this.startWreckCutSequence(spot);
@@ -2367,34 +2453,10 @@ export class V2AppController {
     );
   }
 
-  private unmountActiveLeftPhaseView(): void {
-    if (this.activeLeftPhaseView) {
-      this.activeLeftPhaseView.unmount();
-      this.activeLeftPhaseView = null;
-      this.activeLeftPhaseKey = null;
-    }
-  }
-
-  private updateManagedLeftPhaseView<P, A>(
-    key: 'MAP' | 'ARRANGE',
-    view: PhaseView<P, A>,
-    props: P,
-    actions: A
-  ): void {
-    const erasedView = view as PhaseView<unknown, unknown>;
-    if (this.activeLeftPhaseKey !== key || this.activeLeftPhaseView !== erasedView) {
-      this.unmountActiveLeftPhaseView();
-      this.leftPanelEl.innerHTML = '';
-      view.mount(this.leftPanelEl);
-      this.activeLeftPhaseKey = key;
-      this.activeLeftPhaseView = erasedView;
-    }
-    view.update(props, actions);
-  }
-
   private renderPanels(): void {
     const run = this.getCurrentRun();
-    if (!run || this.computeCurrentScreen() !== 'run') {
+    const currentScreen = this.computeCurrentScreen();
+    if (!run || currentScreen !== 'run') {
       this.preCombatAutoEngage.reset();
       this.cancelInFlightWreckCut();
     } else if (
@@ -2405,14 +2467,24 @@ export class V2AppController {
     ) {
       this.cancelInFlightWreckCut();
     }
+
+    if (currentScreen === 'title' || currentScreen === 'ending') {
+      this.cancelSettlementRollup();
+      this.leftViewSlot.unmount(true);
+      if (currentScreen === 'title') {
+        this.teardownCargoBay();
+        this.rightPanelEl.innerHTML = '';
+      }
+      return;
+    }
+
     if (!run) {
       this.cancelSettlementRollup();
       if (this.prepareDraft) {
         this.renderPreparePanels();
       } else {
-        this.unmountActiveLeftPhaseView();
+        this.leftViewSlot.unmount(true);
         this.teardownCargoBay();
-        this.leftPanelEl.innerHTML = '';
         this.rightPanelEl.innerHTML = '';
       }
       return;
@@ -2624,7 +2696,6 @@ export class V2AppController {
   private renderPreparePanels(): void {
     const draft = this.prepareDraft;
     if (!draft) return;
-    this.unmountActiveLeftPhaseView();
     const p = this.save.profile;
     const readOnly = this.isReadOnlyTab;
     const validation = validateV2PrepareLoadout(
@@ -2645,8 +2716,9 @@ export class V2AppController {
     const effectivePreviewSeed =
       parseV3CustomSeedInput(draft.customSeedInput) ?? fallbackPreviewSeed;
 
-    renderPrepareView(
-      this.leftPanelEl,
+    this.leftViewSlot.sync(
+      'PREPARE',
+      this.preparePhaseView,
       { profile: p, draft, readOnly, validation, effectivePreviewSeed, fallbackPreviewSeed },
       {
         onBack: () => {
@@ -2655,86 +2727,110 @@ export class V2AppController {
           this.syncAll();
         },
         onSelectSector: (sectorId) => {
-          if (!p.campaign.unlockedSectors.includes(sectorId)) return;
-          draft.sectorId = sectorId;
-          if (sectorId !== 'stargate_abyss' && draft.isFinalCampaignRun) {
-            draft.isFinalCampaignRun = false;
+          const curDraft = this.prepareDraft;
+          const curProfile = this.save.profile;
+          if (!curDraft || !curProfile.campaign.unlockedSectors.includes(sectorId)) return;
+          curDraft.sectorId = sectorId;
+          if (sectorId !== 'stargate_abyss' && curDraft.isFinalCampaignRun) {
+            curDraft.isFinalCampaignRun = false;
           }
           this.preferredSectorId = sectorId;
           soundEngine.play('click');
           this.syncAll();
         },
         onSelectStandardMode: () => {
-          draft.isFinalCampaignRun = false;
-          draft.endlessThreat = 0;
+          const curDraft = this.prepareDraft;
+          if (!curDraft) return;
+          curDraft.isFinalCampaignRun = false;
+          curDraft.endlessThreat = 0;
           soundEngine.play('click');
           this.syncAll();
         },
         onSelectFinalMissionMode: () => {
-          if (!isFinalCampaignMissionUnlocked(p).unlocked) return;
-          draft.isFinalCampaignRun = true;
-          draft.endlessThreat = 0;
-          draft.sectorId = 'stargate_abyss';
+          const curDraft = this.prepareDraft;
+          const curProfile = this.save.profile;
+          if (!curDraft || !isFinalCampaignMissionUnlocked(curProfile).unlocked) return;
+          curDraft.isFinalCampaignRun = true;
+          curDraft.endlessThreat = 0;
+          curDraft.sectorId = 'stargate_abyss';
           this.preferredSectorId = 'stargate_abyss';
           soundEngine.play('energyLink');
           this.syncAll();
         },
         onSelectEndlessMode: () => {
-          if (!p.campaign.endlessUnlocked) return;
-          const maxAllowed = Math.max(1, Math.min(10, Math.floor(p.campaign.maxEndlessThreat || 1)));
-          draft.isFinalCampaignRun = false;
-          draft.endlessThreat = Math.max(1, Math.min(maxAllowed, draft.endlessThreat || 1));
-          if (p.campaign.unlockedSectors.includes('stargate_abyss')) {
-            draft.sectorId = 'stargate_abyss';
+          const curDraft = this.prepareDraft;
+          const curProfile = this.save.profile;
+          if (!curDraft || !curProfile.campaign.endlessUnlocked) return;
+          const maxAllowed = Math.max(
+            1,
+            Math.min(10, Math.floor(curProfile.campaign.maxEndlessThreat || 1))
+          );
+          curDraft.isFinalCampaignRun = false;
+          curDraft.endlessThreat = Math.max(1, Math.min(maxAllowed, curDraft.endlessThreat || 1));
+          if (curProfile.campaign.unlockedSectors.includes('stargate_abyss')) {
+            curDraft.sectorId = 'stargate_abyss';
             this.preferredSectorId = 'stargate_abyss';
           }
           soundEngine.play('energyLink');
           this.syncAll();
         },
         onSelectEndlessThreat: (threat) => {
-          if (!p.campaign.endlessUnlocked) return;
-          const maxAllowed = Math.max(1, Math.min(10, Math.floor(p.campaign.maxEndlessThreat || 1)));
+          const curDraft = this.prepareDraft;
+          const curProfile = this.save.profile;
+          if (!curDraft || !curProfile.campaign.endlessUnlocked) return;
+          const maxAllowed = Math.max(
+            1,
+            Math.min(10, Math.floor(curProfile.campaign.maxEndlessThreat || 1))
+          );
           if (threat < 1 || threat > maxAllowed) return;
-          draft.isFinalCampaignRun = false;
-          draft.endlessThreat = threat;
+          curDraft.isFinalCampaignRun = false;
+          curDraft.endlessThreat = threat;
           soundEngine.play('click');
           this.syncAll();
         },
         onChangeCustomSeed: (raw) => {
-          draft.customSeedInput = raw;
+          const curDraft = this.prepareDraft;
+          if (!curDraft) return;
+          curDraft.customSeedInput = raw;
         },
         onPickTrial: (tid) => {
+          const curDraft = this.prepareDraft;
+          if (!curDraft) return;
           const spec = V2_TRIAL_BUILDS[tid];
-          draft.trialBuildId = tid;
-          draft.primaryArchetype = spec.archetypeId;
-          draft.slots = [...buildTrialPrepareSlots(tid, draft.shipId)];
-          draft.playingDemo = true;
-          draft.demoPlaybackKey = null;
-          draft.missingPresetEntries = [];
-          draft.presetNotice = null;
+          curDraft.trialBuildId = tid;
+          curDraft.primaryArchetype = spec.archetypeId;
+          curDraft.slots = [...buildTrialPrepareSlots(tid, curDraft.shipId)];
+          curDraft.playingDemo = true;
+          curDraft.demoPlaybackKey = null;
+          curDraft.missingPresetEntries = [];
+          curDraft.presetNotice = null;
           soundEngine.play('energyLink');
           this.syncAll();
         },
         onExitTrial: () => {
-          draft.trialBuildId = null;
-          draft.playingDemo = false;
-          draft.demoPlaybackKey = null;
-          draft.slots = [
+          const curDraft = this.prepareDraft;
+          const curProfile = this.save.profile;
+          if (!curDraft) return;
+          curDraft.trialBuildId = null;
+          curDraft.playingDemo = false;
+          curDraft.demoPlaybackKey = null;
+          curDraft.slots = [
             ...buildFreeFallbackPrepareSlots(
-              draft.shipId,
-              p.blueprints,
-              getEffectiveShipLoadoutBudget(p, draft.shipId)
+              curDraft.shipId,
+              curProfile.blueprints,
+              getEffectiveShipLoadoutBudget(curProfile, curDraft.shipId)
             ),
           ];
           soundEngine.play('click');
           this.syncAll();
         },
         onSelectShip: (nextShip: V2ShipId) => {
+          const curDraft = this.prepareDraft;
           const curProfile = this.save.profile;
-          if (!curProfile.unlockedShips.includes(nextShip)) return;
+          if (!curDraft || !curProfile.unlockedShips.includes(nextShip)) return;
           const canPersistShip =
             !this.isReadOnlyTab && this.tabGuard.canWrite() && !this.showcaseRun;
-          if (nextShip === draft.shipId) {
+          if (nextShip === curDraft.shipId) {
             if (curProfile.selectedShipId !== nextShip && canPersistShip) {
               this.save = {
                 ...this.save,
@@ -2745,11 +2841,11 @@ export class V2AppController {
             }
             return;
           }
-          draft.shipId = nextShip;
-          draft.playingDemo = false;
-          draft.demoPlaybackKey = null;
-          draft.slots = draft.trialBuildId
-            ? [...buildTrialPrepareSlots(draft.trialBuildId, nextShip)]
+          curDraft.shipId = nextShip;
+          curDraft.playingDemo = false;
+          curDraft.demoPlaybackKey = null;
+          curDraft.slots = curDraft.trialBuildId
+            ? [...buildTrialPrepareSlots(curDraft.trialBuildId, nextShip)]
             : [
                 ...buildFreeFallbackPrepareSlots(
                   nextShip,
@@ -2757,8 +2853,8 @@ export class V2AppController {
                   getEffectiveShipLoadoutBudget(curProfile, nextShip)
                 ),
               ];
-          draft.missingPresetEntries = [];
-          draft.presetNotice = null;
+          curDraft.missingPresetEntries = [];
+          curDraft.presetNotice = null;
           if (canPersistShip) {
             this.save = {
               ...this.save,
@@ -2770,53 +2866,64 @@ export class V2AppController {
           this.syncAll();
         },
         onSelectCrew: (crewId) => {
-          if (!p.unlockedCrew.includes(crewId)) return;
-          draft.crewId = crewId;
+          const curDraft = this.prepareDraft;
+          const curProfile = this.save.profile;
+          if (!curDraft || !curProfile.unlockedCrew.includes(crewId)) return;
+          curDraft.crewId = crewId;
           soundEngine.play('click');
           this.syncAll();
         },
         onSelectArchetype: (arch) => {
-          draft.primaryArchetype = arch;
+          const curDraft = this.prepareDraft;
+          if (!curDraft) return;
+          curDraft.primaryArchetype = arch;
           soundEngine.play('click');
           this.syncAll();
         },
         onFallback: () => {
-          draft.trialBuildId = null;
-          draft.playingDemo = false;
-          draft.demoPlaybackKey = null;
-          draft.slots = [
+          const curDraft = this.prepareDraft;
+          const curProfile = this.save.profile;
+          if (!curDraft) return;
+          curDraft.trialBuildId = null;
+          curDraft.playingDemo = false;
+          curDraft.demoPlaybackKey = null;
+          curDraft.slots = [
             ...buildFreeFallbackPrepareSlots(
-              draft.shipId,
-              p.blueprints,
-              getEffectiveShipLoadoutBudget(p, draft.shipId)
+              curDraft.shipId,
+              curProfile.blueprints,
+              getEffectiveShipLoadoutBudget(curProfile, curDraft.shipId)
             ),
           ];
-          draft.missingPresetEntries = [];
-          draft.presetNotice = null;
+          curDraft.missingPresetEntries = [];
+          curDraft.presetNotice = null;
           soundEngine.play('click');
           this.syncAll();
         },
         onClear: () => {
-          draft.trialBuildId = null;
-          draft.playingDemo = false;
-          draft.demoPlaybackKey = null;
-          draft.slots = [];
-          draft.missingPresetEntries = [];
-          draft.presetNotice = null;
+          const curDraft = this.prepareDraft;
+          if (!curDraft) return;
+          curDraft.trialBuildId = null;
+          curDraft.playingDemo = false;
+          curDraft.demoPlaybackKey = null;
+          curDraft.slots = [];
+          curDraft.missingPresetEntries = [];
+          curDraft.presetNotice = null;
           soundEngine.play('click');
           this.syncAll();
         },
         onAddLoan: (defId) => {
-          if (draft.trialBuildId) return;
-          const spot = findFirstLegalV2Placement(previewBay, defId);
+          const curDraft = this.prepareDraft;
+          if (!curDraft || curDraft.trialBuildId) return;
+          const liveBay = this.buildPreparePreviewBay(curDraft);
+          const spot = findFirstLegalV2Placement(liveBay, defId);
           if (!spot) {
             this.showToast('当前船舱没有足够空位放入该设备，请先移位或卸下旧件。');
             return;
           }
-          draft.playingDemo = false;
-          draft.demoPlaybackKey = null;
-          draft.slots = [
-            ...draft.slots,
+          curDraft.playingDemo = false;
+          curDraft.demoPlaybackKey = null;
+          curDraft.slots = [
+            ...curDraft.slots,
             {
               slotKey: `loan_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
               origin: 'loan',
@@ -2834,18 +2941,21 @@ export class V2AppController {
           this.syncAll();
         },
         onAddOwned: (instId) => {
-          if (draft.trialBuildId) return;
-          const w = p.equipmentWarehouse.find((item) => item.instanceId === instId);
+          const curDraft = this.prepareDraft;
+          const curProfile = this.save.profile;
+          if (!curDraft || curDraft.trialBuildId) return;
+          const w = curProfile.equipmentWarehouse.find((item) => item.instanceId === instId);
           if (!w) return;
-          const spot = findFirstLegalV2Placement(previewBay, w.definitionId);
+          const liveBay = this.buildPreparePreviewBay(curDraft);
+          const spot = findFirstLegalV2Placement(liveBay, w.definitionId);
           if (!spot) {
             this.showToast('当前船舱没有足够空位放入该自有设备。');
             return;
           }
-          draft.playingDemo = false;
-          draft.demoPlaybackKey = null;
-          draft.slots = [
-            ...draft.slots,
+          curDraft.playingDemo = false;
+          curDraft.demoPlaybackKey = null;
+          curDraft.slots = [
+            ...curDraft.slots,
             {
               slotKey: w.instanceId,
               origin: 'owned',
@@ -2860,15 +2970,17 @@ export class V2AppController {
           this.syncAll();
         },
         onSavePreset: (name) => {
-          if (!this.canMutate() || draft.trialBuildId) return;
-          const existing = p.loadoutPresets.find((pr) => pr.name === name);
-          const res = saveV2LoadoutPreset(this.save.profile, {
+          const curDraft = this.prepareDraft;
+          const curProfile = this.save.profile;
+          if (!this.canMutate() || !curDraft || curDraft.trialBuildId) return;
+          const existing = curProfile.loadoutPresets.find((pr) => pr.name === name);
+          const res = saveV2LoadoutPreset(curProfile, {
             presetId: existing?.presetId,
             name,
-            shipId: draft.shipId,
-            crewId: draft.crewId,
-            primaryArchetype: draft.primaryArchetype,
-            slots: draft.slots,
+            shipId: curDraft.shipId,
+            crewId: curDraft.crewId,
+            primaryArchetype: curDraft.primaryArchetype,
+            slots: curDraft.slots,
           });
           if (!res.ok) {
             this.showToast(res.error ?? '保存预设失败');
@@ -2881,27 +2993,33 @@ export class V2AppController {
           this.syncAll();
         },
         onLoadPreset: (presetId) => {
-          const pr = p.loadoutPresets.find((item) => item.presetId === presetId);
+          const curDraft = this.prepareDraft;
+          const curProfile = this.save.profile;
+          if (!curDraft) return;
+          const pr = curProfile.loadoutPresets.find((item) => item.presetId === presetId);
           if (!pr) return;
-          if (!p.unlockedShips.includes(pr.shipId)) {
+          if (!curProfile.unlockedShips.includes(pr.shipId)) {
             this.showToast('预设对应的舰船尚未解锁。');
             return;
           }
-          const resolved = resolveV2PresetAgainstWarehouse(p, pr);
+          const resolved = resolveV2PresetAgainstWarehouse(curProfile, pr);
           const goodSlots = resolved
             .map((r) => r.resolved)
             .filter((x): x is V2PrepareSlotEntry => x !== null);
           const missing = resolved.filter((r) => r.missingOwned);
 
-          draft.shipId = pr.shipId;
-          draft.crewId = pr.crewId && p.unlockedCrew.includes(pr.crewId) ? pr.crewId : draft.crewId;
-          draft.primaryArchetype = pr.primaryArchetype;
-          draft.trialBuildId = null;
-          draft.playingDemo = false;
-          draft.demoPlaybackKey = null;
-          draft.slots = goodSlots;
-          draft.missingPresetEntries = missing;
-          draft.presetNotice =
+          curDraft.shipId = pr.shipId;
+          curDraft.crewId =
+            pr.crewId && curProfile.unlockedCrew.includes(pr.crewId)
+              ? pr.crewId
+              : curDraft.crewId;
+          curDraft.primaryArchetype = pr.primaryArchetype;
+          curDraft.trialBuildId = null;
+          curDraft.playingDemo = false;
+          curDraft.demoPlaybackKey = null;
+          curDraft.slots = goodSlots;
+          curDraft.missingPresetEntries = missing;
+          curDraft.presetNotice =
             missing.length > 0
               ? `预设「${pr.name}」有 ${missing.length} 件自有设备当前不在仓库中，已空出对应槽位。`
               : `已完整载入预设「${pr.name}」。`;
@@ -2909,9 +3027,11 @@ export class V2AppController {
           this.syncAll();
         },
         onSubLoan: () => {
-          let tempBay = this.buildPreparePreviewBay(draft);
-          const added: V2PrepareSlotEntry[] = [...draft.slots];
-          for (const m of draft.missingPresetEntries) {
+          const curDraft = this.prepareDraft;
+          if (!curDraft) return;
+          let tempBay = this.buildPreparePreviewBay(curDraft);
+          const added: V2PrepareSlotEntry[] = [...curDraft.slots];
+          for (const m of curDraft.missingPresetEntries) {
             if (!m.canSubstituteCommonLoan) continue;
             const origDef = V2_EQUIPMENT_DEFS[m.presetSlot.definitionId];
             if (!origDef) continue;
@@ -2926,11 +3046,11 @@ export class V2AppController {
               y: spot.y,
               rotation: spot.rotation,
             });
-            tempBay = this.buildPreparePreviewBay({ ...draft, slots: added });
+            tempBay = this.buildPreparePreviewBay({ ...curDraft, slots: added });
           }
-          draft.slots = added;
-          draft.missingPresetEntries = [];
-          draft.presetNotice = '已按你的确认，以借用普通蓝图补齐缺失槽位。';
+          curDraft.slots = added;
+          curDraft.missingPresetEntries = [];
+          curDraft.presetNotice = '已按你的确认，以借用普通蓝图补齐缺失槽位。';
           soundEngine.play('place');
           this.syncAll();
         },
@@ -2944,7 +3064,10 @@ export class V2AppController {
           soundEngine.play('click');
           this.syncAll();
         },
-        onLaunch: () => this.launchExpeditionFromDraft(draft),
+        onLaunch: () => {
+          const curDraft = this.prepareDraft;
+          if (curDraft) this.launchExpeditionFromDraft(curDraft);
+        },
       }
     );
 
@@ -3023,7 +3146,7 @@ export class V2AppController {
   private renderMapPhase(run: V2RunState): void {
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const relicPassives = getActiveRelicPassives(this.save.profile);
-    this.updateManagedLeftPhaseView(
+    this.leftViewSlot.sync(
       'MAP',
       this.mapPhaseView,
       {
@@ -3179,9 +3302,9 @@ export class V2AppController {
   }
 
   private renderEncounterPhase(run: V2RunState): void {
-    this.unmountActiveLeftPhaseView();
     const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
     if (!node) {
+      this.leftViewSlot.unmount(true);
       this.preCombatAutoEngage.reset();
       return;
     }
@@ -3190,7 +3313,7 @@ export class V2AppController {
     if (node.combat) {
       if (run.activeCombat) {
         this.preCombatAutoEngage.reset();
-        this.leftPanelEl.innerHTML = '';
+        this.leftViewSlot.unmount(true);
         // S03: Keep persistent HoldView (CargoGridV2) mounted & read-only across live combat (0 mid-voyage teardown).
         this.mountV2CargoBay(run.bay, false, {
           title: `参战船舱 · ${V2_SHIPS[run.shipId].name}`,
@@ -3205,8 +3328,9 @@ export class V2AppController {
       const autoEngageSnap = this.preCombatAutoEngage.sync(
         this.getPreCombatAutoEngageLiveEligibility()
       );
-      renderCombatPreView(
-        this.leftPanelEl,
+      this.leftViewSlot.sync(
+        'COMBAT_PRE',
+        this.combatPrePhaseView,
         {
           run,
           node,
@@ -3277,8 +3401,9 @@ export class V2AppController {
     this.preCombatAutoEngage.reset();
 
     if (node.type === 'wreck' && (node.wreck || run.activeWreck)) {
-      renderWreckLeftPanel(
-        this.leftPanelEl,
+      this.leftViewSlot.sync(
+        'WRECK',
+        this.wreckPhaseView,
         {
           run,
           node,
@@ -3289,10 +3414,13 @@ export class V2AppController {
         },
         {
           onSelectHotspot: (spot) => {
+            const latest = this.getCurrentRun() ?? run;
+            const latestNode =
+              (latest.currentNodeId ? latest.graph.nodes[latest.currentNodeId] : null) ?? node;
             this.selectedWreckHotspot = spot;
             soundEngine.play('hoverValid');
-            this.renderWreckOverlay(run, node);
-            this.renderEncounterPhase(run);
+            this.renderWreckOverlay(latest, latestNode);
+            this.renderEncounterPhase(latest);
           },
           onCutSpot: (spotId: V2WreckSpotId) => {
             this.startWreckCutSequence(spotId);
@@ -3302,11 +3430,15 @@ export class V2AppController {
           },
           onUseGadget: (instanceId) => {
             if (this.inFlightWreckCut) return;
-            this.handleUseGadget(run, instanceId);
+            const latest = this.getCurrentRun();
+            if (!latest || latest.phase !== 'ENCOUNTER') return;
+            this.handleUseGadget(latest, instanceId);
           },
           onExtract: () => {
             if (!this.canMutate() || this.inFlightWreckCut) return;
-            const res = extractV2Wreck(run);
+            const latest = this.getCurrentRun();
+            if (!latest || latest.phase !== 'ENCOUNTER') return;
+            const res = extractV2Wreck(latest);
             if (!res.ok) return this.showToast(res.error ?? '无法撤离残骸');
             if (res.run.phase === 'SETTLEMENT') {
               this.settlementDispositions = {};
@@ -3317,7 +3449,9 @@ export class V2AppController {
           },
           onAbandon: () => {
             if (!this.canMutate() || this.inFlightWreckCut) return;
-            const res = abandonV2EventAndReturn(run);
+            const latest = this.getCurrentRun();
+            if (!latest || latest.phase !== 'ENCOUNTER') return;
+            const res = abandonV2EventAndReturn(latest);
             if (!res.ok) return this.showToast(res.error ?? '无法放弃返航');
             this.settlementDispositions = {};
             this.setCurrentRun(res.run);
@@ -3330,13 +3464,20 @@ export class V2AppController {
       return;
     }
 
-    renderEventView(
-      this.leftPanelEl,
+    this.leftViewSlot.sync(
+      'EVENT',
+      this.eventPhaseView,
       { run, node, readOnly },
       {
         onSelectEventOption: (optionIndex) => {
           if (!this.canMutate()) return;
-          const res = resolveV2EventOption(run, optionIndex, this.save.profile.unlockedFamilies);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ENCOUNTER') return;
+          const res = resolveV2EventOption(
+            latest,
+            optionIndex,
+            this.save.profile.unlockedFamilies
+          );
           if (!res.ok) return this.showToast(res.error ?? '操作失败');
           if (res.run.phase === 'SETTLEMENT') {
             this.settlementDispositions = {};
@@ -3350,7 +3491,9 @@ export class V2AppController {
         },
         onAnomalyChoice: (choice) => {
           if (!this.canMutate()) return;
-          const res = resolveV2AnomalyChoice(run, choice);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ENCOUNTER') return;
+          const res = resolveV2AnomalyChoice(latest, choice);
           if (!res.ok) return this.showToast(res.error ?? '操作失败');
           if (res.run.phase === 'SETTLEMENT') {
             this.settlementDispositions = {};
@@ -3361,7 +3504,9 @@ export class V2AppController {
         },
         onDistressChoice: (choice) => {
           if (!this.canMutate()) return;
-          const res = resolveV2DistressChoice(run, choice);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ENCOUNTER') return;
+          const res = resolveV2DistressChoice(latest, choice);
           if (!res.ok) return this.showToast(res.error ?? '操作失败');
           if (res.run.phase === 'SETTLEMENT') {
             this.settlementDispositions = {};
@@ -3372,7 +3517,9 @@ export class V2AppController {
         },
         onAbandon: () => {
           if (!this.canMutate()) return;
-          const res = abandonV2EventAndReturn(run);
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'ENCOUNTER') return;
+          const res = abandonV2EventAndReturn(latest);
           if (!res.ok) return this.showToast(res.error ?? '无法放弃返航');
           this.settlementDispositions = {};
           this.setCurrentRun(res.run);
@@ -3398,24 +3545,31 @@ export class V2AppController {
   }
 
   private renderShopPhase(run: V2RunState): void {
-    this.unmountActiveLeftPhaseView();
     const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
-    if (!node || !node.merchant) return;
+    if (!node || !node.merchant) {
+      this.leftViewSlot.unmount(true);
+      return;
+    }
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const guildRep = this.save.profile.factionRep.starport_guild ?? 0;
 
-    renderShopView(
-      this.leftPanelEl,
+    this.leftViewSlot.sync(
+      'SHOP',
+      this.shopPhaseView,
       { run, node, readOnly, starportGuildRep: guildRep },
       {
         onBuyOffer: (oid) => {
           if (!this.canMutate()) return;
+          const latest = this.getCurrentRun();
+          const latestNode = latest?.currentNodeId ? latest.graph.nodes[latest.currentNodeId] : null;
+          if (!latest || latest.phase !== 'SHOP' || !latestNode) return;
+          const latestRep = this.save.profile.factionRep.starport_guild ?? 0;
           const res = buyV2MerchantOffer(
-            run,
+            latest,
             oid,
-            `tx_offer_${node.nodeId}_${oid}`,
+            `tx_offer_${latestNode.nodeId}_${oid}`,
             this.save.profile.unlockedFamilies,
-            guildRep
+            latestRep
           );
           if (!res.ok) return this.showToast(res.error ?? '购买失败');
           this.setCurrentRun(res.run);
@@ -3424,7 +3578,11 @@ export class V2AppController {
         },
         onBuyFuel: () => {
           if (!this.canMutate()) return;
-          const res = buyV2MerchantFuel(run, `tx_fuel_${node.nodeId}`, guildRep);
+          const latest = this.getCurrentRun();
+          const latestNode = latest?.currentNodeId ? latest.graph.nodes[latest.currentNodeId] : null;
+          if (!latest || latest.phase !== 'SHOP' || !latestNode) return;
+          const latestRep = this.save.profile.factionRep.starport_guild ?? 0;
+          const res = buyV2MerchantFuel(latest, `tx_fuel_${latestNode.nodeId}`, latestRep);
           if (!res.ok) return this.showToast(res.error ?? '无法购买燃料');
           this.setCurrentRun(res.run);
           soundEngine.play('cashRegister');
@@ -3432,7 +3590,11 @@ export class V2AppController {
         },
         onBuyRepair: () => {
           if (!this.canMutate()) return;
-          const res = buyV2MerchantRepair(run, `tx_repair_${node.nodeId}`, guildRep);
+          const latest = this.getCurrentRun();
+          const latestNode = latest?.currentNodeId ? latest.graph.nodes[latest.currentNodeId] : null;
+          if (!latest || latest.phase !== 'SHOP' || !latestNode) return;
+          const latestRep = this.save.profile.factionRep.starport_guild ?? 0;
+          const res = buyV2MerchantRepair(latest, `tx_repair_${latestNode.nodeId}`, latestRep);
           if (!res.ok) return this.showToast(res.error ?? '无法购买维修');
           this.setCurrentRun(res.run);
           soundEngine.play('repairPulse');
@@ -3440,13 +3602,20 @@ export class V2AppController {
         },
         onSellLoot: (iid) => {
           if (!this.canMutate()) return;
-          const res = sellV2ItemToMerchant(run, iid, `tx_sell_${node.nodeId}_${iid}`);
+          const latest = this.getCurrentRun();
+          const latestNode = latest?.currentNodeId ? latest.graph.nodes[latest.currentNodeId] : null;
+          if (!latest || latest.phase !== 'SHOP' || !latestNode) return;
+          const res = sellV2ItemToMerchant(latest, iid, `tx_sell_${latestNode.nodeId}_${iid}`);
           if (!res.ok) return this.showToast(res.error ?? '出售失败');
           this.setCurrentRun(res.run);
           soundEngine.play('cashRegister');
           this.syncAll();
         },
-        onEngineerSwap: (kind) => this.handleEngineerSwap(run, kind),
+        onEngineerSwap: (kind) => {
+          const latest = this.getCurrentRun();
+          if (!latest || latest.phase !== 'SHOP') return;
+          this.handleEngineerSwap(latest, kind);
+        },
         onFinish: () => {
           if (!this.canMutate()) return;
           const latest = this.getCurrentRun();
@@ -3504,10 +3673,10 @@ export class V2AppController {
   }
 
   private renderRewardPhase(run: V2RunState): void {
-    this.unmountActiveLeftPhaseView();
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
-    renderRewardView(
-      this.leftPanelEl,
+    this.leftViewSlot.sync(
+      'REWARD',
+      this.rewardPhaseView,
       {
         run,
         readOnly,
@@ -3537,7 +3706,7 @@ export class V2AppController {
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const collapsed = this.isArrangeSceneCollapsed();
 
-    this.updateManagedLeftPhaseView(
+    this.leftViewSlot.sync(
       'ARRANGE',
       this.arrangePhaseView,
       { run, readOnly, sceneCollapsed: collapsed },
@@ -3680,7 +3849,6 @@ export class V2AppController {
   }
 
   private renderSettlementPhase(run: V2RunState): void {
-    this.unmountActiveLeftPhaseView();
     if (this.settlementRollup.isActive() && this.settledRollupRunId === run.runId) {
       this.settlementRollup.skip({ silentCashRegister: true });
       if (typeof window !== 'undefined') {
@@ -3694,12 +3862,14 @@ export class V2AppController {
     const projectedCredits = p.credits + summary.finalCreditsEarned;
     const nextGoal = this.computeNextBaseGoal(p, projectedCredits);
 
-    renderSettlementView(
-      this.leftPanelEl,
+    this.leftViewSlot.sync(
+      'SETTLEMENT',
+      this.settlementPhaseView,
       { run, profile: p, summary, nextGoal, readOnly },
       {
         onChangeDisposition: (iid, disp) => {
           if (!this.canMutate()) return;
+          const curRun = this.getCurrentRun() ?? run;
           this.settlementRollup.skip({ silentCashRegister: true });
           window.removeEventListener('keydown', this.handleSettlementRollupKey);
           this.settlementDispositions[iid] = disp;
@@ -3711,7 +3881,7 @@ export class V2AppController {
               : 'creditTick'
           );
           this.renderTopHud();
-          this.renderSettlementPhase(run);
+          this.renderSettlementPhase(curRun);
         },
         onSkipRollup: () => {
           this.settlementRollup.skip();
@@ -3821,18 +3991,17 @@ export class V2AppController {
 
           if (!reduced) {
             const syncDockingSlot = () => {
-              const updated = updateBaseDockingNotice(this.sceneOverlayEl, this.activeDockingNotice, {
-                onSkipDocking: () => {
-                  this.phaserHost?.skipBaseReturnDocking();
-                },
-                onCloseDocking: () => {
-                  this.activeDockingNotice = null;
-                  updateBaseDockingNotice(this.sceneOverlayEl, null, {
-                    onSkipDocking: () => {},
-                    onCloseDocking: () => {},
-                  });
-                },
-              });
+              const updated =
+                this.basePhaseView.isMountedIn(this.sceneOverlayEl) &&
+                this.basePhaseView.updateDockingNotice(this.activeDockingNotice, {
+                  onSkipDocking: () => {
+                    this.phaserHost?.skipBaseReturnDocking();
+                  },
+                  onCloseDocking: () => {
+                    this.activeDockingNotice = null;
+                    this.basePhaseView.updateDockingNotice(null);
+                  },
+                });
               if (!updated && this.computeCurrentScreen() === 'base') {
                 this.renderBaseHeroOverlay();
               }
@@ -3899,6 +4068,7 @@ export class V2AppController {
     visualSpec: ReturnType<typeof deriveV2ShipVisualSpec>,
     fallbackMutedLabel?: string
   ): void {
+    this.lastStaticOverlayKey = null;
     const existingStrip = this.sceneOverlayEl.querySelector<HTMLElement>('.v2-mount-strip');
     if (visualSpec.mountSummaryTags.length === 0 && !fallbackMutedLabel) {
       existingStrip?.remove();
@@ -4055,7 +4225,7 @@ export class V2AppController {
       if (nextProfile !== this.save.profile) {
         this.save = { ...this.save, profile: nextProfile };
         this.persist();
-        if (!this.getCurrentRun() && !this.prepareDraft) {
+        if (this.computeCurrentScreen() === 'base') {
           this.renderBaseHeroOverlay();
         }
       }

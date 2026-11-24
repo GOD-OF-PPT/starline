@@ -69,6 +69,8 @@ export function openTitledV2Modal(
   const titleId = `v2-modal-title-${v2ModalSeq++}`;
   const dismissible = opts.dismissible ?? true;
   const modal = openManagedModal(host, { titleId, dismissible, onClose: opts.onClose });
+  modal.backdrop.classList.add('v2-modal-backdrop');
+  modal.card.classList.add('v2-modal-card');
   for (const listener of v2ModalOpenListeners) {
     try {
       listener();

@@ -35,6 +35,50 @@ export interface PhaseView<P, A> {
   unmount(): void;
 }
 
+/**
+ * Strongly-typed lifecycle manager for a single host container.
+ * Guarantees mount()/unmount() run ONLY on active key/view transitions, while
+ * in-phase refreshes invoke update() directly to preserve DOM identity, focus,
+ * scroll position, and active animations.
+ */
+export class ManagedViewSlot<K extends string> {
+  private activeKey: K | null = null;
+  private activeView: PhaseView<unknown, unknown> | null = null;
+
+  constructor(private readonly hostEl: HTMLElement) {}
+
+  getActiveKey(): K | null {
+    return this.activeKey;
+  }
+
+  getActiveView(): PhaseView<unknown, unknown> | null {
+    return this.activeView;
+  }
+
+  sync<P, A>(key: K, view: PhaseView<P, A>, props: P, actions: A): void {
+    const erased = view as PhaseView<unknown, unknown>;
+    if (this.activeKey !== key || this.activeView !== erased) {
+      this.unmount();
+      this.hostEl.innerHTML = '';
+      view.mount(this.hostEl);
+      this.activeKey = key;
+      this.activeView = erased;
+    }
+    view.update(props, actions);
+  }
+
+  unmount(clearHost = false): void {
+    if (this.activeView) {
+      this.activeView.unmount();
+      this.activeView = null;
+      this.activeKey = null;
+    }
+    if (clearHost && this.hostEl.childNodes.length > 0) {
+      this.hostEl.innerHTML = '';
+    }
+  }
+}
+
 export interface V2PrepareDraft {
   contractTemplateId: string;
   sectorId: SectorId;
