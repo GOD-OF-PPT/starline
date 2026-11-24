@@ -1363,6 +1363,12 @@ export function startV2CombatAtCurrentNode(
   if (run.activeCombat && run.activeCombat.nodeId === node.nodeId) {
     return { ok: true, run }; // Already started; idempotent on refresh!
   }
+  if (run.activeCombat && run.activeCombat.nodeId !== node.nodeId) {
+    return { ok: false, run, error: '存在未结算的战斗状态' };
+  }
+  if (run.claimedEventIds.includes(`combat_done_${node.nodeId}`)) {
+    return { ok: false, run, error: '该场战斗已结算' };
+  }
 
   const targetPolicy = policyOverride ?? run.targetPolicy;
   const bossId = resolveNodeBossId(node, run);

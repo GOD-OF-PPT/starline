@@ -47,6 +47,14 @@ import {
 } from './modals/WorkshopModal';
 
 let v2ModalSeq = 1;
+const v2ModalOpenListeners = new Set<() => void>();
+
+export function subscribeV2ModalOpen(listener: () => void): () => void {
+  v2ModalOpenListeners.add(listener);
+  return () => {
+    v2ModalOpenListeners.delete(listener);
+  };
+}
 
 export function openTitledV2Modal(
   host: HTMLElement,
@@ -61,6 +69,13 @@ export function openTitledV2Modal(
   const titleId = `v2-modal-title-${v2ModalSeq++}`;
   const dismissible = opts.dismissible ?? true;
   const modal = openManagedModal(host, { titleId, dismissible, onClose: opts.onClose });
+  for (const listener of v2ModalOpenListeners) {
+    try {
+      listener();
+    } catch {
+      // ignore subscriber errors
+    }
+  }
   if (opts.cardClass) {
     modal.card.classList.add(opts.cardClass);
   }

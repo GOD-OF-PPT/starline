@@ -164,7 +164,12 @@ import { openV3CampaignModal, type CampaignModalTab } from './modals/CampaignMod
 import { openV3CareerModal, type CareerModalTab } from './modals/CareerModal';
 import { ArrangePhaseView } from './screens/ArrangeView';
 import { renderBaseHeroView, updateBaseDockingNotice } from './screens/BaseView';
-import { renderCombatLiveOverlay, renderCombatPreView } from './screens/CombatView';
+import {
+  PreCombatAutoEngageController,
+  renderCombatLiveOverlay,
+  renderCombatPreView,
+  updateCombatPreAutoEngageUi,
+} from './screens/CombatView';
 import { renderEndingView } from './screens/EndingView';
 import { renderEventView } from './screens/EventView';
 import { MapPhaseView } from './screens/MapView';
@@ -202,6 +207,7 @@ import {
   openV2SettingsModal,
   openV2ShowcasePickerModal,
   openV2WarehouseModal,
+  subscribeV2ModalOpen,
 } from './V2Modals';
 
 const V2_TITLE_SESSION_KEY = 'starline_v2_title_entered';
@@ -264,6 +270,8 @@ export class V2AppController {
   // Live combat playback display telemetry (pure presentation)
   private activeCombatPlaybackKey: string | null = null;
   private readonly staticStageTracker = new V2StaticStageSyncTracker();
+  private readonly preCombatAutoEngage: PreCombatAutoEngageController;
+  private unsubscribeModalOpen: (() => void) | null = null;
   private liveCombatRound = 0;
   private liveCombatPlayerHp = 30;
   private liveCombatPlayerShield = 0;
@@ -297,9 +305,18 @@ export class V2AppController {
     this.save = createFreshV2SaveData();
     this.v1Inspection = inspectV1SaveForMigration(window.localStorage);
 
+    this.preCombatAutoEngage = new PreCombatAutoEngageController({
+      onEngage: (nodeKey) => this.engageCurrentCombat(nodeKey),
+      onChange: () => this.refreshPreCombatAutoEngageUi(),
+      isLiveEligible: (expectedKey) => this.getPreCombatAutoEngageLiveEligibility(expectedKey),
+    });
+
     this.tabGuard = new MultiTabGuard(
       (isOwner) => {
         this.isReadOnlyTab = !isOwner;
+        if (this.isReadOnlyTab) {
+          this.preCombatAutoEngage.pause('readonly');
+        }
         this.phaserHost?.setCombatPaused(this.isReadOnlyTab);
         this.syncAll();
       },
@@ -444,6 +461,15 @@ export class V2AppController {
     window.__STARLINE_INSPECT__ = () => this.buildInspectSnapshot();
     window.addEventListener('resize', this.handleWindowResize);
     window.addEventListener('orientationchange', this.handleWindowResize);
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    }
+    this.unsubscribeModalOpen?.();
+    this.unsubscribeModalOpen = subscribeV2ModalOpen(() => {
+      if (this.preCombatAutoEngage.pause('modal')) {
+        this.refreshPreCombatAutoEngageUi();
+      }
+    });
 
     this.syncAll();
 
@@ -461,6 +487,12 @@ export class V2AppController {
     soundEngine.setTrack('none');
     window.removeEventListener('resize', this.handleWindowResize);
     window.removeEventListener('orientationchange', this.handleWindowResize);
+    if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+      document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+    }
+    this.unsubscribeModalOpen?.();
+    this.unsubscribeModalOpen = null;
+    this.preCombatAutoEngage.destroy();
     if (this.actionToastTimer !== null) {
       window.clearTimeout(this.actionToastTimer);
       this.actionToastTimer = null;
@@ -473,6 +505,79 @@ export class V2AppController {
     this.phaserHost?.destroy();
     this.phaserHost = null;
     this.mountEl.innerHTML = '';
+  }
+
+  private readonly handleVisibilityChange = (): void => {
+    if (typeof document !== 'undefined' && document.hidden) {
+      if (this.preCombatAutoEngage.pause('hidden')) {
+        this.refreshPreCombatAutoEngageUi();
+      }
+    }
+  };
+
+  private getPreCombatAutoEngageLiveEligibility(expectedKey?: string): {
+    readonly eligible: boolean;
+    readonly nodeKey: string | null;
+    readonly canMutate: boolean;
+    readonly modalOpen: boolean;
+    readonly hidden: boolean;
+  } {
+    const run = this.getCurrentRun();
+    const node = run?.currentNodeId ? run.graph.nodes[run.currentNodeId] ?? null : null;
+    const nodeKey = run && run.currentNodeId ? `${run.runId}:${run.currentNodeId}` : null;
+    const eligible = Boolean(
+      this.computeCurrentScreen() === 'run' &&
+        run &&
+        run.phase === 'ENCOUNTER' &&
+        node?.combat &&
+        !run.activeCombat &&
+        run.bay.staging.length === 0 &&
+        (!expectedKey || nodeKey === expectedKey)
+    );
+    const modalOpen = hasOpenModal();
+    const hidden = typeof document !== 'undefined' && Boolean(document.hidden);
+    const canMutate = this.canMutate();
+    return { eligible, nodeKey: eligible ? nodeKey : null, canMutate, modalOpen, hidden };
+  }
+
+  private refreshPreCombatAutoEngageUi(): void {
+    if (!this.leftPanelEl) return;
+    const run = this.getCurrentRun();
+    const readOnly = this.isReadOnlyTab && !(run?.isShowcase ?? false);
+    updateCombatPreAutoEngageUi(
+      this.leftPanelEl,
+      this.preCombatAutoEngage.getSnapshot(),
+      readOnly
+    );
+  }
+
+  private engageCurrentCombat(expectedNodeKey?: string): boolean {
+    if (!this.canMutate()) return false;
+    const latest = this.getCurrentRun();
+    if (!latest || latest.phase !== 'ENCOUNTER' || !latest.currentNodeId) return false;
+    if (latest.activeCombat) return false;
+    if (latest.bay.staging.length > 0) return false;
+    const node = latest.graph.nodes[latest.currentNodeId];
+    if (!node?.combat) return false;
+    const curKey = `${latest.runId}:${latest.currentNodeId}`;
+    if (expectedNodeKey && expectedNodeKey !== curKey) return false;
+
+    this.preCombatAutoEngage.markEngaged(curKey);
+    const curPureAuto = isPureAutoCombat(this.save.settings);
+    const res = startV2CombatAtCurrentNode(latest, latest.targetPolicy, {
+      enableTacticalCommands: !curPureAuto,
+      pureAutoCombat: curPureAuto,
+      bonusBossCharges: this.getBonusBossCharges(),
+      stargateRelayTier: getFacilityTier(this.save.profile, 'stargate_relay'),
+    });
+    if (!res.ok) {
+      this.showToast(res.error ?? '无法开始战斗');
+      return false;
+    }
+    this.setCurrentRun(res.run);
+    soundEngine.play('click');
+    this.syncAll();
+    return true;
   }
 
   private handleWindowResize = (): void => {
@@ -1823,6 +1928,9 @@ export class V2AppController {
 
   private renderPanels(): void {
     const run = this.getCurrentRun();
+    if (!run || this.computeCurrentScreen() !== 'run') {
+      this.preCombatAutoEngage.reset();
+    }
     if (!run) {
       if (this.prepareDraft) {
         this.renderPreparePanels();
@@ -1833,6 +1941,10 @@ export class V2AppController {
         this.rightPanelEl.innerHTML = '';
       }
       return;
+    }
+
+    if (run.phase !== 'ENCOUNTER') {
+      this.preCombatAutoEngage.reset();
     }
 
     if (run.phase === 'MAP') {
@@ -2560,11 +2672,15 @@ export class V2AppController {
   private renderEncounterPhase(run: V2RunState): void {
     this.unmountActiveLeftPhaseView();
     const node = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
-    if (!node) return;
+    if (!node) {
+      this.preCombatAutoEngage.reset();
+      return;
+    }
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
 
     if (node.combat) {
       if (run.activeCombat) {
+        this.preCombatAutoEngage.reset();
         this.teardownCargoBay();
         this.leftPanelEl.innerHTML = '';
         this.rightPanelEl.innerHTML = '';
@@ -2574,6 +2690,9 @@ export class V2AppController {
       const pureAuto = isPureAutoCombat(this.save.settings);
       const bonusBossCharges = this.getBonusBossCharges();
       const stargateRelayTier = getFacilityTier(this.save.profile, 'stargate_relay');
+      const autoEngageSnap = this.preCombatAutoEngage.sync(
+        this.getPreCombatAutoEngageLiveEligibility()
+      );
       renderCombatPreView(
         this.leftPanelEl,
         {
@@ -2584,35 +2703,41 @@ export class V2AppController {
           pureAutoCombat: pureAuto,
           bonusBossCharges,
           stargateRelayTier,
+          autoEngage: autoEngageSnap,
         },
         {
           onSelectPolicy: (policy) => {
             if (!this.canMutate()) return;
-            this.setCurrentRun({ ...run, targetPolicy: policy });
+            const latest = this.getCurrentRun();
+            if (!latest || latest.phase !== 'ENCOUNTER' || latest.activeCombat) return;
+            this.preCombatAutoEngage.pause('policy');
+            this.setCurrentRun({ ...latest, targetPolicy: policy });
             soundEngine.play('click');
             this.syncAll();
           },
           onToggleLog: () => {
+            const latest = this.getCurrentRun();
+            if (!latest || latest.phase !== 'ENCOUNTER' || latest.activeCombat) return;
+            this.preCombatAutoEngage.pause('details');
             this.showCombatLogDetails = !this.showCombatLogDetails;
-            this.renderEncounterPhase(run);
+            this.renderEncounterPhase(latest);
           },
-          onUseGadget: (instanceId) => this.handleUseGadget(run, instanceId),
+          onUseGadget: (instanceId) => {
+            const latest = this.getCurrentRun();
+            if (!latest || latest.phase !== 'ENCOUNTER' || latest.activeCombat) return;
+            this.preCombatAutoEngage.pause('gadget');
+            this.handleUseGadget(latest, instanceId);
+          },
+          onTogglePauseAutoEngage: () => {
+            if (!this.canMutate()) return;
+            if (this.preCombatAutoEngage.togglePause()) {
+              soundEngine.play('click');
+              this.refreshPreCombatAutoEngageUi();
+            }
+          },
           onStartCombat: () => {
             if (!this.canMutate()) return;
-            const curPureAuto = isPureAutoCombat(this.save.settings);
-            const res = startV2CombatAtCurrentNode(run, run.targetPolicy, {
-              enableTacticalCommands: !curPureAuto,
-              pureAutoCombat: curPureAuto,
-              bonusBossCharges: this.getBonusBossCharges(),
-              stargateRelayTier,
-            });
-            if (!res.ok) {
-              this.showToast(res.error ?? '无法开始战斗');
-              return;
-            }
-            this.setCurrentRun(res.run);
-            soundEngine.play('click');
-            this.syncAll();
+            this.preCombatAutoEngage.engageNow();
           },
         }
       );
@@ -2623,6 +2748,8 @@ export class V2AppController {
       });
       return;
     }
+
+    this.preCombatAutoEngage.reset();
 
     if (node.type === 'wreck' && (node.wreck || run.activeWreck)) {
       renderWreckLeftPanel(
