@@ -269,6 +269,7 @@ export class CargoGridV2Component {
     this.root = root;
     this.callbacks = callbacks;
     if (typeof window !== 'undefined') {
+      window.addEventListener('pointerdown', this.handleWindowPointerDown, true);
       window.addEventListener('pointermove', this.handleWindowPointerMove);
       window.addEventListener('pointerup', this.handleWindowPointerUp);
       window.addEventListener('pointercancel', this.handleWindowPointerCancel);
@@ -358,6 +359,7 @@ export class CargoGridV2Component {
   destroy(): void {
     this.destroyed = true;
     if (typeof window !== 'undefined') {
+      window.removeEventListener('pointerdown', this.handleWindowPointerDown, true);
       window.removeEventListener('pointermove', this.handleWindowPointerMove);
       window.removeEventListener('pointerup', this.handleWindowPointerUp);
       window.removeEventListener('pointercancel', this.handleWindowPointerCancel);
@@ -648,15 +650,30 @@ export class CargoGridV2Component {
       this.carrying = false;
     }
 
-    // Validate active/pending drag & selection still exist in updated bay
+    // Validate active/pending drag & selection still exist with matching identity & transform in updated bay
+    let dragCancelledInRender = false;
     if (this.drag) {
-      const dragExists =
+      const dragValid =
         this.drag.zone === 'grid'
-          ? bay.placed.some((p) => p.item.instanceId === this.drag?.item.instanceId)
-          : bay.staging.some((s) => s.item.instanceId === this.drag?.item.instanceId);
-      if (!dragExists) {
+          ? bay.placed.some(
+              (p) =>
+                p.item.instanceId === this.drag?.item.instanceId &&
+                p.item.definitionId === this.drag.item.definitionId &&
+                p.rotation === this.drag.rotation &&
+                p.x === this.drag.originX &&
+                p.y === this.drag.originY
+            )
+          : bay.staging.some(
+              (s) =>
+                s.item.instanceId === this.drag?.item.instanceId &&
+                s.item.definitionId === this.drag.item.definitionId &&
+                s.rotation === this.drag.rotation
+            );
+      if (!dragValid) {
         this.clearDragGhost();
+        this.flushSpringBackCleanups();
         this.drag = null;
+        dragCancelledInRender = true;
       }
     }
     if (this.selected) {
@@ -797,6 +814,10 @@ export class CargoGridV2Component {
         this.renderSelectedInspector(editable, null);
         this.scheduleTacticalDeltaUpdate();
       }
+    }
+
+    if (dragCancelledInRender) {
+      this.rescheduleDeltaIfIdle();
     }
 
     this.updateCellVisualFocusAndPreview();
@@ -1995,8 +2016,9 @@ export class CargoGridV2Component {
     }
   }
 
-  private cancelActiveDrag(rescheduleDelta = true): void {
-    if (!this.drag) return;
+  public cancelActiveDrag(rescheduleDelta = true): void {
+    this.flushSpringBackCleanups();
+    if (this.destroyed || !this.drag) return;
     const wasActive = this.drag.active;
     this.clearDragGhost();
     this.drag = null;
@@ -2009,6 +2031,38 @@ export class CargoGridV2Component {
       this.rescheduleDeltaIfIdle();
     }
   }
+
+  private containsTarget(container: HTMLElement | null, target: unknown): boolean {
+    if (!container || !target) return false;
+    if (container === target) return true;
+    if (typeof container.contains === 'function') {
+      try {
+        if (container.contains(target as Node)) return true;
+      } catch {
+        // Fallback to parent chain traversal for lightweight DOM stubs
+      }
+    }
+    let cur = target as { parentElement?: unknown; parentNode?: unknown } | null;
+    while (cur) {
+      if (cur === container) return true;
+      cur = (cur.parentElement ?? cur.parentNode ?? null) as {
+        parentElement?: unknown;
+        parentNode?: unknown;
+      } | null;
+    }
+    return false;
+  }
+
+  private handleWindowPointerDown = (e: PointerEvent): void => {
+    if (this.destroyed || !this.drag) return;
+    if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
+    const pointerId = e.pointerId ?? 0;
+    if (pointerId !== this.drag.pointerId) return;
+    if (this.containsTarget(this.boardEl, e.target) || this.containsTarget(this.stagingEl, e.target)) {
+      return; // board/staging handlers recover with rescheduleDelta=false to preserve D8.4 0-sim gap
+    }
+    this.cancelActiveDrag(true);
+  };
 
   private launchInvalidSpringBack(drag: DragState, isInvalidDrop: boolean): void {
     const ghost = drag.ghostEl;
@@ -2233,7 +2287,7 @@ export class CargoGridV2Component {
   };
 
   private handleInspectorClick = (ev: MouseEvent): void => {
-    if (this.destroyed || !this.bay || this.drag?.active) return;
+    if (this.destroyed || !this.bay || this.drag) return;
     const target = ev.target as HTMLElement | null;
     const btn = target?.closest<HTMLButtonElement>('button[id]');
     if (!btn) return;
@@ -2328,8 +2382,13 @@ export class CargoGridV2Component {
   };
 
   private handleWindowPointerMove = (e: PointerEvent): void => {
+    if (this.destroyed || !this.drag) return;
+    if (hasOpenModal()) {
+      this.cancelActiveDrag(true);
+      return;
+    }
     const pointerId = e.pointerId ?? 0;
-    if (this.destroyed || !this.drag || !this.bay || pointerId !== this.drag.pointerId) return;
+    if (!this.bay || pointerId !== this.drag.pointerId) return;
     const dist = Math.hypot(e.clientX - this.drag.startClientX, e.clientY - this.drag.startClientY);
     let justActivated = false;
     if (!this.drag.active && dist >= 8) {
@@ -2384,8 +2443,13 @@ export class CargoGridV2Component {
   };
 
   private handleWindowPointerUp = (e: PointerEvent): void => {
+    if (this.destroyed || !this.drag) return;
+    if (hasOpenModal()) {
+      this.cancelActiveDrag(true);
+      return;
+    }
     const pointerId = e.pointerId ?? 0;
-    if (this.destroyed || !this.drag || pointerId !== this.drag.pointerId) return;
+    if (pointerId !== this.drag.pointerId) return;
     const drag = this.drag;
     this.drag = null;
 
@@ -2455,7 +2519,7 @@ export class CargoGridV2Component {
   };
 
   private handleWindowBlur = (): void => {
-    if (this.destroyed || !this.drag) return;
+    if (this.destroyed) return;
     this.cancelActiveDrag(true);
   };
 

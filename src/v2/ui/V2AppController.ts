@@ -521,6 +521,7 @@ export class V2AppController {
     }
     this.unsubscribeModalOpen?.();
     this.unsubscribeModalOpen = subscribeV2ModalOpen(() => {
+      this.cargoGrid?.cancelActiveDrag(true);
       if (this.preCombatAutoEngage.pause('modal')) {
         this.refreshPreCombatAutoEngageUi();
       }
@@ -588,6 +589,7 @@ export class V2AppController {
 
   private readonly handleVisibilityChange = (): void => {
     if (typeof document !== 'undefined' && document.hidden) {
+      this.cargoGrid?.cancelActiveDrag(true);
       if (this.preCombatAutoEngage.pause('hidden')) {
         this.refreshPreCombatAutoEngageUi();
       }
@@ -917,6 +919,7 @@ export class V2AppController {
     if (this.lastViewportPhaseKey !== phaseKey) {
       this.lastViewportPhaseKey = phaseKey;
       this.mobileHoldZoomed = false;
+      this.cargoGrid?.cancelActiveDrag(false);
       this.cargoGrid?.collapseDetailsDrawer();
     }
     const isHoldZoomed = Boolean(isVoyage && !isLiveCombat && (isArrange || this.mobileHoldZoomed));
