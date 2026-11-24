@@ -1036,6 +1036,7 @@ class MiniElement extends MiniNode {
 
   focus(_opts?: unknown): void {
     this.doc.activeElement = this;
+    this.dispatchEvent(new MiniEvent('focus', { bubbles: false }));
     this.dispatchEvent(new MiniEvent('focusin', { bubbles: true }));
   }
 
@@ -1874,6 +1875,165 @@ describe('M1B Stage, Feel, Feedback & Telemetry Suite (S03, S06, S07, S08, S09, 
       expect(mountEl.querySelector('[data-testid="combat-screen"]')).not.toBeNull();
       expect(mountEl.querySelector('[data-testid="item-details-drawer"]')).toBeNull();
     });
+
+    it('collapses item-details-drawer on Prepare hull switch (D10.4 unit & D10.5 live V2AppController) and on in-node wreck ambush transition', async () => {
+      // D10.4: Direct CargoGridV2Component shipChanged with identical instanceId ('free_1') collapses open drawer
+      const runRef = createV2TutorialRun('run_d10_4_ship');
+      const freeLaser = createV2EquipmentInstance({
+        instanceId: 'free_1',
+        kind: 'laser',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      let shipBay: V2CargoBayState = {
+        shipId: 'cannon_skiff',
+        placed: [{ item: freeLaser, x: 0, y: 0, rotation: 0 }],
+        staging: [],
+        discardedThisArrange: [],
+      };
+      const directMount = dom.document.createElement('div');
+      dom.document.body.appendChild(directMount);
+      const grid = new CargoGridV2Component(directMount as unknown as HTMLElement, {
+        onBayChange: (nextBay) => {
+          shipBay = nextBay;
+        },
+        getTacticalDelta: (item, zone) =>
+          computeV2PlacementTacticalDelta({
+            run: runRef,
+            bay: shipBay,
+            startingHp: 30,
+            maxHp: 30,
+            targetPolicy: 'weakest',
+            item,
+            zone,
+          }),
+      });
+      grid.render(shipBay, true, { prepareMode: true });
+      const directBoard = directMount.querySelector('.v2-cargo-board')!;
+      const p00 = cellCenter(4, 4, 0, 0);
+      directBoard.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 31, clientX: p00.x, clientY: p00.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 31, clientX: p00.x, clientY: p00.y })
+      );
+      vi.advanceTimersByTime(150);
+      directMount.querySelector('[data-testid="btn-toggle-item-details"]')!.click();
+      expect(directMount.querySelector('[data-testid="item-details-drawer"]')).not.toBeNull();
+
+      // Switch hull cannon_skiff -> shield_cruiser reusing identical 'free_1' instanceId
+      shipBay = { ...shipBay, shipId: 'shield_cruiser' };
+      grid.render(shipBay, true, { prepareMode: true });
+      vi.advanceTimersByTime(150);
+      expect(directMount.querySelector('[data-testid="item-details-drawer"]')).toBeNull();
+      expect(directMount.querySelector('[data-testid="btn-toggle-item-details"]')).not.toBeNull();
+      grid.destroy();
+
+      // D10.5: Live V2AppController Prepare screen hull switch (cannon_skiff -> shield_cruiser)
+      const freshSave = createFreshV2SaveData();
+      const unlockedSave: V2SaveData = {
+        ...freshSave,
+        profile: {
+          ...freshSave.profile,
+          tutorialCompleted: true,
+          unlockedShips: ['cannon_skiff', 'shield_cruiser'],
+          selectedShipId: 'cannon_skiff',
+        },
+        activeRun: null,
+      };
+      const { mountEl } = mountController(unlockedSave);
+      await flushMicrotasks();
+
+      mountEl.querySelector('[data-testid="btn-start-recommended"]')!.click();
+      expect(mountEl.querySelector('[data-testid="prepare-screen"]')).not.toBeNull();
+
+      const prepBoard = mountEl.querySelector('.v2-cargo-board')!;
+      const prepPt = cellCenter(4, 4, 0, 0);
+      prepBoard.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 32, clientX: prepPt.x, clientY: prepPt.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 32, clientX: prepPt.x, clientY: prepPt.y })
+      );
+      vi.advanceTimersByTime(300);
+      const prepDetailsBtn = mountEl.querySelector('[data-testid="btn-toggle-item-details"]')!;
+      expect(prepDetailsBtn).not.toBeNull();
+      prepDetailsBtn.click();
+      expect(mountEl.querySelector('[data-testid="item-details-drawer"]')).not.toBeNull();
+
+      const cruiserBtn = mountEl.querySelector('[data-prep-ship="shield_cruiser"]')!;
+      expect(cruiserBtn).not.toBeNull();
+      cruiserBtn.click();
+      vi.advanceTimersByTime(300);
+      expect(mountEl.querySelector('[data-testid="item-details-drawer"]')).toBeNull();
+
+      // In-node wreck -> ambush pre-combat transition collapses open CargoGridV2 details drawer cleanly
+      const baseWreckRun = createWreckTestRun();
+      const ambushWreckNode = baseWreckRun.graph.nodes[baseWreckRun.currentNodeId!]!;
+      const ambushRun: V2RunState = {
+        ...baseWreckRun,
+        activeWreck: {
+          nodeId: ambushWreckNode.nodeId,
+          stability: 40,
+          maxStability: 100,
+          cutsMade: 1,
+          extracted: false,
+          stabilizerActive: false,
+          hotspots: [
+            {
+              spotId: 'armory',
+              label: '武器库',
+              cut: true,
+              riskHullDamage: 0,
+              riskFuelCost: 0,
+              riskAmbush: false,
+            },
+            {
+              spotId: 'cargo',
+              label: '高危货舱',
+              cut: false,
+              riskHullDamage: 0,
+              riskFuelCost: 0,
+              riskAmbush: true,
+              rewardParts: 2,
+            },
+          ],
+        },
+      };
+      const ambushSave = createFreshV2SaveData();
+      const { mountEl: ambushMount } = mountController({
+        ...ambushSave,
+        settings: { ...ambushSave.settings, reducedMotion: true },
+        activeRun: ambushRun,
+      });
+      await flushMicrotasks();
+
+      // Cut cargo compartment -> deterministically triggers ambush pre-combat inside ENCOUNTER with drawers collapsed
+      ambushMount.querySelector('[data-testid="wreck-cut-cargo"]')!.click();
+      vi.advanceTimersByTime(150);
+      expect(ambushMount.querySelector('[data-testid="combat-screen"]')).not.toBeNull();
+      expect(ambushMount.querySelector('[data-testid="forecast-details-drawer"]')).toBeNull();
+      expect(ambushMount.querySelector('[data-testid="item-details-drawer"]')).toBeNull();
+
+      // Open item details drawer on ambush pre-combat, then engage live combat -> collapses drawer cleanly!
+      const ambushBoard = ambushMount.querySelector('.v2-cargo-board')!;
+      const ambushLaserPt = cellCenter(4, 4, 0, 0);
+      ambushBoard.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 33, clientX: ambushLaserPt.x, clientY: ambushLaserPt.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 33, clientX: ambushLaserPt.x, clientY: ambushLaserPt.y })
+      );
+      vi.advanceTimersByTime(150);
+      ambushMount.querySelector('[data-testid="btn-toggle-item-details"]')!.click();
+      expect(ambushMount.querySelector('[data-testid="item-details-drawer"]')).not.toBeNull();
+
+      ambushMount.querySelector('[data-testid="btn-start-combat"]')!.click();
+      vi.advanceTimersByTime(50);
+      expect(ambushMount.querySelector('[data-testid="item-details-drawer"]')).toBeNull();
+    });
   });
 
   // =========================================================================
@@ -2215,6 +2375,223 @@ describe('M1B Stage, Feel, Feedback & Telemetry Suite (S03, S06, S07, S08, S09, 
       mount.querySelector('[data-staging-id="d8_repair_l3"]')!.click();
       dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'r' }));
       expect(bay.staging[0].rotation).toBe(1);
+
+      grid.destroy();
+    });
+
+    it('runs 0 simulateV2Combat across realistic 16ms drag-start gap (placed & staging), recovers delta on click-release/same-cell drop, and isolates Delete/Arrow/Enter mid-drag (D8.4, D8.3, D9.2, D9.3)', () => {
+      clearTacticalDeltaCache();
+      const simSpy = vi.spyOn(combatV2, 'simulateV2Combat');
+      const run = createV2TutorialRun('run_iter3_d8_d9');
+
+      const laserItem = createV2EquipmentInstance({
+        instanceId: 'eq_laser_1',
+        kind: 'laser',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const batteryItem = createV2EquipmentInstance({
+        instanceId: 'eq_bat_1',
+        kind: 'battery',
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+      const stAuto = createV2EquipmentInstance({
+        instanceId: 'st_auto_1',
+        kind: 'shield',
+        quality: 'common',
+        origin: 'loot',
+        acquiredDepth: 1,
+        location: 'staging',
+      });
+      const stUnsel = createV2EquipmentInstance({
+        instanceId: 'st_unsel_2',
+        kind: 'repair',
+        quality: 'common',
+        origin: 'loot',
+        acquiredDepth: 1,
+        location: 'staging',
+      });
+
+      let bay: V2CargoBayState = {
+        shipId: 'cannon_skiff',
+        placed: [
+          { item: laserItem, x: 0, y: 0, rotation: 0 },
+          { item: batteryItem, x: 2, y: 0, rotation: 0 },
+        ],
+        staging: [
+          { item: stAuto, rotation: 0 },
+          { item: stUnsel, rotation: 0 },
+        ],
+        discardedThisArrange: [],
+      };
+
+      const mount = dom.document.createElement('div');
+      dom.document.body.appendChild(mount);
+      const grid = new CargoGridV2Component(mount as unknown as HTMLElement, {
+        onBayChange: (nextBay) => {
+          bay = nextBay;
+          grid.render(bay, true);
+        },
+        getTacticalDelta: (item, zone) =>
+          computeV2PlacementTacticalDelta({
+            run,
+            bay,
+            startingHp: 30,
+            maxHp: 30,
+            targetPolicy: 'weakest',
+            item,
+            zone,
+          }),
+      });
+      // Initial render auto-selects `st_auto_1`; flush initial delta
+      grid.render(bay, true);
+      vi.advanceTimersByTime(300);
+
+      const board = mount.querySelector('.v2-cargo-board')!;
+      const batStart = cellCenter(4, 4, 2, 0);
+      const hover10 = cellCenter(4, 4, 1, 0);
+      const hover12 = cellCenter(4, 4, 1, 2);
+
+      // --- D8.4 (placed item): 16ms 1-frame gap between pointerdown and pointermove >= 8px => 0 simulateV2Combat! ---
+      clearTacticalDeltaCache();
+      simSpy.mockClear();
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 41, pointerType: 'mouse', clientX: batStart.x, clientY: batStart.y })
+      );
+      vi.advanceTimersByTime(16); // Realistic Frame-0 -> Frame-1 gap before mouse crosses 8px!
+      expect(simSpy).toHaveBeenCalledTimes(0);
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 41, pointerType: 'mouse', clientX: hover10.x, clientY: hover10.y })
+      );
+      vi.advanceTimersByTime(300);
+      expect(dom.document.querySelector('.v2-drag-ghost')).not.toBeNull();
+      expect(simSpy).toHaveBeenCalledTimes(0);
+
+      // --- D8.3 (same-cell drop): return unselected battery back to original (2,0) & pointerup => delta recovers! ---
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 41, pointerType: 'mouse', clientX: batStart.x, clientY: batStart.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 41, pointerType: 'mouse', clientX: batStart.x, clientY: batStart.y })
+      );
+      expect(dom.document.querySelector('.v2-drag-ghost')).toBeNull();
+      vi.advanceTimersByTime(300);
+      expect(simSpy.mock.calls.length).toBeGreaterThan(0);
+      const recoveredDetailsBtn = mount.querySelector('[data-testid="btn-toggle-item-details"]')!;
+      expect(recoveredDetailsBtn).not.toBeNull();
+      recoveredDetailsBtn.click();
+      expect(mount.querySelector('[data-testid="item-details-drawer"]')!.textContent).toContain('不干预时结果');
+
+      // --- D8.4 (staging item): 16ms 1-frame gap on UNSELECTED staging item => 0 simulateV2Combat mid-drag! ---
+      clearTacticalDeltaCache();
+      simSpy.mockClear();
+      const unselChip = mount.querySelector('[data-staging-id="st_unsel_2"]')!;
+      unselChip.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 42, pointerType: 'mouse', clientX: 20, clientY: 320 })
+      );
+      vi.advanceTimersByTime(16);
+      expect(simSpy).toHaveBeenCalledTimes(0);
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 42, pointerType: 'mouse', clientX: hover12.x, clientY: hover12.y })
+      );
+      vi.advanceTimersByTime(300);
+      expect(dom.document.querySelector('.v2-drag-ghost')).not.toBeNull();
+      expect(simSpy).toHaveBeenCalledTimes(0);
+      // Cancel staging drag via Escape
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'Escape' }));
+      expect(dom.document.querySelector('.v2-drag-ghost')).toBeNull();
+
+      // --- D8.4 (normal click-to-select): pointerdown -> 16ms -> pointerup without drag computes tactical delta cleanly! ---
+      clearTacticalDeltaCache();
+      simSpy.mockClear();
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 43, pointerType: 'mouse', clientX: batStart.x, clientY: batStart.y })
+      );
+      vi.advanceTimersByTime(16);
+      expect(simSpy).toHaveBeenCalledTimes(0);
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 43, pointerType: 'mouse', clientX: batStart.x, clientY: batStart.y })
+      );
+      vi.advanceTimersByTime(150);
+      expect(simSpy.mock.calls.length).toBeGreaterThan(0);
+      expect(mount.querySelector('[data-testid="btn-toggle-item-details"]')).not.toBeNull();
+
+      // --- D8.4 (pending-drag pointercancel): pointerdown -> 16ms -> pointercancel (!wasActive) reschedules delta cleanly! ---
+      clearTacticalDeltaCache();
+      simSpy.mockClear();
+      const autoChip = mount.querySelector('[data-staging-id="st_auto_1"]')!;
+      autoChip.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 44, pointerType: 'mouse', clientX: 20, clientY: 320 })
+      );
+      vi.advanceTimersByTime(16);
+      expect(simSpy).toHaveBeenCalledTimes(0);
+      dom.window.dispatchEvent(new MiniEvent('pointercancel', { bubbles: true, pointerId: 44 }));
+      vi.advanceTimersByTime(150);
+      expect(simSpy.mock.calls.length).toBeGreaterThan(0);
+      expect(mount.querySelector('[data-testid="btn-toggle-item-details"]')).not.toBeNull();
+
+      // --- D9.2 (Delete / Backspace mid-drag with gridHasFocus === true): MUST NOT delete item or orphan ghost! ---
+      const cell00 = mount.querySelector('.cargo-cell[data-cx="0"][data-cy="0"]')!;
+      cell00.focus();
+      expect(cell00.classList.contains('kb-focused')).toBe(true);
+
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 45, pointerType: 'mouse', clientX: batStart.x, clientY: batStart.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 45, pointerType: 'mouse', clientX: hover10.x, clientY: hover10.y })
+      );
+      expect(dom.document.querySelector('.v2-drag-ghost')).not.toBeNull();
+
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'Delete' }));
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'Backspace' }));
+      expect(bay.placed.some((p) => p.item.instanceId === 'eq_bat_1')).toBe(true);
+      expect(dom.document.querySelector('.v2-drag-ghost')).not.toBeNull();
+
+      // Escape still cancels active drag cleanly
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'Escape' }));
+      expect(dom.document.querySelector('.v2-drag-ghost')).toBeNull();
+      expect(bay.placed.some((p) => p.item.instanceId === 'eq_bat_1')).toBe(true);
+
+      // --- D9.3 (ArrowLeft x2 + Enter mid-drag with gridHasFocus === true): MUST NOT hijack selected or teleport laser! ---
+      cell00.focus();
+      expect(cell00.classList.contains('kb-focused')).toBe(true);
+
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', { bubbles: true, pointerId: 46, pointerType: 'mouse', clientX: batStart.x, clientY: batStart.y })
+      );
+      dom.window.dispatchEvent(
+        new MiniEvent('pointermove', { bubbles: true, pointerId: 46, pointerType: 'mouse', clientX: hover12.x, clientY: hover12.y })
+      );
+      expect(dom.document.querySelector('.v2-drag-ghost')).not.toBeNull();
+
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'ArrowLeft' }));
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'ArrowLeft' }));
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'Enter' }));
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: ' ' }));
+
+      dom.window.dispatchEvent(
+        new MiniEvent('pointerup', { bubbles: true, pointerId: 46, pointerType: 'mouse', clientX: hover12.x, clientY: hover12.y })
+      );
+      expect(dom.document.querySelector('.v2-drag-ghost')).toBeNull();
+      const laserAfter = bay.placed.find((p) => p.item.instanceId === 'eq_laser_1')!;
+      const batAfter = bay.placed.find((p) => p.item.instanceId === 'eq_bat_1')!;
+      expect({ x: laserAfter.x, y: laserAfter.y }).toEqual({ x: 0, y: 0 });
+      expect({ x: batAfter.x, y: batAfter.y }).toEqual({ x: 1, y: 2 });
+
+      // Post-pointerup keyboard navigation, rotation, and Delete work 100% normally
+      const cell12 = mount.querySelector('.cargo-cell[data-cx="1"][data-cy="2"]')!;
+      cell12.focus();
+      expect(cell12.classList.contains('kb-focused')).toBe(true);
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'ArrowLeft' }));
+      expect(mount.querySelector('.cargo-cell[data-cx="0"][data-cy="2"]')!.classList.contains('kb-focused')).toBe(true);
+      dom.window.dispatchEvent(new MiniEvent('keydown', { key: 'Delete' }));
+      expect(bay.placed.some((p) => p.item.instanceId === 'eq_bat_1')).toBe(false);
 
       grid.destroy();
     });
