@@ -655,6 +655,27 @@ export class V2CombatScene extends Phaser.Scene {
       canOverloadModules: this.canOverloadModules,
       overloadableModules: this.overloadableModules,
     };
+    if (
+      this.decisionPaused &&
+      options?.pauseAtRound !== undefined &&
+      (options.pauseAtRound === null || this.nextRoundIdx + 1 !== options.pauseAtRound)
+    ) {
+      this.decisionPaused = false;
+      if (!this.waitingCompletion) {
+        this.playbackActive = true;
+        this.roundTimerMs = 0;
+      }
+      if (this.time) {
+        this.time.paused = this.externalPaused;
+      }
+      if (options.canOverloadModules === undefined) {
+        this.canOverloadModules = false;
+        this.playback = {
+          ...this.playback,
+          canOverloadModules: false,
+        };
+      }
+    }
     if (this.scene?.isActive() && this.texturesReady) {
       this.refreshEnemyIntentLockTags();
       this.syncModuleInstanceBindings();

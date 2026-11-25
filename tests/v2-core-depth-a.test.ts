@@ -2624,10 +2624,15 @@ describe('R2-M6A Iteration-2 Regressions: Causality, Handler Clearing, D03 Disco
         { item: mkEq('c1', 'capacitor', 'improved'), x: 1, y: 0, rotation: 0 },
         { item: mkEq('sv1', 'salvo_pod', 'improved'), x: 2, y: 0, rotation: 0 },
         { item: mkEq('rl1', 'relay', 'common'), x: 3, y: 0, rotation: 0 },
-        { item: mkEq('s1', 'shield', 'improved'), x: 4, y: 0, rotation: 0 },
+        { item: mkEq('s1', 'shield', 'improved'), x: 4, y: 1, rotation: 0 },
       ],
     };
     const fastBossBase = buildRunAtEncounter(highDpsBay, 'boss_dreadnought', 6, 38, 38);
+    // Verify highDpsBay uses strictly legal heavy_freighter cells (accepted by persistV2SaveData/loadV2SaveData)
+    window.localStorage.clear();
+    const highDpsSaveBase = createFreshV2SaveData();
+    persistV2SaveData(window.localStorage, { ...highDpsSaveBase, activeRun: fastBossBase });
+    expect(loadV2SaveData(window.localStorage).status).toBe('loaded');
     const fastNode = fastBossBase.graph.nodes[fastBossBase.currentNodeId!]!;
     const tunedUnits = [
       { ...fastNode.combat!.units[0], maxHp: 42, armor: 0 },
@@ -3419,6 +3424,216 @@ describe('R2-M6A Iteration-2 Regressions: Causality, Handler Clearing, D03 Disco
 
     ctrl.destroy();
     mount.remove();
+  });
+
+  it('Fix 9: V2CombatScene.patchLiveCombatSimulation releases decisionPaused and resumes playback/timers when pauseAtRound clears to null or shifts away from nextRoundIdx + 1', () => {
+    // Part A & B: Full V2AppController + V2CombatScene flow where paused-at-decision pendingDecision clears to null
+    // on live target lock click -> BOTH scene.update() AND #v2-combat-skip complete combat cleanly with ZERO soft-lock!
+    const bossBay: V2CargoBayState = {
+      ...createEmptyV2Bay('heavy_freighter'),
+      placed: [
+        { item: mkEq('l1', 'laser'), x: 0, y: 0, rotation: 0 },
+        { item: mkEq('s1', 'shield', 'improved'), x: 2, y: 0, rotation: 0 },
+      ],
+    };
+    const bossRun = buildRunAtEncounter(bossBay, 'boss_dreadnought', 6, 38, 38);
+    const started = startV2CombatAtCurrentNode(bossRun, 'highest_threat', {
+      enableTacticalCommands: true,
+    });
+    expect(started.ok).toBe(true);
+    const baseAc = started.run.activeCombat!;
+    const basePending = baseAc.pendingDecision!;
+    const simLen = baseAc.simulation.rounds.length;
+    const livingEnemies = baseAc.simulation.rounds[simLen - 1].enemiesAfter.filter((e) => e.hp > 0);
+    expect(livingEnemies.length).toBeGreaterThanOrEqual(2);
+    const livingEnemy = livingEnemies[0]!;
+
+    // Build save-valid paused-at-decision run whose pendingDecision clears to null upon live retarget
+    const pausedBeyondEndRun: V2RunState = {
+      ...started.run,
+      activeCombat: {
+        ...baseAc,
+        resumeFromRound: simLen + 1,
+        pausedAtDecisionId: basePending.decisionId,
+        pendingDecision: {
+          ...basePending,
+          roundNumber: simLen + 2,
+          chosen: null,
+        },
+      },
+    };
+    const baseSave = createFreshV2SaveData();
+    const savePayload = {
+      ...baseSave,
+      profile: { ...baseSave.profile, tutorialCompleted: true },
+      activeRun: pausedBeyondEndRun,
+    };
+
+    const runUnpausePath = (completionMode: 'update' | 'skip'): void => {
+      phaserHarness.reset();
+      window.localStorage.clear();
+      window.sessionStorage.setItem('starline_v2_title_entered', '1');
+      persistV2SaveData(window.localStorage, savePayload);
+      const verifyLoad = loadV2SaveData(window.localStorage);
+      expect(verifyLoad.status).toBe('loaded');
+
+      const mount = document.createElement('div');
+      document.body.appendChild(mount);
+      const ctrl = new V2AppController(mount, { onSwitchToV1: () => {} });
+      ctrl.init();
+      phaserHarness.lastGame!.events.emit('ready');
+
+      const scene = phaserHarness.lastV2CombatScene as unknown as V2CombatScene;
+      expect(scene).not.toBeNull();
+      const mockTime = {
+        paused: true,
+        delayedCall: (_delayMs: number, cb: () => void) => {
+          cb();
+          return { remove: () => {} };
+        },
+      };
+      (scene as unknown as { time: typeof mockTime }).time = mockTime;
+
+      const sceneInternal = scene as unknown as {
+        decisionPaused: boolean;
+        playbackActive: boolean;
+      };
+      expect(sceneInternal.decisionPaused).toBe(true);
+      expect(sceneInternal.playbackActive).toBe(false);
+      expect(mockTime.paused).toBe(true);
+      const skipBtnBefore = mount.querySelector<HTMLButtonElement>('#v2-combat-skip')!;
+      expect(skipBtnBefore.disabled).toBe(true);
+
+      // Click visible live lock button -> handleToggleEnemyLock clears pendingDecision -> patchV2LiveCombatSimulation({ pauseAtRound: null })
+      const lockBtn = mount.querySelector<HTMLButtonElement>(
+        `[data-testid="enemy-lock-${livingEnemy.enemyId}"]`
+      );
+      expect(lockBtn).not.toBeNull();
+      lockBtn!.click();
+
+      // Scene MUST immediately release decision pause, resume playbackActive, unpause time, and disarm overload!
+      expect(sceneInternal.decisionPaused).toBe(false);
+      expect(sceneInternal.playbackActive).toBe(true);
+      expect(mockTime.paused).toBe(false);
+      expect(scene.getStagePresentationSnapshot().canOverloadModules).toBe(false);
+      const skipBtnAfter = mount.querySelector<HTMLButtonElement>('#v2-combat-skip')!;
+      expect(skipBtnAfter.disabled).toBe(false);
+      expect(skipBtnAfter.textContent).toContain('跳过演出');
+
+      if (completionMode === 'update') {
+        for (let i = 0; i < 6; i++) {
+          scene.update(1000 + i * 500, 500);
+        }
+      } else {
+        skipBtnAfter.click();
+      }
+
+      const endSave = loadV2SaveData(window.localStorage);
+      expect(endSave.status).toBe('loaded');
+      if (endSave.status !== 'loaded') throw new Error('expected loaded');
+      expect(endSave.data.activeRun!.phase).not.toBe('ENCOUNTER');
+      expect(endSave.data.activeRun!.activeCombat).toBeNull();
+
+      ctrl.destroy();
+      mount.remove();
+    };
+
+    runUnpausePath('update');
+    runUnpausePath('skip');
+
+    // Part C: Direct V2CombatScene.patchLiveCombatSimulation checks:
+    // 1) Same pauseAtRound keeps decisionPaused intact
+    // 2) Shifting pauseAtRound away from nextRoundIdx + 1 releases decisionPaused, respects externalPaused, disarms overload, and pauses at new round
+    // 3) Clearing pauseAtRound: null while paused at new round lets skipPlayback() finish cleanly
+    phaserHarness.reset();
+    const scene = new V2CombatScene();
+    const game = new MockPhaserGame({
+      scene: [scene as unknown as InstanceType<typeof MockPhaserScene>],
+    });
+    const units = bossRun.graph.nodes[bossRun.currentNodeId!]!.combat!.units;
+    let pauseCount = 0;
+    let completeCount = 0;
+    const pb: V2StagePlayback = {
+      playbackKey: 'fix9_shift_test',
+      shipId: 'heavy_freighter',
+      shipVisualSpec: deriveV2ShipVisualSpec(bossBay),
+      sectorId: 'near_orbit',
+      sectorIndex: 1,
+      eventBackdrop: null,
+      units,
+      simulation: baseAc.simulation,
+      settings: { ...DEFAULT_SETTINGS },
+      pauseAtRound: 2,
+      canOverloadModules: true,
+      overloadableModules: [{ instanceId: 's1', kind: 'shield', label: '护盾板' }],
+      onPauseForDecision: () => {
+        pauseCount += 1;
+      },
+      onComplete: () => {
+        completeCount += 1;
+      },
+    };
+    game.scene.start('V2CombatScene', { playback: pb });
+    const directTime = {
+      paused: false,
+      delayedCall: (_delayMs: number, cb: () => void) => {
+        cb();
+        return { remove: () => {} };
+      },
+    };
+    (scene as unknown as { time: typeof directTime }).time = directTime;
+    const state = scene as unknown as {
+      decisionPaused: boolean;
+      playbackActive: boolean;
+      nextRoundIdx: number;
+    };
+
+    // Advance Round 1 and hit Round-2 pause boundary
+    scene.update(100, 400);
+    scene.update(600, 500);
+    scene.update(1100, 500);
+    expect(pauseCount).toBe(1);
+    expect(state.decisionPaused).toBe(true);
+    expect(state.playbackActive).toBe(false);
+    expect(state.nextRoundIdx).toBe(1);
+    expect(directTime.paused).toBe(true);
+
+    // Patching with the SAME pauseAtRound (2 === nextRoundIdx + 1) MUST keep decisionPaused intact
+    scene.patchLiveCombatSimulation(baseAc.simulation, { pauseAtRound: 2 });
+    expect(state.decisionPaused).toBe(true);
+    expect(state.playbackActive).toBe(false);
+    expect(directTime.paused).toBe(true);
+
+    // Shifting pauseAtRound to 4 while externalPaused === true MUST release decisionPaused, disarm overload, yet keep time.paused synced to externalPaused
+    expect(baseAc.simulation.rounds.length).toBeGreaterThanOrEqual(4);
+    scene.setPaused(true);
+    scene.patchLiveCombatSimulation(baseAc.simulation, { pauseAtRound: 4 });
+    expect(state.decisionPaused).toBe(false);
+    expect(state.playbackActive).toBe(true);
+    expect(directTime.paused).toBe(true);
+    expect(scene.getStagePresentationSnapshot().canOverloadModules).toBe(false);
+
+    // Releasing externalPaused syncs time.paused = false; skipPlayback advances to new Round-4 pause cleanly
+    scene.setPaused(false);
+    expect(directTime.paused).toBe(false);
+    scene.skipPlayback();
+    expect(pauseCount).toBe(2);
+    expect(state.decisionPaused).toBe(true);
+    expect(state.nextRoundIdx).toBe(3);
+    expect(directTime.paused).toBe(true);
+    expect(completeCount).toBe(0);
+
+    // Clearing pauseAtRound to null releases Round-4 pause and skipPlayback completes cleanly
+    scene.patchLiveCombatSimulation(baseAc.simulation, { pauseAtRound: null });
+    expect(state.decisionPaused).toBe(false);
+    expect(state.playbackActive).toBe(true);
+    expect(directTime.paused).toBe(false);
+    scene.skipPlayback();
+    expect(completeCount).toBe(1);
+    expect(state.decisionPaused).toBe(false);
+    expect(state.playbackActive).toBe(false);
+
+    game.destroy();
   });
 });
 
