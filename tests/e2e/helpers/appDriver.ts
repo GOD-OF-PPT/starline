@@ -399,18 +399,33 @@ export class StarlineAppDriver {
     await expect(this.byTestId(TEST_IDS.SETTLEMENT_SCREEN)).toBeVisible();
   }
 
-  async pauseAutoCombat(): Promise<void> {
+  async pauseAutoCombat(options?: {
+    allowAlreadyPaused?: boolean;
+    timeoutMs?: number;
+  }): Promise<void> {
+    const timeout = options?.timeoutMs ?? 30_000;
     const btn = this.byTestId(TEST_IDS.BTN_PAUSE_AUTO_COMBAT);
-    // Avoid redundant pre-click visibility/enabled CDP round-trips so S05's 1500ms
-    // countdown cannot expire mid-pause under SwiftShader WebGL.
-    const alreadyPaused = await btn.evaluate(
-      (el) => el.getAttribute('aria-pressed') === 'true',
-      undefined,
-      { timeout: 30_000 },
-    );
-    if (!alreadyPaused) {
-      await btn.click();
+    if (options?.allowAlreadyPaused) {
+      const alreadyPaused = await btn.evaluate(
+        (el) => el.getAttribute('aria-pressed') === 'true',
+        undefined,
+        { timeout },
+      );
+      if (!alreadyPaused) {
+        await btn.click({ timeout });
+      }
+      await expect(btn).toHaveAttribute('aria-pressed', 'true');
+      return;
     }
+
+    // Single-round-trip opaque-box click targeting the active countdown state:
+    // eliminates pre-click evaluate()/getAttribute() CDP round-trips so S05's 1500ms
+    // countdown cannot drain during heavy Boss/WebGL scene init or post-reload boot,
+    // while failing closed if S05 unexpectedly entered already paused or already engaged.
+    const unpausedBtn = this.page.locator(
+      `[data-testid="${TEST_IDS.BTN_PAUSE_AUTO_COMBAT}"][aria-pressed="false"]`,
+    );
+    await unpausedBtn.click({ timeout });
     await expect(btn).toHaveAttribute('aria-pressed', 'true');
   }
 
