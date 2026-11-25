@@ -737,9 +737,16 @@ export class V2AppController {
     if (!latest || latest.phase !== 'ENCOUNTER' || !latest.currentNodeId) return;
 
     if (!latest.activeCombat) {
-      this.preCombatAutoEngage.pause('policy');
+      const node = latest.graph.nodes[latest.currentNodeId];
+      if (
+        !node?.combat ||
+        (node.combat.units.length <= 1 && (latest.lockedEnemyId ?? null) === null)
+      ) {
+        return;
+      }
       const res = setV2PreCombatLockedEnemy(latest, enemyId);
       if (!res.ok) return;
+      this.preCombatAutoEngage.pause('policy');
       this.setCurrentRun(res.run);
       soundEngine.play('tacticalOrder');
       this.phaserHost?.updateV2LockedEnemy(res.run.lockedEnemyId ?? null);
@@ -748,7 +755,10 @@ export class V2AppController {
     }
 
     const relayTier = getFacilityTier(this.save.profile, 'stargate_relay');
-    const res = setV2LiveCombatLockedEnemy(latest, enemyId, this.liveCombatRound, {
+    const effectiveCurrentRound = this.awaitingEliteDecision
+      ? this.liveCombatRound
+      : Math.max(this.liveCombatRound, this.phaserHost?.getV2CurrentDispatchedRound() ?? 0);
+    const res = setV2LiveCombatLockedEnemy(latest, enemyId, effectiveCurrentRound, {
       stargateRelayTier: relayTier,
     });
     if (!res.ok || !res.run.activeCombat) {
@@ -763,6 +773,9 @@ export class V2AppController {
     );
     const nextPending = res.run.activeCombat.pendingDecision;
     const nextNeedsDecision = Boolean(nextPending && nextPending.chosen === null);
+    if (!nextNeedsDecision) {
+      this.awaitingEliteDecision = false;
+    }
     this.phaserHost?.patchV2LiveCombatSimulation(res.run.activeCombat.simulation, {
       pauseAtRound: nextNeedsDecision && nextPending ? nextPending.roundNumber : null,
       lockedEnemyId: res.run.lockedEnemyId ?? null,
@@ -803,7 +816,12 @@ export class V2AppController {
    */
   private handlePlayerInitiatedBaySynergies(
     bay: V2CargoBayState,
-    opts?: { readonly isTrialOrShowcase?: boolean }
+    opts?: {
+      readonly isTrialOrShowcase?: boolean;
+      readonly playSfx?: boolean;
+      readonly skipRenderBanners?: boolean;
+      readonly prevBay?: V2CargoBayState;
+    }
   ): void {
     if (this.isReadOnlyTab || !this.tabGuard.canWrite() || this.showcaseRun || opts?.isTrialOrShowcase) {
       return;
@@ -818,6 +836,27 @@ export class V2AppController {
     if (nextProfile === this.save.profile) return;
     this.save = { ...this.save, profile: nextProfile };
     this.persist();
+    let shouldPlayDiscoverySfx = Boolean(opts?.playSfx);
+    if (!shouldPlayDiscoverySfx) {
+      const gridHasPendingSnap = this.cargoGrid?.hasPendingSnapFeedback() ?? false;
+      if (!gridHasPendingSnap) {
+        shouldPlayDiscoverySfx = true;
+      } else if (opts?.prevBay) {
+        const prevStats = calculateV2BuildStats(opts.prevBay);
+        const prevSigs = new Set(
+          prevStats.links.map((l) => `${l.sourceInstanceId}->${l.targetInstanceId}:${l.sourceKind}`)
+        );
+        const gridWillDetectNewLink = stats.links.some(
+          (l) => !prevSigs.has(`${l.sourceInstanceId}->${l.targetInstanceId}:${l.sourceKind}`)
+        );
+        if (!gridWillDetectNewLink) {
+          shouldPlayDiscoverySfx = true;
+        }
+      }
+    }
+    if (shouldPlayDiscoverySfx) {
+      soundEngine.play('energyLink');
+    }
     this.activeSynergyToast = { entries: newly };
     if (this.synergyToastTimer !== null) {
       window.clearTimeout(this.synergyToastTimer);
@@ -828,7 +867,9 @@ export class V2AppController {
       this.synergyToastTimer = null;
       this.renderBanners();
     }, 4800);
-    this.renderBanners();
+    if (!opts?.skipRenderBanners) {
+      this.renderBanners();
+    }
   }
 
   private handleWindowResize = (): void => {
@@ -1875,17 +1916,25 @@ export class V2AppController {
           activeCombat.committedCommands && activeCombat.committedCommands.length > 0
             ? activeCombat.committedCommands[activeCombat.committedCommands.length - 1]
             : null;
-        const latestOv = [...(activeCombat.interventions ?? [])]
+        const latestActionIv = [...(activeCombat.interventions ?? [])]
           .reverse()
-          .find((iv) => iv.kind === 'overload_module');
+          .find((iv) => iv.kind !== 'target_lock');
         const activeOrderChoice =
           latestCmd?.choice ?? (pending?.chosen && pending.chosen !== 'normal' ? pending.chosen : null);
-        this.liveCombatEventLine =
-          latestOv && latestOv.moduleKind
-            ? `部件过载：${getV2EquipmentDefByKind(latestOv.moduleKind, 'common').name}`
-            : activeOrderChoice
+        if (latestActionIv?.kind === 'overload_module' && latestActionIv.moduleKind) {
+          this.liveCombatEventLine = `部件过载：${
+            getV2EquipmentDefByKind(latestActionIv.moduleKind, 'common').name
+          }`;
+        } else if (latestActionIv?.kind === 'tactical_command' && latestActionIv.commandId) {
+          this.liveCombatEventLine =
+            latestActionIv.commandId !== 'normal'
+              ? `指令生效：${getTacticalCommandLabel(latestActionIv.commandId, run.shipId)}`
+              : '';
+        } else {
+          this.liveCombatEventLine = activeOrderChoice
             ? `指令生效：${getTacticalCommandLabel(activeOrderChoice, run.shipId)}`
             : '';
+        }
 
         const prevLog =
           resumeRound > 0 && sim.rounds.length > 0
@@ -1992,6 +2041,7 @@ export class V2AppController {
               activeRun.recentEquipmentKinds
             );
             if (res.ok) {
+              const finalOutcome = activeRun.activeCombat.simulation.outcome;
               this.activeCombatPlaybackKey = null;
               this.awaitingEliteDecision = false;
               this.showCombatLogDetails = false;
@@ -2005,7 +2055,7 @@ export class V2AppController {
               soundEngine.play(
                 isRunPendingCampaignEnding(res.run)
                   ? 'contractDeliver'
-                  : sim.outcome === 'victory'
+                  : finalOutcome === 'victory'
                   ? 'enemyDestroy'
                   : 'hullHit'
               );
@@ -2107,18 +2157,28 @@ export class V2AppController {
         units: previewUnits,
         simulation: null,
         settings: this.save.settings,
-        lockedEnemyId: stageMode === 'pre_combat' ? run.lockedEnemyId ?? null : null,
+        lockedEnemyId:
+          stageMode === 'pre_combat' && previewUnits.length > 1 ? run.lockedEnemyId ?? null : null,
         onEnemyLock:
           stageMode === 'pre_combat' && previewUnits.length > 1
             ? (enemyId) => this.handleToggleEnemyLock(enemyId)
             : undefined,
+        onModuleOverload: undefined,
       })
     );
     if (stageMode === 'pre_combat') {
-      this.phaserHost.updateV2LockedEnemy(run.lockedEnemyId ?? null);
+      this.phaserHost.updateV2LockedEnemy(
+        previewUnits.length > 1 ? run.lockedEnemyId ?? null : null
+      );
       this.phaserHost.setV2StageCallbacks({
         onEnemyLock:
-          previewUnits.length > 1 ? (enemyId) => this.handleToggleEnemyLock(enemyId) : undefined,
+          previewUnits.length > 1 ? (enemyId) => this.handleToggleEnemyLock(enemyId) : null,
+        onModuleOverload: null,
+      });
+    } else {
+      this.phaserHost.setV2StageCallbacks({
+        onEnemyLock: null,
+        onModuleOverload: null,
       });
     }
 
@@ -3128,7 +3188,7 @@ export class V2AppController {
         },
         onAddLoan: (defId) => {
           const curDraft = this.prepareDraft;
-          if (!curDraft || curDraft.trialBuildId) return;
+          if (!this.canMutate() || !curDraft || curDraft.trialBuildId) return;
           const liveBay = this.buildPreparePreviewBay(curDraft);
           const spot = findFirstLegalV2Placement(liveBay, defId);
           if (!spot) {
@@ -3148,6 +3208,13 @@ export class V2AppController {
               rotation: spot.rotation,
             },
           ];
+          const nextPreviewBay = this.buildPreparePreviewBay(curDraft);
+          this.handlePlayerInitiatedBaySynergies(nextPreviewBay, {
+            isTrialOrShowcase: false,
+            playSfx: true,
+            skipRenderBanners: true,
+            prevBay: liveBay,
+          });
           soundEngine.play(
             isHeavyPlacementItem({ definitionId: defId, category: 'equipment' })
               ? 'placeHeavy'
@@ -3158,7 +3225,7 @@ export class V2AppController {
         onAddOwned: (instId) => {
           const curDraft = this.prepareDraft;
           const curProfile = this.save.profile;
-          if (!curDraft || curDraft.trialBuildId) return;
+          if (!this.canMutate() || !curDraft || curDraft.trialBuildId) return;
           const w = curProfile.equipmentWarehouse.find((item) => item.instanceId === instId);
           if (!w) return;
           const liveBay = this.buildPreparePreviewBay(curDraft);
@@ -3181,6 +3248,13 @@ export class V2AppController {
               rotation: spot.rotation,
             },
           ];
+          const nextPreviewBay = this.buildPreparePreviewBay(curDraft);
+          this.handlePlayerInitiatedBaySynergies(nextPreviewBay, {
+            isTrialOrShowcase: false,
+            playSfx: true,
+            skipRenderBanners: true,
+            prevBay: liveBay,
+          });
           soundEngine.play(isHeavyPlacementItem(w) ? 'placeHeavy' : 'place');
           this.syncAll();
         },
@@ -3243,8 +3317,9 @@ export class V2AppController {
         },
         onSubLoan: () => {
           const curDraft = this.prepareDraft;
-          if (!curDraft) return;
-          let tempBay = this.buildPreparePreviewBay(curDraft);
+          if (!this.canMutate() || !curDraft || curDraft.trialBuildId) return;
+          const prevBay = this.buildPreparePreviewBay(curDraft);
+          let tempBay = prevBay;
           const added: V2PrepareSlotEntry[] = [...curDraft.slots];
           for (const m of curDraft.missingPresetEntries) {
             if (!m.canSubstituteCommonLoan) continue;
@@ -3266,6 +3341,12 @@ export class V2AppController {
           curDraft.slots = added;
           curDraft.missingPresetEntries = [];
           curDraft.presetNotice = '已按你的确认，以借用普通蓝图补齐缺失槽位。';
+          this.handlePlayerInitiatedBaySynergies(tempBay, {
+            isTrialOrShowcase: false,
+            playSfx: true,
+            skipRenderBanners: true,
+            prevBay,
+          });
           soundEngine.play('place');
           this.syncAll();
         },
@@ -3307,6 +3388,7 @@ export class V2AppController {
         }),
       onChange: (nextBay) => {
         if (!this.canMutate() || this.prepareDraft !== draft) return;
+        const prevBay = this.buildPreparePreviewBay(draft);
         const wasPlayingDemo = draft.playingDemo;
         draft.playingDemo = false;
         draft.demoPlaybackKey = null;
@@ -3328,6 +3410,7 @@ export class V2AppController {
         });
         this.handlePlayerInitiatedBaySynergies(nextBay, {
           isTrialOrShowcase: Boolean(draft.trialBuildId),
+          prevBay,
         });
         this.syncPrepareLocal(draft, wasPlayingDemo);
       },
@@ -3516,6 +3599,7 @@ export class V2AppController {
         if (!curRun || curRun.phase !== 'MAP') return;
         this.handlePlayerInitiatedBaySynergies(nextBay, {
           isTrialOrShowcase: Boolean(curRun.isShowcase),
+          prevBay: curRun.bay,
         });
         this.syncMapLocal({ ...curRun, bay: nextBay });
       },
@@ -3893,6 +3977,7 @@ export class V2AppController {
         if (!curRun || curRun.phase !== 'SHOP') return;
         this.handlePlayerInitiatedBaySynergies(nextBay, {
           isTrialOrShowcase: Boolean(curRun.isShowcase),
+          prevBay: curRun.bay,
         });
         this.syncShopLocal({ ...curRun, bay: nextBay });
       },
@@ -4027,6 +4112,7 @@ export class V2AppController {
         if (!curRun || curRun.phase !== 'ARRANGE') return;
         this.handlePlayerInitiatedBaySynergies(nextBay, {
           isTrialOrShowcase: Boolean(curRun.isShowcase),
+          prevBay: curRun.bay,
         });
         this.syncArrangeLocal({ ...curRun, bay: nextBay });
       },

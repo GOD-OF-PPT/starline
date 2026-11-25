@@ -693,9 +693,13 @@ const { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, phaserHarness } = vi
   const phaserHarness = {
     createdDisplayObjects: [] as MockDisplayObject[],
     setTintFillCalls: 0,
+    lastGame: null as MockPhaserGame | null,
+    lastV2CombatScene: null as MockSceneInstance | null,
     reset() {
       this.createdDisplayObjects = [];
       this.setTintFillCalls = 0;
+      this.lastGame = null;
+      this.lastV2CombatScene = null;
     },
   };
 
@@ -874,9 +878,13 @@ const { MOCK_SCENE_STATUS, MockPhaserScene, MockPhaserGame, phaserHarness } = vi
       if (config.parent) {
         config.parent.appendChild(this.canvas);
       }
+      phaserHarness.lastGame = this;
       for (const s of config.scene ?? []) {
         s.game = this;
         this.scenesByKey.set(s.sceneKey, s);
+        if (s.sceneKey === 'V2CombatScene') {
+          phaserHarness.lastV2CombatScene = s;
+        }
       }
       this.scene = {
         isActive: (key: string) => this.activeKeys.has(key),
@@ -926,8 +934,9 @@ vi.mock('phaser', () => ({
   },
 }));
 
-import { ALL_SFX_KINDS } from '../src/audio/soundEngine';
+import { ALL_SFX_KINDS, soundEngine, type SfxKind } from '../src/audio/soundEngine';
 import { DEFAULT_SETTINGS } from '../src/domain/progression';
+import { PhaserHost } from '../src/scenes/PhaserHost';
 import { buildEncounterUnits } from '../src/v2/data/enemies';
 import { createV2TutorialRun } from '../src/v2/data/tutorialV2';
 import {
@@ -941,6 +950,7 @@ import {
   commitV2ModuleOverload,
   completeV2CombatAtCurrentNode,
   listV2OverloadableModules,
+  markV2CombatDecisionPaused,
   previewV2CombatNode,
   setV2LiveCombatLockedEnemy,
   setV2PreCombatLockedEnemy,
@@ -953,7 +963,7 @@ import {
   createV2CargoInstance,
   createV2EquipmentInstance,
 } from '../src/v2/domain/itemCatalog';
-import { launchV2Expedition } from '../src/v2/domain/loadout';
+import { launchV2Expedition, saveV2LoadoutPreset } from '../src/v2/domain/loadout';
 import {
   clearV2SaveData,
   createFreshV2Profile,
@@ -980,6 +990,7 @@ import {
   V3_BACKUP_KEY,
   type V2CargoBayState,
   type V2CombatIntervention,
+  type V2ProfileState,
   type V2RunState,
   type V2SaveData,
 } from '../src/v2/domain/types';
@@ -1037,7 +1048,11 @@ function buildRunAtEncounter(
   const baseProfile = {
     ...createFreshV2Profile(),
     tutorialCompleted: true,
-    unlockedShips: ['cannon_skiff' as const, 'shield_cruiser' as const],
+    unlockedShips: [
+      'cannon_skiff' as const,
+      'shield_cruiser' as const,
+      'heavy_freighter' as const,
+    ],
     unlockedFamilies: ['core' as const, 'heavy_kit' as const, 'hangar_kit' as const, 'counter_kit' as const],
     blueprints: [
       'laser' as const,
@@ -1066,6 +1081,10 @@ function buildRunAtEncounter(
     throw new Error('Failed to launch test run');
   }
   const units = buildEncounterUnits(encounterKind, layer, `t_${encounterKind}_${layer}`);
+  const isBossEnc =
+    encounterKind === 'boss_anvil' ||
+    encounterKind === 'boss_dreadnought' ||
+    encounterKind === 'boss_leviathan';
   const nodeId = 'L2A';
   const node = {
     nodeId,
@@ -1073,7 +1092,12 @@ function buildRunAtEncounter(
     slotIndex: 0,
     lane: 0 as const,
     contractMarker: false,
-    type: encounterKind === 'elite' ? ('elite' as const) : ('combat' as const),
+    type: isBossEnc
+      ? ('boss' as const)
+      : encounterKind === 'elite'
+      ? ('elite' as const)
+      : ('combat' as const),
+    ...(isBossEnc ? { bossId: encounterKind } : {}),
     sectorBg: 2 as const,
     nextNodeIds: [],
     resolved: false,
@@ -1877,14 +1901,14 @@ describe('R2-M6A D03: Battery Cap, coolant_tank↔heavy Cross-Category Synergy, 
     expect(stCommon.lasers.filter((l) => l.batteryCapped)).toHaveLength(1);
     expect(stCommon.nominalRound1SingleDmg).toBe(2 + 5 + 3); // Core 2 + boosted 5 + starved 3 = 10
 
-    // Improved battery supplies 2 lasers (+3 each), starves 3rd laser
+    // Improved battery supplies 2 lasers (+3 each), starves 3rd laser (strictly legal non-overlapping 4x4)
     const improvedTri: V2CargoBayState = {
       ...createEmptyV2Bay('cannon_skiff'),
       placed: [
         { item: mkEq('l1', 'laser'), x: 0, y: 1, rotation: 0 },
         { item: mkEq('b1', 'battery', 'improved'), x: 1, y: 1, rotation: 0 },
         { item: mkEq('l2', 'laser'), x: 2, y: 1, rotation: 0 },
-        { item: mkEq('l3', 'laser'), x: 1, y: 0, rotation: 0 },
+        { item: mkEq('l3', 'laser'), x: 1, y: 0, rotation: 1 },
       ],
     };
     const stImp = calculateV2BuildStats(improvedTri);
@@ -1893,16 +1917,16 @@ describe('R2-M6A D03: Battery Cap, coolant_tank↔heavy Cross-Category Synergy, 
     expect(stImp.lasers.filter((l) => l.batteryBonus === 3)).toHaveLength(2);
     expect(stImp.lasers.filter((l) => l.batteryCapped)).toHaveLength(1);
 
-    // Kuhn 2-phase optimal matching beats greedy lexicographic matching!
+    // Kuhn 2-phase optimal matching beats greedy lexicographic matching! (strictly legal non-overlapping 4x4)
     // b_imp (cap 2) adjacent to l_a, l_b, l_c; b_com (cap 1) adjacent ONLY to l_a.
     // Optimal assigns b_com -> l_a (+2) and b_imp -> l_b, l_c (+3, +3) = +8 total across all 3 lasers!
     const kuhnBay: V2CargoBayState = {
       ...createEmptyV2Bay('cannon_skiff'),
       placed: [
         { item: mkEq('b_com', 'battery', 'common'), x: 0, y: 0, rotation: 0 },
-        { item: mkEq('l_a', 'laser'), x: 1, y: 0, rotation: 0 },
+        { item: mkEq('l_a', 'laser'), x: 1, y: 0, rotation: 1 },
         { item: mkEq('b_imp', 'battery', 'improved'), x: 1, y: 1, rotation: 0 },
-        { item: mkEq('l_b', 'laser'), x: 0, y: 1, rotation: 0 },
+        { item: mkEq('l_b', 'laser'), x: 1, y: 2, rotation: 0 },
         { item: mkEq('l_c', 'laser'), x: 2, y: 1, rotation: 0 },
       ],
     };
@@ -1929,7 +1953,7 @@ describe('R2-M6A D03: Battery Cap, coolant_tank↔heavy Cross-Category Synergy, 
       placed: [
         { item: mkEq('h1', 'heavy'), x: 0, y: 0, rotation: 0 },
         { item: mkCargo('ct1', 'cargo.coolant_tank'), x: 1, y: 0, rotation: 0 },
-        { item: mkCargo('ct2', 'cargo.coolant_tank'), x: 0, y: 2, rotation: 0 }, // 2nd adjacent coolant tank must NOT stack!
+        { item: mkCargo('ct2', 'cargo.coolant_tank'), x: 0, y: 3, rotation: 1 }, // Legal 2nd adjacent coolant tank must NOT stack!
       ],
     };
     const st = calculateV2BuildStats(heavyCoolantBay);
@@ -2057,7 +2081,7 @@ describe('R2-M6A D03: Battery Cap, coolant_tank↔heavy Cross-Category Synergy, 
           ...createEmptyV2Bay('cannon_skiff'),
           placed: [
             { item: mkEq('fl1', 'flak'), x: 0, y: 0, rotation: 0 },
-            { item: mkEq('b1', 'battery'), x: 2, y: 0, rotation: 0 },
+            { item: mkEq('b1', 'battery'), x: 2, y: 1, rotation: 0 },
             { item: mkEq('l1', 'laser'), x: 3, y: 0, rotation: 0 },
           ],
         },
@@ -2496,3 +2520,905 @@ describe('R2-M6A Contract #9: Rules 3.1.0, Non-Destructive 3.0.0->3.1.0 Migratio
     mount.remove();
   });
 });
+
+// ===========================================================================
+// 5. Iteration-2 Regressions (Fixes 1–8)
+// ===========================================================================
+
+function captureSfxCalls(fn: (played: SfxKind[]) => void): SfxKind[] {
+  const played: SfxKind[] = [];
+  const origPlay = soundEngine.play.bind(soundEngine);
+  soundEngine.play = ((kind: SfxKind) => {
+    played.push(kind);
+    return origPlay(kind);
+  }) as typeof soundEngine.play;
+  try {
+    fn(played);
+  } finally {
+    soundEngine.play = origPlay;
+  }
+  return played;
+}
+
+describe('R2-M6A Iteration-2 Regressions: Causality, Handler Clearing, D03 Discovery SFX & Polish', () => {
+  beforeEach(() => {
+    phaserHarness.reset();
+    clearTacticalDeltaCache();
+  });
+
+  it('Fix 1: Boss inter-pause live target lock applies at Round 3, allows locking living escorts, and recomputes/clears future pendingDecision without completion deadlock', () => {
+    const bossBay: V2CargoBayState = {
+      ...createEmptyV2Bay('heavy_freighter'),
+      placed: [
+        { item: mkEq('l1', 'laser'), x: 0, y: 0, rotation: 0 },
+        { item: mkEq('b1', 'battery', 'common'), x: 1, y: 0, rotation: 0 },
+        { item: mkEq('s1', 'shield', 'improved'), x: 2, y: 0, rotation: 0 },
+      ],
+    };
+    const bossRun = buildRunAtEncounter(bossBay, 'boss_dreadnought', 6, 38, 38);
+    const started = startV2CombatAtCurrentNode(bossRun, 'weakest', {
+      enableTacticalCommands: true,
+    });
+    expect(started.ok).toBe(true);
+    expect(started.run.tacticalChargesMax).toBe(2);
+    const pause1 = started.run.activeCombat!.pendingDecision!;
+    expect(pause1.roundNumber).toBe(2);
+
+    // Commit Charge 1 (shield overload at R2) -> chains open pendingDecision to future Pause #2 (> R3) with pausedAtDecisionId: null
+    const afterC1 = commitV2ModuleOverload(started.run, pause1.decisionId, 's1');
+    expect(afterC1.ok).toBe(true);
+    const futurePending = afterC1.run.activeCombat!.pendingDecision!;
+    expect(futurePending).not.toBeNull();
+    expect(futurePending.chosen).toBeNull();
+    expect(futurePending.roundNumber).toBeGreaterThan(3);
+    expect(afterC1.run.activeCombat!.pausedAtDecisionId).toBeNull();
+
+    // At end of Round 2 (currentRound = 2), both Boss Core and Escort 2 are ALIVE
+    const r2Enemies = afterC1.run.activeCombat!.simulation.rounds[1].enemiesAfter;
+    const bossCore = r2Enemies.find((e) => e.isBoss && e.hp > 0)!;
+    const livingEscort = r2Enemies.find((e) => !e.isBoss && e.hp > 0)!;
+    expect(bossCore).toBeDefined();
+    expect(livingEscort).toBeDefined();
+
+    // Sub-case A: Locking Boss Core during Round 2 MUST apply on Round 3 (NOT jump to futurePending.roundNumber!)
+    const lockBoss = setV2LiveCombatLockedEnemy(afterC1.run, bossCore.enemyId, 2);
+    expect(lockBoss.ok).toBe(true);
+    expect(lockBoss.run.lockedEnemyId).toBe(bossCore.enemyId);
+    const lockIvBoss = lockBoss.run.activeCombat!.interventions!.find(
+      (iv) => iv.kind === 'target_lock'
+    )!;
+    expect(lockIvBoss.roundNumber).toBe(3);
+    expect(lockBoss.run.activeCombat!.simulation.rounds[2].lockedEnemyIdUsed).toBe(
+      bossCore.enemyId
+    );
+    expect(lockBoss.run.activeCombat!.simulation.rounds[0]).toEqual(
+      afterC1.run.activeCombat!.simulation.rounds[0]
+    );
+    expect(lockBoss.run.activeCombat!.simulation.rounds[1]).toEqual(
+      afterC1.run.activeCombat!.simulation.rounds[1]
+    );
+    // Future Pause #2 round must stay strictly valid within nextSimulation bounds
+    const recomputedPending = lockBoss.run.activeCombat!.pendingDecision;
+    expect(recomputedPending).not.toBeNull();
+    expect(recomputedPending!.roundNumber).toBeLessThanOrEqual(
+      lockBoss.run.activeCombat!.simulation.rounds.length
+    );
+
+    // Sub-case B: Locking living escort at Round 2 MUST succeed (never falsely rejected by far-future round snapshot!)
+    const lockEscort = setV2LiveCombatLockedEnemy(afterC1.run, livingEscort.enemyId, 2);
+    expect(lockEscort.ok).toBe(true);
+    expect(lockEscort.run.activeCombat!.simulation.rounds[2].lockedEnemyIdUsed).toBe(
+      livingEscort.enemyId
+    );
+
+    // Sub-case C: Inter-pause retarget that ends combat BEFORE pre-scheduled Pause #2 MUST clear pendingDecision so completeV2CombatAtCurrentNode never deadlocks!
+    // Exact overkill-avoidance scenario:
+    // - Player has heavy+capacitor (18 dmg R1/R3), salvo_pod+relay (5x2=10 dynamic retargeting missiles/R), core (2 dmg/R), shield.
+    // - Boss Dreadnought (42 HP, 4 initial shield -> enters P2 on R1 with +6 shield -> 10 HP at end of R2) + Escort (20 HP).
+    // - Staying locked on Boss on R3 wastes 10 heavy overkill, leaving Escort at 10 HP -> 4 rounds (Pause #2 pre-scheduled at Round 4!).
+    // - Retargeting onto Escort during R2 (applyRound = 3) exact-kills Escort (2+18=20) and redirects salvo(10) onto Boss (10 HP) -> Victory in 3 rounds, clearing Pause #2!
+    const highDpsBay: V2CargoBayState = {
+      ...createEmptyV2Bay('heavy_freighter'),
+      placed: [
+        { item: mkEq('h1', 'heavy', 'improved'), x: 0, y: 0, rotation: 0 },
+        { item: mkEq('c1', 'capacitor', 'improved'), x: 1, y: 0, rotation: 0 },
+        { item: mkEq('sv1', 'salvo_pod', 'improved'), x: 2, y: 0, rotation: 0 },
+        { item: mkEq('rl1', 'relay', 'common'), x: 3, y: 0, rotation: 0 },
+        { item: mkEq('s1', 'shield', 'improved'), x: 4, y: 0, rotation: 0 },
+      ],
+    };
+    const fastBossBase = buildRunAtEncounter(highDpsBay, 'boss_dreadnought', 6, 38, 38);
+    const fastNode = fastBossBase.graph.nodes[fastBossBase.currentNodeId!]!;
+    const tunedUnits = [
+      { ...fastNode.combat!.units[0], maxHp: 42, armor: 0 },
+      { ...fastNode.combat!.units[1], maxHp: 20, armor: 0 },
+    ];
+    const shortRun: V2RunState = {
+      ...fastBossBase,
+      hp: 38,
+      maxHp: 38,
+      lockedEnemyId: tunedUnits[0].enemyId,
+      graph: {
+        ...fastBossBase.graph,
+        nodes: {
+          ...fastBossBase.graph.nodes,
+          [fastNode.nodeId]: {
+            ...fastNode,
+            combat: { ...fastNode.combat!, units: tunedUnits },
+          },
+        },
+      },
+    };
+    const shortStarted = startV2CombatAtCurrentNode(shortRun, 'weakest', {
+      enableTacticalCommands: true,
+    });
+    expect(shortStarted.ok).toBe(true);
+    const shortC1 = commitV2ModuleOverload(
+      shortStarted.run,
+      shortStarted.run.activeCombat!.pendingDecision!.decisionId,
+      's1'
+    );
+    expect(shortC1.ok).toBe(true);
+    expect(shortC1.run.activeCombat!.pendingDecision).not.toBeNull();
+    expect(shortC1.run.activeCombat!.pendingDecision!.roundNumber).toBe(4);
+    expect(shortC1.run.activeCombat!.simulation.rounds.length).toBe(4);
+
+    // Retarget to Escort during Round 2 (applyRound = 3) -> combat now finishes in 3 rounds (< 4)!
+    // Instead of keeping stale unreachable Round-4 pendingDecision (which would deadlock completion!),
+    // Fix 1 recomputes Pause #2 via findNextPauseRoundAfterCommit to valid Round 3 (before Round 3 executes).
+    const retargetShort = setV2LiveCombatLockedEnemy(shortC1.run, tunedUnits[1].enemyId, 2);
+    expect(retargetShort.ok).toBe(true);
+    expect(retargetShort.run.activeCombat!.simulation.outcome).toBe('victory');
+    expect(retargetShort.run.activeCombat!.simulation.rounds.length).toBe(3);
+    const movedPause = retargetShort.run.activeCombat!.pendingDecision!;
+    expect(movedPause).not.toBeNull();
+    expect(movedPause.roundNumber).toBe(3);
+    expect(movedPause.roundNumber).toBeLessThanOrEqual(
+      retargetShort.run.activeCombat!.simulation.rounds.length
+    );
+
+    // Committing Charge 2 at the recomputed Round-3 pause settles cleanly with ZERO deadlock!
+    const committedR3 = commitV2EliteTacticDecision(
+      retargetShort.run,
+      movedPause.decisionId,
+      'focus_calibrate'
+    );
+    expect(committedR3.ok).toBe(true);
+    const settled = completeV2CombatAtCurrentNode(committedR3.run, ['core']);
+    expect(settled.ok).toBe(true);
+    expect(settled.run.activeCombat).toBeNull();
+
+    // Also verify: if an open pendingDecision targets a round beyond nextSimulation.rounds.length (rebuilt === null),
+    // setV2LiveCombatLockedEnemy explicitly clears pendingDecision to null so completion NEVER deadlocks!
+    const unreachablePendingRun: V2RunState = {
+      ...retargetShort.run,
+      activeCombat: {
+        ...retargetShort.run.activeCombat!,
+        pendingDecision: {
+          ...movedPause,
+          decisionId: `${movedPause.decisionId}_stale5`,
+          roundNumber: 5,
+        },
+        pausedAtDecisionId: null,
+      },
+    };
+    const clearedUnreachable = setV2LiveCombatLockedEnemy(
+      unreachablePendingRun,
+      null,
+      4
+    );
+    expect(clearedUnreachable.ok).toBe(true);
+    expect(clearedUnreachable.run.activeCombat!.pendingDecision).toBeNull();
+    expect(clearedUnreachable.run.activeCombat!.pausedAtDecisionId).toBeNull();
+    expect(completeV2CombatAtCurrentNode(clearedUnreachable.run, ['core']).ok).toBe(true);
+  });
+
+  it('Fix 2: In-flight Round 2+ live lock click respects V2CombatScene.getCurrentDispatchedRound() and never retroactively mutates an animating round', () => {
+    window.localStorage.clear();
+    window.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+    const bay: V2CargoBayState = {
+      ...createEmptyV2Bay('cannon_skiff'),
+      placed: [
+        { item: mkEq('l1', 'laser'), x: 0, y: 0, rotation: 0 },
+        { item: mkEq('s1', 'shield'), x: 1, y: 0, rotation: 0 },
+      ],
+    };
+    const baseRun = buildRunAtEncounter(bay, 'artillery', 4, 30, 30);
+    const units = baseRun.graph.nodes[baseRun.currentNodeId!]!.combat!.units;
+    const artilleryId = units[0].enemyId;
+    const escortId = units[1].enemyId;
+    const started = startV2CombatAtCurrentNode(
+      { ...baseRun, lockedEnemyId: artilleryId },
+      'weakest',
+      { enableTacticalCommands: false }
+    ).run;
+
+    const baseSave = createFreshV2SaveData();
+    persistV2SaveData(window.localStorage, {
+      ...baseSave,
+      profile: { ...baseSave.profile, tutorialCompleted: true },
+      settings: { ...DEFAULT_SETTINGS, pureAutoCombat: true },
+      activeRun: started,
+    });
+
+    const mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const ctrl = new V2AppController(mount, { onSwitchToV1: () => {} });
+    ctrl.init();
+    phaserHarness.lastGame!.events.emit('ready');
+
+    const scene = phaserHarness.lastV2CombatScene as unknown as V2CombatScene;
+    expect(scene).not.toBeNull();
+
+    // Step Round 1 synchronously (no scene.time yet -> Round 1 beats execute immediately & onRoundStep sets liveCombatRound = 1)
+    scene.update(100, 400);
+    expect(scene.getCurrentDispatchedRound()).toBe(1);
+
+    // Now attach a mock Phaser timer queue to hold Round 2's beats IN FLIGHT (0..590ms before resolve beat!)
+    const queuedBeats: Array<{ readonly delayMs: number; readonly cb: () => void; removed: boolean }> = [];
+    (scene as unknown as {
+      time: {
+        paused: boolean;
+        delayedCall: (delayMs: number, cb: () => void) => { remove: () => void };
+      };
+    }).time = {
+      paused: false,
+      delayedCall: (delayMs: number, cb: () => void) => {
+        const entry = { delayMs, cb, removed: false };
+        queuedBeats.push(entry);
+        return {
+          remove: () => {
+            entry.removed = true;
+          },
+        };
+      },
+    };
+
+    // Advance enough delta to dispatch Round 2 (`nextRoundIdx` becomes 2), while Round 2 resolve beat has NOT fired yet!
+    scene.update(1100, 500);
+    scene.update(1600, 500);
+    expect(scene.getCurrentDispatchedRound()).toBe(2);
+    expect(queuedBeats.length).toBeGreaterThan(0);
+
+    const beforeSave = loadV2SaveData(window.localStorage);
+    expect(beforeSave.status).toBe('loaded');
+    if (beforeSave.status !== 'loaded') throw new Error('expected loaded');
+    const round2Before = beforeSave.data.activeRun!.activeCombat!.simulation.rounds[1];
+    expect(round2Before.lockedEnemyIdUsed).toBe(artilleryId);
+
+    // Click live lock button for escort while Round 2 is STILL animating in-flight!
+    const lockBtn = mount.querySelector<HTMLButtonElement>(`[data-testid="enemy-lock-${escortId}"]`);
+    expect(lockBtn).not.toBeNull();
+    lockBtn!.click();
+
+    const afterSave = loadV2SaveData(window.localStorage);
+    expect(afterSave.status).toBe('loaded');
+    if (afterSave.status !== 'loaded') throw new Error('expected loaded');
+    const acAfter = afterSave.data.activeRun!.activeCombat!;
+    // Round 2 MUST remain bit-for-bit identical (NEVER retroactively mutated while animating!)
+    expect(acAfter.simulation.rounds[1]).toEqual(round2Before);
+    // New lock intervention MUST be scheduled for Round 3 (>= dispatchedRound + 1)
+    const lockIv = acAfter.interventions!.find((iv) => iv.kind === 'target_lock')!;
+    expect(lockIv.roundNumber).toBe(3);
+    expect(acAfter.simulation.rounds[2].lockedEnemyIdUsed).toBe(escortId);
+
+    ctrl.destroy();
+    mount.remove();
+  });
+
+  it('Fix 3: Clears stale onEnemyLockHandler/onModuleOverloadHandler across multi->single transitions, syncs same-key lockedEnemyId: null, and blocks single-enemy Pre-Combat lock', () => {
+    const multiUnits = buildEncounterUnits('artillery', 3, 'fix3_multi');
+    const singleUnits = buildEncounterUnits('patrol', 1, 'fix3_single');
+    const bay: V2CargoBayState = {
+      ...createEmptyV2Bay('cannon_skiff'),
+      placed: [{ item: mkEq('h1', 'heavy'), x: 0, y: 0, rotation: 0 }],
+    };
+
+    // 1) Domain guard: setV2PreCombatLockedEnemy rejects non-null lock on 1-enemy node, but still allows clearing stale lock to null
+    const singleRun = buildRunAtEncounter(bay, 'patrol', 1, 30, 30);
+    const loneId = singleRun.graph.nodes[singleRun.currentNodeId!]!.combat!.units[0].enemyId;
+    expect(setV2PreCombatLockedEnemy(singleRun, loneId).ok).toBe(false);
+    const clearedSingle = setV2PreCombatLockedEnemy({ ...singleRun, lockedEnemyId: loneId }, null);
+    expect(clearedSingle.ok).toBe(true);
+    expect(clearedSingle.run.lockedEnemyId).toBeNull();
+
+    // 2) V2CombatScene same-key lockedEnemyId: null + callback clearing + multi->single transition
+    const scene = new V2CombatScene();
+    const game = new MockPhaserGame({
+      scene: [scene as unknown as InstanceType<typeof MockPhaserScene>],
+    });
+    const lockClicks: string[] = [];
+    const ovClicks: string[] = [];
+    const pbMulti: V2StagePlayback = {
+      playbackKey: 'pre_multi',
+      shipId: 'cannon_skiff',
+      shipVisualSpec: deriveV2ShipVisualSpec(bay),
+      sectorId: 'near_orbit',
+      sectorIndex: 1,
+      eventBackdrop: null,
+      units: multiUnits,
+      simulation: null,
+      settings: { ...DEFAULT_SETTINGS },
+      lockedEnemyId: multiUnits[0].enemyId,
+      canOverloadModules: true,
+      overloadableModules: [{ instanceId: 'h1', kind: 'heavy', label: '重炮' }],
+      onEnemyLock: (eid) => lockClicks.push(eid),
+      onModuleOverload: (mid) => ovClicks.push(mid),
+    };
+    game.scene.start('V2CombatScene', { playback: pbMulti });
+    expect(scene.getStagePresentationSnapshot().lockedEnemyId).toBe(multiUnits[0].enemyId);
+
+    // Same-key setPlayback with lockedEnemyId: null + undefined callbacks + canOverloadModules: false
+    scene.setPlayback({
+      ...pbMulti,
+      lockedEnemyId: null,
+      canOverloadModules: false,
+      overloadableModules: [],
+      onEnemyLock: undefined,
+      onModuleOverload: undefined,
+    });
+    expect(scene.getStagePresentationSnapshot().lockedEnemyId).toBeNull();
+    expect(scene.getStagePresentationSnapshot().canOverloadModules).toBe(false);
+    expect((scene as unknown as { playback?: V2StagePlayback }).playback?.lockedEnemyId).toBeNull();
+    // Clicking enemy sprite MUST NOT invoke cleared handler!
+    const multiEnemySprite = phaserHarness.createdDisplayObjects.find(
+      (obj) => obj.textureKey.startsWith('ship.enemy.') && obj.scene !== null
+    )!;
+    multiEnemySprite.emit('pointerdown', { event: { target: game.canvas } });
+    expect(lockClicks).toEqual([]);
+
+    // Re-bind handler on multi-enemy stage, verify click fires, then transition to single-enemy stage with onEnemyLock: undefined
+    scene.setInteractionCallbacks({ onEnemyLock: (eid) => lockClicks.push(eid) });
+    multiEnemySprite.emit('pointerdown', { event: { target: game.canvas } });
+    expect(lockClicks).toEqual([multiUnits[0].enemyId]);
+
+    scene.setPlayback({
+      playbackKey: 'pre_single',
+      shipId: 'cannon_skiff',
+      shipVisualSpec: deriveV2ShipVisualSpec(bay),
+      sectorId: 'near_orbit',
+      sectorIndex: 1,
+      eventBackdrop: null,
+      units: singleUnits,
+      simulation: null,
+      settings: { ...DEFAULT_SETTINGS },
+      lockedEnemyId: null,
+      onEnemyLock: undefined,
+    });
+    const singleEnemySprite = [...phaserHarness.createdDisplayObjects]
+      .reverse()
+      .find((obj) => obj.textureKey.startsWith('ship.enemy.') && obj.scene !== null)!;
+    singleEnemySprite.emit('pointerdown', { event: { target: game.canvas } });
+    expect(lockClicks).toEqual([multiUnits[0].enemyId]); // ZERO new calls on single-enemy stage!
+
+    // Explicit setInteractionCallbacks({ onEnemyLock: null }) clears active handler
+    scene.setInteractionCallbacks({ onEnemyLock: (eid) => lockClicks.push(eid) });
+    scene.setInteractionCallbacks({ onEnemyLock: null });
+    singleEnemySprite.emit('pointerdown', { event: { target: game.canvas } });
+    expect(lockClicks).toEqual([multiUnits[0].enemyId]);
+    game.destroy();
+
+    // 3) PhaserHost multi-enemy -> single-enemy transition + same-key static reuse clearing
+    phaserHarness.reset();
+    const hostContainer = document.createElement('div');
+    document.body.appendChild(hostContainer);
+    const host = new PhaserHost(hostContainer);
+    phaserHarness.lastGame!.events.emit('ready');
+    const hostLockCalls: string[] = [];
+    host.showV2Stage({
+      ...pbMulti,
+      playbackKey: 'host_multi',
+      onEnemyLock: (eid) => hostLockCalls.push(eid),
+    });
+    // Same-key static reuse with undefined callbacks & lockedEnemyId: null MUST clear handler and lock
+    host.showV2Stage({
+      ...pbMulti,
+      playbackKey: 'host_multi',
+      lockedEnemyId: null,
+      canOverloadModules: false,
+      overloadableModules: [],
+      onEnemyLock: undefined,
+      onModuleOverload: undefined,
+    });
+    const hostMultiSprite = phaserHarness.createdDisplayObjects.find(
+      (obj) => obj.textureKey.startsWith('ship.enemy.') && obj.scene !== null
+    )!;
+    hostMultiSprite.emit('pointerdown', { event: { target: phaserHarness.lastGame!.canvas } });
+    expect(hostLockCalls).toEqual([]);
+
+    // Re-bind via setV2StageCallbacks, then transition to single-enemy stage with onEnemyLock: undefined -> strict no-op
+    host.setV2StageCallbacks({ onEnemyLock: (eid) => hostLockCalls.push(eid) });
+    hostMultiSprite.emit('pointerdown', { event: { target: phaserHarness.lastGame!.canvas } });
+    expect(hostLockCalls).toEqual([multiUnits[0].enemyId]);
+
+    host.showV2Stage({
+      playbackKey: 'host_single',
+      shipId: 'cannon_skiff',
+      shipVisualSpec: deriveV2ShipVisualSpec(bay),
+      sectorId: 'near_orbit',
+      sectorIndex: 1,
+      eventBackdrop: null,
+      units: singleUnits,
+      simulation: null,
+      settings: { ...DEFAULT_SETTINGS },
+      lockedEnemyId: null,
+      onEnemyLock: undefined,
+    });
+    const hostSingleSprite = [...phaserHarness.createdDisplayObjects]
+      .reverse()
+      .find((obj) => obj.textureKey.startsWith('ship.enemy.') && obj.scene !== null)!;
+    hostSingleSprite.emit('pointerdown', { event: { target: phaserHarness.lastGame!.canvas } });
+    expect(hostLockCalls).toEqual([multiUnits[0].enemyId]);
+    host.destroy();
+    hostContainer.remove();
+  });
+
+  it('Fix 4: PREPARE (non-trial) onAddLoan, onAddOwned, and onSubLoan trigger "新联动！" toast, persist discoveredSynergies, and play energyLink SFX', () => {
+    window.localStorage.clear();
+    window.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+    const ownedBat = createV2EquipmentInstance({
+      instanceId: 'owned_bat_prep',
+      kind: 'battery',
+      quality: 'common',
+      origin: 'owned',
+      acquiredDepth: 1,
+      location: 'warehouse',
+    });
+    let profile: V2ProfileState = {
+      ...createFreshV2Profile(),
+      tutorialCompleted: true,
+      discoveredSynergies: [],
+      unlockedShips: ['cannon_skiff'],
+      unlockedFamilies: ['core', 'heavy_kit', 'counter_kit'],
+      blueprints: ['laser', 'battery', 'heavy', 'capacitor', 'shield', 'counter'],
+      equipmentWarehouse: [ownedBat],
+    };
+    // Save a preset containing counter + a missing owned shield so #v2-preset-sub-loan substitutes shield next to counter!
+    const presetRes = saveV2LoadoutPreset(profile, {
+      name: '反击补齐预设',
+      shipId: 'cannon_skiff',
+      crewId: 'engineer',
+      primaryArchetype: 'heavy',
+      slots: [
+        {
+          slotKey: 'loan_cnt_1',
+          origin: 'loan',
+          definitionId: 'equipment.counter.common',
+          x: 0,
+          y: 0,
+          rotation: 0,
+        },
+        {
+          slotKey: 'missing_owned_shield',
+          origin: 'owned',
+          definitionId: 'equipment.shield.improved',
+          warehouseInstanceId: 'missing_owned_shield',
+          x: 1,
+          y: 0,
+          rotation: 0,
+        },
+      ],
+    });
+    expect(presetRes.ok).toBe(true);
+    profile = { ...presetRes.profile, discoveredSynergies: [] };
+
+    const baseSave = createFreshV2SaveData();
+    persistV2SaveData(window.localStorage, {
+      ...baseSave,
+      profile,
+      activeRun: null,
+    });
+
+    const mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const ctrl = new V2AppController(mount, { onSwitchToV1: () => {} });
+    ctrl.init();
+
+    // Enter PREPARE from BASE
+    const prepBtn = mount.querySelector<HTMLButtonElement>('#v2-base-launch-rec');
+    expect(prepBtn).not.toBeNull();
+    prepBtn!.click();
+
+    // 4A: onAddLoan (heavy + capacitor -> capacitor_heavy)
+    mount.querySelector<HTMLButtonElement>('#v2-prep-clear')!.click();
+    const sfxLoan = captureSfxCalls(() => {
+      mount.querySelector<HTMLButtonElement>('[data-add-loan="equipment.heavy.common"]')!.click();
+      mount.querySelector<HTMLButtonElement>('[data-add-loan="equipment.capacitor.common"]')!.click();
+    });
+    const toastA = mount.querySelector('[data-testid="synergy-discovery-toast"]');
+    expect(toastA).not.toBeNull();
+    expect(toastA!.getAttribute('data-synergy-ids')).toContain('capacitor_heavy');
+    expect(sfxLoan.filter((k) => k === 'energyLink').length).toBe(1);
+    const savedA = loadV2SaveData(window.localStorage);
+    expect(savedA.status).toBe('loaded');
+    if (savedA.status !== 'loaded') throw new Error('expected loaded');
+    expect(savedA.data.profile.discoveredSynergies).toContain('capacitor_heavy');
+
+    // 4B: onAddOwned (laser + owned battery -> battery_laser)
+    mount.querySelector<HTMLButtonElement>('#v2-prep-clear')!.click();
+    const sfxOwned = captureSfxCalls(() => {
+      mount.querySelector<HTMLButtonElement>('[data-add-loan="equipment.laser.common"]')!.click();
+      mount.querySelector<HTMLButtonElement>('[data-add-owned="owned_bat_prep"]')!.click();
+    });
+    const toastB = mount.querySelector('[data-testid="synergy-discovery-toast"]');
+    expect(toastB).not.toBeNull();
+    expect(toastB!.getAttribute('data-synergy-ids')).toContain('battery_laser');
+    expect(sfxOwned.filter((k) => k === 'energyLink').length).toBe(1);
+    const savedB = loadV2SaveData(window.localStorage);
+    expect(savedB.status).toBe('loaded');
+    if (savedB.status !== 'loaded') throw new Error('expected loaded');
+    expect(savedB.data.profile.discoveredSynergies).toContain('battery_laser');
+
+    // 4C: onSubLoan (preset missing shield substituted next to counter -> shield_counter)
+    const presetLoadBtn = mount.querySelector<HTMLButtonElement>('[data-load-preset]');
+    expect(presetLoadBtn).not.toBeNull();
+    presetLoadBtn!.click();
+    const subBtn = mount.querySelector<HTMLButtonElement>('#v2-preset-sub-loan');
+    expect(subBtn).not.toBeNull();
+    const sfxSub = captureSfxCalls(() => {
+      subBtn!.click();
+    });
+    const toastC = mount.querySelector('[data-testid="synergy-discovery-toast"]');
+    expect(toastC).not.toBeNull();
+    expect(toastC!.getAttribute('data-synergy-ids')).toContain('shield_counter');
+    expect(sfxSub.filter((k) => k === 'energyLink').length).toBe(1);
+    const savedC = loadV2SaveData(window.localStorage);
+    expect(savedC.status).toBe('loaded');
+    if (savedC.status !== 'loaded') throw new Error('expected loaded');
+    expect(savedC.data.profile.discoveredSynergies).toContain('shield_counter');
+
+    ctrl.destroy();
+    mount.remove();
+  });
+
+  it('Fix 5: ARRANGE #btn-v2-undo-discard AND migrated pre-linked bay move both emit energyLink SFX alongside "新联动！" toast', () => {
+    window.localStorage.clear();
+    window.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+    // 5A: #btn-v2-undo-discard restores coolant_tank adjacent to heavy -> toast + energyLink SFX!
+    const tutBase = createV2TutorialRun('fix5_undo');
+    const coolant = mkCargo('ct_undo', 'cargo.coolant_tank', 'bay');
+    const undoRun: V2RunState = {
+      ...tutBase,
+      isTutorial: false,
+      phase: 'ARRANGE',
+      bay: {
+        ...createEmptyV2Bay('cannon_skiff'),
+        placed: [{ item: mkEq('h1', 'heavy'), x: 0, y: 0, rotation: 0 }],
+        staging: [],
+        discardedThisArrange: [
+          {
+            item: coolant,
+            previousLocation: { zone: 'grid', x: 1, y: 0, rotation: 0 },
+          },
+        ],
+      },
+    };
+    const baseSave = createFreshV2SaveData();
+    persistV2SaveData(window.localStorage, {
+      ...baseSave,
+      profile: { ...baseSave.profile, tutorialCompleted: true, discoveredSynergies: [] },
+      activeRun: undoRun,
+    });
+
+    const mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const ctrl = new V2AppController(mount, { onSwitchToV1: () => {} });
+    ctrl.init();
+
+    const undoBtn = mount.querySelector<HTMLButtonElement>('#btn-v2-undo-discard');
+    expect(undoBtn).not.toBeNull();
+    const sfxUndo = captureSfxCalls(() => {
+      undoBtn!.click();
+    });
+    const toastUndo = mount.querySelector('[data-testid="synergy-discovery-toast"]');
+    expect(toastUndo).not.toBeNull();
+    expect(toastUndo!.getAttribute('data-synergy-ids')).toContain('coolant_heavy');
+    expect(sfxUndo.filter((k) => k === 'energyLink').length).toBe(1);
+    ctrl.destroy();
+
+    // 5B: Migrated bay with pre-existing laser+battery link (discoveredSynergies: []) -> moving unrelated shield discovers + plays energyLink!
+    window.localStorage.clear();
+    const migratedRun: V2RunState = {
+      ...tutBase,
+      isTutorial: false,
+      phase: 'ARRANGE',
+      bay: {
+        ...createEmptyV2Bay('cannon_skiff'),
+        placed: [
+          { item: mkEq('l1', 'laser'), x: 0, y: 0, rotation: 0 },
+          { item: mkEq('b1', 'battery'), x: 1, y: 0, rotation: 0 },
+          { item: mkEq('s1', 'shield'), x: 3, y: 0, rotation: 0 },
+        ],
+        staging: [],
+        discardedThisArrange: [],
+      },
+    };
+    persistV2SaveData(window.localStorage, {
+      ...baseSave,
+      profile: { ...baseSave.profile, tutorialCompleted: true, discoveredSynergies: [] },
+      activeRun: migratedRun,
+    });
+
+    const ctrl2 = new V2AppController(mount, { onSwitchToV1: () => {} });
+    const bootSfx = captureSfxCalls(() => {
+      ctrl2.init();
+    });
+    expect(mount.querySelector('[data-testid="synergy-discovery-toast"]')).toBeNull();
+    expect(bootSfx.filter((k) => k === 'energyLink').length).toBe(0);
+
+    // Select shield at (3,0) (center x=224, y=32 on 256x256 4x4 board) and place at (3,2) (center x=224, y=160)
+    const board = mount.querySelector<HTMLElement>('.v2-cargo-board')!;
+    const sfxMigrated = captureSfxCalls(() => {
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', {
+          bubbles: true,
+          button: 0,
+          pointerType: 'mouse',
+          clientX: 224,
+          clientY: 32,
+        }) as unknown as Event
+      );
+      window.dispatchEvent(
+        new MiniEvent('pointerup', {
+          bubbles: true,
+          button: 0,
+          pointerType: 'mouse',
+          clientX: 224,
+          clientY: 32,
+        }) as unknown as Event
+      );
+      board.dispatchEvent(
+        new MiniEvent('pointerdown', {
+          bubbles: true,
+          button: 0,
+          pointerType: 'mouse',
+          clientX: 224,
+          clientY: 160,
+        }) as unknown as Event
+      );
+    });
+    const toastMig = mount.querySelector('[data-testid="synergy-discovery-toast"]');
+    expect(toastMig).not.toBeNull();
+    expect(toastMig!.getAttribute('data-synergy-ids')).toContain('battery_laser');
+    expect(sfxMigrated.filter((k) => k === 'energyLink').length).toBe(1);
+
+    ctrl2.destroy();
+    mount.remove();
+  });
+
+  it('Fix 6: Live-lock defeat -> victory flip plays enemyDestroy SFX (NOT stale defeat hullHit SFX) on combat completion', () => {
+    window.localStorage.clear();
+    window.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+    const sandwichBay: V2CargoBayState = {
+      ...createEmptyV2Bay('cannon_skiff'),
+      placed: [
+        { item: mkEq('l1', 'laser'), x: 0, y: 0, rotation: 0 },
+        { item: mkEq('b1', 'battery', 'common'), x: 1, y: 0, rotation: 0 },
+        { item: mkEq('l2', 'laser'), x: 2, y: 0, rotation: 0 },
+      ],
+    };
+    const baseRun = buildRunAtEncounter(sandwichBay, 'artillery', 3, 22, 30);
+    const units = baseRun.graph.nodes[baseRun.currentNodeId!]!.combat!.units;
+    const artilleryId = units[0].enemyId;
+
+    const started = startV2CombatAtCurrentNode(baseRun, 'weakest', {
+      enableTacticalCommands: false,
+    }).run;
+    expect(started.activeCombat!.simulation.outcome).toBe('defeat');
+
+    const baseSave = createFreshV2SaveData();
+    persistV2SaveData(window.localStorage, {
+      ...baseSave,
+      profile: { ...baseSave.profile, tutorialCompleted: true },
+      settings: { ...DEFAULT_SETTINGS, pureAutoCombat: true },
+      activeRun: started,
+    });
+
+    const mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const ctrl = new V2AppController(mount, { onSwitchToV1: () => {} });
+    ctrl.init();
+    phaserHarness.lastGame!.events.emit('ready');
+
+    // Toggle live lock onto artillery cannon -> flips activeCombat.simulation.outcome in-place to 'victory'!
+    const lockBtn = mount.querySelector<HTMLButtonElement>(`[data-testid="enemy-lock-${artilleryId}"]`);
+    expect(lockBtn).not.toBeNull();
+    lockBtn!.click();
+
+    const midSave = loadV2SaveData(window.localStorage);
+    expect(midSave.status).toBe('loaded');
+    if (midSave.status !== 'loaded') throw new Error('expected loaded');
+    expect(midSave.data.activeRun!.activeCombat!.simulation.outcome).toBe('victory');
+
+    // Skip to complete combat -> MUST enter REWARD and play 'enemyDestroy' (NOT 'hullHit')!
+    const skipBtn = mount.querySelector<HTMLButtonElement>('#v2-combat-skip');
+    expect(skipBtn).not.toBeNull();
+    const completionSfx = captureSfxCalls(() => {
+      skipBtn!.click();
+    });
+    const endSave = loadV2SaveData(window.localStorage);
+    expect(endSave.status).toBe('loaded');
+    if (endSave.status !== 'loaded') throw new Error('expected loaded');
+    expect(endSave.data.activeRun!.phase).toBe('REWARD');
+    expect(completionSfx).toContain('enemyDestroy');
+    expect(completionSfx).not.toContain('hullHit');
+
+    ctrl.destroy();
+    mount.remove();
+  });
+
+  it('Fix 7: CombatPrePhaseView details drawer refreshes per-round logs when lock toggle keeps identical final HP and round count', () => {
+    const bay: V2CargoBayState = {
+      ...createEmptyV2Bay('cannon_skiff'),
+      placed: [
+        { item: mkEq('l1', 'laser'), x: 0, y: 0, rotation: 0 },
+        { item: mkEq('b1', 'battery', 'common'), x: 1, y: 0, rotation: 0 },
+      ],
+    };
+    const baseRun = buildRunAtEncounter(bay, 'patrol', 2, 30, 30);
+    const node = baseRun.graph.nodes[baseRun.currentNodeId!]!;
+
+    // Asymmetric armor (0 vs 1) with tuned HP on standard units so BOTH locks finish in 4 rounds & identical final HP,
+    // while Round-1 damage dealt differs (7 vs 5)!
+    const drUnits = [
+      { ...node.combat!.units[0], enemyId: 'dr_u0', name: '侦察艇 A', maxHp: 14, damagePerRound: 3, armor: 0, pierceRatio: 0, role: 'standard' as const },
+      { ...node.combat!.units[0], enemyId: 'dr_u1', name: '装甲艇 B', maxHp: 10, damagePerRound: 3, armor: 1, pierceRatio: 0, role: 'standard' as const },
+    ];
+    const drNode = {
+      ...node,
+      combat: { ...node.combat!, encounterKind: 'patrol' as const, units: drUnits },
+    };
+    const drRun: V2RunState = {
+      ...baseRun,
+      graph: { ...baseRun.graph, nodes: { ...baseRun.graph.nodes, [node.nodeId]: drNode } },
+    };
+    const drLock0: V2RunState = { ...drRun, lockedEnemyId: 'dr_u0' };
+    const drLock1: V2RunState = { ...drRun, lockedEnemyId: 'dr_u1' };
+    const drPv0 = previewV2CombatNode(drLock0, node.nodeId)!;
+    const drPv1 = previewV2CombatNode(drLock1, node.nodeId)!;
+
+    expect(drPv0.outcome).toBe(drPv1.outcome);
+    expect(drPv0.finalPlayerHpAfterRepair).toBe(drPv1.finalPlayerHpAfterRepair);
+    expect(drPv0.roundsCount).toBe(drPv1.roundsCount);
+    const r1Dmg0 = drPv0.rounds[0].playerAttacks.reduce((s, a) => s + a.appliedDamage, 0);
+    const r1Dmg1 = drPv1.rounds[0].playerAttacks.reduce((s, a) => s + a.appliedDamage, 0);
+    expect(r1Dmg0).not.toBe(r1Dmg1);
+
+    const host = document.createElement('div');
+    const preView = new CombatPrePhaseView();
+    preView.mount(host);
+    const noopActions = {
+      onSelectPolicy: () => {},
+      onToggleLog: () => {},
+      onUseGadget: () => {},
+      onTogglePauseAutoEngage: () => {},
+      onToggleLockEnemy: () => {},
+      onStartCombat: () => {},
+    };
+
+    preView.update(
+      {
+        run: drLock0,
+        node: drNode,
+        readOnly: false,
+        showCombatLogDetails: true,
+        pureAutoCombat: false,
+        bonusBossCharges: 0,
+        stargateRelayTier: 0,
+        autoEngage: undefined,
+      },
+      noopActions
+    );
+    const html0 = host.querySelector('[data-testid="forecast-details-drawer"]')!.innerHTML;
+
+    preView.update(
+      {
+        run: drLock1,
+        node: drNode,
+        readOnly: false,
+        showCombatLogDetails: true,
+        pureAutoCombat: false,
+        bonusBossCharges: 0,
+        stargateRelayTier: 0,
+        autoEngage: undefined,
+      },
+      noopActions
+    );
+    const html1 = host.querySelector('[data-testid="forecast-details-drawer"]')!.innerHTML;
+    expect(html0).not.toBe(html1);
+    expect(html0).toContain(`R1: 我方 ${r1Dmg0}伤`);
+    expect(html1).toContain(`R1: 我方 ${r1Dmg1}伤`);
+    preView.unmount();
+  });
+
+  it('Fix 8: 2-charge Boss liveCombatEventLine shows chronologically latest non-target_lock intervention AND CombatLivePhaseView disables tactical orders when readOnly', () => {
+    window.localStorage.clear();
+    window.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+    const bossBay: V2CargoBayState = {
+      ...createEmptyV2Bay('heavy_freighter'),
+      placed: [
+        { item: mkEq('l1', 'laser'), x: 0, y: 0, rotation: 0 },
+        { item: mkEq('b1', 'battery', 'common'), x: 1, y: 0, rotation: 0 },
+        { item: mkEq('s1', 'shield', 'improved'), x: 2, y: 0, rotation: 0 },
+      ],
+    };
+    const bossRun = buildRunAtEncounter(bossBay, 'boss_dreadnought', 6, 38, 38);
+    const started = startV2CombatAtCurrentNode(bossRun, 'weakest', {
+      enableTacticalCommands: true,
+    }).run;
+
+    // Verify CombatLivePhaseView disables ALL [data-elite-tactic] buttons when readOnly === true
+    const paused1 = markV2CombatDecisionPaused(
+      started,
+      started.activeCombat!.pendingDecision!.decisionId
+    );
+    const liveHost = document.createElement('div');
+    const liveView = new CombatLivePhaseView();
+    liveView.mount(liveHost);
+    liveView.update(
+      {
+        run: paused1,
+        liveCombatRound: 2,
+        liveCombatPlayerHp: 35,
+        liveCombatPlayerShield: 4,
+        liveCombatEnemiesAlive: 3,
+        liveCombatEventLine: '',
+        livePhaseBannerText: null,
+        liveEnemySnapshots: paused1.activeCombat!.simulation.rounds[0].enemiesAfter,
+        awaitingEliteDecision: true,
+        combatSpeed: 1,
+        readOnly: true,
+      },
+      {
+        onPeekBay: () => {},
+        onToggleSpeed: () => {},
+        onSkipPlayback: () => {},
+        onCommitEliteTactic: () => {},
+        onOverloadModule: () => {},
+      }
+    );
+    const tacticBtns = Array.from(
+      liveHost.querySelectorAll<HTMLButtonElement>('[data-elite-tactic]')
+    );
+    expect(tacticBtns.length).toBe(4);
+    expect(tacticBtns.every((b) => b.disabled)).toBe(true);
+    liveView.unmount();
+
+    // Commit Charge 1 = module overload ('s1') at R2, then Charge 2 = tactical command ('emergency_shield') at Pause #2
+    const afterC1 = commitV2ModuleOverload(
+      paused1,
+      paused1.activeCombat!.pendingDecision!.decisionId,
+      's1'
+    );
+    expect(afterC1.ok).toBe(true);
+    const pause2Id = afterC1.run.activeCombat!.pendingDecision!.decisionId;
+    const afterC2 = commitV2EliteTacticDecision(afterC1.run, pause2Id, 'emergency_shield');
+    expect(afterC2.ok).toBe(true);
+
+    // Mount in V2AppController (with a queued mock timer so initial resume line is inspected before Round N+1 step fires)
+    const baseSave = createFreshV2SaveData();
+    persistV2SaveData(window.localStorage, {
+      ...baseSave,
+      profile: { ...baseSave.profile, tutorialCompleted: true },
+      activeRun: afterC2.run,
+    });
+    const mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const ctrl = new V2AppController(mount, { onSwitchToV1: () => {} });
+    ctrl.init();
+
+    // Event line MUST show Charge 2 ('指令生效：紧急护盾'), NOT stale Charge 1 ('部件过载：护盾发生器')!
+    const eventText = mount.textContent ?? '';
+    expect(eventText).toContain('指令生效：紧急护盾');
+    expect(eventText).not.toContain('部件过载：护盾发生器');
+
+    ctrl.destroy();
+    mount.remove();
+  });
+});
+

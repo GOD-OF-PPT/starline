@@ -529,31 +529,46 @@ export class V2CombatScene extends Phaser.Scene {
       nextStaticKey !== null &&
       nextStaticKey === this.appliedPlaybackKey
     ) {
+      const nextLockedEnemyId =
+        playback.lockedEnemyId !== undefined ? playback.lockedEnemyId : this.lockedEnemyId;
+      const nextOverloadableModules = playback.overloadableModules ?? [];
+      const nextCanOverloadModules = Boolean(playback.canOverloadModules);
       this.playback = {
         ...(this.playback ?? playback),
         shipVisualSpec: playback.shipVisualSpec ?? null,
         settings: playback.settings,
         playbackKey: nextStaticKey,
-        lockedEnemyId: playback.lockedEnemyId ?? this.lockedEnemyId,
-        overloadableModules: playback.overloadableModules ?? this.overloadableModules,
-        canOverloadModules: playback.canOverloadModules ?? this.canOverloadModules,
-        onEnemyLock: playback.onEnemyLock ?? this.playback?.onEnemyLock,
-        onModuleOverload: playback.onModuleOverload ?? this.playback?.onModuleOverload,
+        lockedEnemyId: nextLockedEnemyId,
+        overloadableModules: nextOverloadableModules,
+        canOverloadModules: nextCanOverloadModules,
+        onEnemyLock: playback.onEnemyLock,
+        onModuleOverload: playback.onModuleOverload,
       };
-      this.lockedEnemyId = playback.lockedEnemyId ?? null;
-      this.onEnemyLockHandler = playback.onEnemyLock ?? this.onEnemyLockHandler;
-      this.onModuleOverloadHandler = playback.onModuleOverload ?? this.onModuleOverloadHandler;
+      this.lockedEnemyId = nextLockedEnemyId;
+      this.overloadableModules = nextOverloadableModules;
+      this.canOverloadModules = nextCanOverloadModules;
+      this.onEnemyLockHandler = playback.onEnemyLock ?? null;
+      this.onModuleOverloadHandler = playback.onModuleOverload ?? null;
       this.updateShipVisualSpec(playback.shipVisualSpec ?? null);
       this.updateSettings(playback.settings);
       this.refreshEnemyIntentLockTags();
+      this.syncModuleInstanceBindings();
+      this.rebuildOverloadNodeTags();
+      this.layoutModules();
       return;
     }
     this.playback = playback;
-    if (playback.onEnemyLock !== undefined) this.onEnemyLockHandler = playback.onEnemyLock;
-    if (playback.onModuleOverload !== undefined) this.onModuleOverloadHandler = playback.onModuleOverload;
+    this.onEnemyLockHandler = playback.onEnemyLock ?? null;
+    this.onModuleOverloadHandler = playback.onModuleOverload ?? null;
     if (this.scene?.isActive() && this.texturesReady) {
       this.applyPlayback();
     }
+  }
+
+  /** D02: Returns count of rounds already dispatched visually in active combat (0 when inactive) */
+  getCurrentDispatchedRound(): number {
+    if (!this.playback?.simulation) return 0;
+    return this.nextRoundIdx;
   }
 
   /** D02: Updates locked enemy reticle & intent tag in-place without resetting stage or playback! */
@@ -567,18 +582,24 @@ export class V2CombatScene extends Phaser.Scene {
     }
   }
 
-  /** D01/D02: Updates canvas click handlers in-place without stage reset */
+  /** D01/D02: Updates canvas click handlers in-place without stage reset (supports explicit null/undefined clearing) */
   setInteractionCallbacks(callbacks: {
-    readonly onEnemyLock?: (enemyId: string) => void;
-    readonly onModuleOverload?: (instanceId: string) => void;
+    readonly onEnemyLock?: ((enemyId: string) => void) | null;
+    readonly onModuleOverload?: ((instanceId: string) => void) | null;
   }): void {
-    if (callbacks.onEnemyLock !== undefined) this.onEnemyLockHandler = callbacks.onEnemyLock;
-    if (callbacks.onModuleOverload !== undefined) this.onModuleOverloadHandler = callbacks.onModuleOverload;
+    if ('onEnemyLock' in callbacks) {
+      this.onEnemyLockHandler = callbacks.onEnemyLock ?? null;
+    }
+    if ('onModuleOverload' in callbacks) {
+      this.onModuleOverloadHandler = callbacks.onModuleOverload ?? null;
+    }
     if (this.playback) {
       this.playback = {
         ...this.playback,
-        ...(callbacks.onEnemyLock !== undefined ? { onEnemyLock: callbacks.onEnemyLock } : {}),
-        ...(callbacks.onModuleOverload !== undefined ? { onModuleOverload: callbacks.onModuleOverload } : {}),
+        ...('onEnemyLock' in callbacks ? { onEnemyLock: callbacks.onEnemyLock ?? undefined } : {}),
+        ...('onModuleOverload' in callbacks
+          ? { onModuleOverload: callbacks.onModuleOverload ?? undefined }
+          : {}),
       };
     }
   }
@@ -1555,6 +1576,11 @@ export class V2CombatScene extends Phaser.Scene {
     const pb = this.playback;
     if (!pb) {
       this.appliedPlaybackKey = null;
+      this.lockedEnemyId = null;
+      this.overloadableModules = [];
+      this.canOverloadModules = false;
+      this.onEnemyLockHandler = null;
+      this.onModuleOverloadHandler = null;
       this.playerBaseTint = null;
       this.playerCurrentTint = null;
       this.playerHpState = { hp: 0, maxHp: 0, trailHp: 0, holdMs: 0 };
@@ -1566,8 +1592,8 @@ export class V2CombatScene extends Phaser.Scene {
     this.lockedEnemyId = pb.lockedEnemyId ?? null;
     this.overloadableModules = pb.overloadableModules ?? [];
     this.canOverloadModules = Boolean(pb.canOverloadModules);
-    if (pb.onEnemyLock !== undefined) this.onEnemyLockHandler = pb.onEnemyLock;
-    if (pb.onModuleOverload !== undefined) this.onModuleOverloadHandler = pb.onModuleOverload;
+    this.onEnemyLockHandler = pb.onEnemyLock ?? null;
+    this.onModuleOverloadHandler = pb.onModuleOverload ?? null;
     this.wreckCutAnim = null;
     if (pb.eventBackdrop !== 'wreck') {
       this.wreckCompartments = [];

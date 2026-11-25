@@ -1205,7 +1205,7 @@ export class CombatPrePhaseView implements PhaseView<CombatPreViewProps, CombatP
             })
             .join(' · ');
 
-          const drawerKey = `${pv.outcome}:${pv.finalPlayerHpAfterRepair}:${pv.roundsCount}:${pv.startingPlayerHp}:${pv.startingPlayerShield}:${pv.repairApplied}:${enemyDetailsListHtml}:${cargoPerCellSummary}`;
+          const drawerKey = `${pv.outcome}:${pv.finalPlayerHpAfterRepair}:${pv.roundsCount}:${pv.startingPlayerHp}:${pv.startingPlayerShield}:${pv.repairApplied}:${pv.targetPolicy}:${pv.lockedEnemyId ?? ''}:${enemyDetailsListHtml}:${cargoPerCellSummary}`;
           if (this.lastDrawerKey !== drawerKey) {
             this.lastDrawerKey = drawerKey;
             this.detailsDrawerEl.innerHTML = `
@@ -1878,7 +1878,7 @@ export class CombatLivePhaseView
           } else {
             btn.removeAttribute('data-tactical-signature');
           }
-          syncButtonDisabled(btn, !opt.enabled);
+          syncButtonDisabled(btn, readOnly || !opt.enabled);
 
           const cKey = `${isSig ? sigDef.badge : ''}|${opt.label}|${optMeta.tier}|${trend}|${
             opt.enabled ? opt.summary : opt.disabledReason ?? '当前不可用'

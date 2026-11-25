@@ -2488,6 +2488,9 @@ export function setV2PreCombatLockedEnemy(
       },
     };
   }
+  if (node.combat.units.length <= 1) {
+    return { ok: false, run, error: '单敌遭遇无需指定集火目标' };
+  }
   if (!node.combat.units.some((u) => u.enemyId === enemyId)) {
     return { ok: false, run, error: '目标敌舰不存在于当前遭遇中' };
   }
@@ -2504,7 +2507,7 @@ export function setV2PreCombatLockedEnemy(
  * D02: Toggles or clears target lock mid-combat WITHOUT retroactively mutating Round 1!
  * - Preserves immutable opening Round-1 lock on `activeCombat.lockedEnemyId`.
  * - Records Round-2+ target lock strictly in `activeCombat.interventions` (`kind: 'target_lock'`).
- * - Immediately rebuilds open `pendingDecision` previews so tactical options reflect the new lock.
+ * - Immediately rebuilds or recomputes open `pendingDecision` previews so tactical options reflect the new lock.
  */
 export function setV2LiveCombatLockedEnemy(
   run: V2RunState,
@@ -2525,8 +2528,15 @@ export function setV2LiveCombatLockedEnemy(
 
   const pending = ac.pendingDecision;
   const openPending = Boolean(pending && pending.chosen === null);
+  const isPausedAtPending = Boolean(
+    openPending &&
+      pending &&
+      (ac.pausedAtDecisionId === pending.decisionId ||
+        currentRound === undefined ||
+        currentRound + 1 >= pending.roundNumber)
+  );
   const applyRound =
-    openPending && pending
+    isPausedAtPending && pending
       ? Math.max(2, pending.roundNumber)
       : Math.max(2, (currentRound ?? (ac.resumeFromRound ?? 0) + 1) + 1);
 
@@ -2545,7 +2555,7 @@ export function setV2LiveCombatLockedEnemy(
 
   const prevInterventions = ac.interventions ?? [];
   const filteredInterventions = prevInterventions.filter(
-    (iv) => !(iv.kind === 'target_lock' && iv.roundNumber === applyRound)
+    (iv) => !(iv.kind === 'target_lock' && iv.roundNumber >= applyRound)
   );
   const lockIv: V2CombatIntervention = {
     interventionId: `lock_${run.runId}_${node.nodeId}_r${applyRound}`,
@@ -2581,24 +2591,64 @@ export function setV2LiveCombatLockedEnemy(
     endlessMutatorIds: run.endlessMutatorIds ?? ac.simulation.endlessMutatorIds,
   });
 
-  let nextPendingDecision = pending ?? null;
+  let nextPendingDecision: V2EliteTacticDecision | null = pending ?? null;
   if (openPending && pending) {
-    const rebuilt = buildTacticalDecisionAtRound({
-      run,
-      node,
-      targetPolicy: ac.targetPolicy,
-      startingHp: ac.startingHp,
-      baselineSim: nextSimulation,
-      pauseRound: pending.roundNumber,
-      priorCommands: prevCommitted,
-      priorInterventions: nextInterventions,
-      openingLockedEnemyId,
-      chargeIndex: pending.chargeIndex ?? 1,
-      chargesMax: pending.chargesMax ?? run.tacticalChargesMax,
-      stargateRelayTier: relayTier,
-    });
-    if (rebuilt) {
-      nextPendingDecision = { ...rebuilt, decisionId: pending.decisionId };
+    if (isPausedAtPending || applyRound >= pending.roundNumber) {
+      const rebuilt = buildTacticalDecisionAtRound({
+        run,
+        node,
+        targetPolicy: ac.targetPolicy,
+        startingHp: ac.startingHp,
+        baselineSim: nextSimulation,
+        pauseRound: pending.roundNumber,
+        priorCommands: prevCommitted,
+        priorInterventions: nextInterventions,
+        openingLockedEnemyId,
+        chargeIndex: pending.chargeIndex ?? 1,
+        chargesMax: pending.chargesMax ?? run.tacticalChargesMax,
+        stargateRelayTier: relayTier,
+      });
+      nextPendingDecision = rebuilt ? { ...rebuilt, decisionId: pending.decisionId } : null;
+    } else {
+      // Inter-pause live retargeting before a future Boss pause: recompute valid pause round on nextSimulation
+      let lastCommittedRound = 0;
+      for (const c of prevCommitted) {
+        if (c.roundNumber > lastCommittedRound) lastCommittedRound = c.roundNumber;
+      }
+      for (const iv of prevInterventions) {
+        if (iv.kind !== 'target_lock' && iv.roundNumber > lastCommittedRound) {
+          lastCommittedRound = iv.roundNumber;
+        }
+      }
+      const nextPauseRound = findNextPauseRoundAfterCommit(
+        nextSimulation,
+        Math.max(lastCommittedRound, applyRound - 1)
+      );
+      if (nextPauseRound !== null) {
+        const rebuilt = buildTacticalDecisionAtRound({
+          run,
+          node,
+          targetPolicy: ac.targetPolicy,
+          startingHp: ac.startingHp,
+          baselineSim: nextSimulation,
+          pauseRound: nextPauseRound,
+          priorCommands: prevCommitted,
+          priorInterventions: nextInterventions,
+          openingLockedEnemyId,
+          chargeIndex: pending.chargeIndex ?? 1,
+          chargesMax: pending.chargesMax ?? run.tacticalChargesMax,
+          stargateRelayTier: relayTier,
+        });
+        nextPendingDecision = rebuilt
+          ? {
+              ...rebuilt,
+              decisionId:
+                rebuilt.roundNumber === pending.roundNumber ? pending.decisionId : rebuilt.decisionId,
+            }
+          : null;
+      } else {
+        nextPendingDecision = null;
+      }
     }
   }
 
@@ -2612,6 +2662,10 @@ export function setV2LiveCombatLockedEnemy(
         simulation: nextSimulation,
         pendingDecision: nextPendingDecision,
         interventions: nextInterventions,
+        pausedAtDecisionId:
+          nextPendingDecision && ac.pausedAtDecisionId === nextPendingDecision.decisionId
+            ? ac.pausedAtDecisionId
+            : null,
       },
     },
   };

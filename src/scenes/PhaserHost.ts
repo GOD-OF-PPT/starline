@@ -368,23 +368,30 @@ export class PhaserHost {
       nextStaticKey !== null &&
       nextStaticKey === this.activeV2StageKey
     ) {
+      const nextLockedEnemyId =
+        playback.lockedEnemyId !== undefined
+          ? playback.lockedEnemyId
+          : this.pendingV2Stage?.lockedEnemyId ?? null;
+      const nextOverloadableModules = playback.overloadableModules ?? [];
+      const nextCanOverloadModules = Boolean(playback.canOverloadModules);
       this.pendingV2Stage = {
         ...(this.pendingV2Stage ?? playback),
         shipVisualSpec: playback.shipVisualSpec ?? null,
         settings: playback.settings,
         playbackKey: nextStaticKey,
-        lockedEnemyId: playback.lockedEnemyId ?? null,
-        overloadableModules: playback.overloadableModules,
-        canOverloadModules: playback.canOverloadModules,
-        onEnemyLock: playback.onEnemyLock ?? this.pendingV2Stage?.onEnemyLock,
-        onModuleOverload: playback.onModuleOverload ?? this.pendingV2Stage?.onModuleOverload,
+        lockedEnemyId: nextLockedEnemyId,
+        overloadableModules: nextOverloadableModules,
+        canOverloadModules: nextCanOverloadModules,
+        onEnemyLock: playback.onEnemyLock,
+        onModuleOverload: playback.onModuleOverload,
       };
       this.updateV2ShipVisualSpec(playback.shipVisualSpec ?? null);
       this.updateCombatSettings(playback.settings);
-      this.updateV2LockedEnemy(playback.lockedEnemyId ?? null);
+      this.updateV2LockedEnemy(nextLockedEnemyId);
+      this.updateV2OverloadInteraction(nextCanOverloadModules, nextOverloadableModules);
       this.setV2StageCallbacks({
-        onEnemyLock: playback.onEnemyLock,
-        onModuleOverload: playback.onModuleOverload,
+        onEnemyLock: playback.onEnemyLock ?? null,
+        onModuleOverload: playback.onModuleOverload ?? null,
       });
       return;
     }
@@ -481,16 +488,21 @@ export class PhaserHost {
     }
   }
 
+  getV2CurrentDispatchedRound(): number {
+    if (this.currentMode !== 'v2_stage') return 0;
+    return this.v2CombatScene.getCurrentDispatchedRound();
+  }
+
   setV2StageCallbacks(callbacks: {
-    readonly onEnemyLock?: (enemyId: string) => void;
-    readonly onModuleOverload?: (instanceId: string) => void;
+    readonly onEnemyLock?: ((enemyId: string) => void) | null;
+    readonly onModuleOverload?: ((instanceId: string) => void) | null;
   }): void {
     if (this.pendingV2Stage) {
       this.pendingV2Stage = {
         ...this.pendingV2Stage,
-        ...(callbacks.onEnemyLock !== undefined ? { onEnemyLock: callbacks.onEnemyLock } : {}),
-        ...(callbacks.onModuleOverload !== undefined
-          ? { onModuleOverload: callbacks.onModuleOverload }
+        ...('onEnemyLock' in callbacks ? { onEnemyLock: callbacks.onEnemyLock ?? undefined } : {}),
+        ...('onModuleOverload' in callbacks
+          ? { onModuleOverload: callbacks.onModuleOverload ?? undefined }
           : {}),
       };
     }

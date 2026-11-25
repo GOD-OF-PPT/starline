@@ -289,6 +289,10 @@ export class CargoGridV2Component {
     return this.root;
   }
 
+  hasPendingSnapFeedback(): boolean {
+    return Boolean(this.pendingSnapFeedback && this.lastSnappedId);
+  }
+
   getUiStateSnapshot(): {
     readonly selected: { readonly zone: 'grid' | 'staging'; readonly instanceId: string } | null;
     readonly focusedCell: V2GridCoord;
@@ -2348,10 +2352,15 @@ export class CargoGridV2Component {
     const undoBtn = target?.closest<HTMLButtonElement>('#btn-v2-undo-discard');
     if (undoBtn) {
       if (!this.editable) return;
+      const lastDiscarded =
+        this.bay.discardedThisArrange[this.bay.discardedThisArrange.length - 1];
       const res = undoV2LastDiscard(this.bay);
       if (res.ok) {
-        this.lastSnappedId = null;
-        this.pendingSnapFeedback = false;
+        const restoredOnGrid =
+          lastDiscarded &&
+          res.bay.placed.some((p) => p.item.instanceId === lastDiscarded.item.instanceId);
+        this.lastSnappedId = restoredOnGrid ? lastDiscarded.item.instanceId : null;
+        this.pendingSnapFeedback = Boolean(restoredOnGrid);
         soundEngine.play('pickup');
         this.callbacks.onBayChange(res.bay);
       }
