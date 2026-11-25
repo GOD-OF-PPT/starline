@@ -35,6 +35,7 @@ export type V2EnemyUnitRole =
   | 'armored'
   | 'piercer'
   | 'artillery'
+  | 'escort_shielder'
   | 'shield_regen'
   | 'drone_carrier'
   | 'emp_disruptor'
@@ -255,9 +256,9 @@ export const V2_ENCOUNTER_TEMPLATES: Record<V2EncounterKind, V2EncounterTemplate
   },
   artillery: {
     kind: 'artillery',
-    name: '轨道火炮舰',
-    badge: '蓄力重炮',
-    tacticHint: '奇数轮蓄力瞄准（0 伤），偶数轮发射高伤穿盾重炮齐射；可在偶数轮施放紧急护盾格挡',
+    name: '轨道火炮编队',
+    badge: '蓄力重炮 · 护航加盾',
+    tacticHint: '火炮舰奇数轮蓄力、偶数轮发射高伤穿盾重炮；护盾护航艇奇数轮为主舰投影护盾，可锁定火炮舰抢杀或先清护航',
     scaleWithDepth: true,
     extraBounty: 3,
     units: [
@@ -271,13 +272,23 @@ export const V2_ENCOUNTER_TEMPLATES: Record<V2EncounterKind, V2EncounterTemplate
         pierceRatio: 0.25,
         role: 'artillery',
       },
+      {
+        unitIdSuffix: 'artillery_escort',
+        name: '护盾护航艇',
+        spriteArchetype: 'scout',
+        baseHp: 11,
+        baseDamage: 1,
+        armor: 0,
+        pierceRatio: 0,
+        role: 'escort_shielder',
+      },
     ],
   },
   shield_regen: {
     kind: 'shield_regen',
-    name: '自愈护盾舰',
-    badge: '护盾再生',
-    tacticHint: '开战自带偏导护盾，偶数轮自动充能再生护盾；建议配合火力过载或聚焦校准速破',
+    name: '自愈护盾编队',
+    badge: '护盾再生 · 穿盾袭扰',
+    tacticHint: '护盾舰自带护盾并偶数轮回盾；伴随高穿盾脆皮袭扰艇，优先锁定击杀袭扰艇可大幅降低船体失血',
     scaleWithDepth: true,
     extraBounty: 3,
     units: [
@@ -292,6 +303,16 @@ export const V2_ENCOUNTER_TEMPLATES: Record<V2EncounterKind, V2EncounterTemplate
         role: 'shield_regen',
         initialShield: 5,
         maxShield: 8,
+      },
+      {
+        unitIdSuffix: 'shield_regen_escort',
+        name: '穿盾袭扰艇',
+        spriteArchetype: 'interceptor',
+        baseHp: 9,
+        baseDamage: 3,
+        armor: 0,
+        pierceRatio: 0.5,
+        role: 'piercer',
       },
     ],
   },
@@ -347,9 +368,9 @@ export const V2_ENCOUNTER_TEMPLATES: Record<V2EncounterKind, V2EncounterTemplate
   },
   rammer: {
     kind: 'rammer',
-    name: '冲撞突击艇',
-    badge: '加速撞击',
-    tacticHint: '奇数轮推进加速压制，偶数轮高速舰首撞击（高伤 + 30% 穿盾）；预判偶数轮抬盾或先手击毁',
+    name: '冲撞突击编队',
+    badge: '加速撞击 · 诱饵掩护',
+    tacticHint: '突击艇奇数轮加速、偶数轮高速穿盾撞击；伴随装甲诱饵艇吸火，建议切换最大威胁或锁定突击艇抢先击毁',
     scaleWithDepth: true,
     extraBounty: 3,
     units: [
@@ -362,6 +383,16 @@ export const V2_ENCOUNTER_TEMPLATES: Record<V2EncounterKind, V2EncounterTemplate
         armor: 1,
         pierceRatio: 0,
         role: 'rammer',
+      },
+      {
+        unitIdSuffix: 'rammer_escort',
+        name: '诱饵护航艇',
+        spriteArchetype: 'scout',
+        baseHp: 12,
+        baseDamage: 1,
+        armor: 1,
+        pierceRatio: 0,
+        role: 'standard',
       },
     ],
   },
@@ -652,7 +683,11 @@ export function resolveUnitIntentRole(
     }
     return 'elite_flagship';
   }
+  if (idLower.includes('artillery_escort') || idLower.includes('escort_shield') || unit.name.includes('护盾护航')) {
+    return 'escort_shielder';
+  }
   if (idLower.includes('artillery') || unit.name.includes('火炮')) return 'artillery';
+  if (idLower.includes('shield_regen_escort') || unit.name.includes('袭扰')) return 'piercer';
   if (idLower.includes('shield_regen') || unit.name.includes('自愈') || unit.name.includes('护盾舰')) {
     return 'shield_regen';
   }
@@ -662,6 +697,7 @@ export function resolveUnitIntentRole(
   if (idLower.includes('emp') || unit.name.includes('电磁') || unit.name.includes('干扰')) {
     return 'emp_disruptor';
   }
+  if (idLower.includes('rammer_escort') || unit.name.includes('诱饵')) return 'standard';
   if (idLower.includes('rammer') || unit.name.includes('冲撞') || unit.name.includes('突击艇')) {
     return 'rammer';
   }
@@ -757,6 +793,23 @@ export function resolveUnitIntentForRound(params: {
         shortLabel: '重炮齐射',
         damage: Math.max(2, Math.round(baseDmg * 1.75)),
         pierceRatio: Math.max(0.25, unit.pierceRatio),
+      };
+    }
+    case 'escort_shielder': {
+      if (r % 2 === 1) {
+        return {
+          kind: 'shield_regen',
+          label: '护航加盾',
+          shortLabel: '护航+3盾',
+          damage: baseDmg,
+          allyShieldGain: 3,
+        };
+      }
+      return {
+        kind: 'attack',
+        label: '护航掩护',
+        shortLabel: '掩护',
+        damage: baseDmg,
       };
     }
     case 'shield_regen': {
@@ -888,6 +941,7 @@ export function getUnitIntentCyclePreview(
     cycleLen = 3;
   } else if (
     role === 'artillery' ||
+    role === 'escort_shielder' ||
     role === 'shield_regen' ||
     role === 'emp_disruptor' ||
     role === 'rammer'

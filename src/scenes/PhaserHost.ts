@@ -10,9 +10,11 @@ import {
 import { CombatScene, type CombatScenePlayback } from './CombatScene';
 import {
   V2CombatScene,
+  type V2StageOverloadModuleSpec,
   type V2StagePlayback,
   type WreckCompartmentVisualState,
 } from '../v2/scenes/V2CombatScene';
+import type { V2CombatSimulation } from '../v2/domain/types';
 
 export type ActiveSceneMode = 'base' | 'combat' | 'v2_stage';
 
@@ -366,14 +368,31 @@ export class PhaserHost {
       nextStaticKey !== null &&
       nextStaticKey === this.activeV2StageKey
     ) {
+      const nextLockedEnemyId =
+        playback.lockedEnemyId !== undefined
+          ? playback.lockedEnemyId
+          : this.pendingV2Stage?.lockedEnemyId ?? null;
+      const nextOverloadableModules = playback.overloadableModules ?? [];
+      const nextCanOverloadModules = Boolean(playback.canOverloadModules);
       this.pendingV2Stage = {
         ...(this.pendingV2Stage ?? playback),
         shipVisualSpec: playback.shipVisualSpec ?? null,
         settings: playback.settings,
         playbackKey: nextStaticKey,
+        lockedEnemyId: nextLockedEnemyId,
+        overloadableModules: nextOverloadableModules,
+        canOverloadModules: nextCanOverloadModules,
+        onEnemyLock: playback.onEnemyLock,
+        onModuleOverload: playback.onModuleOverload,
       };
       this.updateV2ShipVisualSpec(playback.shipVisualSpec ?? null);
       this.updateCombatSettings(playback.settings);
+      this.updateV2LockedEnemy(nextLockedEnemyId);
+      this.updateV2OverloadInteraction(nextCanOverloadModules, nextOverloadableModules);
+      this.setV2StageCallbacks({
+        onEnemyLock: playback.onEnemyLock ?? null,
+        onModuleOverload: playback.onModuleOverload ?? null,
+      });
       return;
     }
 
@@ -457,6 +476,82 @@ export class PhaserHost {
     }
     if (this.currentMode === 'v2_stage') {
       this.v2CombatScene.updateShipVisualSpec(spec);
+    }
+  }
+
+  updateV2LockedEnemy(enemyId: string | null): void {
+    if (this.pendingV2Stage) {
+      this.pendingV2Stage = { ...this.pendingV2Stage, lockedEnemyId: enemyId };
+    }
+    if (this.currentMode === 'v2_stage') {
+      this.v2CombatScene.updateLockedEnemy(enemyId);
+    }
+  }
+
+  getV2CurrentDispatchedRound(): number {
+    if (this.currentMode !== 'v2_stage') return 0;
+    return this.v2CombatScene.getCurrentDispatchedRound();
+  }
+
+  setV2StageCallbacks(callbacks: {
+    readonly onEnemyLock?: ((enemyId: string) => void) | null;
+    readonly onModuleOverload?: ((instanceId: string) => void) | null;
+  }): void {
+    if (this.pendingV2Stage) {
+      this.pendingV2Stage = {
+        ...this.pendingV2Stage,
+        ...('onEnemyLock' in callbacks ? { onEnemyLock: callbacks.onEnemyLock ?? undefined } : {}),
+        ...('onModuleOverload' in callbacks
+          ? { onModuleOverload: callbacks.onModuleOverload ?? undefined }
+          : {}),
+      };
+    }
+    if (this.currentMode === 'v2_stage') {
+      this.v2CombatScene.setInteractionCallbacks(callbacks);
+    }
+  }
+
+  updateV2OverloadInteraction(
+    canOverload: boolean,
+    modules?: readonly V2StageOverloadModuleSpec[]
+  ): void {
+    if (this.pendingV2Stage) {
+      this.pendingV2Stage = {
+        ...this.pendingV2Stage,
+        canOverloadModules: canOverload,
+        ...(modules !== undefined ? { overloadableModules: modules } : {}),
+      };
+    }
+    if (this.currentMode === 'v2_stage') {
+      this.v2CombatScene.updateOverloadInteraction(canOverload, modules);
+    }
+  }
+
+  patchV2LiveCombatSimulation(
+    simulation: V2CombatSimulation,
+    options?: {
+      readonly pauseAtRound?: number | null;
+      readonly lockedEnemyId?: string | null;
+      readonly canOverloadModules?: boolean;
+      readonly overloadableModules?: readonly V2StageOverloadModuleSpec[];
+    }
+  ): void {
+    if (this.pendingV2Stage) {
+      this.pendingV2Stage = {
+        ...this.pendingV2Stage,
+        simulation,
+        ...(options?.pauseAtRound !== undefined ? { pauseAtRound: options.pauseAtRound } : {}),
+        ...(options?.lockedEnemyId !== undefined ? { lockedEnemyId: options.lockedEnemyId } : {}),
+        ...(options?.canOverloadModules !== undefined
+          ? { canOverloadModules: options.canOverloadModules }
+          : {}),
+        ...(options?.overloadableModules !== undefined
+          ? { overloadableModules: options.overloadableModules }
+          : {}),
+      };
+    }
+    if (this.currentMode === 'v2_stage') {
+      this.v2CombatScene.patchLiveCombatSimulation(simulation, options);
     }
   }
 

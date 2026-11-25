@@ -12,6 +12,7 @@ import type { SectorBgIndex } from '../../data/nodes';
 import type { GameSettings } from '../../domain/progression';
 import type { V3EnemyIntent } from '../data/bosses';
 import type { V2EnemyUnitSpec } from '../data/enemies';
+import type { V2EquipmentKind } from '../data/equipment';
 import type { V2ShipId } from '../data/ships';
 import { getTacticalCommandLabel } from '../domain/combatV2';
 import type { V2ShipVisualSpec } from '../domain/shipVisualSpec';
@@ -52,6 +53,12 @@ import {
 
 export * from './v2CombatVfx';
 
+export interface V2StageOverloadModuleSpec {
+  readonly instanceId: string;
+  readonly kind: V2EquipmentKind;
+  readonly label: string;
+}
+
 export interface V2StagePlayback {
   readonly playbackKey?: string;
   readonly shipId: V2ShipId;
@@ -69,6 +76,16 @@ export interface V2StagePlayback {
   readonly onPauseForDecision?: () => void;
   readonly onRoundStep?: (roundIndex: number, log: V2CombatRoundLog) => void;
   readonly onComplete?: () => void;
+  /** D02: Active locked enemy target ID (highlighted with amber reticle) */
+  readonly lockedEnemyId?: string | null;
+  /** D01: Mounted modules eligible for canvas click-to-overload during pause windows */
+  readonly overloadableModules?: readonly V2StageOverloadModuleSpec[];
+  /** D01: True when canvas module click-to-overload is currently armed */
+  readonly canOverloadModules?: boolean;
+  /** D02: Triggered when player clicks an enemy sprite on canvas */
+  readonly onEnemyLock?: (enemyId: string) => void;
+  /** D01: Triggered when player clicks a mounted ship module on canvas */
+  readonly onModuleOverload?: (instanceId: string) => void;
 }
 
 interface BeamFx {
@@ -115,6 +132,7 @@ interface MountedModuleEntry {
   readonly kind: 'heavy' | 'laser' | 'drone_bay' | 'counter_ring' | 'cargo_rack';
   sprite: Phaser.GameObjects.Image;
   badgeText?: Phaser.GameObjects.Text;
+  instanceId?: string | null;
   /** Offset relative to playerSprite display width/height */
   relX: number;
   relY: number;
@@ -122,6 +140,14 @@ interface MountedModuleEntry {
   recoilX: number;
   muzzleOffsetX: number;
   muzzleOffsetY: number;
+}
+
+interface OverloadNodeTagEntry {
+  readonly instanceId: string;
+  readonly kind: V2EquipmentKind;
+  readonly textObj: Phaser.GameObjects.Text;
+  readonly relX: number;
+  readonly relY: number;
 }
 
 interface ImpactGlowFx {
@@ -297,6 +323,12 @@ export class V2CombatScene extends Phaser.Scene {
   private roundTimers: Phaser.Time.TimerEvent[] = [];
   private roundEpoch = 0;
   private inFlightRound: InFlightRoundState | null = null;
+  private lockedEnemyId: string | null = null;
+  private canOverloadModules = false;
+  private overloadableModules: readonly V2StageOverloadModuleSpec[] = [];
+  private overloadNodeTags: OverloadNodeTagEntry[] = [];
+  private onEnemyLockHandler: ((enemyId: string) => void) | null = null;
+  private onModuleOverloadHandler: ((instanceId: string) => void) | null = null;
 
   constructor() {
     super({ key: 'V2CombatScene' });
@@ -458,6 +490,7 @@ export class V2CombatScene extends Phaser.Scene {
       this.clearPopups();
       this.wreckCompartments = [];
       this.wreckCutAnim = null;
+      this.destroyOverloadNodeTags();
       this.destroyModuleSprites();
       this.destroyEnemySprites();
       this.playerSprite = null;
@@ -480,6 +513,14 @@ export class V2CombatScene extends Phaser.Scene {
     }
   }
 
+  private isValidCanvasPointer(pointer?: unknown): boolean {
+    const rawEvent = (pointer as { event?: { target?: unknown } } | undefined)?.event;
+    if (rawEvent?.target && this.game?.canvas && rawEvent.target !== this.game.canvas) {
+      return false;
+    }
+    return true;
+  }
+
   setPlayback(playback: V2StagePlayback): void {
     const nextStaticKey = !playback.simulation ? (playback.playbackKey ?? null) : null;
     if (
@@ -488,19 +529,158 @@ export class V2CombatScene extends Phaser.Scene {
       nextStaticKey !== null &&
       nextStaticKey === this.appliedPlaybackKey
     ) {
+      const nextLockedEnemyId =
+        playback.lockedEnemyId !== undefined ? playback.lockedEnemyId : this.lockedEnemyId;
+      const nextOverloadableModules = playback.overloadableModules ?? [];
+      const nextCanOverloadModules = Boolean(playback.canOverloadModules);
       this.playback = {
         ...(this.playback ?? playback),
         shipVisualSpec: playback.shipVisualSpec ?? null,
         settings: playback.settings,
         playbackKey: nextStaticKey,
+        lockedEnemyId: nextLockedEnemyId,
+        overloadableModules: nextOverloadableModules,
+        canOverloadModules: nextCanOverloadModules,
+        onEnemyLock: playback.onEnemyLock,
+        onModuleOverload: playback.onModuleOverload,
       };
+      this.lockedEnemyId = nextLockedEnemyId;
+      this.overloadableModules = nextOverloadableModules;
+      this.canOverloadModules = nextCanOverloadModules;
+      this.onEnemyLockHandler = playback.onEnemyLock ?? null;
+      this.onModuleOverloadHandler = playback.onModuleOverload ?? null;
       this.updateShipVisualSpec(playback.shipVisualSpec ?? null);
       this.updateSettings(playback.settings);
+      this.refreshEnemyIntentLockTags();
+      this.syncModuleInstanceBindings();
+      this.rebuildOverloadNodeTags();
+      this.layoutModules();
       return;
     }
     this.playback = playback;
+    this.onEnemyLockHandler = playback.onEnemyLock ?? null;
+    this.onModuleOverloadHandler = playback.onModuleOverload ?? null;
     if (this.scene?.isActive() && this.texturesReady) {
       this.applyPlayback();
+    }
+  }
+
+  /** D02: Returns count of rounds already dispatched visually in active combat (0 when inactive) */
+  getCurrentDispatchedRound(): number {
+    if (!this.playback?.simulation) return 0;
+    return this.nextRoundIdx;
+  }
+
+  /** D02: Updates locked enemy reticle & intent tag in-place without resetting stage or playback! */
+  updateLockedEnemy(enemyId: string | null): void {
+    this.lockedEnemyId = enemyId;
+    if (this.playback) {
+      this.playback = { ...this.playback, lockedEnemyId: enemyId };
+    }
+    if (this.scene?.isActive() && this.texturesReady) {
+      this.refreshEnemyIntentLockTags();
+    }
+  }
+
+  /** D01/D02: Updates canvas click handlers in-place without stage reset (supports explicit null/undefined clearing) */
+  setInteractionCallbacks(callbacks: {
+    readonly onEnemyLock?: ((enemyId: string) => void) | null;
+    readonly onModuleOverload?: ((instanceId: string) => void) | null;
+  }): void {
+    if ('onEnemyLock' in callbacks) {
+      this.onEnemyLockHandler = callbacks.onEnemyLock ?? null;
+    }
+    if ('onModuleOverload' in callbacks) {
+      this.onModuleOverloadHandler = callbacks.onModuleOverload ?? null;
+    }
+    if (this.playback) {
+      this.playback = {
+        ...this.playback,
+        ...('onEnemyLock' in callbacks ? { onEnemyLock: callbacks.onEnemyLock ?? undefined } : {}),
+        ...('onModuleOverload' in callbacks
+          ? { onModuleOverload: callbacks.onModuleOverload ?? undefined }
+          : {}),
+      };
+    }
+  }
+
+  /** D01: Arms or disarms clickable mounted ship modules in-place during tactical decision windows */
+  updateOverloadInteraction(
+    canOverload: boolean,
+    modules?: readonly V2StageOverloadModuleSpec[]
+  ): void {
+    this.canOverloadModules = canOverload;
+    if (modules !== undefined) {
+      this.overloadableModules = modules;
+    }
+    if (this.playback) {
+      this.playback = {
+        ...this.playback,
+        canOverloadModules: canOverload,
+        ...(modules !== undefined ? { overloadableModules: modules } : {}),
+      };
+    }
+    if (this.scene?.isActive() && this.texturesReady) {
+      this.syncModuleInstanceBindings();
+      this.rebuildOverloadNodeTags();
+      this.layoutModules();
+    }
+  }
+
+  /** D02: Patches live combat simulation IN-PLACE when retargeting mid-combat (0 animation restart!) */
+  patchLiveCombatSimulation(
+    simulation: V2CombatSimulation,
+    options?: {
+      readonly pauseAtRound?: number | null;
+      readonly lockedEnemyId?: string | null;
+      readonly canOverloadModules?: boolean;
+      readonly overloadableModules?: readonly V2StageOverloadModuleSpec[];
+    }
+  ): void {
+    if (!this.playback) return;
+    const nextLock =
+      options?.lockedEnemyId !== undefined ? options.lockedEnemyId : this.lockedEnemyId;
+    this.lockedEnemyId = nextLock;
+    if (options?.canOverloadModules !== undefined) {
+      this.canOverloadModules = options.canOverloadModules;
+    }
+    if (options?.overloadableModules !== undefined) {
+      this.overloadableModules = options.overloadableModules;
+    }
+    this.playback = {
+      ...this.playback,
+      simulation,
+      ...(options?.pauseAtRound !== undefined ? { pauseAtRound: options.pauseAtRound } : {}),
+      lockedEnemyId: nextLock,
+      canOverloadModules: this.canOverloadModules,
+      overloadableModules: this.overloadableModules,
+    };
+    if (
+      this.decisionPaused &&
+      options?.pauseAtRound !== undefined &&
+      (options.pauseAtRound === null || this.nextRoundIdx + 1 !== options.pauseAtRound)
+    ) {
+      this.decisionPaused = false;
+      if (!this.waitingCompletion) {
+        this.playbackActive = true;
+        this.roundTimerMs = 0;
+      }
+      if (this.time) {
+        this.time.paused = this.externalPaused;
+      }
+      if (options.canOverloadModules === undefined) {
+        this.canOverloadModules = false;
+        this.playback = {
+          ...this.playback,
+          canOverloadModules: false,
+        };
+      }
+    }
+    if (this.scene?.isActive() && this.texturesReady) {
+      this.refreshEnemyIntentLockTags();
+      this.syncModuleInstanceBindings();
+      this.rebuildOverloadNodeTags();
+      this.layoutModules();
     }
   }
 
@@ -564,6 +744,9 @@ export class V2CombatScene extends Phaser.Scene {
     readonly wreckCutActive: boolean;
     readonly wreckCompartmentsCut: number;
     readonly wreckCompartmentCount: number;
+    readonly lockedEnemyId?: string | null;
+    readonly canOverloadModules?: boolean;
+    readonly clickableModuleIds?: readonly string[];
     readonly enemiesState: readonly {
       readonly enemyId: string;
       readonly hp: number;
@@ -575,6 +758,12 @@ export class V2CombatScene extends Phaser.Scene {
       readonly angle: number;
     }[];
   } {
+    const clickableIds = Array.from(
+      new Set<string>([
+        ...this.moduleSprites.map((m) => m.instanceId).filter((id): id is string => Boolean(id)),
+        ...this.overloadNodeTags.map((n) => n.instanceId),
+      ])
+    );
     return {
       appliedPlaybackKey: this.appliedPlaybackKey,
       activeRings: this.rings.length,
@@ -602,6 +791,9 @@ export class V2CombatScene extends Phaser.Scene {
       wreckCutActive: this.wreckCutAnim !== null,
       wreckCompartmentsCut: this.wreckCompartments.filter((c) => c.cut).length,
       wreckCompartmentCount: this.wreckCompartments.length,
+      lockedEnemyId: this.lockedEnemyId,
+      canOverloadModules: this.canOverloadModules,
+      clickableModuleIds: clickableIds,
       enemiesState: this.enemies.map((e) => ({
         enemyId: e.enemyId,
         hp: e.hp,
@@ -854,29 +1046,35 @@ export class V2CombatScene extends Phaser.Scene {
   private formatCanvasIntentTag(
     unit: Pick<V2EnemyUnitSpec, 'damagePerRound' | 'armor' | 'pierceRatio'>,
     intent?: V3EnemyIntent,
-    shield = 0
+    shield = 0,
+    isLocked = false
   ): { readonly text: string; readonly color: string; readonly isCharging: boolean } {
+    const lockPrefix = isLocked ? '◎锁定 · ' : '';
     if (intent) {
       const parts: string[] = [intent.shortLabel];
       if (intent.damage > 0) parts.push(`攻${intent.damage}`);
       if (intent.shieldGain && intent.shieldGain > 0 && !intent.shortLabel.includes('盾')) {
         parts.push(`盾+${intent.shieldGain}`);
       }
+      if (intent.allyShieldGain && intent.allyShieldGain > 0 && !intent.shortLabel.includes('盾')) {
+        parts.push(`护航+${intent.allyShieldGain}盾`);
+      }
       if (shield > 0) parts.push(`盾${shield}`);
-      const color =
-        intent.kind === 'charge'
-          ? '#F6B852'
-          : intent.kind === 'pierce_beam' || intent.kind === 'ram' || intent.kind === 'heavy_volley'
-          ? '#FF8AA8'
-          : intent.kind === 'shield_regen'
-          ? '#62D6DF'
-          : intent.kind === 'emp'
-          ? '#D6B8FF'
-          : intent.kind === 'summon'
-          ? '#7AE582'
-          : '#E9EDF2';
+      const color = isLocked
+        ? '#FFD791'
+        : intent.kind === 'charge'
+        ? '#F6B852'
+        : intent.kind === 'pierce_beam' || intent.kind === 'ram' || intent.kind === 'heavy_volley'
+        ? '#FF8AA8'
+        : intent.kind === 'shield_regen'
+        ? '#62D6DF'
+        : intent.kind === 'emp'
+        ? '#D6B8FF'
+        : intent.kind === 'summon'
+        ? '#7AE582'
+        : '#E9EDF2';
       return {
-        text: parts.join(' · '),
+        text: `${lockPrefix}${parts.join(' · ')}`,
         color,
         isCharging: intent.kind === 'charge',
       };
@@ -886,10 +1084,26 @@ export class V2CombatScene extends Phaser.Scene {
     if (unit.pierceRatio > 0) intentParts.push(`穿${Math.round(unit.pierceRatio * 100)}%`);
     if (shield > 0) intentParts.push(`盾${shield}`);
     return {
-      text: intentParts.join(' · '),
-      color: unit.pierceRatio > 0 ? '#FFA3B8' : unit.armor > 0 ? '#F6B852' : '#E9EDF2',
+      text: `${lockPrefix}${intentParts.join(' · ')}`,
+      color: isLocked ? '#FFD791' : unit.pierceRatio > 0 ? '#FFA3B8' : unit.armor > 0 ? '#F6B852' : '#E9EDF2',
       isCharging: false,
     };
+  }
+
+  private refreshEnemyIntentLockTags(): void {
+    const sim = this.playback?.simulation;
+    const latestSnapSource =
+      sim && this.nextRoundIdx > 0 && sim.rounds.length > 0
+        ? sim.rounds[Math.min(this.nextRoundIdx - 1, sim.rounds.length - 1)].enemiesAfter
+        : sim?.initialEnemies ?? [];
+    for (const e of this.enemies) {
+      if (e.dead || !e.intentTag?.scene) continue;
+      const snap = latestSnapSource.find((s) => s.enemyId === e.enemyId);
+      const isLocked = this.lockedEnemyId === e.enemyId;
+      const tag = this.formatCanvasIntentTag(snap ?? e.spec, snap?.nextIntent, e.shield, isLocked);
+      e.isCharging = tag.isCharging;
+      e.intentTag.setText(tag.text).setColor(tag.color).setVisible(true);
+    }
   }
 
   private spawnEnemyVisualEntry(
@@ -904,7 +1118,8 @@ export class V2CombatScene extends Phaser.Scene {
 
     const initShield = initialSnap?.shield ?? unit.initialShield ?? 0;
     const initMaxShield = initialSnap?.maxShield ?? unit.maxShield ?? initShield;
-    const tag = this.formatCanvasIntentTag(unit, initialSnap?.nextIntent, initShield);
+    const isLocked = this.lockedEnemyId === unit.enemyId;
+    const tag = this.formatCanvasIntentTag(unit, initialSnap?.nextIntent, initShield, isLocked);
 
     const intentTag = this.add
       .text(0, 0, tag.text, {
@@ -949,6 +1164,15 @@ export class V2CombatScene extends Phaser.Scene {
       dead: initHp <= 0,
       brokenApart: false,
     };
+
+    // D02: Clickable enemy sprite for target lock (optional chaining preserves minimal Phaser mocks + PR #4 canvas guard!)
+    sprite.setInteractive?.({ useHandCursor: true });
+    sprite.on?.('pointerdown', (pointer?: unknown) => {
+      if (!this.isValidCanvasPointer(pointer) || entry.dead) return;
+      const handler = this.onEnemyLockHandler ?? this.playback?.onEnemyLock;
+      handler?.(entry.enemyId);
+    });
+
     this.enemies.push(entry);
     return entry;
   }
@@ -1009,7 +1233,8 @@ export class V2CombatScene extends Phaser.Scene {
         }
         entry.intentTag?.setVisible(false);
       } else {
-        const tag = this.formatCanvasIntentTag(snap, snap.nextIntent, entry.shield);
+        const isLocked = this.lockedEnemyId === entry.enemyId;
+        const tag = this.formatCanvasIntentTag(snap, snap.nextIntent, entry.shield, isLocked);
         entry.isCharging = tag.isCharging;
         if (entry.intentTag?.scene) {
           entry.intentTag.setText(tag.text).setColor(tag.color).setVisible(true);
@@ -1049,8 +1274,17 @@ export class V2CombatScene extends Phaser.Scene {
     this.popups = [];
   }
 
+  private destroyOverloadNodeTags(): void {
+    for (const node of this.overloadNodeTags) {
+      node.textObj?.off?.('pointerdown');
+      if (node.textObj?.scene) node.textObj.destroy();
+    }
+    this.overloadNodeTags = [];
+  }
+
   private destroyModuleSprites(): void {
     for (const m of this.moduleSprites) {
+      m.sprite?.off?.('pointerdown');
       if (m.sprite?.scene) m.sprite.destroy();
       if (m.badgeText?.scene) m.badgeText.destroy();
     }
@@ -1059,10 +1293,88 @@ export class V2CombatScene extends Phaser.Scene {
 
   private destroyEnemySprites(): void {
     for (const e of this.enemies) {
+      e.sprite?.off?.('pointerdown');
       if (e.sprite?.scene) e.sprite.destroy();
       if (e.intentTag?.scene) e.intentTag.destroy();
     }
     this.enemies = [];
+  }
+
+  private resolveInstanceIdForVisualMount(kind: MountedModuleEntry['kind']): string | null {
+    const mods = this.overloadableModules;
+    if (mods.length === 0) return null;
+    if (kind === 'heavy') return mods.find((m) => m.kind === 'heavy')?.instanceId ?? null;
+    if (kind === 'laser') return mods.find((m) => m.kind === 'laser')?.instanceId ?? null;
+    if (kind === 'drone_bay') return mods.find((m) => m.kind === 'hangar')?.instanceId ?? null;
+    if (kind === 'counter_ring') {
+      return (
+        mods.find((m) => m.kind === 'counter')?.instanceId ??
+        mods.find((m) => m.kind === 'shield')?.instanceId ??
+        null
+      );
+    }
+    return null;
+  }
+
+  private syncModuleInstanceBindings(): void {
+    for (const m of this.moduleSprites) {
+      m.instanceId = this.resolveInstanceIdForVisualMount(m.kind);
+    }
+  }
+
+  private rebuildOverloadNodeTags(): void {
+    this.destroyOverloadNodeTags();
+    if (
+      !this.canOverloadModules ||
+      !this.playerSprite ||
+      !this.playerSprite.scene ||
+      !this.playerSprite.visible ||
+      this.playback?.eventBackdrop === 'wreck' ||
+      this.overloadableModules.length === 0
+    ) {
+      return;
+    }
+
+    const boundIds = new Set<string>(
+      this.moduleSprites.map((m) => m.instanceId).filter((id): id is string => Boolean(id))
+    );
+    const extraMods = this.overloadableModules.filter((m) => !boundIds.has(m.instanceId));
+    const slots: readonly [number, number][] = [
+      [-0.30, -0.58],
+      [0.24, -0.58],
+      [-0.36, 0.56],
+      [0.26, 0.56],
+      [-0.04, 0.62],
+      [-0.04, -0.62],
+    ];
+    extraMods.slice(0, slots.length).forEach((mod, idx) => {
+      const [relX, relY] = slots[idx];
+      const textObj = this.add
+        .text(0, 0, `⚡${mod.label}`, {
+          fontFamily: 'system-ui, -apple-system, sans-serif',
+          fontSize: '10px',
+          fontStyle: 'bold',
+          color: '#FFE2A8',
+          backgroundColor: 'rgba(20, 32, 52, 0.92)',
+          padding: { left: 5, right: 5, top: 2, bottom: 2 },
+          resolution: 2,
+        })
+        .setOrigin(0.5, 0.5)
+        .setDepth(6);
+      textObj.setInteractive?.({ useHandCursor: true });
+      textObj.on?.('pointerdown', (pointer?: unknown) => {
+        if (!this.isValidCanvasPointer(pointer) || !this.canOverloadModules) return;
+        const handler = this.onModuleOverloadHandler ?? this.playback?.onModuleOverload;
+        handler?.(mod.instanceId);
+      });
+      this.overloadNodeTags.push({
+        instanceId: mod.instanceId,
+        kind: mod.kind,
+        textObj,
+        relX,
+        relY,
+      });
+    });
   }
 
   private rebuildModuleSprites(): void {
@@ -1106,17 +1418,29 @@ export class V2CombatScene extends Phaser.Scene {
           .setOrigin(0.5, 0.5)
           .setDepth(depth + 1);
       }
-      this.moduleSprites.push({
+      const entry: MountedModuleEntry = {
         kind,
         sprite,
         badgeText,
+        instanceId: this.resolveInstanceIdForVisualMount(kind),
         relX,
         relY,
         scaleRatio,
         recoilX: 0,
         muzzleOffsetX,
         muzzleOffsetY,
-      });
+      };
+      if (kind !== 'cargo_rack') {
+        sprite.setInteractive?.({ useHandCursor: true });
+        sprite.on?.('pointerdown', (pointer?: unknown) => {
+          if (!this.isValidCanvasPointer(pointer) || !this.canOverloadModules || !entry.instanceId) {
+            return;
+          }
+          const handler = this.onModuleOverloadHandler ?? this.playback?.onModuleOverload;
+          handler?.(entry.instanceId);
+        });
+      }
+      this.moduleSprites.push(entry);
     };
 
     // 1. Dorsal Main Weapon: Heavy Railgun or Pulse Laser Turret (or both staggered cleanly)
@@ -1214,6 +1538,10 @@ export class V2CombatScene extends Phaser.Scene {
         m.sprite.clearTint();
       }
     }
+    for (const node of this.overloadNodeTags) {
+      if (!node.textObj?.scene) continue;
+      node.textObj.setPosition(px + dw * node.relX, py + dh * node.relY);
+    }
   }
 
   private getModuleMuzzle(kind: MountedModuleEntry['kind']): { x: number; y: number } | null {
@@ -1237,6 +1565,7 @@ export class V2CombatScene extends Phaser.Scene {
     this.clearDeathChoreos();
     this.smokes = [];
     this.clearPopups();
+    this.destroyOverloadNodeTags();
     this.destroyModuleSprites();
     this.destroyEnemySprites();
 
@@ -1268,6 +1597,11 @@ export class V2CombatScene extends Phaser.Scene {
     const pb = this.playback;
     if (!pb) {
       this.appliedPlaybackKey = null;
+      this.lockedEnemyId = null;
+      this.overloadableModules = [];
+      this.canOverloadModules = false;
+      this.onEnemyLockHandler = null;
+      this.onModuleOverloadHandler = null;
       this.playerBaseTint = null;
       this.playerCurrentTint = null;
       this.playerHpState = { hp: 0, maxHp: 0, trailHp: 0, holdMs: 0 };
@@ -1276,6 +1610,11 @@ export class V2CombatScene extends Phaser.Scene {
       return;
     }
     this.appliedPlaybackKey = !pb.simulation ? (pb.playbackKey ?? null) : null;
+    this.lockedEnemyId = pb.lockedEnemyId ?? null;
+    this.overloadableModules = pb.overloadableModules ?? [];
+    this.canOverloadModules = Boolean(pb.canOverloadModules);
+    this.onEnemyLockHandler = pb.onEnemyLock ?? null;
+    this.onModuleOverloadHandler = pb.onModuleOverload ?? null;
     this.wreckCutAnim = null;
     if (pb.eventBackdrop !== 'wreck') {
       this.wreckCompartments = [];
@@ -1333,6 +1672,7 @@ export class V2CombatScene extends Phaser.Scene {
 
     if (showPlayerShip) {
       this.rebuildModuleSprites();
+      this.rebuildOverloadNodeTags();
     }
 
     // Enemy unit sprites (1..5+) + dynamic tactical intent pills
@@ -1611,6 +1951,41 @@ export class V2CombatScene extends Phaser.Scene {
         }
       }
 
+      if (log.appliedInterventionsThisRound) {
+        for (const iv of log.appliedInterventionsThisRound) {
+          if (iv.kind !== 'overload_module') continue;
+          const mk = iv.moduleKind;
+          if (mk === 'battery') {
+            this.synergyPulseLife = 0.55;
+            this.synergyTargetKind = 'laser';
+            soundEngine.play('energyLink');
+            this.rings.push({ x: this.playerBaseX, y: this.playerBaseY, maxR: 54, color: 0x62d6df, life: 0.45, maxLife: 0.45 });
+            this.spawnPopup(this.playerBaseX + 10, this.playerBaseY - 38, '电池超载·相邻增幅！', '#62D6DF', 'status');
+          } else if (mk === 'shield' || mk === 'counter' || mk === 'coolant_vent') {
+            this.shieldArcLife = 0.58;
+            soundEngine.play('shieldOverload');
+            this.rings.push({ x: this.playerBaseX + 18, y: this.playerBaseY, maxR: 50, color: 0x62d6df, life: 0.44, maxLife: 0.44 });
+            this.spawnPopup(this.playerBaseX + 12, this.playerBaseY - 38, '护盾过载爆发！', '#62D6DF', 'shield');
+          } else if (mk === 'repair') {
+            soundEngine.play('repairPulse');
+            this.rings.push({ x: this.playerBaseX, y: this.playerBaseY, maxR: 46, color: 0x7ae582, life: 0.44, maxLife: 0.44 });
+            this.spawnPopup(this.playerBaseX + 12, this.playerBaseY - 38, '应急抢修过载！', '#7AE582', 'heal');
+          } else if (mk === 'heavy' || mk === 'capacitor') {
+            this.synergyPulseLife = 0.52;
+            this.synergyTargetKind = 'heavy';
+            soundEngine.play('heavyBlast');
+            this.rings.push({ x: heavyMuzzle.x, y: heavyMuzzle.y, maxR: 44, color: 0xf6b852, life: 0.42, maxLife: 0.42 });
+            this.spawnPopup(this.playerBaseX + 12, this.playerBaseY - 38, '重炮急射过载！', '#F6B852', 'status');
+          } else {
+            this.synergyPulseLife = 0.48;
+            this.synergyTargetKind = mk === 'hangar' || mk === 'relay' ? 'drone_bay' : 'laser';
+            soundEngine.play('tacticalOrder');
+            this.rings.push({ x: this.playerBaseX + 14, y: this.playerBaseY, maxR: 44, color: 0xf6b852, life: 0.4, maxLife: 0.4 });
+            this.spawnPopup(this.playerBaseX + 12, this.playerBaseY - 38, '部件过载！', '#F6B852', 'status');
+          }
+        }
+      }
+
       if (log.enemyIntentsThisRound) {
         let playedRegenSfx = false;
         for (const item of log.enemyIntentsThisRound) {
@@ -1625,6 +2000,13 @@ export class V2CombatScene extends Phaser.Scene {
             src.shieldArcLife = Math.max(src.shieldArcLife, 0.36);
             this.rings.push({ x: src.baseX, y: src.baseY, maxR: 34, color: 0x62d6df, life: 0.36, maxLife: 0.36 });
             this.spawnPopup(src.baseX, src.baseY - 34, `敌盾 +${item.intent.shieldGain}`, '#62D6DF', 'shield');
+          } else if (item.intent.allyShieldGain && item.intent.allyShieldGain > 0) {
+            if (!playedRegenSfx) {
+              soundEngine.play('shieldOverload');
+              playedRegenSfx = true;
+            }
+            this.rings.push({ x: src.baseX, y: src.baseY, maxR: 32, color: 0x62d6df, life: 0.36, maxLife: 0.36 });
+            this.spawnPopup(src.baseX, src.baseY - 34, `护航 +${item.intent.allyShieldGain}盾`, '#62D6DF', 'shield');
           } else if (item.intent.kind === 'charge') {
             this.rings.push({ x: src.baseX, y: src.baseY, maxR: 30, color: 0xf6b852, life: 0.38, maxLife: 0.38 });
             this.spawnPopup(src.baseX, src.baseY - 34, item.intent.shortLabel, '#F6B852', 'status');
@@ -1841,16 +2223,17 @@ export class V2CombatScene extends Phaser.Scene {
           const lm = this.moduleSprites.find((m) => m.kind === 'laser');
           if (lm && atk.sourceKind === 'laser') lm.recoilX = -6;
           const srcPt = atk.sourceKind === 'laser' ? laserMuzzle : pMuzzle;
-          this.spawnMuzzleFlash(srcPt.x, srcPt.y, 1, 0x62d6df, 11);
+          const beamColor = atk.isOverload ? 0xfacc15 : 0x62d6df;
+          this.spawnMuzzleFlash(srcPt.x, srcPt.y, 1, beamColor, atk.isOverload ? 14 : 11);
           this.beams.push({
             x1: srcPt.x,
             y1: srcPt.y,
             x2: ePt.x,
             y2: ePt.y,
-            color: 0x62d6df,
-            thickness: 3,
-            life: 0.26,
-            maxLife: 0.26,
+            color: beamColor,
+            thickness: atk.isOverload ? 4.4 : 3,
+            life: atk.isOverload ? 0.32 : 0.26,
+            maxLife: atk.isOverload ? 0.32 : 0.26,
           });
         }
       }
@@ -2788,6 +3171,48 @@ export class V2CombatScene extends Phaser.Scene {
         this.addFxGraphics.fillCircle(eMuz.x, eMuz.y, e.spec.isBoss ? 9 : 6);
       }
     }
+    // D02: Industrial Amber Target-Lock Reticle around the locked living enemy
+    if (this.lockedEnemyId) {
+      const locked = this.enemies.find((e) => e.enemyId === this.lockedEnemyId && !e.dead && e.sprite?.scene);
+      if (locked) {
+        const halfW = Math.max(24, locked.sprite.displayWidth * 0.52);
+        const halfH = Math.max(18, locked.sprite.displayHeight * 0.52);
+        const cx = locked.sprite.x;
+        const cy = locked.sprite.y;
+        const arm = Math.max(8, Math.min(14, halfH * 0.38));
+        const pulse = reduced ? 0.92 : 0.72 + 0.26 * Math.sin(this.elapsed * 8);
+        this.fxGraphics.lineStyle(2.4, 0xf6b852, pulse);
+        // Top-left bracket
+        this.fxGraphics.lineBetween(cx - halfW, cy - halfH + arm, cx - halfW, cy - halfH);
+        this.fxGraphics.lineBetween(cx - halfW, cy - halfH, cx - halfW + arm, cy - halfH);
+        // Top-right bracket
+        this.fxGraphics.lineBetween(cx + halfW - arm, cy - halfH, cx + halfW, cy - halfH);
+        this.fxGraphics.lineBetween(cx + halfW, cy - halfH, cx + halfW, cy - halfH + arm);
+        // Bottom-left bracket
+        this.fxGraphics.lineBetween(cx - halfW, cy + halfH - arm, cx - halfW, cy + halfH);
+        this.fxGraphics.lineBetween(cx - halfW, cy + halfH, cx - halfW + arm, cy + halfH);
+        // Bottom-right bracket
+        this.fxGraphics.lineBetween(cx + halfW - arm, cy + halfH, cx + halfW, cy + halfH);
+        this.fxGraphics.lineBetween(cx + halfW, cy + halfH, cx + halfW, cy + halfH - arm);
+        // Outer subtle ADD glow ticks
+        this.addFxGraphics.lineStyle(1.6, 0xffe2a8, pulse * 0.55);
+        this.addFxGraphics.lineBetween(cx - halfW - 5, cy, cx - halfW + 2, cy);
+        this.addFxGraphics.lineBetween(cx + halfW - 2, cy, cx + halfW + 5, cy);
+      }
+    }
+
+    // D01: Pulsing readiness rings on clickable mounted ship modules during tactical pause
+    if (this.canOverloadModules && this.playerSprite?.visible) {
+      const ovPulse = reduced ? 0.8 : 0.45 + 0.45 * Math.sin(this.elapsed * 8.5);
+      for (const m of this.moduleSprites) {
+        if (!m.instanceId || !m.sprite?.scene) continue;
+        this.fxGraphics.lineStyle(2.0, 0xf6b852, ovPulse);
+        this.fxGraphics.strokeCircle(m.sprite.x, m.sprite.y, 13);
+        this.addFxGraphics.fillStyle(0xf6b852, ovPulse * 0.22);
+        this.addFxGraphics.fillCircle(m.sprite.x, m.sprite.y, 9);
+      }
+    }
+
     if (this.enemyChargeMs > 0) {
       const a = Math.min(1, this.enemyChargeMs / 240);
       for (const e of this.enemies) {

@@ -15,7 +15,9 @@ import { getShipSignatureCommand } from '../../data/ships';
 import {
   computeCombatTacticalChargesMax,
   getEffectiveV2CombatBounty,
+  listV2OverloadableModules,
   previewV2CombatNode,
+  previewV2ModuleOverload,
   resolveNodeBossId,
 } from '../../domain/combatV2';
 import { canUseV3GadgetInRun } from '../../domain/encounter';
@@ -441,6 +443,7 @@ export interface CombatPreViewActions {
   readonly onToggleLog: () => void;
   readonly onUseGadget?: (instanceId: string) => void;
   readonly onTogglePauseAutoEngage?: () => void;
+  readonly onToggleLockEnemy?: (enemyId: string) => void;
   readonly onStartCombat: () => void;
 }
 
@@ -474,6 +477,9 @@ function formatIntentShortText(intent: V3EnemyIntent): string {
   }
   if (intent.shieldGain && intent.shieldGain > 0) {
     details.push(`+${intent.shieldGain}盾`);
+  }
+  if (intent.allyShieldGain && intent.allyShieldGain > 0) {
+    details.push(`护航+${intent.allyShieldGain}盾`);
   }
   if (intent.empShieldDrain && intent.empShieldDrain > 0) {
     details.push(`削${intent.empShieldDrain}盾`);
@@ -563,6 +569,11 @@ export class CombatPrePhaseView implements PhaseView<CombatPreViewProps, CombatP
     const policy = btn.dataset.policy as V2TargetPolicy | undefined;
     if (policy) {
       this.latestActions.onSelectPolicy(policy);
+      return;
+    }
+    const lockEnemyId = btn.dataset.enemyLock;
+    if (lockEnemyId) {
+      this.latestActions.onToggleLockEnemy?.(lockEnemyId);
       return;
     }
     const gadgetId = btn.dataset.useGadget;
@@ -996,9 +1007,13 @@ export class CombatPrePhaseView implements PhaseView<CombatPreViewProps, CombatP
       }
     }
 
-    // Enemy roster
+    // Enemy roster (with D02 multi-enemy lock toggle button)
     const mutFx = aggregateEndlessMutatorEffects(run.endlessMutatorIds);
-    const rosterKey = `${node.nodeId}:${bossId ?? ''}:${mutFx.enemyPierceBonus}:${node.combat.units
+    const activeLockedId = run.lockedEnemyId ?? null;
+    const isMultiEnemy = node.combat.units.length > 1;
+    const rosterKey = `${node.nodeId}:${bossId ?? ''}:${mutFx.enemyPierceBonus}:${activeLockedId ?? ''}:${
+      readOnly ? 1 : 0
+    }:${node.combat.units
       .map((u) => {
         const s = pv?.initialEnemies.find((e) => e.enemyId === u.enemyId);
         return `${u.enemyId}:${s?.shield ?? u.initialShield ?? 0}:${s?.armor ?? u.armor}:${
@@ -1016,6 +1031,7 @@ export class CombatPrePhaseView implements PhaseView<CombatPreViewProps, CombatP
           const dispShield = initSnap?.shield ?? initShield.shield;
           const dispArmor = initSnap?.armor ?? u.armor;
           const dispPierce = initSnap?.pierceRatio ?? u.pierceRatio;
+          const isLocked = activeLockedId === u.enemyId;
           const intentCycleHtml = cycle
             .map((intent, idx) => {
               const dispIntent: V3EnemyIntent =
@@ -1049,10 +1065,22 @@ export class CombatPrePhaseView implements PhaseView<CombatPreViewProps, CombatP
             : dispShield > 0
             ? '护盾单位'
             : '常规编队';
-          return `<div class="v2-enemy-chip v3-enemy-card ${u.isBoss ? 'is-boss' : ''}">
+          const lockBtnHtml = isMultiEnemy
+            ? `<button type="button" class="btn btn-sm v3-enemy-lock-btn ${
+                isLocked ? 'is-locked' : ''
+              }" data-enemy-lock="${u.enemyId}" data-testid="enemy-lock-${u.enemyId}" aria-pressed="${
+                isLocked ? 'true' : 'false'
+              }" ${readOnly ? 'disabled' : ''}>${isLocked ? '◎ 已锁定' : '◎ 锁定'}</button>`
+            : '';
+          return `<div class="v2-enemy-chip v3-enemy-card ${u.isBoss ? 'is-boss' : ''} ${
+            isLocked ? 'is-locked-target' : ''
+          }">
             <div class="v3-enemy-card-head">
               <strong>${u.name}</strong>
-              <span class="v3-enemy-role-badge">${roleTag}</span>
+              <div class="v3-enemy-head-actions">
+                <span class="v3-enemy-role-badge">${roleTag}</span>
+                ${lockBtnHtml}
+              </div>
             </div>
             <div class="intent-cycle">
               <span class="v3-intent-prefix">行动意图</span>
@@ -1177,7 +1205,7 @@ export class CombatPrePhaseView implements PhaseView<CombatPreViewProps, CombatP
             })
             .join(' · ');
 
-          const drawerKey = `${pv.outcome}:${pv.finalPlayerHpAfterRepair}:${pv.roundsCount}:${pv.startingPlayerHp}:${pv.startingPlayerShield}:${pv.repairApplied}:${enemyDetailsListHtml}:${cargoPerCellSummary}`;
+          const drawerKey = `${pv.outcome}:${pv.finalPlayerHpAfterRepair}:${pv.roundsCount}:${pv.startingPlayerHp}:${pv.startingPlayerShield}:${pv.repairApplied}:${pv.targetPolicy}:${pv.lockedEnemyId ?? ''}:${enemyDetailsListHtml}:${cargoPerCellSummary}`;
           if (this.lastDrawerKey !== drawerKey) {
             this.lastDrawerKey = drawerKey;
             this.detailsDrawerEl.innerHTML = `
@@ -1342,6 +1370,8 @@ export interface CombatLiveOverlayProps {
   readonly livePhaseBannerText: string | null;
   readonly awaitingEliteDecision: boolean;
   readonly combatSpeed: 1 | 2;
+  readonly readOnly?: boolean;
+  readonly stargateRelayTier?: number;
 }
 
 export interface CombatLiveOverlayActions {
@@ -1349,6 +1379,8 @@ export interface CombatLiveOverlayActions {
   readonly onToggleSpeed: () => void;
   readonly onSkipPlayback: () => void;
   readonly onCommitEliteTactic: (decisionId: string, choice: V2EliteTacticChoice) => void;
+  readonly onOverloadModule?: (decisionId: string, moduleInstanceId: string) => void;
+  readonly onToggleLockEnemy?: (enemyId: string) => void;
 }
 
 export class CombatLivePhaseView
@@ -1373,8 +1405,12 @@ export class CombatLivePhaseView
   private decisionChargesEl: HTMLSpanElement | null = null;
   private decisionThreatEl: HTMLSpanElement | null = null;
   private decisionOptionsEl: HTMLDivElement | null = null;
+  private overloadSectionEl: HTMLDivElement | null = null;
+  private overloadListEl: HTMLDivElement | null = null;
   private readonly tacticBtns = new Map<string, HTMLButtonElement>();
   private readonly tacticContentKeys = new Map<string, string>();
+  private readonly overloadBtns = new Map<string, HTMLButtonElement>();
+  private readonly overloadContentKeys = new Map<string, string>();
 
   private latestActions: CombatLiveOverlayActions | null = null;
   private latestShowDecisionBar = false;
@@ -1403,6 +1439,16 @@ export class CombatLivePhaseView
     if (btn === this.skipBtnEl || btn.id === 'v2-combat-skip') {
       if (this.latestShowDecisionBar) return;
       this.latestActions.onSkipPlayback();
+      return;
+    }
+    const lockEnemyId = btn.dataset.enemyLock;
+    if (lockEnemyId) {
+      this.latestActions.onToggleLockEnemy?.(lockEnemyId);
+      return;
+    }
+    const overloadModId = btn.dataset.overloadModule;
+    if (overloadModId && this.latestShowDecisionBar && this.latestPendingDecisionId) {
+      this.latestActions.onOverloadModule?.(this.latestPendingDecisionId, overloadModId);
       return;
     }
     const tacticChoice = btn.dataset.eliteTactic as V2EliteTacticChoice | undefined;
@@ -1505,6 +1551,18 @@ export class CombatLivePhaseView
     decisionOptions.className = 'v2-et-options v3-tactical-options';
     decisionBar.appendChild(decisionOptions);
 
+    // D01: Persistent keyed Per-Module Component Overload section inside decisionBar
+    const overloadSection = document.createElement('div');
+    overloadSection.className = 'v3-overload-section';
+    overloadSection.dataset.testid = 'combat-overload-section';
+    const overloadHead = document.createElement('div');
+    overloadHead.className = 'v3-overload-head';
+    overloadHead.innerHTML = `${svgIcon('bolt', 12)} <span>部件过载（共享指令充能 · 可直接点击舰体部件或下方按钮）</span>`;
+    const overloadList = document.createElement('div');
+    overloadList.className = 'v3-overload-grid';
+    overloadSection.appendChild(overloadHead);
+    overloadSection.appendChild(overloadList);
+
     host.appendChild(root);
     root.addEventListener('click', this.handleRootClick);
 
@@ -1523,6 +1581,8 @@ export class CombatLivePhaseView
     this.decisionChargesEl = decisionCharges;
     this.decisionThreatEl = decisionThreat;
     this.decisionOptionsEl = decisionOptions;
+    this.overloadSectionEl = overloadSection;
+    this.overloadListEl = overloadList;
   }
 
   update(props: CombatLiveOverlayProps, actions: CombatLiveOverlayActions): void {
@@ -1540,6 +1600,8 @@ export class CombatLivePhaseView
       livePhaseBannerText,
       awaitingEliteDecision,
       combatSpeed,
+      readOnly = false,
+      stargateRelayTier = 0,
     } = props;
     const sim = run.activeCombat?.simulation;
     if (!sim) return;
@@ -1671,8 +1733,10 @@ export class CombatLivePhaseView
       this.phaseSlotEl.innerHTML = phaseBannerHtml;
     }
 
-    // Live enemy intent strip
+    // Live enemy intent strip (with D02 interactive target-lock buttons when >1 living enemy or lock active)
     const livingSnaps = liveEnemySnapshots.filter((e) => e.hp > 0);
+    const activeLockedId = run.lockedEnemyId ?? null;
+    const showLiveLockControls = livingSnaps.length > 1 || activeLockedId !== null;
     const liveIntentStripHtml =
       livingSnaps.length > 0
         ? `<div class="v3-live-intent-strip">
@@ -1684,10 +1748,23 @@ export class CombatLivePhaseView
                 const intentText = intent
                   ? formatIntentShortText(intent)
                   : `攻 ${e.damagePerRound}`;
-                return `<span class="enemy-intent-badge ${getIntentToneClass(
-                  intentKind
-                )}" data-enemy-intent="${intentKind}" data-testid="enemy-intent-${e.enemyId}">
-                  ${e.name}：${intentText}${e.shield && e.shield > 0 ? ` · 敌盾${e.shield}` : ''}
+                const isLocked = activeLockedId === e.enemyId;
+                const lockBtn = showLiveLockControls
+                  ? `<button type="button" class="v3-enemy-lock-btn v3-live-lock-btn ${
+                      isLocked ? 'is-locked' : ''
+                    }" data-enemy-lock="${e.enemyId}" data-testid="enemy-lock-${
+                      e.enemyId
+                    }" aria-pressed="${isLocked ? 'true' : 'false'}" ${
+                      readOnly ? 'disabled' : ''
+                    }>${isLocked ? '◎ 已锁定' : '◎ 锁定'}</button>`
+                  : '';
+                return `<span class="v3-live-intent-item ${isLocked ? 'is-locked-target' : ''}">
+                  <span class="enemy-intent-badge ${getIntentToneClass(
+                    intentKind
+                  )}" data-enemy-intent="${intentKind}" data-testid="enemy-intent-${e.enemyId}">
+                    ${e.name}：${intentText}${e.shield && e.shield > 0 ? ` · 敌盾${e.shield}` : ''}
+                  </span>
+                  ${lockBtn}
                 </span>`;
               })
               .join('')}
@@ -1801,7 +1878,7 @@ export class CombatLivePhaseView
           } else {
             btn.removeAttribute('data-tactical-signature');
           }
-          syncButtonDisabled(btn, !opt.enabled);
+          syncButtonDisabled(btn, readOnly || !opt.enabled);
 
           const cKey = `${isSig ? sigDef.badge : ''}|${opt.label}|${optMeta.tier}|${trend}|${
             opt.enabled ? opt.summary : opt.disabledReason ?? '当前不可用'
@@ -1828,6 +1905,92 @@ export class CombatLivePhaseView
             this.decisionOptionsEl!.insertBefore(btn, curAtIdx ?? null);
           }
         });
+
+        // D01: Persistent keyed Per-Module Component Overload controls
+        if (this.overloadSectionEl && this.overloadListEl) {
+          const overloadMods = listV2OverloadableModules(run.bay);
+          if (overloadMods.length === 0) {
+            if (this.overloadSectionEl.parentElement) {
+              this.overloadSectionEl.remove();
+            }
+          } else {
+            if (this.overloadSectionEl.parentElement !== this.decisionBarEl) {
+              this.decisionBarEl.appendChild(this.overloadSectionEl);
+            }
+            const nextModIds = new Set<string>(overloadMods.map((m) => m.instanceId));
+            for (const [mid, btn] of this.overloadBtns.entries()) {
+              if (!nextModIds.has(mid)) {
+                btn.remove();
+                this.overloadBtns.delete(mid);
+                this.overloadContentKeys.delete(mid);
+              }
+            }
+            const baseSimOutcome = sim.outcome;
+            const baseSimHp = sim.outcome === 'victory' ? sim.finalPlayerHpAfterRepair : 0;
+            const baseSimRounds = sim.roundsCount;
+            const canClickOverload = !readOnly && chargesRemaining > 0;
+
+            overloadMods.forEach((mod, idx) => {
+              const ovPreview = previewV2ModuleOverload(run, pending.decisionId, mod.instanceId, {
+                stargateRelayTier,
+              });
+              const ovOutcome = ovPreview?.outcome ?? baseSimOutcome;
+              const ovHp = ovPreview
+                ? ovPreview.outcome === 'victory'
+                  ? ovPreview.finalPlayerHpAfterRepair
+                  : 0
+                : baseSimHp;
+              const ovRounds = ovPreview?.roundsCount ?? baseSimRounds;
+              const ovThreat = classifyV2CombatThreat(
+                { outcome: ovOutcome, playerFinalHp: ovHp },
+                run.maxHp
+              );
+              const ovMeta = getV2ThreatTierMeta(ovThreat.tier);
+              const ovTrend = classifyV2CombatDeltaTrend({
+                beforeOutcome: baseSimOutcome,
+                afterOutcome: ovOutcome,
+                beforeHp: baseSimHp,
+                afterHp: ovHp,
+                beforeRounds: baseSimRounds,
+                afterRounds: ovRounds,
+                maxHp: run.maxHp,
+              });
+              const trendGlyph = ovTrend === 'up' ? '↑ ' : ovTrend === 'down' ? '↓ ' : '';
+
+              let btn = this.overloadBtns.get(mod.instanceId);
+              if (!btn) {
+                btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'v3-overload-btn';
+                btn.dataset.overloadModule = mod.instanceId;
+                btn.dataset.testid = `overload-module-${mod.instanceId}`;
+                btn.dataset.moduleKind = mod.kind;
+                this.overloadBtns.set(mod.instanceId, btn);
+              }
+              btn.dataset.threatTier = ovMeta.tier;
+              syncButtonDisabled(btn, !canClickOverload);
+
+              const contentKey = `${mod.name}|${mod.overloadTitle}|${mod.overloadSummary}|${ovMeta.tier}|${ovTrend}|${
+                canClickOverload ? 1 : 0
+              }`;
+              if (this.overloadContentKeys.get(mod.instanceId) !== contentKey) {
+                this.overloadContentKeys.set(mod.instanceId, contentKey);
+                btn.innerHTML = `
+                  <div class="v3-overload-btn-head">
+                    <strong>⚡ ${mod.name} · ${mod.overloadTitle}</strong>
+                    <span class="v3-threat-pill threat-${ovMeta.tier} trend-${ovTrend}">${trendGlyph}${ovMeta.symbol} ${ovMeta.label}</span>
+                  </div>
+                  <div class="v3-overload-btn-sub">${mod.overloadSummary}</div>
+                `;
+              }
+
+              const curAtIdx = this.overloadListEl!.children[idx];
+              if (curAtIdx !== btn) {
+                this.overloadListEl!.insertBefore(btn, curAtIdx ?? null);
+              }
+            });
+          }
+        }
       }
     }
   }
@@ -1837,6 +2000,8 @@ export class CombatLivePhaseView
     this.rootEl?.remove();
     this.tacticBtns.clear();
     this.tacticContentKeys.clear();
+    this.overloadBtns.clear();
+    this.overloadContentKeys.clear();
     this.hostEl = null;
     this.rootEl = null;
     this.statusGroupEl = null;
@@ -1853,6 +2018,8 @@ export class CombatLivePhaseView
     this.decisionChargesEl = null;
     this.decisionThreatEl = null;
     this.decisionOptionsEl = null;
+    this.overloadSectionEl = null;
+    this.overloadListEl = null;
     this.latestActions = null;
     this.latestShowDecisionBar = false;
     this.latestPendingDecisionId = null;

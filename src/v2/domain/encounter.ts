@@ -224,6 +224,7 @@ export function selectV2MapNode(
       discardedCountThisRun: nextDiscardedCount,
       phase: nextPhase,
       activeCombat: null,
+      lockedEnemyId: null,
       overchargeCellActive: false,
       pendingReward: null,
       activeEngineerOffer: null,
@@ -590,6 +591,7 @@ export function cutV2WreckHotspot(
     recentEquipmentKinds: nextRecentKinds.slice(-4),
     tacticalChargesMax: nextChargesMax,
     tacticalChargesUsed: nextChargesUsed,
+    ...(ambushTriggered ? { lockedEnemyId: null } : {}),
     graph: {
       ...run.graph,
       nodes: { ...run.graph.nodes, [node.nodeId]: updatedNode },
@@ -927,6 +929,7 @@ export function abandonV2EventAndReturn(run: V2RunState): V2ActionOutcome {
       ...run,
       activeWreck: null,
       activeEvent: null,
+      lockedEnemyId: null,
       phase: 'SETTLEMENT',
       settlementReason: 'safe_return',
       graph: {
@@ -1361,6 +1364,7 @@ export function finishV2ArrangeAndProceed(
         bay: cleanBay,
         discardedCountThisRun: nextDiscardedCount,
         activeEngineerOffer: expiredOffer,
+        lockedEnemyId: null,
         phase: 'SETTLEMENT',
         settlementReason: 'safe_return',
       },
@@ -1376,6 +1380,7 @@ export function finishV2ArrangeAndProceed(
       bay: cleanBay,
       discardedCountThisRun: nextDiscardedCount,
       activeEngineerOffer: expiredOffer,
+      lockedEnemyId: null,
       phase: 'MAP',
     },
   };
@@ -1401,6 +1406,7 @@ export function initiateV2SafeReturnFromMap(run: V2RunState): V2ActionOutcome {
       activeEngineerOffer: null,
       activeWreck: null,
       activeEvent: null,
+      lockedEnemyId: null,
       phase: 'SETTLEMENT',
       settlementReason: 'safe_return',
     },

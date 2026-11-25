@@ -12,6 +12,7 @@ import {
 import { V2_FACILITY_ORDER, V2_RELIC_ORDER, type V2FacilityId } from '../data/facilities';
 import { V2_SHIP_ORDER, isCellValidForShip, type V2ShipId } from '../data/ships';
 import { getV2OccupiedCells, type V2Rotation } from '../data/shapes';
+import { isV2SynergyTypeId, V2_SYNERGY_ORDER } from './buildStatsV2';
 import { getAnyV2ItemDef } from './itemCatalog';
 import { MAX_UINT32 } from './seedParam';
 import {
@@ -22,6 +23,8 @@ import {
   V2_RULES_VERSION,
   V2_SAVE_KEY,
   V2_SCHEMA_VERSION,
+  V3_0_BACKUP_KEY,
+  V3_0_RULES_VERSION,
   V3_BACKUP_KEY,
   type CampaignActId,
   type EndingId,
@@ -29,6 +32,7 @@ import {
   type SectorId,
   type V2ActiveCombatState,
   type V2CargoBayState,
+  type V2CombatIntervention,
   type V2CombatRewardBundle,
   type V2CombatSimulation,
   type V2ContractInstance,
@@ -37,6 +41,7 @@ import {
   type V2EventOptionState,
   type V2EventState,
   type V2GameSettings,
+  type V2InterventionKind,
   type V2ItemInstance,
   type V2LoadoutPreset,
   type V2MapNode,
@@ -65,7 +70,12 @@ export interface V2StorageLike {
 
 export type V2LoadResult =
   | { readonly status: 'fresh'; readonly data: V2SaveData }
-  | { readonly status: 'loaded'; readonly data: V2SaveData; readonly migratedFromV2?: boolean }
+  | {
+      readonly status: 'loaded';
+      readonly data: V2SaveData;
+      readonly migratedFromV2?: boolean;
+      readonly migratedFromV3_0?: boolean;
+    }
   | { readonly status: 'corrupt_with_backup'; readonly backup: V2SaveData; readonly error: string }
   | { readonly status: 'corrupt_no_backup'; readonly data: V2SaveData; readonly error: string };
 
@@ -178,6 +188,11 @@ const VALID_TACTICAL_COMMANDS: ReadonlySet<V2TacticalCommandId> = new Set([
   'signature_heavy_freighter',
   'signature_stargate_cruiser',
 ]);
+const VALID_INTERVENTION_KINDS: ReadonlySet<V2InterventionKind> = new Set([
+  'tactical_command',
+  'overload_module',
+  'target_lock',
+]);
 const V3_CAREER_KEYS: readonly (keyof V3CareerStats)[] = [
   'totalWins',
   'totalDefeats',
@@ -232,6 +247,38 @@ function isDenseArrayOf<T>(
 
 function sanitizeNonNegInt(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0;
+}
+
+function isValidCombatIntervention(raw: unknown): raw is V2CombatIntervention {
+  if (!isPlainObject(raw)) return false;
+  if (typeof raw.interventionId !== 'string' || raw.interventionId.length === 0) return false;
+  if (!isFiniteInt(raw.roundNumber) || raw.roundNumber < 1) return false;
+  if (typeof raw.kind !== 'string' || !VALID_INTERVENTION_KINDS.has(raw.kind as V2InterventionKind)) {
+    return false;
+  }
+  if (raw.kind === 'tactical_command') {
+    return (
+      typeof raw.commandId === 'string' &&
+      VALID_TACTICAL_COMMANDS.has(raw.commandId as V2TacticalCommandId)
+    );
+  }
+  if (raw.kind === 'overload_module') {
+    return (
+      typeof raw.moduleInstanceId === 'string' &&
+      raw.moduleInstanceId.length > 0 &&
+      (raw.moduleKind === undefined ||
+        (typeof raw.moduleKind === 'string' &&
+          V2_ALL_EQUIPMENT_KINDS.includes(raw.moduleKind as V2EquipmentKind)))
+    );
+  }
+  if (raw.kind === 'target_lock') {
+    return (
+      raw.targetEnemyId === undefined ||
+      raw.targetEnemyId === null ||
+      typeof raw.targetEnemyId === 'string'
+    );
+  }
+  return false;
 }
 
 function isValidPresetSlot(raw: unknown): raw is V2PresetSlot {
@@ -557,6 +604,7 @@ export function createFreshV2Profile(): V2ProfileState {
     runHistory: [],
     career: createInitialV3CareerStats(),
     hullTuning: {},
+    discoveredSynergies: [],
   };
 }
 
@@ -1244,6 +1292,19 @@ function validateV2RunCore(
     ) {
       return { ok: false, error: 'activeRun.activeCombat.simulation.endlessMutatorIds 非法' };
     }
+    if (
+      sim.lockedEnemyId !== undefined &&
+      sim.lockedEnemyId !== null &&
+      typeof sim.lockedEnemyId !== 'string'
+    ) {
+      return { ok: false, error: 'activeRun.activeCombat.simulation.lockedEnemyId 非法' };
+    }
+    if (
+      sim.appliedInterventions !== undefined &&
+      !isDenseArrayOf(sim.appliedInterventions, isValidCombatIntervention)
+    ) {
+      return { ok: false, error: 'activeRun.activeCombat.simulation.appliedInterventions 非法' };
+    }
     if (ac.pendingDecision !== undefined && ac.pendingDecision !== null) {
       const pd = ac.pendingDecision;
       if (
@@ -1281,6 +1342,19 @@ function validateV2RunCore(
       )
     ) {
       return { ok: false, error: 'activeCombat.committedCommands 数据损坏' };
+    }
+    if (
+      ac.lockedEnemyId !== undefined &&
+      ac.lockedEnemyId !== null &&
+      typeof ac.lockedEnemyId !== 'string'
+    ) {
+      return { ok: false, error: 'activeCombat.lockedEnemyId 非法' };
+    }
+    if (
+      ac.interventions !== undefined &&
+      !isDenseArrayOf(ac.interventions, isValidCombatIntervention)
+    ) {
+      return { ok: false, error: 'activeCombat.interventions 数据损坏' };
     }
     if (ac.resumeFromRound !== undefined && !isNonNegInt(ac.resumeFromRound)) {
       return { ok: false, error: 'activeCombat.resumeFromRound 非法' };
@@ -1397,6 +1471,13 @@ function validateV2RunCore(
     }
     if (run.overchargeCellActive !== undefined && typeof run.overchargeCellActive !== 'boolean') {
       return { ok: false, error: 'activeRun.overchargeCellActive 非法' };
+    }
+    if (
+      run.lockedEnemyId !== undefined &&
+      run.lockedEnemyId !== null &&
+      typeof run.lockedEnemyId !== 'string'
+    ) {
+      return { ok: false, error: 'activeRun.lockedEnemyId 非法' };
     }
     if (run.factionRepEarnedThisRun !== undefined) {
       if (!isPlainObject(run.factionRepEarnedThisRun)) {
@@ -1765,6 +1846,12 @@ function validateSaveDataCore(
         }
       }
     }
+    if (
+      p.discoveredSynergies !== undefined &&
+      !isDenseArrayOf(p.discoveredSynergies, (s) => isString(s) && isV2SynergyTypeId(s))
+    ) {
+      return { ok: false, error: 'profile.discoveredSynergies 非法' };
+    }
   }
 
   if (d.activeRun !== null) {
@@ -1778,8 +1865,106 @@ export function validateV2SaveDataDetailed(raw: unknown): V2ValidationResult {
   return validateSaveDataCore(raw, V2_SCHEMA_VERSION, V2_RULES_VERSION, true);
 }
 
+export function validateV3_0SaveDataDetailed(raw: unknown): V2ValidationResult {
+  return validateSaveDataCore(raw, V2_SCHEMA_VERSION, V3_0_RULES_VERSION, true);
+}
+
 export function validateLegacyV2SaveDataDetailed(raw: unknown): V2ValidationResult {
   return validateSaveDataCore(raw, V2_LEGACY_SCHEMA_VERSION, V2_LEGACY_RULES_VERSION, false);
+}
+
+/**
+ * Pure helper safely rewinding an in-flight mid-combat fight back to pre-combat at the exact same node
+ * when upgrading rulesVersion (e.g. '3.0.0' -> '3.1.0' or legacy V2 -> '3.1.0').
+ * - Strips aborted combat tactical/intervention claim keys from `claimedEventIds`.
+ * - Restores pre-combat HP (`min(maxHp, activeCombat.startingHp)`), resets `activeCombat: null`,
+ *   `lockedEnemyId: null`, `tacticalChargesUsed: 0`.
+ * - Preserves wallet, fuel, bay, salvagePartsEarned, overchargeCellActive, tacticalChargesMax, activeWreck, activeEvent!
+ */
+export function rewindLegacyActiveCombatForRulesUpgrade(run: V2RunState): V2RunState {
+  if (!run.activeCombat) {
+    return {
+      ...run,
+      schemaVersion: V2_SCHEMA_VERSION,
+      rulesVersion: V2_RULES_VERSION,
+      lockedEnemyId: run.lockedEnemyId ?? null,
+    };
+  }
+  const ac = run.activeCombat;
+  const abortedClaimExact = new Set<string>();
+  for (const c of ac.committedCommands ?? []) {
+    abortedClaimExact.add(`tactic_commit_${c.decisionId}`);
+  }
+  if (ac.pendingDecision) {
+    abortedClaimExact.add(`tactic_commit_${ac.pendingDecision.decisionId}`);
+  }
+  for (const iv of ac.interventions ?? []) {
+    abortedClaimExact.add(`tactic_commit_${iv.interventionId}`);
+    abortedClaimExact.add(`intervention_commit_${iv.interventionId}`);
+  }
+  const tacticPrefix = `tactic_commit_tactic_${run.runId}_${ac.nodeId}_`;
+  const interventionPrefix = `intervention_commit_${run.runId}_${ac.nodeId}_`;
+  const cleanedClaims = run.claimedEventIds.filter(
+    (cid) =>
+      !abortedClaimExact.has(cid) &&
+      !cid.startsWith(tacticPrefix) &&
+      !cid.startsWith(interventionPrefix)
+  );
+  const restoredHp = Math.min(run.maxHp, Math.max(0, Math.floor(ac.startingHp)));
+
+  return {
+    ...run,
+    schemaVersion: V2_SCHEMA_VERSION,
+    rulesVersion: V2_RULES_VERSION,
+    hp: restoredHp,
+    activeCombat: null,
+    lockedEnemyId: null,
+    tacticalChargesUsed: 0,
+    claimedEventIds: cleanedClaims,
+  };
+}
+
+/**
+ * Non-destructively upgrades a validated V3 rules '3.0.0' save to rules '3.1.0' (Contract #9).
+ * Preserves ALL profile, settings, and activeRun progress; safely rewinds any in-flight '3.0.0' activeCombat.
+ */
+export function migrateV3_0ToV3_1SaveData(rawV3_0: unknown): {
+  readonly ok: boolean;
+  readonly data?: V2SaveData;
+  readonly error?: string;
+} {
+  const check = validateV3_0SaveDataDetailed(rawV3_0);
+  if (!check.ok) {
+    return { ok: false, error: check.error };
+  }
+  const src = rawV3_0 as V2SaveData;
+  const rawDiscoveredSynergies = Array.isArray(src.profile.discoveredSynergies)
+    ? V2_SYNERGY_ORDER.filter((id) => src.profile.discoveredSynergies!.includes(id))
+    : [];
+  const migratedProfile: V2ProfileState = {
+    ...src.profile,
+    discoveredSynergies: rawDiscoveredSynergies,
+  };
+  const migratedRun: V2RunState | null =
+    src.activeRun !== null ? rewindLegacyActiveCombatForRulesUpgrade(src.activeRun) : null;
+
+  const migrated: V2SaveData = {
+    schemaVersion: V2_SCHEMA_VERSION,
+    rulesVersion: V2_RULES_VERSION,
+    savedAt:
+      typeof src.savedAt === 'string' && src.savedAt.length > 0
+        ? src.savedAt
+        : new Date().toISOString(),
+    profile: migratedProfile,
+    activeRun: migratedRun,
+    settings: sanitizeSettings(src.settings),
+  };
+
+  const finalCheck = validateV2SaveDataDetailed(migrated);
+  if (!finalCheck.ok) {
+    return { ok: false, error: `3.0.0->3.1.0 迁移后校验失败: ${finalCheck.error}` };
+  }
+  return { ok: true, data: normalizeV2SaveData(migrated) };
 }
 
 /**
@@ -1945,11 +2130,12 @@ export function migrateV2ToV3SaveData(rawV2: unknown): {
       credits,
     }),
     hullTuning: {},
+    discoveredSynergies: [],
   };
 
   let migratedRun: V2RunState | null = null;
   if (src.activeRun !== null) {
-    migratedRun = {
+    migratedRun = rewindLegacyActiveCombatForRulesUpgrade({
       ...src.activeRun,
       schemaVersion: V2_SCHEMA_VERSION,
       rulesVersion: V2_RULES_VERSION,
@@ -1962,7 +2148,8 @@ export function migrateV2ToV3SaveData(rawV2: unknown): {
       tacticalChargesUsed: 0,
       salvagePartsEarned: 0,
       isFinalCampaignRun: false,
-    };
+      lockedEnemyId: null,
+    });
   }
 
   const migrated: V2SaveData = {
@@ -2318,6 +2505,13 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
     }
   }
 
+  const discoveredSynergySet = new Set<string>(
+    Array.isArray(rawProfile.discoveredSynergies)
+      ? rawProfile.discoveredSynergies.filter((s): s is string => typeof s === 'string' && isV2SynergyTypeId(s))
+      : []
+  );
+  const discoveredSynergies = V2_SYNERGY_ORDER.filter((id) => discoveredSynergySet.has(id));
+
   let activeRun: V2RunState | null = null;
   if (raw.activeRun !== null && isPlainObject(raw.activeRun)) {
     const rawRun = raw.activeRun;
@@ -2437,6 +2631,7 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
       },
       career,
       hullTuning,
+      discoveredSynergies,
     },
     activeRun,
     settings: sanitizeSettings(raw?.settings),
@@ -2453,6 +2648,16 @@ function isValidLegacyV2RawString(raw: string | null): boolean {
   }
 }
 
+function isValidV3_0RawString(raw: string | null): boolean {
+  if (!raw) return false;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return validateV3_0SaveDataDetailed(parsed).ok;
+  } catch {
+    return false;
+  }
+}
+
 function tryRecoverBackupRaw(raw: string | null): V2SaveData | null {
   if (!raw) return null;
   try {
@@ -2460,6 +2665,16 @@ function tryRecoverBackupRaw(raw: string | null): V2SaveData | null {
     const bCheck = validateV2SaveDataDetailed(parsedBackup);
     if (bCheck.ok) {
       return normalizeV2SaveData(parsedBackup as V2SaveData);
+    }
+    if (
+      isPlainObject(parsedBackup) &&
+      parsedBackup.schemaVersion === V2_SCHEMA_VERSION &&
+      parsedBackup.rulesVersion === V3_0_RULES_VERSION
+    ) {
+      const migratedV3_0 = migrateV3_0ToV3_1SaveData(parsedBackup);
+      if (migratedV3_0.ok && migratedV3_0.data) {
+        return normalizeV2SaveData(migratedV3_0.data);
+      }
     }
     if (
       isPlainObject(parsedBackup) &&
@@ -2479,10 +2694,12 @@ function tryRecoverBackupRaw(raw: string | null): V2SaveData | null {
 export function loadV2SaveData(storage: V2StorageLike): V2LoadResult {
   let primaryRaw: string | null = null;
   let v3BackupRaw: string | null = null;
+  let v3_0BackupRaw: string | null = null;
   let v2BackupRaw: string | null = null;
   try {
     primaryRaw = storage.getItem(V2_SAVE_KEY);
     v3BackupRaw = storage.getItem(V3_BACKUP_KEY);
+    v3_0BackupRaw = storage.getItem(V3_0_BACKUP_KEY);
     v2BackupRaw = storage.getItem(V2_BACKUP_KEY);
   } catch (err) {
     return {
@@ -2505,6 +2722,28 @@ export function loadV2SaveData(storage: V2StorageLike): V2LoadResult {
     }
 
     if (
+      isPlainObject(parsed) &&
+      parsed.schemaVersion === V2_SCHEMA_VERSION &&
+      parsed.rulesVersion === V3_0_RULES_VERSION
+    ) {
+      const migrated31 = migrateV3_0ToV3_1SaveData(parsed);
+      if (migrated31.ok && migrated31.data) {
+        // Strictly write-once backup for valid V3 3.0.0 saves
+        if (!isValidV3_0RawString(v3_0BackupRaw)) {
+          try {
+            storage.setItem(V3_0_BACKUP_KEY, primaryRaw);
+          } catch {
+            // Best-effort backup
+          }
+        }
+        return {
+          status: 'loaded',
+          data: normalizeV2SaveData(migrated31.data),
+          migratedFromV3_0: true,
+        };
+      }
+      primaryError = migrated31.error ?? v3Check.error ?? primaryError;
+    } else if (
       isPlainObject(parsed) &&
       parsed.schemaVersion === V2_LEGACY_SCHEMA_VERSION
     ) {
@@ -2532,12 +2771,21 @@ export function loadV2SaveData(storage: V2StorageLike): V2LoadResult {
     primaryError = `JSON 解析失败: ${String(err)}`;
   }
 
-  // Primary corrupt -> try rolling V3 backup FIRST, then fall back to V2 backup (accepting both V3 and legacy V2 without ever overwriting V2_BACKUP_KEY)
+  // Primary corrupt -> try rolling V3 backup FIRST, then V3.0.0 backup, then V2 backup
   const recoveredV3 = tryRecoverBackupRaw(v3BackupRaw);
   if (recoveredV3) {
     return {
       status: 'corrupt_with_backup',
       backup: recoveredV3,
+      error: primaryError,
+    };
+  }
+
+  const recoveredV3_0 = tryRecoverBackupRaw(v3_0BackupRaw);
+  if (recoveredV3_0) {
+    return {
+      status: 'corrupt_with_backup',
+      backup: recoveredV3_0,
       error: primaryError,
     };
   }
@@ -2592,8 +2840,13 @@ export function persistV2SaveData(
       try {
         const parsedPrev = JSON.parse(prev) as unknown;
         if (validateV2SaveDataDetailed(parsedPrev).ok) {
-          // Rotate valid V3 previous primary exclusively into V3_BACKUP_KEY (never touch V2_BACKUP_KEY!)
+          // Rotate valid V3 3.1.0 previous primary exclusively into V3_BACKUP_KEY (never touch V3_0 or V2 backup!)
           storage.setItem(V3_BACKUP_KEY, prev);
+        } else if (validateV3_0SaveDataDetailed(parsedPrev).ok) {
+          // Strictly write-once for valid V3 3.0.0 backup
+          if (!isValidV3_0RawString(storage.getItem(V3_0_BACKUP_KEY))) {
+            storage.setItem(V3_0_BACKUP_KEY, prev);
+          }
         } else if (validateLegacyV2SaveDataDetailed(parsedPrev).ok) {
           // Strictly write-once for valid legacy V2 backup: never overwrite an existing valid legacy V2 backup
           if (!isValidLegacyV2RawString(storage.getItem(V2_BACKUP_KEY))) {
@@ -2616,6 +2869,7 @@ export function clearV2SaveData(storage: V2StorageLike): void {
     storage.removeItem(V2_SAVE_KEY);
     storage.removeItem(V2_BACKUP_KEY);
     storage.removeItem(V3_BACKUP_KEY);
+    storage.removeItem(V3_0_BACKUP_KEY);
   } catch {
     // ignore
   }

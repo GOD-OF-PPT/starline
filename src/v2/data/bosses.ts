@@ -20,6 +20,7 @@ export interface V3EnemyIntent {
   readonly damage: number;
   readonly pierceRatio?: number;
   readonly shieldGain?: number;
+  readonly allyShieldGain?: number;
   readonly empShieldDrain?: number;
   readonly summonCount?: number;
 }
@@ -33,6 +34,7 @@ export interface V3BossIntentTemplate {
   readonly flatDamageOffset?: number;
   readonly pierceRatio?: number;
   readonly shieldGain?: number;
+  readonly allyShieldGain?: number;
   readonly empShieldDrain?: number;
   readonly summonCount?: number;
 }
@@ -401,6 +403,7 @@ export function materializeBossIntent(
       ? { pierceRatio: basePierceRatio }
       : {}),
     ...(tpl.shieldGain ? { shieldGain: tpl.shieldGain } : {}),
+    ...(tpl.allyShieldGain ? { allyShieldGain: tpl.allyShieldGain } : {}),
     ...(tpl.empShieldDrain ? { empShieldDrain: tpl.empShieldDrain } : {}),
     ...(tpl.summonCount ? { summonCount: tpl.summonCount } : {}),
   };

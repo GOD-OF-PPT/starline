@@ -79,7 +79,7 @@ export const V2_CARGO_DEFS: Record<string, V2CargoDef> = {
     layer1BasePrice: 27,
     isCollectible: false,
     isMissionItem: false,
-    summary: '工业压液冷罐，1×3 细长高密货，1 层基价 27¤（9.0¤/格）',
+    summary: '工业压液冷罐，1×3 细长高密货，1 层基价 27¤（9.0¤/格）；正交贴邻重炮时额外 +4 伤',
   },
   'cargo.old_engine': {
     defId: 'cargo.old_engine',

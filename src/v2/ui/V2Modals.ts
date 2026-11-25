@@ -14,6 +14,7 @@ import { V3_GADGET_DEFS } from '../data/gadgets';
 import { V2_SHAPES } from '../data/shapes';
 import { V2_SHIP_ORDER } from '../data/ships';
 import { V2_TRIAL_BUILD_ORDER, V2_TRIAL_BUILDS } from '../data/trialBuilds';
+import { V2_SYNERGY_CATALOG, V2_SYNERGY_ORDER } from '../domain/buildStatsV2';
 import { getAnyV2ItemDef } from '../domain/itemCatalog';
 import type { V1MigrationInspection } from '../domain/migration';
 import {
@@ -676,6 +677,45 @@ export function openV2CodexModal(host: HTMLElement, profile: V2ProfileState): vo
             })
             .join('')}
         </div>
+        ${(() => {
+          const discoveredSynergies = new Set(profile.discoveredSynergies ?? []);
+          const foundSynCount = V2_SYNERGY_ORDER.filter((id) => discoveredSynergies.has(id)).length;
+          return `<section class="v3-codex-synergy-section" data-testid="codex-synergy-section">
+            <div class="v3-codex-synergy-head">
+              <h3>联动图鉴 (${foundSynCount}/${V2_SYNERGY_ORDER.length})</h3>
+              <span class="v3-codex-synergy-sub">在整舱或整备中触发任意正交联动即可永久收录</span>
+            </div>
+            <div class="v3-codex-synergy-grid">
+              ${V2_SYNERGY_ORDER.map((sid) => {
+                const entry = V2_SYNERGY_CATALOG[sid];
+                const isFound = discoveredSynergies.has(sid);
+                return `<div class="v3-codex-synergy-card ${isFound ? 'discovered' : 'locked'}" data-synergy-id="${
+                  entry.id
+                }" data-synergy-state="${isFound ? 'discovered' : 'locked'}">
+                  <div class="v3-codex-synergy-name-row">
+                    <strong>${isFound ? entry.name : '未发现联动'}</strong>
+                    <span class="v3-codex-synergy-tags">
+                      ${entry.isCrossCategory ? '<span class="v3-codex-state seen">跨类</span>' : ''}
+                      <span class="v3-codex-state ${isFound ? 'found' : 'locked'}">${
+                  isFound ? '已发现' : '未发现'
+                }</span>
+                    </span>
+                  </div>
+                  <div class="v3-codex-synergy-pair">${
+                    isFound
+                      ? entry.pairLabel
+                      : entry.isCrossCategory
+                      ? '尝试将特定货物与装备正交贴邻'
+                      : '尝试将互补模块正交贴邻'
+                  }</div>
+                  <div class="v3-codex-synergy-desc">${
+                    isFound ? entry.effectSummary : '在船舱内完成配对后解锁完整效果说明'
+                  }</div>
+                </div>`;
+              }).join('')}
+            </div>
+          </section>`;
+        })()}
       `;
     }
   );

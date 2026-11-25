@@ -18,6 +18,7 @@ export interface V2ShipVisualSpec {
   readonly heavyCount: number;
   readonly heavyBoosted: boolean;
   readonly heavyImproved: boolean;
+  readonly heavyCooled?: boolean;
   readonly hangarCount: number;
   readonly hangarBoosted: boolean;
   readonly hangarMaxDrones: number;
@@ -74,6 +75,7 @@ export function deriveV2ShipVisualSpec(bay: V2CargoBayState): V2ShipVisualSpec {
   const heavyCount = stats.heavies.length;
   const heavyBoosted = stats.heavies.some((h) => h.firesOnOddRounds);
   const heavyImproved = stats.heavies.some((h) => h.quality === 'improved');
+  const heavyCooled = stats.heavies.some((h) => h.coolantTankLinked);
 
   const hangarCount = stats.hangars.length;
   const hangarBoosted = stats.hangars.some((h) => h.relayQuality !== null);
@@ -87,7 +89,9 @@ export function deriveV2ShipVisualSpec(bay: V2CargoBayState): V2ShipVisualSpec {
 
   const mountSummaryTags: string[] = [];
   if (heavyCount > 0) {
-    mountSummaryTags.push(`磁轨重炮×${heavyCount}${heavyBoosted ? '·先手' : ''}`);
+    mountSummaryTags.push(
+      `磁轨重炮×${heavyCount}${heavyBoosted ? '·先手' : ''}${heavyCooled ? '·液冷' : ''}`
+    );
   }
   if (laserCount > 0) {
     mountSummaryTags.push(`脉冲炮塔×${laserCount}${laserBoosted ? '·充能' : ''}`);
@@ -122,6 +126,7 @@ export function deriveV2ShipVisualSpec(bay: V2CargoBayState): V2ShipVisualSpec {
     heavyCount,
     heavyBoosted,
     heavyImproved,
+    heavyCooled,
     hangarCount,
     hangarBoosted,
     hangarMaxDrones,

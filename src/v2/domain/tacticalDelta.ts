@@ -202,6 +202,7 @@ function serializeSimCtx(
     String(simCtx?.endlessThreat ?? 0),
     (simCtx?.endlessMutatorIds ?? []).join(','),
     String(simCtx?.stargateRelayTier ?? 0),
+    simCtx?.lockedEnemyId ?? '',
   ].join('|');
 }
 
@@ -351,6 +352,7 @@ export interface DeltaSimContext {
   readonly endlessThreat?: number;
   readonly endlessMutatorIds?: readonly string[];
   readonly stargateRelayTier?: number;
+  readonly lockedEnemyId?: string | null;
 }
 
 export function findBestPlacementForItem(
@@ -424,6 +426,8 @@ export function findBestPlacementForItem(
           endlessThreat: simCtx?.endlessThreat,
           endlessMutatorIds: simCtx?.endlessMutatorIds,
           stargateRelayTier: simCtx?.stargateRelayTier,
+          lockedEnemyId: simCtx?.lockedEnemyId ?? null,
+          interventions: [],
         });
         const linkBonus = st.links.length * 100;
         const winBonus = sim.outcome === 'victory' ? 10_000 : 0;
@@ -562,12 +566,18 @@ export function computeV2PlacementTacticalDelta(params: {
   readonly crewId?: V2CrewId | null;
   readonly crewMasteryTier?: number;
   readonly stargateRelayTier?: number;
+  readonly lockedEnemyId?: string | null;
 }): V2TacticalDelta {
   const bayHash = computeV2BayHash(params.bay);
   const itemKey = serializeItemKey(params.item);
 
-  // Mission, gadget, or pure cargo item -> clear value/contract space readout (skip encounter lookup)
-  if (params.item.category !== 'equipment') {
+  const isCoolantTank = params.item.definitionId === 'cargo.coolant_tank';
+  const hasHeavyInBay =
+    isCoolantTank &&
+    params.bay.placed.some((p) => V2_EQUIPMENT_DEFS[p.item.definitionId]?.kind === 'heavy');
+
+  // Mission, gadget, or pure cargo item without active cross-category heavy partner -> fast 0-sim path (preserves data_box no-recommendedSpot invariant!)
+  if (params.item.category !== 'equipment' && !hasHeavyInBay) {
     const nonEqKey = `non_eq|${bayHash}|${itemKey}|${params.zone}`;
     const cached = lruGet(deltaCache, nonEqKey);
     if (cached.hit && cached.value) {
@@ -614,7 +624,9 @@ export function computeV2PlacementTacticalDelta(params: {
       const perCell = (params.item.fixedValue / Math.max(1, cellCount)).toFixed(1);
       const merchantVal = Math.floor(params.item.fixedValue * 0.8);
       result = {
-        synergyLine: '高价货物 · 不参战，安全带回可换取信用点',
+        synergyLine: isCoolantTank
+          ? '高价货品 · 正交贴邻「磁轨重炮」可激活跨类液冷联动（+4 伤）'
+          : '高价货物 · 不参战，安全带回可换取信用点',
         combatDeltaLine: `安全返航出售 +${params.item.fixedValue}¤（商人收购 ${merchantVal}¤）`,
         qualitativeDeltaLine:
           params.item.fixedValue > 0
@@ -633,7 +645,7 @@ export function computeV2PlacementTacticalDelta(params: {
     return cacheAndReturnDelta(nonEqKey, result);
   }
 
-  const eqDef = V2_EQUIPMENT_DEFS[params.item.definitionId]!;
+  const eqDef = params.item.category === 'equipment' ? V2_EQUIPMENT_DEFS[params.item.definitionId] : undefined;
   const ref = resolveReferenceEncounter(params.run);
   const simCtx: DeltaSimContext = {
     sectorId: params.sectorId ?? params.run?.sectorId ?? 'near_orbit',
@@ -644,6 +656,7 @@ export function computeV2PlacementTacticalDelta(params: {
     endlessThreat: params.run?.endlessThreat,
     endlessMutatorIds: params.run?.endlessMutatorIds,
     stargateRelayTier: params.stargateRelayTier,
+    lockedEnemyId: params.lockedEnemyId ?? null,
   };
   const candidateSpotKey = params.candidateSpot
     ? `${params.candidateSpot.x},${params.candidateSpot.y},${params.candidateSpot.rotation}`
@@ -665,7 +678,11 @@ export function computeV2PlacementTacticalDelta(params: {
   const def = getAnyV2ItemDef(params.item.definitionId);
   const cellCount = def ? V2_SHAPES[def.shapeId].cells.length : 1;
   const freeInfo = countFreeCells(params.bay);
-  const partnerKinds = getSynergyPartnerKinds(eqDef.kind);
+  const partnerKinds: readonly V2EquipmentKind[] = eqDef
+    ? getSynergyPartnerKinds(eqDef.kind)
+    : isCoolantTank
+    ? ['heavy']
+    : [];
 
   if (params.zone === 'staging') {
     const baselineSim = runDeltaSimulation({
@@ -683,6 +700,8 @@ export function computeV2PlacementTacticalDelta(params: {
       endlessThreat: simCtx.endlessThreat,
       endlessMutatorIds: simCtx.endlessMutatorIds,
       stargateRelayTier: simCtx.stargateRelayTier,
+      lockedEnemyId: simCtx.lockedEnemyId ?? null,
+      interventions: [],
     });
 
     let chosenSpot: { x: number; y: number; rotation: V2Rotation; bayAfter: V2CargoBayState } | null = null;
@@ -724,11 +743,11 @@ export function computeV2PlacementTacticalDelta(params: {
         synergyLine:
           partnerKinds.length > 0
             ? `可与「${V2_EQUIPMENT_DEFS[`equipment.${partnerKinds[0]}.common`].name}」正交联动`
-            : eqDef.summary,
+            : eqDef?.summary ?? def?.summary ?? '',
         combatDeltaLine: '当前船舱无合法空位，请先移位或舍弃旧件腾出格位',
         qualitativeDeltaLine: '= 船舱无合法空位，需先腾舱',
         trendDirection: 'neutral',
-        spaceLine: `需 ${cellCount} 格（${V2_SHAPES[eqDef.shapeId].label}）· 当前余 ${freeInfo.free}/${freeInfo.total} 格`,
+        spaceLine: `需 ${cellCount} 格（${V2_SHAPES[(eqDef ?? def)!.shapeId].label}）· 当前余 ${freeInfo.free}/${freeInfo.total} 格`,
         positiveImpact: false,
         detailSummary: '不干预时结果 · 当前船舱无合法空位，无法评估装入后的战局变化',
       };
@@ -739,12 +758,19 @@ export function computeV2PlacementTacticalDelta(params: {
     const activeLinks = afterStats.links.filter(
       (l) => l.sourceInstanceId === params.item.instanceId || l.targetInstanceId === params.item.instanceId
     );
+    const afterCapped = afterStats.cappedLinks.filter(
+      (l) => l.sourceInstanceId === params.item.instanceId || l.targetInstanceId === params.item.instanceId
+    );
     const synergyLine =
       activeLinks.length > 0
-        ? `推荐格位可触发联动：${activeLinks.map((l) => l.label).join(' / ')}`
+        ? `推荐格位可触发联动：${activeLinks.map((l) => l.label).join(' / ')}${
+            afterCapped.length > 0 ? `（另有 ${afterCapped.length} 条电池供能超上限）` : ''
+          }`
+        : afterCapped.length > 0
+        ? '相邻电池已达供能上限（普通 1 / 优良 2），改用优良电池或增配电池可激活'
         : partnerKinds.length > 0
         ? `贴邻「${V2_EQUIPMENT_DEFS[`equipment.${partnerKinds[0]}.common`].name}」可触发联动（当前舱内未配对）`
-        : eqDef.summary;
+        : eqDef?.summary ?? def?.summary ?? '';
 
     const afterSim = runDeltaSimulation({
       resultId: 'delta_after',
@@ -762,6 +788,8 @@ export function computeV2PlacementTacticalDelta(params: {
       endlessThreat: simCtx.endlessThreat,
       endlessMutatorIds: simCtx.endlessMutatorIds,
       stargateRelayTier: simCtx.stargateRelayTier,
+      lockedEnemyId: simCtx.lockedEnemyId ?? null,
+      interventions: [],
     });
     const cmp = formatSimComparison(ref.label, baselineSim, afterSim, 'install');
     const qual = formatQualitativeComparison(
@@ -772,18 +800,20 @@ export function computeV2PlacementTacticalDelta(params: {
       'install',
       cmp.line
     );
+    const cargoValSuffix =
+      isCoolantTank && params.item.fixedValue > 0 ? ` · 返航售价 +${params.item.fixedValue}¤` : '';
 
     const stagingResult: V2TacticalDelta = {
       synergyLine,
-      combatDeltaLine: cmp.line,
+      combatDeltaLine: `${cmp.line}${cargoValSuffix}`,
       qualitativeDeltaLine: qual.qualitativeDeltaLine,
       trendDirection: qual.trendDirection,
       beforeThreat: qual.beforeThreat,
       afterThreat: qual.afterThreat,
-      detailSummary: qual.detailSummary,
+      detailSummary: `${qual.detailSummary}${cargoValSuffix}`,
       spaceLine: `占 ${cellCount} 格 · 装入后余 ${Math.max(0, freeInfo.free - cellCount)}/${freeInfo.total} 格`,
       recommendedSpot: { x: chosenSpot.x, y: chosenSpot.y, rotation: chosenSpot.rotation },
-      positiveImpact: cmp.positive || activeLinks.length > 0,
+      positiveImpact: cmp.positive || activeLinks.length > 0 || (isCoolantTank && params.item.fixedValue > 0),
     };
     return cacheAndReturnDelta(eqCacheKey, stagingResult);
   }
@@ -791,6 +821,9 @@ export function computeV2PlacementTacticalDelta(params: {
   // Already placed in bay: show active synergy + impact vs removing it + reposition hint if unlinked partner exists!
   const currentStats = calculateV2BuildStats(params.bay);
   const currentLinks = currentStats.links.filter(
+    (l) => l.sourceInstanceId === params.item.instanceId || l.targetInstanceId === params.item.instanceId
+  );
+  const currentCapped = currentStats.cappedLinks.filter(
     (l) => l.sourceInstanceId === params.item.instanceId || l.targetInstanceId === params.item.instanceId
   );
 
@@ -810,6 +843,8 @@ export function computeV2PlacementTacticalDelta(params: {
     endlessThreat: simCtx.endlessThreat,
     endlessMutatorIds: simCtx.endlessMutatorIds,
     stargateRelayTier: simCtx.stargateRelayTier,
+    lockedEnemyId: simCtx.lockedEnemyId ?? null,
+    interventions: [],
   });
   const simCurrent = runDeltaSimulation({
     resultId: 'delta_cur',
@@ -827,6 +862,8 @@ export function computeV2PlacementTacticalDelta(params: {
     endlessThreat: simCtx.endlessThreat,
     endlessMutatorIds: simCtx.endlessMutatorIds,
     stargateRelayTier: simCtx.stargateRelayTier,
+    lockedEnemyId: simCtx.lockedEnemyId ?? null,
+    interventions: [],
   });
 
   let synergyLine: string;
@@ -843,11 +880,26 @@ export function computeV2PlacementTacticalDelta(params: {
     const partnerName = partnerPlaced
       ? getAnyV2ItemDef(partnerPlaced.item.definitionId)?.name ?? '相邻装备'
       : '相邻装备';
-    synergyLine = `已贴邻「${partnerName}」生效（${currentLinks.map((l) => l.label).join(' / ')}）`;
+    const batSupply =
+      eqDef?.kind === 'battery'
+        ? currentStats.batterySupplies.find((bs) => bs.instanceId === params.item.instanceId)
+        : undefined;
+    const capSuffix =
+      batSupply && batSupply.cappedLaserIds.length > 0
+        ? `（已供能 ${batSupply.suppliedLaserIds.length}/${batSupply.capacity}，另有 ${batSupply.cappedLaserIds.length} 门超上限）`
+        : '';
+    synergyLine = `已贴邻「${partnerName}」生效（${currentLinks.map((l) => l.label).join(' / ')}）${capSuffix}`;
+  } else if (currentCapped.length > 0) {
+    synergyLine =
+      eqDef?.kind === 'laser'
+        ? '相邻电池已达供能上限（普通 1 / 优良 2），改用优良电池或增配电池可激活'
+        : '供能容量已达上限（普通 1 / 优良 2）';
   } else if (partnerKinds.length > 0) {
     const partnerInBay = params.bay.placed.find((p) => {
       const pEq = V2_EQUIPMENT_DEFS[p.item.definitionId];
-      return pEq && partnerKinds.includes(pEq.kind);
+      if (pEq && partnerKinds.includes(pEq.kind)) return true;
+      if (eqDef?.kind === 'heavy' && p.item.definitionId === 'cargo.coolant_tank') return true;
+      return false;
     });
     if (partnerInBay) {
       // Check if moving this item can link to partnerInBay!
@@ -874,7 +926,7 @@ export function computeV2PlacementTacticalDelta(params: {
       synergyLine = `可与「${V2_EQUIPMENT_DEFS[`equipment.${partnerKinds[0]}.common`].name}」正交联动`;
     }
   } else {
-    synergyLine = eqDef.summary;
+    synergyLine = eqDef?.summary ?? def?.summary ?? '';
   }
 
   const cmp = formatSimComparison(ref.label, simWithout, simCurrent, 'installed_value');
@@ -886,17 +938,19 @@ export function computeV2PlacementTacticalDelta(params: {
     'installed_value',
     cmp.line
   );
+  const cargoValSuffix =
+    isCoolantTank && params.item.fixedValue > 0 ? ` · 返航售价 +${params.item.fixedValue}¤` : '';
   const gridResult: V2TacticalDelta = {
     synergyLine,
-    combatDeltaLine: cmp.line,
+    combatDeltaLine: `${cmp.line}${cargoValSuffix}`,
     qualitativeDeltaLine: qual.qualitativeDeltaLine,
     trendDirection: qual.trendDirection,
     beforeThreat: qual.beforeThreat,
     afterThreat: qual.afterThreat,
-    detailSummary: qual.detailSummary,
-    spaceLine: `已占 ${cellCount} 格（${V2_SHAPES[eqDef.shapeId].label}）· 船舱余 ${freeInfo.free}/${freeInfo.total} 格`,
+    detailSummary: `${qual.detailSummary}${cargoValSuffix}`,
+    spaceLine: `已占 ${cellCount} 格（${V2_SHAPES[(eqDef ?? def)!.shapeId].label}）· 船舱余 ${freeInfo.free}/${freeInfo.total} 格`,
     recommendedSpot,
-    positiveImpact: cmp.positive || currentLinks.length > 0,
+    positiveImpact: cmp.positive || currentLinks.length > 0 || (isCoolantTank && params.item.fixedValue > 0),
   };
   return cacheAndReturnDelta(eqCacheKey, gridResult);
 }

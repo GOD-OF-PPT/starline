@@ -1343,3 +1343,125 @@ body.reduced-motion .v2-shell .v2-settle-totals .v2-mig-row.is-rollup-revealed {
   transform: none;
   transition: none !important;
 }
+
+/* --- D03 Battery Cap Starvation & Synergy Discovery Toast & Codex --- */
+.v2-shell .v2-placed-item.battery-capped {
+  outline: 2px dashed #f59e0b;
+  outline-offset: -2px;
+}
+
+.v2-shell .energy-link-capped {
+  pointer-events: none;
+}
+
+.v2-shell .v3-synergy-discovery-toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 2px;
+  border: 1px solid rgba(56, 189, 248, 0.72);
+  border-left: 3px solid #38bdf8;
+  background: rgba(12, 26, 44, 0.94);
+  color: #e6f4ff;
+  font-size: 12px;
+}
+
+.v2-shell .v3-synergy-toast-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 2px;
+  background: rgba(246, 184, 82, 0.24);
+  border: 1px solid rgba(246, 184, 82, 0.65);
+  color: #ffe2a8;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.v2-shell .v3-synergy-toast-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.v2-modal-card .v3-codex-synergy-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(110, 148, 192, 0.28);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.v2-modal-card .v3-codex-synergy-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.v2-modal-card .v3-codex-synergy-head h3 {
+  margin: 0;
+  font-size: 14px;
+  color: #e9edf2;
+}
+
+.v2-modal-card .v3-codex-synergy-sub {
+  font-size: 11.5px;
+  color: #9db4ce;
+}
+
+.v2-modal-card .v3-codex-synergy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.v2-modal-card .v3-codex-synergy-card {
+  padding: 8px 10px;
+  border-radius: 2px;
+  border: 1px solid rgba(110, 148, 192, 0.26);
+  background: rgba(15, 25, 40, 0.84);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.v2-modal-card .v3-codex-synergy-card.discovered {
+  border-color: rgba(56, 189, 248, 0.52);
+  border-left: 3px solid #38bdf8;
+}
+
+.v2-modal-card .v3-codex-synergy-card.locked {
+  opacity: 0.72;
+}
+
+.v2-modal-card .v3-codex-synergy-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12.5px;
+  color: #eef5fc;
+}
+
+.v2-modal-card .v3-codex-synergy-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.v2-modal-card .v3-codex-synergy-pair {
+  font-size: 11px;
+  font-weight: 600;
+  color: #7dd3fc;
+}
+
+.v2-modal-card .v3-codex-synergy-desc {
+  font-size: 11px;
+  color: #b7c8dd;
+  line-height: 1.35;
+}
+
