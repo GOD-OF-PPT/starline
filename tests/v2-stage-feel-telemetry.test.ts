@@ -1474,7 +1474,7 @@ describe('M1B Stage, Feel, Feedback & Telemetry Suite (S03, S06, S07, S08, S09, 
       expect(shell.classList.contains('phase-reward')).toBe(true);
       expect(mountEl.querySelector('.v2-cargo-board')).toBe(initialBoard);
 
-      mountEl.querySelector('[data-pick-reward="repair"]')!.click();
+      mountEl.querySelector('[data-pick-reward="skip"]')!.click();
       expect(shell.classList.contains('phase-map')).toBe(true);
       expect(mountEl.querySelector('.v2-cargo-board')).toBe(initialBoard);
 

@@ -201,9 +201,9 @@ export const V3_EVENT_CATALOG: readonly V3EventTemplate[] = [
       {
         label: '耗油协助拖航护送（-1 燃料）',
         costSummary: '消耗 1 燃料',
-        rewardSummary: '恢复 +10 船体耐久 · +16¤ · 星港行会声望 +20',
+        rewardSummary: '恢复 +6 船体耐久 · +16¤ · 星港行会声望 +20',
         fuelCost: 1,
-        rewardHp: 10,
+        rewardHp: 6,
         rewardCredits: 16,
         rewardFactionId: 'starport_guild',
         rewardFactionRep: 20,
@@ -211,9 +211,9 @@ export const V3_EVENT_CATALOG: readonly V3EventTemplate[] = [
       {
         label: '陆衡规划惯性牵引（领航员专属）',
         costSummary: '无消耗（陆衡专属）',
-        rewardSummary: '恢复 +8 耐久 · +22¤ · 星港行会声望 +25',
+        rewardSummary: '恢复 +5 耐久 · +22¤ · 星港行会声望 +25',
         requiredCrewId: 'navigator',
-        rewardHp: 8,
+        rewardHp: 5,
         rewardCredits: 22,
         rewardFactionId: 'starport_guild',
         rewardFactionRep: 25,
@@ -281,9 +281,9 @@ export const V3_EVENT_CATALOG: readonly V3EventTemplate[] = [
       {
         label: '启动付费快速焊修（15¤）',
         costSummary: '消耗 15¤ 航行钱包',
-        rewardSummary: '恢复 +12 船体耐久 · +8 精密零件',
+        rewardSummary: '恢复 +8 船体耐久 · +8 精密零件',
         walletCost: 15,
-        rewardHp: 12,
+        rewardHp: 8,
         rewardParts: 8,
       },
       {
@@ -297,9 +297,9 @@ export const V3_EVENT_CATALOG: readonly V3EventTemplate[] = [
       {
         label: '林工重刷维护权限（工程师专属）',
         costSummary: '无消耗（林工专属）',
-        rewardSummary: '免费恢复 +10 耐久 · +12 精密零件',
+        rewardSummary: '免费恢复 +6 耐久 · +12 精密零件',
         requiredCrewId: 'engineer',
-        rewardHp: 10,
+        rewardHp: 6,
         rewardParts: 12,
       },
       {
@@ -434,9 +434,9 @@ export const V3_EVENT_CATALOG: readonly V3EventTemplate[] = [
       {
         label: '喷射推进焰融冰施救（-1 燃料）',
         costSummary: '消耗 1 燃料',
-        rewardSummary: '恢复 +12 耐久 · 自由拾荒团声望 +20 · +8 精密零件',
+        rewardSummary: '恢复 +8 耐久 · 自由拾荒团声望 +20 · +8 精密零件',
         fuelCost: 1,
-        rewardHp: 12,
+        rewardHp: 8,
         rewardParts: 8,
         rewardFactionId: 'free_salvagers',
         rewardFactionRep: 20,
@@ -444,9 +444,9 @@ export const V3_EVENT_CATALOG: readonly V3EventTemplate[] = [
       {
         label: '陆衡引流冰脊重力裂缝（领航员专属）',
         costSummary: '无消耗（陆衡专属）',
-        rewardSummary: '免费恢复 +10 耐久 · 拾荒团声望 +25 · +15¤',
+        rewardSummary: '免费恢复 +6 耐久 · 拾荒团声望 +25 · +15¤',
         requiredCrewId: 'navigator',
-        rewardHp: 10,
+        rewardHp: 6,
         rewardCredits: 15,
         rewardFactionId: 'free_salvagers',
         rewardFactionRep: 25,
@@ -657,9 +657,9 @@ export const V3_EVENT_CATALOG: readonly V3EventTemplate[] = [
       {
         label: '支付维护费启用应急补给（20¤）',
         costSummary: '消耗 20¤ 航行钱包',
-        rewardSummary: '恢复 +12 耐久 · +2 燃料 · 行会声望 +15',
+        rewardSummary: '恢复 +8 耐久 · +2 燃料 · 行会声望 +15',
         walletCost: 20,
-        rewardHp: 12,
+        rewardHp: 8,
         rewardFuel: 2,
         rewardFactionId: 'starport_guild',
         rewardFactionRep: 15,
@@ -667,9 +667,9 @@ export const V3_EVENT_CATALOG: readonly V3EventTemplate[] = [
       {
         label: '林工更换备用电容重启浮标（工程师专属）',
         costSummary: '无消耗（林工专属）',
-        rewardSummary: '星港行会声望 +30 · 恢复 +10 耐久 · +14 精密零件',
+        rewardSummary: '星港行会声望 +30 · 恢复 +6 耐久 · +14 精密零件',
         requiredCrewId: 'engineer',
-        rewardHp: 10,
+        rewardHp: 6,
         rewardParts: 14,
         rewardFactionId: 'starport_guild',
         rewardFactionRep: 30,
@@ -1159,7 +1159,7 @@ export function drawSectorEventPayload(
   });
   const payload: V2DistressPayload = {
     rescueFuelCost: 1,
-    repairAmount: 10,
+    repairAmount: 6,
     haulCargoItem,
     chosenOption: null,
   };

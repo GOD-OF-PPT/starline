@@ -1007,3 +1007,319 @@ export function calculateV2BuildStats(bay: V2CargoBayState): V2BuildStats {
   };
 }
 
+export interface V2RewardSynergyMatch {
+  readonly synergyId: V2SynergyTypeId;
+  readonly synergyName: string;
+  readonly badgeLabel: string;
+  readonly partnerInstanceIds: readonly string[];
+  readonly partnerNames: readonly string[];
+  readonly partnerDefIds: readonly string[];
+  readonly isCrossCategory: boolean;
+  readonly batteryCappedWarning?: boolean;
+}
+
+export interface V2RewardSynergyEvaluation {
+  readonly rewardDefId: string;
+  readonly rewardKind: V2EquipmentKind | null;
+  readonly hasSynergy: boolean;
+  readonly matches: readonly V2RewardSynergyMatch[];
+  readonly primaryBadgeText: string | null;
+  readonly summaryText: string;
+  readonly suggestedPartnerHint: string | null;
+}
+
+const OVERDRIVE_WEAPON_KINDS: ReadonlySet<V2EquipmentKind> = new Set([
+  'laser',
+  'heavy',
+  'hangar',
+  'flak',
+  'salvo_pod',
+  'emp_jammer',
+  'salvage_grapple',
+]);
+
+const SUGGESTED_PARTNER_HINT_BY_KIND: Readonly<Partial<Record<V2EquipmentKind, string>>> = {
+  laser: '能量电池 / 超频核心',
+  battery: '激光炮',
+  heavy: '蓄能器 / 冷却罐 / 排热阀',
+  capacitor: '磁轨重炮 / 齐射导弹舱',
+  hangar: '编队中继 / 超频核心',
+  relay: '无人机库 / 齐射导弹舱',
+  shield: '反击器',
+  counter: '护盾板',
+  flak: '超频核心',
+  coolant_vent: '磁轨重炮 / 齐射导弹舱',
+  cargo_amp: '任意货物 / 任务货',
+  emp_jammer: '超频核心',
+  overdrive_core: '任意武器模块',
+  salvage_grapple: '超频核心',
+  salvo_pod: '蓄能器 / 编队中继 / 排热阀',
+};
+
+function getPlacedDisplayName(placed: V2PlacedItem): string {
+  const eqDef = V2_EQUIPMENT_DEFS[placed.item.definitionId];
+  if (eqDef) return eqDef.name;
+  if (placed.item.definitionId === 'cargo.coolant_tank') return '冷却罐';
+  if (placed.item.definitionId === 'mission.sealed_reactor') return '密封反应堆';
+  if (placed.item.definitionId === 'mission.escape_pod') return '救援救生舱';
+  if (placed.item.definitionId === 'mission.black_box') return '加密黑匣记录仪';
+  if (placed.item.definitionId === 'cargo.old_engine') return '旧引擎';
+  if (placed.item.definitionId === 'cargo.folding_antenna') return '折叠天线';
+  if (placed.item.definitionId === 'cargo.alloy_bar') return '合金条';
+  if (placed.item.definitionId === 'cargo.data_box') return '数据盒';
+  if (placed.item.definitionId === 'cargo.ancient_navigator') return '古代导航仪';
+  if (placed.item.definitionId === 'cargo.quantum_core') return '量子星核';
+  if (placed.item.definitionId === 'cargo.cryo_amber') return '星渊琥珀匣';
+  if (placed.item.definitionId === 'cargo.obsidian_crown') return '黑曜舰桥冠徽';
+  return placed.item.definitionId;
+}
+
+/**
+ * Pure D07 live-bay synergy evaluator for post-combat 3-equipment rewards.
+ * Covers all 10 verified V2SynergyTypeId rules in canonical V2_SYNERGY_ORDER,
+ * including battery supply capacity checks (D03) and cargo.coolant_tank <-> heavy!
+ */
+export function evaluateV2RewardSynergies(
+  bay: V2CargoBayState,
+  rewardEquipmentDefId: string
+): V2RewardSynergyEvaluation {
+  const rewardDef = V2_EQUIPMENT_DEFS[rewardEquipmentDefId];
+  if (!rewardDef) {
+    return {
+      rewardDefId: rewardEquipmentDefId,
+      rewardKind: null,
+      hasSynergy: false,
+      matches: [],
+      primaryBadgeText: null,
+      summaryText: '独立组件',
+      suggestedPartnerHint: null,
+    };
+  }
+
+  const kind = rewardDef.kind;
+  const sortedPlaced = [...bay.placed].sort((a, b) =>
+    a.item.instanceId.localeCompare(b.item.instanceId)
+  );
+  const stats = calculateV2BuildStats(bay);
+
+  const bySynergy = new Map<
+    V2SynergyTypeId,
+    {
+      partners: V2PlacedItem[];
+      batteryCappedWarning?: boolean;
+      customBadge?: string;
+    }
+  >();
+
+  const addMatch = (
+    synergyId: V2SynergyTypeId,
+    partners: V2PlacedItem[],
+    opts?: { batteryCappedWarning?: boolean; customBadge?: string }
+  ) => {
+    if (partners.length === 0) return;
+    const existing = bySynergy.get(synergyId);
+    if (!existing) {
+      bySynergy.set(synergyId, {
+        partners: [...partners],
+        batteryCappedWarning: opts?.batteryCappedWarning,
+        customBadge: opts?.customBadge,
+      });
+    } else {
+      const seenIds = new Set(existing.partners.map((p) => p.item.instanceId));
+      for (const p of partners) {
+        if (!seenIds.has(p.item.instanceId)) {
+          existing.partners.push(p);
+          seenIds.add(p.item.instanceId);
+        }
+      }
+      if (opts?.batteryCappedWarning) existing.batteryCappedWarning = true;
+      if (opts?.customBadge) existing.customBadge = opts.customBadge;
+    }
+  };
+
+  const placedByEqKind = (eqKind: V2EquipmentKind): V2PlacedItem[] =>
+    sortedPlaced.filter(
+      (p) =>
+        p.item.category === 'equipment' &&
+        V2_EQUIPMENT_DEFS[p.item.definitionId]?.kind === eqKind
+    );
+
+  // 1. battery_laser (with D03 battery capacity awareness!)
+  if (kind === 'battery') {
+    const lasers = placedByEqKind('laser');
+    if (lasers.length > 0) {
+      const hasUnsupplied = stats.lasers.some((l) => l.batteryBonus === 0);
+      const cap = getBatterySupplyCapacity(rewardDef.quality);
+      addMatch('battery_laser', lasers, {
+        customBadge: hasUnsupplied
+          ? `可联「激光炮」· 供能≤${cap}门`
+          : `可联「激光炮」· 增配供能(+${rewardDef.quality === 'improved' ? 3 : 2})`,
+      });
+    }
+  } else if (kind === 'laser') {
+    const batteries = placedByEqKind('battery');
+    if (batteries.length > 0) {
+      const hasSpareCapacity = stats.batterySupplies.some(
+        (b) => b.suppliedLaserIds.length < b.capacity
+      );
+      addMatch('battery_laser', batteries, {
+        batteryCappedWarning: !hasSpareCapacity,
+        customBadge: hasSpareCapacity
+          ? '可联「能量电池」· 尚有供能余量'
+          : '可联「能量电池」（现有电池已满载）',
+      });
+    }
+  }
+
+  // 2. coolant_heavy (cross-category: cargo.coolant_tank <-> heavy)
+  if (kind === 'heavy') {
+    const coolants = sortedPlaced.filter(
+      (p) => p.item.definitionId === 'cargo.coolant_tank'
+    );
+    if (coolants.length > 0) {
+      addMatch('coolant_heavy', coolants, {
+        customBadge: '跨类联「冷却罐」· +4 伤',
+      });
+    }
+  }
+
+  // 3. capacitor_heavy
+  if (kind === 'capacitor') {
+    addMatch('capacitor_heavy', placedByEqKind('heavy'), {
+      customBadge: '可联「磁轨重炮」· 首轮先手开火',
+    });
+  } else if (kind === 'heavy') {
+    addMatch('capacitor_heavy', placedByEqKind('capacitor'), {
+      customBadge: '可联「蓄能器」· 首轮先手开火',
+    });
+  }
+
+  // 4. relay_hangar
+  if (kind === 'relay') {
+    addMatch('relay_hangar', placedByEqKind('hangar'), {
+      customBadge: '可联「无人机库」· 上限 3→4 架',
+    });
+  } else if (kind === 'hangar') {
+    addMatch('relay_hangar', placedByEqKind('relay'), {
+      customBadge: '可联「编队中继」· 上限 3→4 架',
+    });
+  }
+
+  // 5. shield_counter
+  if (kind === 'shield') {
+    addMatch('shield_counter', placedByEqKind('counter'), {
+      customBadge: '可联「反击器」· 激活护盾反击',
+    });
+  } else if (kind === 'counter') {
+    addMatch('shield_counter', placedByEqKind('shield'), {
+      customBadge: '可联「护盾板」· 激活护盾反击',
+    });
+  }
+
+  // 6. coolant_vent_heavy
+  if (kind === 'coolant_vent') {
+    addMatch('coolant_vent_heavy', placedByEqKind('heavy'), {
+      customBadge: '可联「磁轨重炮」· 每发 +2/+3 伤',
+    });
+  } else if (kind === 'heavy') {
+    addMatch('coolant_vent_heavy', placedByEqKind('coolant_vent'), {
+      customBadge: '可联「冷却排热阀」· 每发 +2/+3 伤',
+    });
+  }
+
+  // 7. coolant_vent_salvo
+  if (kind === 'coolant_vent') {
+    addMatch('coolant_vent_salvo', placedByEqKind('salvo_pod'), {
+      customBadge: '可联「齐射导弹舱」· 首弹 +2/+3 伤',
+    });
+  } else if (kind === 'salvo_pod') {
+    addMatch('coolant_vent_salvo', placedByEqKind('coolant_vent'), {
+      customBadge: '可联「冷却排热阀」· 首弹 +2/+3 伤',
+    });
+  }
+
+  // 8. support_salvo (capacitor | relay <-> salvo_pod)
+  if (kind === 'capacitor' || kind === 'relay') {
+    addMatch('support_salvo', placedByEqKind('salvo_pod'), {
+      customBadge: '可联「齐射导弹舱」· 导弹 +1 枚/轮',
+    });
+  } else if (kind === 'salvo_pod') {
+    const supports = [...placedByEqKind('capacitor'), ...placedByEqKind('relay')];
+    addMatch('support_salvo', supports, {
+      customBadge: '可联「蓄能器/中继」· 导弹 +1 枚/轮',
+    });
+  }
+
+  // 9. overdrive_weapon
+  if (kind === 'overdrive_core') {
+    const weapons = sortedPlaced.filter((p) => {
+      const def = V2_EQUIPMENT_DEFS[p.item.definitionId];
+      return Boolean(def && OVERDRIVE_WEAPON_KINDS.has(def.kind));
+    });
+    if (weapons.length > 0) {
+      const names = Array.from(new Set(weapons.map(getPlacedDisplayName)));
+      addMatch('overdrive_weapon', weapons, {
+        customBadge: `可联「${names.slice(0, 2).join('/')}」· 超频增伤`,
+      });
+    }
+  } else if (OVERDRIVE_WEAPON_KINDS.has(kind)) {
+    addMatch('overdrive_weapon', placedByEqKind('overdrive_core'), {
+      customBadge: '可联「超频核心」· 超频增伤',
+    });
+  }
+
+  // 10. cargo_amp_cargo (cross-category: cargo_amp <-> any placed cargo/mission)
+  if (kind === 'cargo_amp') {
+    const cargos = sortedPlaced.filter(
+      (p) => p.item.category === 'cargo' || p.item.category === 'mission'
+    );
+    if (cargos.length > 0) {
+      const names = Array.from(new Set(cargos.map(getPlacedDisplayName)));
+      const head = names.slice(0, 2).join('/');
+      addMatch('cargo_amp_cargo', cargos, {
+        customBadge: `跨类联「${head}」${names.length > 2 ? '等' : ''}· 核攻/护盾+`,
+      });
+    }
+  }
+
+  const matches: V2RewardSynergyMatch[] = [];
+  for (const synergyId of V2_SYNERGY_ORDER) {
+    const hit = bySynergy.get(synergyId);
+    if (!hit) continue;
+    const cat = V2_SYNERGY_CATALOG[synergyId];
+    const partnerInstanceIds = hit.partners.map((p) => p.item.instanceId);
+    const partnerDefIds = hit.partners.map((p) => p.item.definitionId);
+    const partnerNames = Array.from(new Set(hit.partners.map(getPlacedDisplayName)));
+    matches.push({
+      synergyId,
+      synergyName: cat.name,
+      badgeLabel: hit.customBadge ?? `可联「${partnerNames[0]}」· ${cat.name}`,
+      partnerInstanceIds,
+      partnerNames,
+      partnerDefIds,
+      isCrossCategory: Boolean(cat.isCrossCategory),
+      ...(hit.batteryCappedWarning ? { batteryCappedWarning: true } : {}),
+    });
+  }
+
+  const hasSynergy = matches.length > 0;
+  const primaryBadgeText = matches[0]?.badgeLabel ?? null;
+  const suggestedPartnerHint = SUGGESTED_PARTNER_HINT_BY_KIND[kind] ?? null;
+  const summaryText = hasSynergy
+    ? matches.map((m) => m.badgeLabel).join('；')
+    : suggestedPartnerHint
+    ? `独立组件（可配对：${suggestedPartnerHint}）`
+    : '独立组件（即装即用）';
+
+  return {
+    rewardDefId: rewardEquipmentDefId,
+    rewardKind: kind,
+    hasSynergy,
+    matches,
+    primaryBadgeText,
+    summaryText,
+    suggestedPartnerHint,
+  };
+}
+
+

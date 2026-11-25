@@ -180,7 +180,7 @@ export function evaluateRunBonusObjective(
 ): boolean {
   const bonus = run.bonusObjective ?? run.contract.bonusObjective;
   if (!bonus) return false;
-  if (reason === 'defeat' || run.hp <= 0) return false;
+  if (reason === 'defeat' || run.hp <= 0 || run.emergencyTowUsed === true) return false;
 
   switch (bonus.id) {
     case 'bonus_high_hp':

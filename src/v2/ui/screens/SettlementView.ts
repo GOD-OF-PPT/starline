@@ -1,12 +1,21 @@
 import { getItemImageUrl } from '../../../assets/itemArt';
 import { soundEngine } from '../../../audio/soundEngine';
-import { V2_EQUIPMENT_DEFS } from '../../data/equipment';
+import {
+  V2_CONTRACT_FAMILY_UNLOCK_ORDER,
+  V2_EQUIPMENT_DEFS,
+  getV2EquipmentDefByKind,
+  type V2UnlockFamilyId,
+} from '../../data/equipment';
 import { V3_FACTIONS } from '../../data/factions';
 import { getV3EndlessMutatorDef } from '../../data/sectors';
 import { previewSettlementCampaignOutcomes } from '../../domain/campaign';
 import { getDismantleSalvagePartsYield } from '../../domain/dismantle';
 import { getEffectiveWarehouseCapacity } from '../../domain/progressionV2';
-import type { V2SettlementSummary } from '../../domain/settlementV2';
+import {
+  V2_DEFEAT_SALVAGE_FLOOR_RATE,
+  V2_EMERGENCY_TOW_RETENTION_RATE,
+  type V2SettlementSummary,
+} from '../../domain/settlementV2';
 import type {
   FactionId,
   V2PlacedItem,
@@ -24,6 +33,8 @@ export interface SettlementViewProps {
   readonly summary: V2SettlementSummary;
   readonly nextGoal: NextBaseGoal;
   readonly readOnly: boolean;
+  /** D07 optional Run-1 / Run-2 chosen equipment family during settlement */
+  readonly selectedFamilyUnlock?: V2UnlockFamilyId | null;
 }
 
 export interface SettlementViewActions {
@@ -32,6 +43,8 @@ export interface SettlementViewActions {
   readonly onShowcaseToBase: () => void;
   readonly onConfirmSettlement: () => void;
   readonly onSkipRollup?: () => void;
+  /** D07 optional callback when user picks an equipment family radio option */
+  readonly onSelectFamilyUnlock?: (family: V2UnlockFamilyId) => void;
 }
 
 function syncButtonDisabled(btn: HTMLButtonElement, disabled: boolean): void {
@@ -194,13 +207,19 @@ function dispositionLabel(
   d: V2SettlementDisposition,
   item: V2PlacedItem['item'],
   profile: V2ProfileState,
-  shipId: V2RunState['shipId']
+  shipId: V2RunState['shipId'],
+  effectiveSellValue?: number,
+  depthBonusCredits?: number
 ): string {
   switch (d) {
     case 'deliver':
       return '交付委托';
-    case 'sell':
-      return `出售 +${item.fixedValue}¤`;
+    case 'sell': {
+      const sellVal = effectiveSellValue ?? item.fixedValue;
+      return (depthBonusCredits ?? 0) > 0
+        ? `出售 +${sellVal}¤ (深潜+${depthBonusCredits})`
+        : `出售 +${sellVal}¤`;
+    }
     case 'dismantle': {
       const parts = getDismantleSalvagePartsYield(item, profile, shipId);
       return `拆解 +${parts} 精密零件`;
@@ -265,6 +284,20 @@ export class SettlementPhaseView
   private lastGoalHintKey: string | null = null;
   private campaignCardEl: HTMLDivElement | null = null;
   private lastCampaignCardKey: string | null = null;
+
+  // D07 persistent 0-<button> radiogroup for Run-1 / Run-2 family unlock (S09 safe!)
+  private familyUnlockSectionEl: HTMLDivElement | null = null;
+  private familyUnlockGroupEl: HTMLDivElement | null = null;
+  private readonly familyUnlockOpts = new Map<
+    V2UnlockFamilyId,
+    {
+      readonly labelEl: HTMLLabelElement;
+      readonly radioEl: HTMLInputElement;
+      readonly bodyEl: HTMLDivElement;
+    }
+  >();
+  private latestSelectedFamilyUnlock: V2UnlockFamilyId | null = null;
+  private lastFamilyUnlockKey: string | null = null;
 
   private itemsSectionEl: HTMLDivElement | null = null;
   private emptyHintEl: HTMLDivElement | null = null;
@@ -374,6 +407,31 @@ export class SettlementPhaseView
       }
     }
 
+    // 2b. D07 Family unlock 0-<button> radiogroup controls
+    const famCtrl = target.closest('label[data-family-unlock]') as HTMLLabelElement | null;
+    if (famCtrl && this.rootEl.contains(famCtrl)) {
+      if (this.latestReadOnly) return;
+      const fam = famCtrl.dataset.familyUnlock as V2UnlockFamilyId | undefined;
+      if (!fam) return;
+      const famRadio = famCtrl.querySelector<HTMLInputElement>('input[data-family-radio]');
+      if (famRadio?.disabled) return;
+      const isDirectFamRadio = Boolean(famRadio && target === famRadio);
+      if (!isDirectFamRadio) {
+        ev.preventDefault();
+      }
+      if (this.latestSelectedFamilyUnlock === fam) return;
+      this.latestSelectedFamilyUnlock = fam;
+      for (const [fKey, fRefs] of this.familyUnlockOpts.entries()) {
+        const isSel = fKey === fam;
+        fRefs.labelEl.classList.toggle('is-selected', isSel);
+        fRefs.radioEl.checked = isSel;
+        if (isSel) fRefs.radioEl.setAttribute('checked', '');
+        else fRefs.radioEl.removeAttribute('checked');
+      }
+      actions.onSelectFamilyUnlock?.(fam);
+      return;
+    }
+
     // 3. Disposition controls (2-option <button> or 3+-option <label> segmented radio)
     const ctrl = target.closest(
       'button[data-settle-item], label[data-settle-item]'
@@ -460,6 +518,24 @@ export class SettlementPhaseView
     if (!this.rootEl || !this.latestActions || this.latestReadOnly) return;
     const target = ev.target as HTMLElement | null;
     if (!target || typeof target.closest !== 'function') return;
+
+    const famInput = target.closest('input[data-family-radio]') as HTMLInputElement | null;
+    if (famInput && this.rootEl.contains(famInput) && !famInput.disabled && famInput.checked) {
+      const fam = famInput.value as V2UnlockFamilyId | undefined;
+      if (fam && fam !== this.latestSelectedFamilyUnlock) {
+        this.latestSelectedFamilyUnlock = fam;
+        for (const [fKey, fRefs] of this.familyUnlockOpts.entries()) {
+          const isSel = fKey === fam;
+          fRefs.labelEl.classList.toggle('is-selected', isSel);
+          fRefs.radioEl.checked = isSel;
+          if (isSel) fRefs.radioEl.setAttribute('checked', '');
+          else fRefs.radioEl.removeAttribute('checked');
+        }
+        this.latestActions.onSelectFamilyUnlock?.(fam);
+      }
+      return;
+    }
+
     const input = target.closest('input[data-settle-radio]') as HTMLInputElement | null;
     if (!input || !this.rootEl.contains(input) || input.disabled || !input.checked) return;
     const iid = input.dataset.settleItem;
@@ -542,6 +618,20 @@ export class SettlementPhaseView
     const goalHint = document.createElement('div');
     const campaignCard = document.createElement('div');
     campaignCard.className = 'v3-settle-campaign-card';
+
+    // D07 persistent 3-pick-1 family unlock section (0 <button> elements; detached when empty!)
+    const familyUnlockSection = document.createElement('div');
+    familyUnlockSection.className = 'v3-settle-family-unlock';
+    familyUnlockSection.dataset.testid = 'settlement-family-unlock';
+    const famHead = document.createElement('div');
+    famHead.className = 'v3-family-unlock-head';
+    famHead.innerHTML = `${svgIcon('star', 14)} <strong>选择解锁新装备体系（含免费蓝图 + 首件赠品）</strong><small>可在此直接勾选，也可稍后回基地再选</small>`;
+    const famGroup = document.createElement('div');
+    famGroup.className = 'v3-family-unlock-group';
+    famGroup.setAttribute('role', 'radiogroup');
+    famGroup.setAttribute('aria-label', '选择解锁装备体系');
+    familyUnlockSection.appendChild(famHead);
+    familyUnlockSection.appendChild(famGroup);
 
     // Items Section
     const itemsSection = document.createElement('div');
@@ -629,6 +719,8 @@ export class SettlementPhaseView
     this.totalsEl = totals;
     this.goalHintEl = goalHint;
     this.campaignCardEl = campaignCard;
+    this.familyUnlockSectionEl = familyUnlockSection;
+    this.familyUnlockGroupEl = famGroup;
     this.itemsSectionEl = itemsSection;
     this.emptyHintEl = emptyHint;
     this.decisionRowsWrapEl = decisionRowsWrap;
@@ -659,10 +751,21 @@ export class SettlementPhaseView
       return;
     }
 
-    const { run, profile: p, summary, nextGoal, readOnly } = props;
+    const {
+      run,
+      profile: p,
+      summary,
+      nextGoal,
+      readOnly,
+      selectedFamilyUnlock = null,
+    } = props;
     this.latestReadOnly = readOnly;
+    this.latestSelectedFamilyUnlock = selectedFamilyUnlock;
 
     const isSafe = summary.reason === 'safe_return';
+    const isEmergencyTow = isSafe && Boolean(summary.emergencyTowUsed);
+    const defeatPct = Math.round(V2_DEFEAT_SALVAGE_FLOOR_RATE * 100);
+    const towPenaltyPct = Math.round((1 - V2_EMERGENCY_TOW_RETENTION_RATE) * 100);
     const warehouseCap = getEffectiveWarehouseCapacity(p);
 
     // Sync authoritative selectedByItem map from props
@@ -682,12 +785,20 @@ export class SettlementPhaseView
     );
 
     // Header
-    const titleKey = run.isShowcase ? 'showcase' : isSafe ? 'safe' : 'defeat';
+    const titleKey = run.isShowcase
+      ? 'showcase'
+      : isEmergencyTow
+      ? 'tow'
+      : isSafe
+      ? 'safe'
+      : 'defeat';
     if (this.lastTitleKey !== titleKey) {
       this.lastTitleKey = titleKey;
       this.titleEl.innerHTML = `${svgIcon('beacon', 16)} ${
         run.isShowcase
           ? '4 站精华试玩结算'
+          : isEmergencyTow
+          ? '紧急拖航返航清点'
           : isSafe
           ? '安全返航清点'
           : '战败 · 紧急拖回结算'
@@ -736,28 +847,34 @@ export class SettlementPhaseView
 
     // Status banner
     const statusKey = isSafe
-      ? `safe:${summary.contractCompleted ? 1 : 0}:${run.isTutorial ? 1 : 0}:${run.contract.type}:${
-          run.contract.name
-        }`
-      : `defeat:${summary.lostOwnedCount}:${summary.lostLootCount}`;
+      ? `safe:${isEmergencyTow ? 1 : 0}:${towPenaltyPct}:${summary.contractCompleted ? 1 : 0}:${
+          run.isTutorial ? 1 : 0
+        }:${run.contract.type}:${run.contract.name}`
+      : `defeat:${defeatPct}:${summary.lostOwnedCount}:${summary.lostLootCount}`;
     if (this.lastStatusBannerKey !== statusKey) {
       this.lastStatusBannerKey = statusKey;
       if (isSafe) {
-        this.statusBannerEl.className = `v2-settle-banner${summary.contractCompleted ? ' ok' : ''}`;
-        this.statusBannerEl.style.marginBottom = '';
-        this.statusBannerEl.innerHTML = `<strong>${
-          summary.contractCompleted
-            ? run.isTutorial
-              ? '首航教学交付成功！免费启用工作台并获得额外悬赏'
-              : `委托「${run.contract.name}」交付完成！`
-            : run.contract.type === 'free'
-            ? '自由打捞安全返航'
-            : `委托「${run.contract.name}」未完成（无信用点罚金）`
-        }</strong>`;
+        this.statusBannerEl.className = isEmergencyTow
+          ? 'system-banner banner-warn'
+          : `v2-settle-banner${summary.contractCompleted ? ' ok' : ''}`;
+        this.statusBannerEl.style.marginBottom = isEmergencyTow ? '4px' : '';
+        if (isEmergencyTow) {
+          this.statusBannerEl.innerHTML = `<strong>非信标紧急拖航返航（扣除 ${towPenaltyPct}% 拖航费 · 无深潜升值与额外目标加赏；自有装备安全入库）</strong>`;
+        } else {
+          this.statusBannerEl.innerHTML = `<strong>${
+            summary.contractCompleted
+              ? run.isTutorial
+                ? '首航教学交付成功！免费启用工作台并获得额外悬赏'
+                : `委托「${run.contract.name}」交付完成！`
+              : run.contract.type === 'free'
+              ? '自由打捞安全返航'
+              : `委托「${run.contract.name}」未完成（无信用点罚金）`
+          }</strong>`;
+        }
       } else {
         this.statusBannerEl.className = 'system-banner banner-danger';
         this.statusBannerEl.style.marginBottom = '4px';
-        this.statusBannerEl.textContent = `舰体损毁由拖船拖回。按规则折算 40% 回收，本次带出的 ${summary.lostOwnedCount} 件自有设备与 ${summary.lostLootCount} 件拾获物已损失；基地仓库原有库存不受影响。`;
+        this.statusBannerEl.textContent = `舰体损毁由拖船拖回。按规则折算 ${defeatPct}% 回收，本次带出的 ${summary.lostOwnedCount} 件自有设备与 ${summary.lostLootCount} 件拾获物已损失；基地仓库原有库存不受影响。`;
       }
     }
 
@@ -769,10 +886,14 @@ export class SettlementPhaseView
     const totalsKey = [
       run.runId,
       isSafe ? 1 : 0,
+      isEmergencyTow ? 1 : 0,
       run.isShowcase ? 1 : 0,
       run.isTutorial ? 1 : 0,
       summary.walletCredits,
       summary.soldItemsCredits,
+      summary.extractionDepth ?? 0,
+      summary.depthAppreciationCredits ?? 0,
+      summary.emergencyTowFeeCredits ?? 0,
       summary.crewMasteryBonusCredits ?? 0,
       summary.contractRewardCredits,
       summary.bonusObjective?.label ?? '',
@@ -784,6 +905,7 @@ export class SettlementPhaseView
       summary.totalSalvagePartsEarned,
       summary.dismantledPartsEarned,
       summary.defeatRecoverableBase,
+      defeatPct,
       summary.warehouseProjectedCount,
       warehouseCap,
       summary.warehouseOverflow ? 1 : 0,
@@ -844,6 +966,15 @@ export class SettlementPhaseView
                 summary.soldItemsCredits
               )}><span>出售物品收益</span><strong class="num">+${summary.soldItemsCredits}¤</strong></div>
               ${
+                (summary.depthAppreciationCredits ?? 0) > 0
+                  ? `<div class="v2-mig-row v3-depth-bonus-row" ${nextStepAttr(
+                      summary.depthAppreciationCredits ?? 0
+                    )}><span>深潜携带升值（第 L${summary.extractionDepth ?? 1} 层信标返航）</span><strong class="num">+${
+                      summary.depthAppreciationCredits
+                    }¤</strong></div>`
+                  : ''
+              }
+              ${
                 (summary.crewMasteryBonusCredits ?? 0) > 0
                   ? `<div class="v2-mig-row" ${nextStepAttr(
                       summary.crewMasteryBonusCredits ?? 0
@@ -880,6 +1011,13 @@ export class SettlementPhaseView
                     }¤</strong></div>`
                   : ''
               }
+              ${
+                isEmergencyTow && (summary.emergencyTowFeeCredits ?? 0) > 0
+                  ? `<div class="v2-mig-row v3-tow-fee-row" ${nextStepAttr(0)}><span>非信标紧急拖航费 (-${towPenaltyPct}%)</span><strong class="num text-danger">-${
+                      summary.emergencyTowFeeCredits
+                    }¤</strong></div>`
+                  : ''
+              }
               ${partsRowHtml}
               ${factionRepRowsHtml}
               ${
@@ -892,9 +1030,9 @@ export class SettlementPhaseView
             `
             : `<div class="v2-mig-row" ${nextStepAttr(
                 summary.finalCreditsEarned
-              )}><span>可回收总额 × 40%</span><strong class="num">${
+              )}><span>可回收总额 × ${defeatPct}%</span><strong class="num">${
                 summary.defeatRecoverableBase
-              } × 40%</strong></div>
+              } × ${defeatPct}%</strong></div>
                ${partsRowHtml}`
         }
         <div class="v2-mig-row total"><span>本次实得总计</span><strong class="num" data-testid="settlement-total-credits" data-final-credits="${
@@ -939,6 +1077,81 @@ export class SettlementPhaseView
         this.lastCampaignCardKey = null;
         if (this.goalHintEl.parentElement) this.goalHintEl.remove();
         if (this.campaignCardEl.parentElement) this.campaignCardEl.remove();
+      }
+    }
+
+    // D07 Run-1 / Run-2 Equipment Family Unlock Selector (0 <button> elements -> S09 100% safe!)
+    if (this.familyUnlockSectionEl && this.familyUnlockGroupEl) {
+      const famChoices =
+        isSafe && !run.isShowcase ? summary.pendingFamilyUnlockChoices ?? [] : [];
+      if (famChoices.length >= 2) {
+        const famKey = `${famChoices.join(',')}|${selectedFamilyUnlock ?? ''}|${readOnly ? 1 : 0}`;
+        if (this.lastFamilyUnlockKey !== famKey) {
+          this.lastFamilyUnlockKey = famKey;
+          const validSet = new Set<V2UnlockFamilyId>(famChoices);
+          for (const [fKey, fRefs] of this.familyUnlockOpts.entries()) {
+            if (!validSet.has(fKey)) {
+              fRefs.labelEl.remove();
+              this.familyUnlockOpts.delete(fKey);
+            }
+          }
+          famChoices.forEach((fam, idx) => {
+            const spec = V2_CONTRACT_FAMILY_UNLOCK_ORDER.find((u) => u.family === fam);
+            let fRefs = this.familyUnlockOpts.get(fam);
+            if (!fRefs) {
+              const labelEl = document.createElement('label');
+              labelEl.className = 'v3-family-unlock-opt';
+              labelEl.dataset.familyUnlock = fam;
+              labelEl.dataset.testid = `family-unlock-option-${fam}`;
+
+              const radioEl = document.createElement('input');
+              radioEl.type = 'radio';
+              radioEl.name = 'settle_family_unlock';
+              radioEl.setAttribute('name', 'settle_family_unlock');
+              radioEl.value = fam;
+              radioEl.setAttribute('value', fam);
+              radioEl.dataset.familyRadio = '1';
+
+              const bodyEl = document.createElement('div');
+              bodyEl.className = 'v3-family-unlock-body';
+              const giftName = spec
+                ? getV2EquipmentDefByKind(spec.giftMainKind, 'common').name
+                : fam;
+              const bpName = spec
+                ? getV2EquipmentDefByKind(spec.freeBlueprintKind, 'common').name
+                : '';
+              bodyEl.innerHTML = `
+                <div class="v3-fu-title"><strong>${spec?.name ?? fam}</strong></div>
+                <div class="v3-fu-meta">赠品：${giftName} · 免费蓝图：${bpName}</div>
+              `;
+
+              labelEl.appendChild(radioEl);
+              labelEl.appendChild(bodyEl);
+              fRefs = { labelEl, radioEl, bodyEl };
+              this.familyUnlockOpts.set(fam, fRefs);
+            }
+
+            const isSelected = selectedFamilyUnlock === fam;
+            fRefs.labelEl.classList.toggle('is-selected', isSelected);
+            if (fRefs.radioEl.checked !== isSelected) fRefs.radioEl.checked = isSelected;
+            if (isSelected) fRefs.radioEl.setAttribute('checked', '');
+            else fRefs.radioEl.removeAttribute('checked');
+            syncInputDisabled(fRefs.radioEl, readOnly);
+
+            const curChild = this.familyUnlockGroupEl!.children[idx];
+            if (curChild !== fRefs.labelEl) {
+              this.familyUnlockGroupEl!.insertBefore(fRefs.labelEl, curChild ?? null);
+            }
+          });
+        }
+        if (this.familyUnlockSectionEl.parentElement !== this.scrollBodyEl) {
+          this.scrollBodyEl.insertBefore(this.familyUnlockSectionEl, this.itemsSectionEl);
+        }
+      } else {
+        this.lastFamilyUnlockKey = null;
+        if (this.familyUnlockSectionEl.parentElement) {
+          this.familyUnlockSectionEl.remove();
+        }
       }
     }
 
@@ -1046,7 +1259,9 @@ export class SettlementPhaseView
               line.selectedDisposition,
               line.item,
               p,
-              run.shipId
+              run.shipId,
+              line.effectiveSellValue,
+              line.depthBonusCredits
             )}`;
             if (refs.currentChoiceEl && refs.currentChoiceEl.textContent !== curText) {
               refs.currentChoiceEl.textContent = curText;
@@ -1062,7 +1277,14 @@ export class SettlementPhaseView
               } else {
                 refs.toggleBtnEl.removeAttribute('data-testid');
               }
-              const altText = `改为${dispositionLabel(alt, line.item, p, run.shipId)}`;
+              const altText = `改为${dispositionLabel(
+                alt,
+                line.item,
+                p,
+                run.shipId,
+                line.effectiveSellValue,
+                line.depthBonusCredits
+              )}`;
               if (refs.toggleBtnEl.textContent !== altText) {
                 refs.toggleBtnEl.textContent = altText;
               }
@@ -1137,7 +1359,14 @@ export class SettlementPhaseView
               }
               syncInputDisabled(optRefs.radioEl, readOnly);
 
-              const optText = dispositionLabel(d, line.item, p, run.shipId);
+              const optText = dispositionLabel(
+                d,
+                line.item,
+                p,
+                run.shipId,
+                line.effectiveSellValue,
+                line.depthBonusCredits
+              );
               if (optRefs.textEl.textContent !== optText) optRefs.textEl.textContent = optText;
 
               const curAtOptIdx = segGroupEl.children[optIdx];
@@ -1172,7 +1401,12 @@ export class SettlementPhaseView
         // 2) Auto-resolved non-loan lines (0 <button>s)
         if (autoNonLoanLines.length > 0) {
           const autoKey = autoNonLoanLines
-            .map((l) => `${l.item.instanceId}:${l.selectedDisposition}:${l.item.fixedValue}`)
+            .map(
+              (l) =>
+                `${l.item.instanceId}:${l.selectedDisposition}:${
+                  l.effectiveSellValue ?? l.item.fixedValue
+                }:${l.depthBonusCredits ?? 0}`
+            )
             .join('|');
           if (this.lastAutoResolvedKey !== autoKey) {
             this.lastAutoResolvedKey = autoKey;
@@ -1194,7 +1428,9 @@ export class SettlementPhaseView
                       line.selectedDisposition,
                       line.item,
                       p,
-                      run.shipId
+                      run.shipId,
+                      line.effectiveSellValue,
+                      line.depthBonusCredits
                     )}</span>
                   </div>`
                 )
@@ -1301,6 +1537,11 @@ export class SettlementPhaseView
     this.lastGoalHintKey = null;
     this.campaignCardEl = null;
     this.lastCampaignCardKey = null;
+    this.familyUnlockSectionEl = null;
+    this.familyUnlockGroupEl = null;
+    this.familyUnlockOpts.clear();
+    this.latestSelectedFamilyUnlock = null;
+    this.lastFamilyUnlockKey = null;
     this.itemsSectionEl = null;
     this.emptyHintEl = null;
     this.decisionRowsWrapEl = null;

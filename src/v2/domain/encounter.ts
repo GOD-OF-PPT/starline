@@ -1,20 +1,21 @@
 import {
   V2_CARGO_DEFS,
-  V2_EXTENDED_RELIC_CARGO_KINDS,
-  V2_REGULAR_CARGO_KINDS,
   computeV2CargoPrice,
 } from '../data/cargo';
 import { buildSectorEnemyEncounter, isActBossEncounterKind } from '../data/enemies';
 import {
+  V2_MAX_POST_WIN_REPAIR,
   getMerchantBuybackPrice,
   getUnlockedEquipmentKinds,
+  getV2EquipmentDefByKind,
   type V2EquipmentKind,
   type V2Quality,
   type V2UnlockFamilyId,
 } from '../data/equipment';
 import { getV3GadgetDef } from '../data/gadgets';
 import { getV3SectorDef } from '../data/sectors';
-import { calculateV2BuildStats } from './buildStatsV2';
+import { V2_SHAPES, type V2ShapeId } from '../data/shapes';
+import { calculateV2BuildStats, evaluateV2RewardSynergies } from './buildStatsV2';
 import {
   computeV2JumpFuelCost,
   freezeRunBonusObjectiveForSettlement,
@@ -36,15 +37,24 @@ import {
   getEffectiveMerchantEquipmentPrice,
   getEffectiveMerchantServicePrice,
 } from './factions';
-import { addV2ItemToStaging, removeV2ItemById } from './inventoryV2';
-import { createV2CargoInstance, createV2EquipmentInstance } from './itemCatalog';
+import {
+  addV2ItemToStaging,
+  canFitAllV2Shapes,
+  composeConflictCargoBundle,
+  getV2BayOccupancy,
+  pickConflictInducingEquipmentKinds,
+  removeV2ItemById,
+} from './inventoryV2';
+import { createV2CargoInstance, createV2EquipmentInstance, getAnyV2ItemDef } from './itemCatalog';
 import { withV2Stream } from './rngStreams';
 import type {
   V2CombatPayload,
   V2CombatRewardBundle,
+  V2EventState,
   V2ItemInstance,
   V2MapNode,
   V2ProfileState,
+  V2RewardChoiceId,
   V2RngStreams,
   V2RunState,
   V2WreckSpotId,
@@ -69,8 +79,60 @@ export interface V2ActionOutcome {
 
 export interface V3WreckCutOutcome extends V2ActionOutcome {
   readonly ambushTriggered?: boolean;
+  readonly collapsed?: boolean;
   readonly tookHazard?: boolean;
   readonly summaryText?: string;
+}
+
+export type V2SafeReturnMode = 'beacon_free' | 'emergency_tow' | 'stranded_tow';
+
+export interface V2SafeReturnStatus {
+  readonly mode: V2SafeReturnMode;
+  readonly isFreeBeacon: boolean;
+  readonly isStranded: boolean;
+  readonly canReturnNow: boolean;
+  readonly blockedReason?: string;
+  /** 0 for beacon_free; 0.35 (-35% tow fee) for emergency_tow / stranded_tow */
+  readonly towPenaltyRate: number;
+  readonly nextBeaconLayer: number | null;
+}
+
+function getUpcomingContractMissionShapes(run: V2RunState, node: V2MapNode): V2ShapeId[] {
+  if (
+    !node.contractMarker ||
+    run.contract.status !== 'active' ||
+    !run.contract.missionItemDefId ||
+    run.contract.missionItemCount <= 0
+  ) {
+    return [];
+  }
+  const def = V2_CARGO_DEFS[run.contract.missionItemDefId];
+  if (!def) return [];
+  const shapes: V2ShapeId[] = [];
+  for (let i = 0; i < run.contract.missionItemCount; i += 1) {
+    shapes.push(def.shapeId);
+  }
+  return shapes;
+}
+
+function formatWreckCargoSizeRange(items: readonly V2ItemInstance[]): string {
+  const counts = items.map((it) => {
+    const def = V2_CARGO_DEFS[it.definitionId];
+    return def ? V2_SHAPES[def.shapeId].cells.length : 2;
+  });
+  const min = Math.min(...counts);
+  const max = Math.max(...counts);
+  const range = min === max ? `${min} 格` : `${min}–${max} 格`;
+  return `${items.length} 件（单件 ${range}）`;
+}
+
+function formatWreckCargoValueRange(items: readonly V2ItemInstance[]): string {
+  const vals = items.map((it) => it.fixedValue);
+  const total = vals.reduce((s, v) => s + v, 0);
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  const range = min === max ? `${min}¤` : `${min}–${max}¤`;
+  return `合计 ${total}¤（${range}）`;
 }
 
 export function getReachableNextNodeIds(run: V2RunState): readonly string[] {
@@ -194,14 +256,206 @@ export function selectV2MapNode(
 
   let nextStreams = run.rngStreams;
   let activeWreck: V2WreckState | null = null;
-  let activeEvent = null;
+  let activeEvent: V2EventState | null = null;
+  let updatedTargetNode: V2MapNode = node;
+  const shouldCalibrateConflict =
+    !run.isTutorial &&
+    !run.isShowcase &&
+    (run.spatialConflictCount ?? 0) === 0 &&
+    run.bay.placed.length > 0 &&
+    !node.resolved;
+  const sector = getV3SectorDef(run.sectorId);
 
   if (node.type === 'wreck' && node.wreck) {
-    const built = buildActiveWreckStateForNode(run, node, options?.profile);
+    // D06 Hook 1: Dynamically calibrate wreck cargo/armory on node entry (persisted to graph & activeWreck!)
+    if (shouldCalibrateConflict && !run.activeWreck) {
+      const missionShapes = getUpcomingContractMissionShapes(run, node);
+      const relicExisting =
+        node.hasRelicSignal && node.relicSignalDefId
+          ? node.wreck.cargoItems.filter((c) => c.definitionId === node.relicSignalDefId)
+          : [];
+      const unlockedKinds = getUnlockedEquipmentKinds(
+        options?.profile?.unlockedFamilies ?? ['core']
+      );
+      const occ = getV2BayOccupancy(run.bay);
+      const freeCells = Math.max(0, occ.totalCells - occ.occupiedCells);
+
+      const calibrated = withV2Stream(nextStreams, 'events', (rng) => {
+        const cargoBundle = composeConflictCargoBundle({
+          shipId: run.bay.shipId,
+          placedItems: run.bay.placed,
+          extraCommittedShapes: missionShapes,
+          existingItems: relicExisting,
+          layer: node.layer,
+          sectorPriceMult: sector.cargoPriceMult,
+          maxItems: 3,
+          minItems: 2,
+          rng,
+          idPrefix: `${run.runId}_d06_wrk_${node.nodeId}`,
+        });
+
+        let armoryItem = node.wreck!.armoryItem;
+        if (!node.hasSupportGuarantee && freeCells <= 4) {
+          const conflictKinds = pickConflictInducingEquipmentKinds(
+            run.bay.shipId,
+            run.bay.placed,
+            missionShapes,
+            unlockedKinds
+          );
+          if (conflictKinds.length > 0) {
+            const pickedKind = rng.pick(conflictKinds);
+            armoryItem = createV2EquipmentInstance({
+              instanceId: `${run.runId}_d06_wrkeq_${node.nodeId}`,
+              kind: pickedKind,
+              quality: armoryItem.quality,
+              origin: 'loot',
+              acquiredDepth: node.layer,
+              location: 'staging',
+            });
+          }
+        }
+        return { cargoItems: cargoBundle.items, armoryItem };
+      });
+
+      nextStreams = calibrated.nextStreams;
+      const eqDef = getAnyV2ItemDef(calibrated.value.armoryItem.definitionId);
+      const eqCells = eqDef ? V2_SHAPES[eqDef.shapeId].cells.length : 2;
+      updatedTargetNode = {
+        ...node,
+        wreck: {
+          ...node.wreck,
+          armoryItem: calibrated.value.armoryItem,
+          cargoItems: calibrated.value.cargoItems,
+          armorySizeRange: `${eqCells} 格设备`,
+          armoryValueRange: `回收 ${calibrated.value.armoryItem.fixedValue}¤`,
+          cargoSizeRange: formatWreckCargoSizeRange(calibrated.value.cargoItems),
+          cargoValueRange: formatWreckCargoValueRange(calibrated.value.cargoItems),
+        },
+      };
+    }
+
+    const built = buildActiveWreckStateForNode(
+      { ...run, rngStreams: nextStreams },
+      updatedTargetNode,
+      options?.profile
+    );
     activeWreck = built.wreck;
     nextStreams = built.nextStreams;
   } else if (node.type === 'anomaly' || node.type === 'distress') {
-    activeEvent = node.eventState ?? buildFallbackEventStateFromLegacyNode(run, node);
+    let baseEvent = node.eventState ?? buildFallbackEventStateFromLegacyNode(run, node);
+
+    // D06 Hook 2: Dynamically calibrate cargo-granting event options on L2+ entry (reload-safe!)
+    if (shouldCalibrateConflict && !run.activeEvent && node.layer >= 2 && baseEvent) {
+      const missionShapes = getUpcomingContractMissionShapes(run, node);
+      const calibratedEv = withV2Stream(nextStreams, 'events', (rng) => {
+        const nextOptions = baseEvent!.options.map((opt) => {
+          const hasCargoReward = Boolean(
+            opt.rewardItems &&
+              opt.rewardItems.length > 0 &&
+              opt.rewardItems.every((it) => it.category === 'cargo')
+          );
+          const isMarkedRescueGift =
+            !hasCargoReward &&
+            !opt.isFallback &&
+            node.layer >= 3 &&
+            node.contractMarker &&
+            run.contract.type === 'rescue' &&
+            (!opt.rewardItems || opt.rewardItems.length === 0);
+          if (!hasCargoReward && !isMarkedRescueGift) return opt;
+
+          const existingRewardItems = opt.rewardItems ?? [];
+          const relicExisting =
+            node.hasRelicSignal && node.relicSignalDefId
+              ? existingRewardItems.filter((it) => it.definitionId === node.relicSignalDefId)
+              : [];
+          const bundle = composeConflictCargoBundle({
+            shipId: run.bay.shipId,
+            placedItems: run.bay.placed,
+            extraCommittedShapes: missionShapes,
+            existingItems: relicExisting,
+            layer: node.layer,
+            sectorPriceMult: sector.cargoPriceMult,
+            maxItems: isMarkedRescueGift
+              ? 3
+              : Math.max(2, Math.min(3, existingRewardItems.length + 1)),
+            minItems: Math.max(1, existingRewardItems.length),
+            forceConflict: isMarkedRescueGift,
+            rng,
+            idPrefix: `${run.runId}_d06_evt_${node.nodeId}_${opt.index}`,
+          });
+          return {
+            ...opt,
+            rewardItems: bundle.items,
+          };
+        });
+
+        let nextAnomaly = node.anomaly;
+        if (node.type === 'anomaly' && node.anomaly) {
+          const relicExisting =
+            node.hasRelicSignal && node.relicSignalDefId
+              ? node.anomaly.breachCargoItems.filter((it) => it.definitionId === node.relicSignalDefId)
+              : [];
+          const breachBundle = composeConflictCargoBundle({
+            shipId: run.bay.shipId,
+            placedItems: run.bay.placed,
+            extraCommittedShapes: missionShapes,
+            existingItems: relicExisting,
+            layer: node.layer,
+            sectorPriceMult: sector.cargoPriceMult,
+            maxItems: 3,
+            minItems: 2,
+            rng,
+            idPrefix: `${run.runId}_d06_anom_${node.nodeId}`,
+          });
+          nextAnomaly = {
+            ...node.anomaly,
+            breachCargoItems: breachBundle.items,
+          };
+        }
+
+        let nextDistress = node.distress;
+        if (
+          node.type === 'distress' &&
+          node.distress &&
+          !(node.hasRelicSignal && node.distress.haulCargoItem.definitionId === node.relicSignalDefId)
+        ) {
+          const haulBundle = composeConflictCargoBundle({
+            shipId: run.bay.shipId,
+            placedItems: run.bay.placed,
+            extraCommittedShapes: missionShapes,
+            layer: node.layer,
+            sectorPriceMult: sector.cargoPriceMult,
+            maxItems: 1,
+            minItems: 1,
+            rng,
+            idPrefix: `${run.runId}_d06_dist_${node.nodeId}`,
+          });
+          if (haulBundle.items[0]) {
+            nextDistress = {
+              ...node.distress,
+              haulCargoItem: haulBundle.items[0],
+            };
+          }
+        }
+
+        return {
+          eventState: { ...baseEvent!, options: nextOptions },
+          anomaly: nextAnomaly,
+          distress: nextDistress,
+        };
+      });
+
+      nextStreams = calibratedEv.nextStreams;
+      baseEvent = calibratedEv.value.eventState;
+      updatedTargetNode = {
+        ...node,
+        ...(calibratedEv.value.anomaly ? { anomaly: calibratedEv.value.anomaly } : {}),
+        ...(calibratedEv.value.distress ? { distress: calibratedEv.value.distress } : {}),
+        eventState: baseEvent,
+      };
+    }
+
+    activeEvent = baseEvent;
   }
 
   const nextDiscardedCount =
@@ -211,10 +465,19 @@ export function selectV2MapNode(
       ? { ...run.bay, discardedThisArrange: [] }
       : run.bay;
 
+  const nextGraph =
+    updatedTargetNode === node
+      ? run.graph
+      : {
+          ...run.graph,
+          nodes: { ...run.graph.nodes, [targetNodeId]: updatedTargetNode },
+        };
+
   return {
     ok: true,
     run: {
       ...run,
+      graph: nextGraph,
       rngStreams: nextStreams,
       fuel: run.fuel - fuelCalc.totalCost,
       navigatorFreeJumpUsed: run.navigatorFreeJumpUsed || fuelCalc.navigatorDiscountApplied,
@@ -447,11 +710,13 @@ export function cutV2WreckHotspot(
       ? [spot.rewardItem]
       : [];
 
+  const newlyLootedIds: string[] = [];
   for (const rawItem of itemsToStage) {
     const alreadyStaged = nextBay.staging.some((s) => s.item.instanceId === rawItem.instanceId);
     if (!alreadyStaged) {
       const stagedItem: V2ItemInstance = { ...rawItem, location: 'staging' };
       nextBay = addV2ItemToStaging(nextBay, stagedItem, 0);
+      newlyLootedIds.push(stagedItem.instanceId);
       if (stagedItem.category === 'equipment') {
         acquiredEquips.push(stagedItem);
         if (node.layer <= 3) {
@@ -478,6 +743,7 @@ export function cutV2WreckHotspot(
   }
 
   // Reactor bonus fuel/repair ONLY if hotspot explicitly defines reactorFuelGain / reactorRepairGain
+  // D04 restrained healing: Salvager T2 adds +1 HP (5->6) on multi-cut reactor repair
   if (spotId === 'reactor' && ((spot.reactorFuelGain ?? 0) > 0 || (spot.reactorRepairGain ?? 0) > 0)) {
     const salvagerT2 = run.crewId === 'salvager' && (run.crewMasteryTier ?? 0) >= 2;
     const fuelCapGain =
@@ -486,7 +752,7 @@ export function cutV2WreckHotspot(
         : 0;
     const repairCapGain =
       (spot.reactorRepairGain ?? 0) > 0
-        ? Math.min((spot.reactorRepairGain ?? 0) + (salvagerT2 ? 2 : 0), run.maxHp - nextHp)
+        ? Math.min((spot.reactorRepairGain ?? 0) + (salvagerT2 ? 1 : 0), run.maxHp - nextHp)
         : 0;
 
     if (reactorMode === 'repair' && repairCapGain > 0) {
@@ -513,7 +779,7 @@ export function cutV2WreckHotspot(
 
   const stabilizerConsumed = !evalRes.isFirstSafeCut && Boolean(wreck.stabilizerActive);
   if (stabilizerConsumed) {
-    summaryParts.push('切割稳定器护航生效（免伤防伏击）');
+    summaryParts.push('切割稳定器护航生效（免伤防伏击防坍塌）');
   }
 
   const nextHotspots = wreck.hotspots.map((h) =>
@@ -523,6 +789,45 @@ export function cutV2WreckHotspot(
   const nextCutsMade = wreck.cutsMade + 1;
   let summaryText = summaryParts.join(' · ');
 
+  let nextWreckLootIds = Array.from(
+    new Set([...(wreck.wreckLootInstanceIds ?? []), ...newlyLootedIds])
+  );
+
+  // D05 Deterministic Structural Collapse (Cut #1 & Stabilizer 100% safe!)
+  let collapsed = false;
+  if (!evalRes.isFirstSafeCut && !stabilizerConsumed) {
+    if (nextStability <= 0) {
+      collapsed = true;
+    } else if (nextStability < 30 && (evalRes.collapseRiskPct ?? 0) > 0) {
+      const collapseRoll = withV2Stream(nextStreams, 'events', (rng) =>
+        rng.nextFloat() * 100 < (evalRes.collapseRiskPct ?? 0)
+      );
+      nextStreams = collapseRoll.nextStreams;
+      collapsed = collapseRoll.value;
+    }
+  }
+
+  let nextEngineerOffer = run.activeEngineerOffer;
+  if (collapsed) {
+    // Forfeit ONLY unextracted staged items from THIS wreck (placed ship gear & mission items stay 100% intact!)
+    const forfeitedSet = new Set(nextWreckLootIds);
+    const lostCount = nextBay.staging.filter((s) => forfeitedSet.has(s.item.instanceId)).length;
+    nextBay = {
+      ...nextBay,
+      staging: nextBay.staging.filter((s) => !forfeitedSet.has(s.item.instanceId)),
+    };
+    if (nextEngineerOffer && forfeitedSet.has(nextEngineerOffer.targetInstanceId)) {
+      nextEngineerOffer = { ...nextEngineerOffer, used: true };
+    }
+    // Minor structural shock clamped so hp >= 1 (NEVER violates lethal-cut guard!)
+    const shockDamage = nextHp > 1 ? Math.min(3, nextHp - 1) : 0;
+    nextHp = Math.max(1, nextHp - shockDamage);
+    nextWreckLootIds = [];
+    summaryText = `${summaryText} · 残骸结构坍塌！本船暂存物资损失 ${lostCount} 件${
+      shockDamage > 0 ? `，受震荡 -${shockDamage} HP` : ''
+    }，剩余舱室已封锁。`;
+  }
+
   let ambushTriggered = false;
   let updatedNode: V2MapNode = node;
   let nextWreck: V2WreckState = {
@@ -531,6 +836,8 @@ export function cutV2WreckHotspot(
     cutsMade: nextCutsMade,
     hotspots: nextHotspots,
     stabilizerActive: stabilizerConsumed ? false : wreck.stabilizerActive,
+    collapsed,
+    wreckLootInstanceIds: nextWreckLootIds,
     lastCutSummary: summaryText,
   };
   let nextChargesMax = run.tacticalChargesMax;
@@ -587,6 +894,7 @@ export function cutV2WreckHotspot(
     salvagePartsEarned: nextParts,
     bay: nextBay,
     activeWreck: nextWreck,
+    activeEngineerOffer: nextEngineerOffer,
     claimedEventIds: [...run.claimedEventIds, claimKey],
     recentEquipmentKinds: nextRecentKinds.slice(-4),
     tacticalChargesMax: nextChargesMax,
@@ -598,15 +906,18 @@ export function cutV2WreckHotspot(
     },
   };
 
-  for (const eq of acquiredEquips) {
-    nextRun = maybeCreateEngineerSwapOffer(nextRun, eq, unlockedFamilies);
+  if (!collapsed) {
+    for (const eq of acquiredEquips) {
+      nextRun = maybeCreateEngineerSwapOffer(nextRun, eq, unlockedFamilies);
+    }
   }
 
   return {
     ok: true,
     run: nextRun,
     ambushTriggered,
-    tookHazard: evalRes.effectiveHullDamage > 0 || evalRes.effectiveFuelCost > 0,
+    collapsed,
+    tookHazard: collapsed || evalRes.effectiveHullDamage > 0 || evalRes.effectiveFuelCost > 0,
     summaryText,
   };
 }
@@ -923,13 +1234,18 @@ export function abandonV2EventAndReturn(run: V2RunState): V2ActionOutcome {
   ) {
     return { ok: false, run, error: '战斗节点或残骸伏击战斗不可按非战斗事件放弃' };
   }
+  const isFreeReturnNode = Boolean(node.isBeacon) || isAtTerminalLayer(run);
   const updatedNode: V2MapNode = { ...node, abandoned: true, resolved: false };
   const nextRun = freezeRunBonusObjectiveForSettlement(
     {
       ...run,
+      bay: { ...run.bay, staging: [], discardedThisArrange: [] },
+      activeEngineerOffer: null,
       activeWreck: null,
       activeEvent: null,
       lockedEnemyId: null,
+      emergencyTowUsed: !isFreeReturnNode,
+      returnMode: isFreeReturnNode ? 'beacon_free' : 'emergency_tow',
       phase: 'SETTLEMENT',
       settlementReason: 'safe_return',
       graph: {
@@ -1175,8 +1491,12 @@ export function finishV2MerchantVisit(run: V2RunState): V2ActionOutcome {
 }
 
 /**
- * Generates deterministic 3-choice post-combat rewards (1 equipment, 1 cargo, 1 repair +10).
- * Respects guaranteedSupportKind on designated nodes and prevents 3 consecutive identical equipment types in L1-L3!
+ * Generates deterministic D07 3-equipment synergy-tagged post-combat rewards (repairAmount = 0):
+ * - Picks 3 distinct unlocked equipment kinds honoring AC05 `guaranteedSupportKind`, L1-L3 anti-repeat,
+ *   live-bay synergy relevance, and D06 spatial conflict sizing.
+ * - Preserves guaranteed relics on `hasRelicSignal` nodes (Tutorial L4B `ancient_navigator` & pity signals)
+ *   in BOTH `bonusLootItems` AND `cargoOption` mirror.
+ * - Attaches D06 conflict-guarantee salvage crates into `bonusLootItems` on L3+ (or L2 marked) when needed.
  */
 export function generateV2CombatRewardBundle(
   run: V2RunState,
@@ -1186,6 +1506,16 @@ export function generateV2CombatRewardBundle(
 ): { readonly bundle: V2CombatRewardBundle; readonly nextStreams: V2RngStreams } {
   const combat = node.combat!;
   const unlockedKinds = getUnlockedEquipmentKinds(unlockedFamilies);
+  const sector = getV3SectorDef(run.sectorId);
+  const isElite = node.type === 'elite' || node.type === 'boss';
+  const buildStats = calculateV2BuildStats(run.bay);
+  const repairAlreadyCapped = buildStats.rawRepair >= V2_MAX_POST_WIN_REPAIR;
+  const shouldCalibrateConflict =
+    !run.isTutorial &&
+    !run.isShowcase &&
+    (run.spatialConflictCount ?? 0) === 0 &&
+    run.bay.placed.length > 0;
+  const missionShapes = getUpcomingContractMissionShapes(run, node);
 
   const draw = withV2Stream(run.rngStreams, 'rewards', (rng) => {
     const blockedKind: V2EquipmentKind | null =
@@ -1196,71 +1526,186 @@ export function generateV2CombatRewardBundle(
         ? recentEquipmentKinds[recentEquipmentKinds.length - 1]
         : null;
 
-    let eqKind: V2EquipmentKind;
-    if (combat.guaranteedSupportKind && combat.guaranteedSupportKind !== blockedKind) {
-      eqKind = combat.guaranteedSupportKind;
-    } else {
-      let pool = [...unlockedKinds];
-      if (blockedKind) {
+    const pickedKinds: V2EquipmentKind[] = [];
+    const conflictKinds = shouldCalibrateConflict
+      ? pickConflictInducingEquipmentKinds(
+          run.bay.shipId,
+          run.bay.placed,
+          missionShapes,
+          unlockedKinds
+        )
+      : [];
+
+    const availablePool = (excludeBlocked: boolean): V2EquipmentKind[] => {
+      let pool = unlockedKinds.filter((k) => !pickedKinds.includes(k));
+      if (excludeBlocked && blockedKind) {
         const filtered = pool.filter((k) => k !== blockedKind);
         if (filtered.length > 0) pool = filtered;
       }
-      eqKind = rng.pick(pool);
+      return pool;
+    };
+
+    // Slot 0: honor AC05 guaranteedSupportKind unless suppressed by L1-L3 anti-repeat guard
+    if (combat.guaranteedSupportKind && combat.guaranteedSupportKind !== blockedKind) {
+      pickedKinds.push(combat.guaranteedSupportKind);
+    } else {
+      const pool0 = availablePool(true);
+      const conflict0 = pool0.filter((k) => conflictKinds.includes(k));
+      if (conflict0.length > 0) {
+        pickedKinds.push(rng.pick(conflict0));
+      } else {
+        pickedKinds.push(rng.pick(pool0));
+      }
     }
 
-    const quality: V2Quality =
-      run.allowImproved && rng.nextFloat() < combat.improvedProb ? 'improved' : 'common';
-    const equipmentOption = createV2EquipmentInstance({
-      instanceId: `${run.runId}_rew_eq_${node.nodeId}`,
-      kind: eqKind,
-      quality,
-      origin: 'loot',
-      acquiredDepth: node.layer,
-      location: 'staging',
-    });
+    // Slot 1: prefer a distinct kind with active bay synergy if Slot 0 has none (buildcraft clarity!)
+    const slot0HasSynergy = evaluateV2RewardSynergies(
+      run.bay,
+      getV2EquipmentDefByKind(pickedKinds[0], 'common').defId
+    ).hasSynergy;
+    const pool1 = availablePool(true);
+    if (!slot0HasSynergy) {
+      const synCandidates = pool1.filter(
+        (k) =>
+          evaluateV2RewardSynergies(
+            run.bay,
+            getV2EquipmentDefByKind(k, 'common').defId
+          ).hasSynergy
+      );
+      if (synCandidates.length > 0) {
+        pickedKinds.push(rng.pick(synCandidates));
+      } else if (pool1.length > 0) {
+        pickedKinds.push(rng.pick(pool1));
+      }
+    } else if (pool1.length > 0) {
+      const conflict1 = pool1.filter((k) => conflictKinds.includes(k));
+      pickedKinds.push(conflict1.length > 0 ? rng.pick(conflict1) : rng.pick(pool1));
+    }
 
-    const sector = getV3SectorDef(run.sectorId);
-    const isElite = node.type === 'elite' || node.type === 'boss';
-    let cargoDefId: string;
+    // Slot 2: distinct kind (prefer conflict-inducing or larger unlocked shape when D06 active; down-weight redundant repair)
+    const pool2Raw = availablePool(true);
+    let pool2 = pool2Raw;
+    if (repairAlreadyCapped && pool2.length > 1) {
+      const noRep = pool2.filter((k) => k !== 'repair');
+      if (noRep.length > 0) pool2 = noRep;
+    }
+    if (pool2.length > 0) {
+      const conflict2 = pool2.filter((k) => conflictKinds.includes(k));
+      if (conflict2.length > 0) {
+        pickedKinds.push(rng.pick(conflict2));
+      } else if (shouldCalibrateConflict) {
+        const larger = pool2.filter(
+          (k) => V2_SHAPES[getV2EquipmentDefByKind(k, 'common').shapeId].cells.length >= 2
+        );
+        pickedKinds.push(larger.length > 0 ? rng.pick(larger) : rng.pick(pool2));
+      } else {
+        pickedKinds.push(rng.pick(pool2));
+      }
+    }
+
+    // Safety backfill if unlocked pool ever has < 3 distinct kinds
+    while (pickedKinds.length < 3 && unlockedKinds.length > 0) {
+      const rest = availablePool(false);
+      pickedKinds.push(rest.length > 0 ? rng.pick(rest) : rng.pick(unlockedKinds));
+    }
+
+    // Roll qualities independently per slot; guarantee >= 1 improved on elite/boss when allowImproved
+    const qualities: V2Quality[] = pickedKinds.map(() =>
+      run.allowImproved && rng.nextFloat() < combat.improvedProb ? 'improved' : 'common'
+    );
+    if (isElite && run.allowImproved && !qualities.includes('improved') && qualities.length > 0) {
+      qualities[0] = 'improved';
+    }
+
+    const equipmentOptions: V2ItemInstance[] = pickedKinds.map((kind, idx) =>
+      createV2EquipmentInstance({
+        instanceId: `${run.runId}_rew_eq_${node.nodeId}_${idx}`,
+        kind,
+        quality: qualities[idx],
+        origin: 'loot',
+        acquiredDepth: node.layer,
+        location: 'staging',
+      })
+    );
+
+    const bonusLootItems: V2ItemInstance[] = [];
+    let guaranteedRelicItem: V2ItemInstance | null = null;
     if (
       node.hasRelicSignal &&
       node.relicSignalDefId &&
       Object.prototype.hasOwnProperty.call(V2_CARGO_DEFS, node.relicSignalDefId)
     ) {
-      cargoDefId = node.relicSignalDefId;
-    } else if (
-      node.layer >= 4 &&
-      rng.nextFloat() < (isElite ? Math.max(0.25, sector.relicDropChanceDeep + 0.13) : sector.relicDropChanceDeep)
-    ) {
-      if (sector.signatureRelicIds.length > 0 && rng.nextFloat() < 0.7) {
-        const sigDefId = `cargo.${rng.pick(sector.signatureRelicIds)}`;
-        cargoDefId = Object.prototype.hasOwnProperty.call(V2_CARGO_DEFS, sigDefId)
-          ? sigDefId
-          : `cargo.${rng.pick(V2_EXTENDED_RELIC_CARGO_KINDS)}`;
-      } else {
-        cargoDefId = `cargo.${rng.pick(V2_EXTENDED_RELIC_CARGO_KINDS)}`;
-      }
-    } else {
-      cargoDefId = `cargo.${rng.pick(V2_REGULAR_CARGO_KINDS)}`;
+      const scaledVal =
+        sector.cargoPriceMult === 1
+          ? undefined
+          : Math.max(
+              1,
+              Math.round(computeV2CargoPrice(node.relicSignalDefId, node.layer) * sector.cargoPriceMult)
+            );
+      guaranteedRelicItem = createV2CargoInstance({
+        instanceId: `${run.runId}_rew_relic_${node.nodeId}`,
+        defId: node.relicSignalDefId,
+        origin: 'loot',
+        acquiredDepth: node.layer,
+        location: 'staging',
+        fixedValueOverride: scaledVal,
+      });
+      bonusLootItems.push(guaranteedRelicItem);
     }
-    const scaledCargoVal =
-      sector.cargoPriceMult === 1
-        ? undefined
-        : Math.max(1, Math.round(computeV2CargoPrice(cargoDefId, node.layer) * sector.cargoPriceMult));
-    const cargoOption = createV2CargoInstance({
-      instanceId: `${run.runId}_rew_cg_${node.nodeId}`,
-      defId: cargoDefId,
-      origin: 'loot',
-      acquiredDepth: node.layer,
-      location: 'staging',
-      fixedValueOverride: scaledCargoVal,
-    });
+
+    // D06 Hook 3: On L3+ (or L2 on spacious 18-20 cell hulls with >= 9 free cells), if even the
+    // smallest offered equipment + mission items still fit without conflict, attach 1-2 salvage crates!
+    const occNow = getV2BayOccupancy(run.bay);
+    const freeNow = Math.max(0, occNow.totalCells - occNow.occupiedCells);
+    if (shouldCalibrateConflict && (node.layer >= 3 || (node.layer === 2 && freeNow >= 9))) {
+      const eqShapes = equipmentOptions.map(
+        (eq) => getAnyV2ItemDef(eq.definitionId)?.shapeId ?? '1x1'
+      );
+      const smallestEqShape = eqShapes.reduce((minS, s) =>
+        V2_SHAPES[s].cells.length < V2_SHAPES[minS].cells.length ? s : minS
+      );
+      const placedShapes = run.bay.placed.map(
+        (p) => getAnyV2ItemDef(p.item.definitionId)?.shapeId ?? '1x1'
+      );
+      const bonusShapes = bonusLootItems.map(
+        (b) => getAnyV2ItemDef(b.definitionId)?.shapeId ?? '1x1'
+      );
+      const fitsEvenSmallest = canFitAllV2Shapes(run.bay.shipId, [
+        ...placedShapes,
+        ...missionShapes,
+        ...bonusShapes,
+        smallestEqShape,
+      ]);
+      if (fitsEvenSmallest) {
+        const extraSlots = node.layer >= 3 ? 2 : 1;
+        const salvage = composeConflictCargoBundle({
+          shipId: run.bay.shipId,
+          placedItems: run.bay.placed,
+          extraCommittedShapes: [...missionShapes, smallestEqShape],
+          existingItems: bonusLootItems,
+          layer: node.layer,
+          sectorPriceMult: sector.cargoPriceMult,
+          maxItems: bonusLootItems.length + extraSlots,
+          minItems: bonusLootItems.length + 1,
+          forceConflict: node.layer >= 3,
+          rng,
+          idPrefix: `${run.runId}_d06_rewcg_${node.nodeId}`,
+        });
+        bonusLootItems.splice(0, bonusLootItems.length, ...salvage.items);
+      }
+    }
+
+    const equipmentOption = equipmentOptions[0];
+    // Preserve cargoOption as guaranteed relic mirror (for hasRelicSignal compatibility) or primary bonus/eq fallback
+    const cargoOption = guaranteedRelicItem ?? bonusLootItems[0] ?? equipmentOption;
 
     const bundle: V2CombatRewardBundle = {
       nodeId: node.nodeId,
+      equipmentOptions,
+      ...(bonusLootItems.length > 0 ? { bonusLootItems } : {}),
       equipmentOption,
       cargoOption,
-      repairAmount: 10,
+      repairAmount: 0,
       chosen: null,
     };
     return bundle;
@@ -1271,29 +1716,88 @@ export function generateV2CombatRewardBundle(
 
 export function pickV2CombatReward(
   run: V2RunState,
-  choice: 'equipment' | 'cargo' | 'repair',
+  choice: V2RewardChoiceId,
   unlockedFamilies: readonly V2UnlockFamilyId[]
 ): V2ActionOutcome {
   if (run.phase !== 'REWARD' || !run.pendingReward || !run.currentNodeId) {
     return { ok: false, run, error: '当前不在战后三选一阶段' };
   }
   const node = run.graph.nodes[run.currentNodeId];
-  const claimKey = `reward_${run.pendingReward.nodeId}`;
-  if (run.pendingReward.chosen !== null || run.claimedEventIds.includes(claimKey)) {
+  const bundle = run.pendingReward;
+  const claimKey = `reward_${bundle.nodeId}`;
+  if (bundle.chosen !== null || run.claimedEventIds.includes(claimKey)) {
     return { ok: false, run, error: '本节点奖励已领取' };
   }
 
+  const isModern3Eq = Boolean(bundle.equipmentOptions && bundle.equipmentOptions.length > 0);
   let nextBay = run.bay;
   let nextHp = run.hp;
   let acquiredEq: V2ItemInstance | null = null;
+  let nextRecentKinds = [...(run.recentEquipmentKinds ?? [])];
 
-  if (choice === 'equipment') {
-    nextBay = addV2ItemToStaging(nextBay, run.pendingReward.equipmentOption, 0);
-    acquiredEq = run.pendingReward.equipmentOption;
+  if (choice === 'equipment_0' || choice === 'equipment_1' || choice === 'equipment_2') {
+    const idx = choice === 'equipment_0' ? 0 : choice === 'equipment_1' ? 1 : 2;
+    const picked = bundle.equipmentOptions?.[idx] ?? (idx === 0 ? bundle.equipmentOption : undefined);
+    if (!picked) {
+      return { ok: false, run, error: '目标装备选项不存在' };
+    }
+    nextBay = addV2ItemToStaging(nextBay, picked, 0);
+    acquiredEq = picked;
+    for (const bonus of bundle.bonusLootItems ?? []) {
+      if (!nextBay.staging.some((s) => s.item.instanceId === bonus.instanceId)) {
+        nextBay = addV2ItemToStaging(nextBay, bonus, 0);
+      }
+    }
+    if (node.layer <= 3) {
+      const pickedKind = picked.definitionId.split('.')[1] as V2EquipmentKind | undefined;
+      if (pickedKind) {
+        if (nextRecentKinds.length > 0) {
+          nextRecentKinds = [...nextRecentKinds.slice(0, -1), pickedKind];
+        } else {
+          nextRecentKinds = [pickedKind];
+        }
+      }
+    }
+  } else if (choice === 'equipment') {
+    const picked = bundle.equipmentOptions?.[0] ?? bundle.equipmentOption;
+    nextBay = addV2ItemToStaging(nextBay, picked, 0);
+    acquiredEq = picked;
+    for (const bonus of bundle.bonusLootItems ?? []) {
+      if (!nextBay.staging.some((s) => s.item.instanceId === bonus.instanceId)) {
+        nextBay = addV2ItemToStaging(nextBay, bonus, 0);
+      }
+    }
+  } else if (choice === 'skip') {
+    // Zero-heal skip: stages 0 equipment and 0 D06 crates, while ALWAYS preserving guaranteed collectible relics!
+    for (const bonus of bundle.bonusLootItems ?? []) {
+      const def = V2_CARGO_DEFS[bonus.definitionId];
+      if (def?.isCollectible && !nextBay.staging.some((s) => s.item.instanceId === bonus.instanceId)) {
+        nextBay = addV2ItemToStaging(nextBay, bonus, 0);
+      }
+    }
   } else if (choice === 'cargo') {
-    nextBay = addV2ItemToStaging(nextBay, run.pendingReward.cargoOption, 0);
+    if (isModern3Eq) {
+      return { ok: false, run, error: '当前版本战后奖励已改为三件装备三选一（不含单独货箱选项）' };
+    }
+    nextBay = addV2ItemToStaging(nextBay, bundle.cargoOption, 0);
+  } else if (choice === 'repair') {
+    if (isModern3Eq || (bundle.repairAmount ?? 0) <= 0) {
+      if (run.isTutorial) {
+        // Legacy tutorial compatibility alias: 0 HP healed (strictly zero-heal!) and stages guaranteed relic only
+        for (const bonus of bundle.bonusLootItems ?? []) {
+          const def = V2_CARGO_DEFS[bonus.definitionId];
+          if (def?.isCollectible && !nextBay.staging.some((s) => s.item.instanceId === bonus.instanceId)) {
+            nextBay = addV2ItemToStaging(nextBay, bonus, 0);
+          }
+        }
+      } else {
+        return { ok: false, run, error: '当前版本战后奖励已取消免费抢修，请选择装备或跳过' };
+      }
+    } else {
+      nextHp = run.hp <= 0 ? 0 : Math.min(run.maxHp, run.hp + bundle.repairAmount);
+    }
   } else {
-    nextHp = run.hp <= 0 ? 0 : Math.min(run.maxHp, run.hp + run.pendingReward.repairAmount);
+    return { ok: false, run, error: '无效的奖励选项' };
   }
 
   // Restore any loot stashed during a wreck ambush encounter back into staging!
@@ -1317,7 +1821,8 @@ export function pickV2CombatReward(
     bay: nextBay,
     activeWreck: nextActiveWreck,
     wrecksDissectedThisRun: nextWrecksDissected,
-    pendingReward: { ...run.pendingReward, chosen: choice },
+    recentEquipmentKinds: nextRecentKinds.slice(-4),
+    pendingReward: { ...bundle, chosen: choice },
     claimedEventIds: [...run.claimedEventIds, claimKey],
     graph: {
       ...run.graph,
@@ -1334,11 +1839,73 @@ export function pickV2CombatReward(
 }
 
 /**
+ * Pure D04 3-state Safe Return evaluator (`D2 = b` Beacon-only free return + non-softlock Emergency Tow):
+ * - `'beacon_free'` (0% fee): L0 orbital staging, `curNode.isBeacon === true`, or terminal layer.
+ * - `'stranded_tow'` (35% fee): non-beacon AND insufficient fuel to jump to any next node (ZERO softlock!).
+ * - `'emergency_tow'` (35% fee): non-beacon with fuel remaining (voluntary early bail-out).
+ */
+export function getV2SafeReturnStatus(run: V2RunState): V2SafeReturnStatus {
+  const curNode = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
+  const curLayer = curNode?.layer ?? 0;
+  const isFreeBeacon =
+    run.currentNodeId === null ||
+    Boolean(curNode?.isBeacon) ||
+    isAtTerminalLayer(run);
+
+  let nextBeaconLayer: number | null = null;
+  for (const n of Object.values(run.graph.nodes)) {
+    if (n.isBeacon && n.layer > curLayer) {
+      if (nextBeaconLayer === null || n.layer < nextBeaconLayer) {
+        nextBeaconLayer = n.layer;
+      }
+    }
+  }
+  if (nextBeaconLayer === null && curLayer < run.graph.maxLayers) {
+    nextBeaconLayer = run.graph.maxLayers;
+  }
+
+  const hasStaged = run.bay.staging.length > 0;
+  const phaseOk = run.phase === 'MAP' || run.phase === 'ARRANGE';
+  const blockedReason = !phaseOk
+    ? '当前阶段不可发起返航'
+    : hasStaged
+    ? `请先处理暂存区 ${run.bay.staging.length} 件物品再返航`
+    : undefined;
+
+  if (isFreeBeacon) {
+    return {
+      mode: 'beacon_free',
+      isFreeBeacon: true,
+      isStranded: false,
+      canReturnNow: phaseOk && !hasStaged,
+      ...(blockedReason ? { blockedReason } : {}),
+      towPenaltyRate: 0,
+      nextBeaconLayer,
+    };
+  }
+
+  const reachable = getReachableNextNodeIds(run);
+  const jumpCost = computeV2JumpFuelCost(run).totalCost;
+  const isStranded = reachable.length > 0 && run.fuel < jumpCost;
+
+  return {
+    mode: isStranded ? 'stranded_tow' : 'emergency_tow',
+    isFreeBeacon: false,
+    isStranded,
+    canReturnNow: phaseOk && !hasStaged,
+    ...(blockedReason ? { blockedReason } : {}),
+    towPenaltyRate: 0.35,
+    nextBeaconLayer,
+  };
+}
+
+/**
  * Finishes ARRANGE phase:
  * - Requires staging to be completely cleared
  * - Expires any unused Engineer swap offer (§6.2)
  * - Accumulates discardedCountThisRun and clears discard undo stack
- * - At terminal layer (Layer 6 or Tutorial Layer 4), automatically transitions to safe-return SETTLEMENT!
+ * - At terminal layer (Layer 6 or Tutorial Layer 4), automatically transitions to free safe-return SETTLEMENT!
+ * - Enforces D04 Beacon rule on non-terminal `'safe_return'`.
  */
 export function finishV2ArrangeAndProceed(
   run: V2RunState,
@@ -1357,7 +1924,7 @@ export function finishV2ArrangeAndProceed(
     ? { ...run.activeEngineerOffer, used: true }
     : null;
 
-  if (action === 'safe_return' || isAtTerminalLayer(run)) {
+  if (isAtTerminalLayer(run)) {
     const settlementRun = freezeRunBonusObjectiveForSettlement(
       {
         ...run,
@@ -1365,6 +1932,34 @@ export function finishV2ArrangeAndProceed(
         discardedCountThisRun: nextDiscardedCount,
         activeEngineerOffer: expiredOffer,
         lockedEnemyId: null,
+        emergencyTowUsed: false,
+        returnMode: 'beacon_free',
+        phase: 'SETTLEMENT',
+        settlementReason: 'safe_return',
+      },
+      'safe_return'
+    );
+    return { ok: true, run: settlementRun };
+  }
+
+  if (action === 'safe_return') {
+    const status = getV2SafeReturnStatus(run);
+    if (!status.isFreeBeacon) {
+      return {
+        ok: false,
+        run,
+        error: '当前不在回收信标节点，无法免费安全返航（请先返回航图前往信标或呼叫紧急拖航）',
+      };
+    }
+    const settlementRun = freezeRunBonusObjectiveForSettlement(
+      {
+        ...run,
+        bay: cleanBay,
+        discardedCountThisRun: nextDiscardedCount,
+        activeEngineerOffer: expiredOffer,
+        lockedEnemyId: null,
+        emergencyTowUsed: false,
+        returnMode: 'beacon_free',
         phase: 'SETTLEMENT',
         settlementReason: 'safe_return',
       },
@@ -1387,15 +1982,34 @@ export function finishV2ArrangeAndProceed(
 }
 
 /**
- * Initiates free safe return from MAP phase (always free via recovery beacon, §5.3!).
+ * Initiates safe return from MAP/ARRANGE phase (D04 / D2 = b):
+ * - Free at Layer 0, Recovery Beacon nodes (`isBeacon === true`), and terminal layer.
+ * - Rejects non-beacon calls unless `options?.allowEmergencyTow === true` (strict domain enforcement!).
  */
-export function initiateV2SafeReturnFromMap(run: V2RunState): V2ActionOutcome {
+export function initiateV2SafeReturnFromMap(
+  run: V2RunState,
+  options?: { readonly allowEmergencyTow?: boolean }
+): V2ActionOutcome {
   if (run.phase !== 'MAP' && run.phase !== 'ARRANGE') {
     return { ok: false, run, error: '当前阶段不可直接呼叫安全返航' };
   }
   if (run.bay.staging.length > 0) {
     return { ok: false, run, error: '请先处理暂存区物品后再返航' };
   }
+
+  const status = getV2SafeReturnStatus(run);
+  if (!status.isFreeBeacon && options?.allowEmergencyTow !== true) {
+    const hint = status.nextBeaconLayer
+      ? `（下一回收信标位于第 ${status.nextBeaconLayer} 层，或呼叫紧急拖航）`
+      : '（或呼叫紧急拖航）';
+    return {
+      ok: false,
+      run,
+      error: `当前不在回收信标节点，无法免费安全返航${hint}`,
+    };
+  }
+
+  const emergencyTowUsed = !status.isFreeBeacon;
   const nextDiscardedCount =
     (run.discardedCountThisRun ?? 0) + run.bay.discardedThisArrange.length;
   const settlementRun = freezeRunBonusObjectiveForSettlement(
@@ -1407,10 +2021,20 @@ export function initiateV2SafeReturnFromMap(run: V2RunState): V2ActionOutcome {
       activeWreck: null,
       activeEvent: null,
       lockedEnemyId: null,
+      emergencyTowUsed,
+      returnMode: status.mode,
       phase: 'SETTLEMENT',
       settlementReason: 'safe_return',
     },
     'safe_return'
   );
   return { ok: true, run: settlementRun };
+}
+
+/**
+ * Non-softlock Emergency Tow return from any non-beacon node (-35% tow fee, 0 depth appreciation, 0 bonus).
+ * Always callable even at 0 fuel and 0 credits!
+ */
+export function initiateV2EmergencyTowReturn(run: V2RunState): V2ActionOutcome {
+  return initiateV2SafeReturnFromMap(run, { allowEmergencyTow: true });
 }

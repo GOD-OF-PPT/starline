@@ -3,7 +3,7 @@ import { getV3GadgetDef } from '../../data/gadgets';
 import { getV3SectorDef } from '../../data/sectors';
 import { V2_SHAPES } from '../../data/shapes';
 import { buildActiveWreckStateForNode, evaluateWreckHotspotCut } from '../../domain/dismantle';
-import { canUseV3GadgetInRun } from '../../domain/encounter';
+import { canUseV3GadgetInRun, isAtTerminalLayer } from '../../domain/encounter';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
 import type {
   V2ItemInstance,
@@ -46,6 +46,8 @@ export const WRECK_SPOT_COORDS: Record<
   armory: { normX: 0.22, normY: 0.48, left: '22%', top: '38%', icon: 'cannon' },
   reactor: { normX: 0.5, normY: 0.45, left: '50%', top: '34%', icon: 'fuel' },
   cargo: { normX: 0.78, normY: 0.5, left: '78%', top: '39%', icon: 'crate' },
+  vault: { normX: 0.36, normY: 0.64, left: '36%', top: '62%', icon: 'star' },
+  aux_bay: { normX: 0.64, normY: 0.64, left: '64%', top: '62%', icon: 'wrench' },
 };
 
 function syncButtonDisabled(btn: HTMLButtonElement, disabled: boolean): void {
@@ -669,19 +671,37 @@ export class WreckPhaseView implements PhaseView<WreckLeftPanelProps, WreckLeftP
 
     if (this.abandonBtnEl) {
       syncButtonDisabled(this.abandonBtnEl, readOnly || isBusyCutting);
+      const isFreeBeacon = Boolean(node.isBeacon) || isAtTerminalLayer(run);
+      const abandonLabel = isFreeBeacon ? '放弃并返航' : '紧急拖航撤离（-35% 费用）';
+      const abandonTitle = isFreeBeacon
+        ? '放弃当前残骸并从回收信标免费返航（丢弃本船未整理暂存物资）'
+        : '非信标节点放弃残骸将呼叫紧急拖航（扣除 35% 拖航费、无深潜升值，丢弃本船未整理暂存物资）';
+      if (this.abandonBtnEl.textContent !== abandonLabel) {
+        this.abandonBtnEl.textContent = abandonLabel;
+      }
+      if (this.abandonBtnEl.title !== abandonTitle) {
+        this.abandonBtnEl.title = abandonTitle;
+      }
     }
 
     const pct =
       wreck.maxStability > 0
         ? Math.max(0, Math.min(100, Math.round((wreck.stability / wreck.maxStability) * 100)))
         : 0;
-    const toneCls = pct >= 70 ? 'tone-safe' : pct >= 35 ? 'tone-warn' : 'tone-critical';
-    const alarmLabel =
-      wreck.cutsMade === 0
-        ? '首刀无伤 · 零风险切割'
-        : pct >= 35
-        ? '警戒状态 · 贪刀将触发结构风险'
-        : '临界警报 · 结构极不稳定';
+    const toneCls = wreck.collapsed
+      ? 'tone-critical'
+      : pct >= 70
+      ? 'tone-safe'
+      : pct >= 35
+      ? 'tone-warn'
+      : 'tone-critical';
+    const alarmLabel = wreck.collapsed
+      ? '结构已坍塌 · 剩余舱室封锁，请立即撤离'
+      : wreck.cutsMade === 0
+      ? '首刀无伤 · 零风险切割'
+      : pct >= 35
+      ? '警戒状态 · 贪刀将触发结构风险'
+      : '临界警报 · 结构极不稳定（贪刀有坍塌风险）';
 
     if (this.stabilityCardEl) {
       const sCls = `v3-wreck-stability-card ${toneCls}`;
@@ -845,12 +865,25 @@ export class WreckPhaseView implements PhaseView<WreckLeftPanelProps, WreckLeftP
           (spot.reactorFuelGain ?? 0) + (salvagerT2 && (spot.reactorFuelGain ?? 0) > 0 ? 1 : 0);
         const repG =
           (spot.reactorRepairGain ?? 0) +
-          (salvagerT2 && (spot.reactorRepairGain ?? 0) > 0 ? 2 : 0);
+          (salvagerT2 && (spot.reactorRepairGain ?? 0) > 0 ? 1 : 0);
         const rParts: string[] = [];
-        if (fuelG > 0) rParts.push(`燃料 +${fuelG}`);
-        if (repG > 0) rParts.push(`应急修船 +${repG} HP`);
+        if (fuelG > 0 && repG > 0) {
+          if (run.fuel < run.maxFuel) {
+            rParts.push(`燃料 +${fuelG}（满油时转为应急抢修 +${repG} HP）`);
+          } else {
+            rParts.push(`应急抢修 +${repG} HP（当前满油）`);
+          }
+        } else if (fuelG > 0) {
+          rParts.push(`燃料 +${fuelG}`);
+        } else if (repG > 0) {
+          rParts.push(`应急抢修 +${repG} HP`);
+        }
         if ((spot.rewardParts ?? 0) > 0) rParts.push(`精密零件 +${spot.rewardParts}`);
         previewLine = rParts.length > 0 ? rParts.join(' · ') : '拆解反应堆精密构件';
+      } else if (spot.spotId === 'vault') {
+        previewLine = `密封高价货舱${items.length > 0 ? ` ×${items.length}` : ''} · 高额精密零件`;
+      } else if (spot.spotId === 'aux_bay') {
+        previewLine = `副舱备用设备${items.length > 0 ? ` ×${items.length}` : ''} · 精密零件`;
       } else {
         previewLine = items.length > 0 ? `封存物资 ×${items.length}` : '精密构件回收';
       }
@@ -866,12 +899,14 @@ export class WreckPhaseView implements PhaseView<WreckLeftPanelProps, WreckLeftP
       let riskHtml = '';
       if (spot.cut) {
         riskHtml = `<span class="v3-risk-pill risk-done">${svgIcon('check', 12)} 舱室已切开</span>`;
+      } else if (wreck.collapsed) {
+        riskHtml = `<span class="v3-risk-pill risk-lethal">${svgIcon('warning', 12)} 残骸已坍塌 · 舱室封锁</span>`;
       } else if (isCuttingThis) {
         riskHtml = `<span class="v3-risk-pill risk-warn">${svgIcon('cut', 12)} 等离子割枪切割中…</span>`;
       } else if (evalRes.isFirstSafeCut) {
         riskHtml = `<span class="v3-risk-pill risk-safe">${svgIcon('check', 12)} 首刀无伤（0 耐久 / 0 燃料消耗）</span>`;
       } else if (wreck.stabilizerActive) {
-        riskHtml = `<span class="v3-risk-pill risk-safe">${svgIcon('check', 12)} 稳定器护航：下刀免伤防伏击（0 耐久 / 0 燃料）</span>`;
+        riskHtml = `<span class="v3-risk-pill risk-safe">${svgIcon('check', 12)} 稳定器护航：下刀免伤防伏击防坍塌（0 耐久 / 0 燃料）</span>`;
       } else {
         const pills: string[] = [];
         if (evalRes.isLethal) {
@@ -903,6 +938,15 @@ export class WreckPhaseView implements PhaseView<WreckLeftPanelProps, WreckLeftP
             )} 警报警告：可能触发敌舰伏击</span>`
           );
         }
+        if ((evalRes.collapseRiskPct ?? 0) > 0) {
+          pills.push(
+            `<span class="v3-risk-pill risk-lethal">${svgIcon('warning', 12)} ${
+              evalRes.willGuaranteedCollapse
+                ? '结构坍塌警告：本刀必坍塌（损失本船未撤离物资）'
+                : `结构坍塌风险 ${evalRes.collapseRiskPct}%（损失本船未撤离物资）`
+            }</span>`
+          );
+        }
         if (pills.length === 0) {
           pills.push(
             `<span class="v3-risk-pill risk-warn">贪刀损耗稳定度 -${evalRes.stabilityCost}</span>`
@@ -911,6 +955,16 @@ export class WreckPhaseView implements PhaseView<WreckLeftPanelProps, WreckLeftP
         riskHtml = pills.join('');
       }
 
+      const blockedShortReason = evalRes.disabledReason
+        ? evalRes.disabledReason.includes('坍塌')
+          ? '结构已坍塌'
+          : evalRes.disabledReason.includes('燃料不足')
+          ? '燃料不足'
+          : evalRes.disabledReason.includes('稳定度归零')
+          ? '稳定度归零'
+          : evalRes.disabledReason
+        : '无法切割';
+
       const btnLabel = spot.cut
         ? '已切开'
         : isCuttingThis
@@ -918,7 +972,7 @@ export class WreckPhaseView implements PhaseView<WreckLeftPanelProps, WreckLeftP
         : evalRes.isLethal
         ? `${svgIcon('warning', 14)} 船体不足 · 无法切割`
         : !evalRes.canCut
-        ? `无法切割`
+        ? `${svgIcon('warning', 14)} ${blockedShortReason}`
         : evalRes.isFirstSafeCut
         ? `${svgIcon('cut', 14)} 安全切开${spot.label}`
         : `${svgIcon('cut', 14)} 贪刀切开${spot.label}`;
@@ -1022,6 +1076,8 @@ export class WreckPhaseView implements PhaseView<WreckLeftPanelProps, WreckLeftP
         : 'btn-secondary';
       const btnCls = `btn ${btnTone} v3-wreck-cut-btn`;
       if (refs.cutBtnEl.className !== btnCls) refs.cutBtnEl.className = btnCls;
+      const cutTitle = evalRes.disabledReason ?? '';
+      if (refs.cutBtnEl.title !== cutTitle) refs.cutBtnEl.title = cutTitle;
       syncButtonDisabled(refs.cutBtnEl, readOnly || isBusyCutting || !evalRes.canCut);
       if (refs.btnLabelKey !== btnLabel) {
         refs.btnLabelKey = btnLabel;

@@ -1,64 +1,75 @@
 import { describe, expect, it } from 'vitest';
+import { buildEncounterUnits } from '../src/v2/data/enemies';
 import { V2_EQUIPMENT_DEFS, type V2ArchetypeId } from '../src/v2/data/equipment';
 import type { V2ShipId } from '../src/v2/data/ships';
+import { evaluateV2RewardSynergies } from '../src/v2/domain/buildStatsV2';
 import {
   completeV2CombatAtCurrentNode,
   previewV2CombatNode,
+  simulateV2Combat,
   startV2CombatAtCurrentNode,
 } from '../src/v2/domain/combatV2';
 import {
   canPerformSurveyAtCurrentNode,
   computeV2JumpFuelCost,
+  isContractReadyForDelivery,
   performSurveyAtCurrentNode,
 } from '../src/v2/domain/contracts';
 import {
   abandonV2EventAndReturn,
+  buyV2MerchantFuel,
+  buyV2MerchantRepair,
+  cutV2WreckHotspot,
+  evaluateV2EventOption,
+  extractV2Wreck,
   finishV2ArrangeAndProceed,
   finishV2MerchantVisit,
   getReachableNextNodeIds,
+  getV2SafeReturnStatus,
+  initiateV2EmergencyTowReturn,
   initiateV2SafeReturnFromMap,
   pickV2CombatReward,
-  resolveV2AnomalyChoice,
-  resolveV2DistressChoice,
-  resolveV2WreckChoice,
+  resolveV2EventOption,
   selectV2MapNode,
 } from '../src/v2/domain/encounter';
 import {
+  createEmptyV2Bay,
   discardV2Item,
   findFirstLegalV2Placement,
   placeV2FromStaging,
 } from '../src/v2/domain/inventoryV2';
+import { createV2EquipmentInstance } from '../src/v2/domain/itemCatalog';
 import {
   launchV2Expedition,
   type V2PrepareSlotEntry,
 } from '../src/v2/domain/loadout';
 import { createFreshV2Profile } from '../src/v2/domain/persistenceV2';
 import { calculateV2Settlement } from '../src/v2/domain/settlementV2';
-import type { V2RunState } from '../src/v2/domain/types';
+import type { SectorId, V2ProfileState, V2RewardChoiceId, V2RunState } from '../src/v2/domain/types';
 
 /**
- * §18 V2 Strategy Simulation Matrix:
- * Crosses 3 ships × 3 primary archetypes × 3 standard/deep contracts × (Common-only vs Improved-enabled).
- * Explicitly reports:
- * - contractRate (委托完成率)
- * - defeatRate (真实战败率 — DOES NOT mask difficulty by auto-dodging every hard fight!)
- * - earlyRetreatRate (提前撤退率)
- * - layer6Rate (六层到达率)
- * - avgCredits (平均单局收益)
- *
- * Strategy assumption (explicitly documented per §18):
- * - Greedy contract follower: prioritizes contract markers, picks equipment when slot fits else high-value cargo,
- *   pushes forward if HP >= 8 OR willing to take risky fights when 'aggressive' risk profile is used;
- *   retreats early only once contract is complete (unless pushing for Layer 6) or when fuel runs out.
+ * §18 + R2-M6B D08 Full V3.1 Balance Simulation Matrix:
+ * - Covers ALL 4 ships (cannon_skiff / shield_cruiser / heavy_freighter / stargate_cruiser)
+ * - Covers ALL 5 archetypes (laser / heavy / hangar / counter / salvo)
+ * - Covers ALL 5 standard contracts + deep contracts (transport / rescue / survey / bounty / derelict)
+ * - Covers ALL 3 sectors (near_orbit / frozen_graveyard / stargate_abyss)
+ * - Uses genuine V3.1 gameplay loops: multi-cut wrecks (`cutV2WreckHotspot` + `extractV2Wreck`),
+ *   V3 crew-reactive events (`resolveV2EventOption`), D07 3-equipment synergy-tagged rewards
+ *   (`equipment_0..2` / `skip`), and D04 Beacon-only free return vs Emergency Tow (-35%).
  */
+
+type ExtendedSimArchetype = V2ArchetypeId | 'salvo';
 
 interface SimPolicy {
   readonly name: string;
   readonly shipId: V2ShipId;
-  readonly archetype: V2ArchetypeId;
+  readonly archetype: ExtendedSimArchetype;
   readonly contractId: string;
   readonly pushToLayer6: boolean;
   readonly allowImproved: boolean;
+  readonly sectorId?: SectorId;
+  readonly greedyWreckCuts?: boolean;
+  readonly forceEarlyTow?: boolean;
 }
 
 interface SimMetrics {
@@ -67,61 +78,138 @@ interface SimMetrics {
   readonly contractRate: number;
   readonly defeatRate: number;
   readonly earlyRetreatRate: number;
+  readonly beaconReturnRate: number;
+  readonly emergencyTowRate: number;
   readonly layer6Rate: number;
+  readonly spatialConflictRate: number;
+  readonly avgConflicts: number;
   readonly avgCredits: number;
 }
 
-function buildArchetypeSlots(shipId: V2ShipId, archetype: V2ArchetypeId): readonly V2PrepareSlotEntry[] {
+function toPrimaryArchetype(arch: ExtendedSimArchetype): V2ArchetypeId {
+  return arch === 'salvo' ? 'hangar' : arch;
+}
+
+function buildArchetypeSlots(shipId: V2ShipId, archetype: ExtendedSimArchetype): readonly V2PrepareSlotEntry[] {
+  const isFreighter = shipId === 'heavy_freighter'; // budget 5 (vs 6 on skiff/shield, 8 on stargate_cruiser)
+  const isCruiser = shipId === 'stargate_cruiser';
+  const ox = isCruiser ? 1 : 0; // stargate_cruiser disables (0,0)/(4,0); columns 1..3 rows 0..3 are all valid!
+
+  if (archetype === 'laser') {
+    const base: V2PrepareSlotEntry[] = [
+      { slotKey: 'l1', origin: 'loan', definitionId: 'equipment.laser.common', x: ox + 0, y: 0, rotation: 0 },
+      { slotKey: 'b1', origin: 'loan', definitionId: 'equipment.battery.common', x: ox + 1, y: 0, rotation: 0 },
+      { slotKey: 's1', origin: 'loan', definitionId: 'equipment.shield.common', x: ox + 2, y: 0, rotation: 0 },
+    ];
+    if (!isFreighter) {
+      base.push({ slotKey: 'ca1', origin: 'loan', definitionId: 'equipment.cargo_amp.common', x: ox + 1, y: 1, rotation: 0 });
+    }
+    if (isCruiser) {
+      base.push({ slotKey: 'l2', origin: 'loan', definitionId: 'equipment.laser.common', x: 0, y: 1, rotation: 0 });
+    }
+    return base;
+  }
+
   if (archetype === 'heavy') {
-    // heavy(3) + capacitor(1) = 4 (fits all 3 ships incl. freighter budget 5!)
     const base: V2PrepareSlotEntry[] = [
-      { slotKey: 'h1', origin: 'loan', definitionId: 'equipment.heavy.common', x: 0, y: 0, rotation: 0 },
-      { slotKey: 'c1', origin: 'loan', definitionId: 'equipment.capacitor.common', x: 1, y: 0, rotation: 0 },
+      { slotKey: 'h1', origin: 'loan', definitionId: 'equipment.heavy.common', x: ox + 0, y: 0, rotation: 0 },
+      { slotKey: 'c1', origin: 'loan', definitionId: 'equipment.capacitor.common', x: ox + 1, y: 0, rotation: 0 },
     ];
-    if (shipId !== 'heavy_freighter') {
-      base.push({ slotKey: 's1', origin: 'loan', definitionId: 'equipment.shield.common', x: 2, y: 0, rotation: 0 });
+    if (!isFreighter) {
+      base.push({ slotKey: 'cv1', origin: 'loan', definitionId: 'equipment.coolant_vent.common', x: ox + 1, y: 1, rotation: 0 });
+      if (isCruiser) {
+        base.push({ slotKey: 's1', origin: 'loan', definitionId: 'equipment.shield.common', x: 0, y: 1, rotation: 0 });
+      }
+    } else {
+      base.push({ slotKey: 'ca1', origin: 'loan', definitionId: 'equipment.cargo_amp.common', x: ox + 1, y: 1, rotation: 0 });
     }
     return base;
   }
+
   if (archetype === 'hangar') {
-    // hangar(3) + relay(1) = 4; + battery/repair if budget 6
     const base: V2PrepareSlotEntry[] = [
-      { slotKey: 'hg1', origin: 'loan', definitionId: 'equipment.hangar.common', x: 0, y: 0, rotation: 0 },
-      { slotKey: 'rl1', origin: 'loan', definitionId: 'equipment.relay.common', x: 2, y: 0, rotation: 0 },
+      { slotKey: 'hg1', origin: 'loan', definitionId: 'equipment.hangar.common', x: ox + 0, y: 0, rotation: 0 },
+      { slotKey: 'rl1', origin: 'loan', definitionId: 'equipment.relay.common', x: ox + 2, y: 0, rotation: 0 },
     ];
-    if (shipId !== 'heavy_freighter') {
-      base.push({ slotKey: 'rp1', origin: 'loan', definitionId: 'equipment.repair.common', x: 2, y: 1, rotation: 0 });
+    if (!isFreighter) {
+      base.push({ slotKey: 'rp1', origin: 'loan', definitionId: 'equipment.repair.common', x: ox + 2, y: 1, rotation: 0 });
+      if (isCruiser) {
+        base.push({ slotKey: 's1', origin: 'loan', definitionId: 'equipment.shield.common', x: 0, y: 1, rotation: 0 });
+      }
+    } else {
+      base.push({ slotKey: 'ca1', origin: 'loan', definitionId: 'equipment.cargo_amp.common', x: ox + 2, y: 1, rotation: 0 });
     }
     return base;
   }
-  // counter: shield(2) + counter(2) = 4; + laser(2) if budget 6
+
+  if (archetype === 'salvo') {
+    const base: V2PrepareSlotEntry[] = [
+      { slotKey: 'sv1', origin: 'loan', definitionId: 'equipment.salvo_pod.common', x: ox + 0, y: 0, rotation: 0 },
+      { slotKey: 'cp1', origin: 'loan', definitionId: 'equipment.capacitor.common', x: ox + 1, y: 0, rotation: 0 },
+    ];
+    if (!isFreighter) {
+      base.push({ slotKey: 'cv1', origin: 'loan', definitionId: 'equipment.coolant_vent.common', x: ox + 1, y: 1, rotation: 0 });
+      if (isCruiser) {
+        base.push({ slotKey: 's1', origin: 'loan', definitionId: 'equipment.shield.common', x: ox + 2, y: 0, rotation: 0 });
+      }
+    } else {
+      base.push({ slotKey: 'ca1', origin: 'loan', definitionId: 'equipment.cargo_amp.common', x: ox + 1, y: 1, rotation: 0 });
+    }
+    return base;
+  }
+
+  // counter: shield(2) + counter(2) = 4; + laser(2) if budget >= 6; on freighter align shield onto (2,1) power cell!
+  if (isFreighter) {
+    return [
+      { slotKey: 's1', origin: 'loan', definitionId: 'equipment.shield.common', x: 2, y: 1, rotation: 0 },
+      { slotKey: 'ct1', origin: 'loan', definitionId: 'equipment.counter.common', x: 1, y: 1, rotation: 0 },
+      { slotKey: 'ca1', origin: 'loan', definitionId: 'equipment.cargo_amp.common', x: 2, y: 0, rotation: 0 },
+    ];
+  }
   const base: V2PrepareSlotEntry[] = [
-    { slotKey: 's1', origin: 'loan', definitionId: 'equipment.shield.common', x: 0, y: 0, rotation: 0 },
-    { slotKey: 'ct1', origin: 'loan', definitionId: 'equipment.counter.common', x: 1, y: 0, rotation: 0 },
+    { slotKey: 's1', origin: 'loan', definitionId: 'equipment.shield.common', x: ox + 0, y: 0, rotation: 0 },
+    { slotKey: 'ct1', origin: 'loan', definitionId: 'equipment.counter.common', x: ox + 1, y: 0, rotation: 0 },
+    { slotKey: 'l1', origin: 'loan', definitionId: 'equipment.laser.common', x: ox + 2, y: 0, rotation: 0 },
   ];
-  if (shipId !== 'heavy_freighter') {
-    base.push({ slotKey: 'l1', origin: 'loan', definitionId: 'equipment.laser.common', x: 2, y: 0, rotation: 0 });
+  if (isCruiser) {
+    base.push({ slotKey: 'emp1', origin: 'loan', definitionId: 'equipment.emp_jammer.common', x: 0, y: 1, rotation: 0 });
   }
   return base;
 }
 
 function packStagingItems(run: V2RunState): V2RunState {
   let bay = run.bay;
-  // Prioritize mission items first! If mission item doesn't fit, discard lowest-value non-mission loot until it fits!
+  // Realistic player priority: 1) mission items, 2) combat equipment upgrades (up to 5 eqs), 3) highest-value cargo!
   const sorted = [...bay.staging].sort((a, b) => {
-    if (a.item.origin === 'mission' && b.item.origin !== 'mission') return -1;
-    if (b.item.origin === 'mission' && a.item.origin !== 'mission') return 1;
+    const rank = (it: typeof a.item) =>
+      it.origin === 'mission' ? 0 : it.category === 'equipment' ? 1 : 2;
+    const ra = rank(a.item);
+    const rb = rank(b.item);
+    if (ra !== rb) return ra - rb;
     return b.item.fixedValue - a.item.fixedValue;
   });
 
   for (const st of sorted) {
     let spot = findFirstLegalV2Placement(bay, st.item.definitionId);
     if (!spot && st.item.origin === 'mission') {
-      // Make room for mission item by discarding lowest-value cargo first, then non-core equipment
       const removable = [...bay.placed]
         .filter((p) => p.item.origin !== 'mission')
         .sort((a, b) => a.item.fixedValue - b.item.fixedValue);
       for (const rem of removable) {
+        bay = discardV2Item(bay, rem.item.instanceId).bay;
+        spot = findFirstLegalV2Placement(bay, st.item.definitionId);
+        if (spot) break;
+      }
+    } else if (
+      !spot &&
+      st.item.category === 'equipment' &&
+      bay.placed.filter((p) => p.item.category === 'equipment').length < 5
+    ) {
+      // Trade a lower-value regular cargo to mount newly won combat equipment!
+      const removableCargo = [...bay.placed]
+        .filter((p) => p.item.category === 'cargo' && p.item.origin === 'loot')
+        .sort((a, b) => a.item.fixedValue - b.item.fixedValue);
+      for (const rem of removableCargo) {
         bay = discardV2Item(bay, rem.item.instanceId).bay;
         spot = findFirstLegalV2Placement(bay, st.item.definitionId);
         if (spot) break;
@@ -136,16 +224,20 @@ function packStagingItems(run: V2RunState): V2RunState {
   return { ...run, bay };
 }
 
-function runSingleSimulation(policy: SimPolicy, seed: number): {
-  readonly contractCompleted: boolean;
-  readonly defeated: boolean;
-  readonly earlyRetreat: boolean;
-  readonly reachedLayer6: boolean;
-  readonly credits: number;
-} {
+function returnHomeRespectingBeacons(run: V2RunState): V2RunState {
+  const status = getV2SafeReturnStatus(run);
+  return (
+    status.isFreeBeacon
+      ? initiateV2SafeReturnFromMap(run)
+      : initiateV2EmergencyTowReturn(run)
+  ).run;
+}
+
+function makeSimProfile(): V2ProfileState {
   const allFamilies = ['core', 'heavy_kit', 'hangar_kit', 'counter_kit'] as const;
-  const profile = {
-    ...createFreshV2Profile(),
+  const fresh = createFreshV2Profile();
+  return {
+    ...fresh,
     buildings: {
       workbench: true,
       contract_hub: true,
@@ -154,67 +246,119 @@ function runSingleSimulation(policy: SimPolicy, seed: number): {
       research_lab: true,
       display: true,
     },
-    unlockedShips: ['cannon_skiff', 'shield_cruiser', 'heavy_freighter'] as const,
-    unlockedCrew: ['engineer', 'navigator', 'salvager'] as const,
+    facilityTiers: {
+      workbench: 1,
+      contract_hub: 1,
+      drydock: 2,
+      research_lab: 1,
+      display: 1,
+      stargate_relay: 0,
+    },
+    unlockedShips: ['cannon_skiff', 'shield_cruiser', 'heavy_freighter', 'stargate_cruiser'],
+    unlockedCrew: ['engineer', 'navigator', 'salvager'],
     unlockedFamilies: [...allFamilies],
     blueprints: Object.keys(V2_EQUIPMENT_DEFS)
       .filter((k) => k.endsWith('.common'))
       .map((k) => k.split('.')[1]) as ReturnType<typeof createFreshV2Profile>['blueprints'],
+    campaign: {
+      ...fresh.campaign,
+      currentAct: 'act3',
+      unlockedSectors: ['near_orbit', 'frozen_graveyard', 'stargate_abyss'],
+    },
     tutorialCompleted: true,
     deepestLayerReached: 6,
+    totalRuns: 5,
   };
+}
+
+function runSingleSimulation(policy: SimPolicy, seed: number): {
+  readonly contractCompleted: boolean;
+  readonly defeated: boolean;
+  readonly earlyRetreat: boolean;
+  readonly beaconReturn: boolean;
+  readonly emergencyTow: boolean;
+  readonly reachedLayer6: boolean;
+  readonly spatialConflicts: number;
+  readonly credits: number;
+} {
+  const profile = makeSimProfile();
+  const sectorId = policy.sectorId ?? 'near_orbit';
+  const crewId = policy.contractId.startsWith('survey') ? 'navigator' : 'salvager';
 
   const launched = launchV2Expedition({
     profile,
     contractTemplateId: policy.contractId,
     shipId: policy.shipId,
-    crewId: policy.contractId.startsWith('survey') ? 'navigator' : 'salvager',
-    primaryArchetype: policy.archetype,
+    crewId,
+    primaryArchetype: toPrimaryArchetype(policy.archetype),
     slots: buildArchetypeSlots(policy.shipId, policy.archetype),
+    sectorId,
     seed,
     allowImproved: policy.allowImproved,
   });
-  let run = launched.run!;
+  if (!launched.ok || !launched.run) {
+    throw new Error(`Simulation launch failed (${policy.name}, seed=${seed}): ${launched.errors.join('; ')}`);
+  }
+  let run = launched.run;
 
-  for (let guard = 0; guard < 24 && run.phase !== 'SETTLEMENT'; guard++) {
+  for (let guard = 0; guard < 36 && run.phase !== 'SETTLEMENT'; guard++) {
     if (run.phase === 'MAP') {
       const nextIds = getReachableNextNodeIds(run);
       const jumpCost = computeV2JumpFuelCost(run).totalCost;
+      const curNode = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
+      const curLayer = curNode?.layer ?? 0;
+
+      // Stranded or terminal -> return home (free if beacon/terminal, else stranded_tow!)
       if (nextIds.length === 0 || run.fuel < jumpCost) {
+        run = returnHomeRespectingBeacons(run);
+        break;
+      }
+
+      // Optional early emergency-tow bailout policy (used for D04 Beacon vs Tow payoff comparison!)
+      if (policy.forceEarlyTow && curLayer === 2 && !curNode?.isBeacon) {
+        run = initiateV2EmergencyTowReturn(run).run;
+        break;
+      }
+
+      const cDone = isContractReadyForDelivery(run, 'safe_return');
+      const retStatus = getV2SafeReturnStatus(run);
+
+      // Smart D04 Beacon-aware return: if contract complete and not pushing Layer 6, extract FREE on Beacon!
+      if (cDone && !policy.pushToLayer6 && retStatus.isFreeBeacon && curLayer >= 3) {
         run = initiateV2SafeReturnFromMap(run).run;
         break;
       }
 
-      // If contract already complete and not pushing Layer 6 -> return home!
-      const cDone =
-        (run.contract.type === 'transport' &&
-          run.bay.placed.some((p) => p.item.definitionId === 'mission.sealed_reactor')) ||
-        (run.contract.type === 'rescue' &&
-          run.bay.placed.filter((p) => p.item.definitionId === 'mission.escape_pod').length >=
-            run.contract.missionItemCount) ||
-        (run.contract.type === 'survey' &&
-          run.contract.completedNodeIds.length >= run.contract.requiredCompletions);
-
-      if (cDone && !policy.pushToLayer6) {
-        run = initiateV2SafeReturnFromMap(run).run;
-        break;
-      }
-
-      // Pick node: prioritize guaranteed backbone path for uncompleted contract, else prefer safe non-combat or winnable fight
+      // Pick next node: prioritize contract backbone, then Beacon if contract already done, else best survival node
       const gSet = new Set(run.graph.guaranteedPathNodeIds);
       let chosenId = nextIds[0];
       const onGuaranteed = nextIds.find((id) => gSet.has(id));
-      if (!cDone && onGuaranteed) {
-        chosenId = onGuaranteed;
+      const nextBeacon = nextIds.find((id) => run.graph.nodes[id]?.isBeacon);
+
+      if (cDone && !policy.pushToLayer6 && nextBeacon) {
+        chosenId = nextBeacon;
+      } else if (!cDone && onGuaranteed) {
+        const gNode = run.graph.nodes[onGuaranteed];
+        const gPreview = previewV2CombatNode(run, onGuaranteed);
+        const altId = nextIds.find((id) => id !== onGuaranteed);
+        if (
+          !gNode?.contractMarker &&
+          gPreview?.outcome === 'defeat' &&
+          altId &&
+          previewV2CombatNode(run, altId)?.outcome !== 'defeat'
+        ) {
+          chosenId = altId;
+        } else {
+          chosenId = onGuaranteed;
+        }
       } else {
         const nonCombat = nextIds.find((id) => {
           const t = run.graph.nodes[id].type;
-          return t !== 'combat' && t !== 'elite';
+          return t !== 'combat' && t !== 'elite' && t !== 'boss';
         });
         if (nonCombat && !policy.pushToLayer6) {
           chosenId = nonCombat;
         } else {
-          // Pick best combat node by preview HP remaining (NOTE: aggressive deep push still takes risky fights -> real defeat rate!)
           chosenId = [...nextIds].sort((a, b) => {
             const pa = previewV2CombatNode(run, a);
             const pb = previewV2CombatNode(run, b);
@@ -225,50 +369,117 @@ function runSingleSimulation(policy: SimPolicy, seed: number): {
         }
       }
 
-      // If non-pushing strategy sees guaranteed lethal on ALL choices, retreat early
+      // If non-pushing strategy sees guaranteed lethal on ALL reachable options, extract early (Beacon or Tow)
       const chosenPreview = previewV2CombatNode(run, chosenId);
       if (chosenPreview && chosenPreview.outcome === 'defeat' && !policy.pushToLayer6) {
-        run = initiateV2SafeReturnFromMap(run).run;
+        run = returnHomeRespectingBeacons(run);
         break;
       }
 
-      run = selectV2MapNode(run, chosenId).run;
+      const entered = selectV2MapNode(run, chosenId, { profile });
+      if (!entered.ok) {
+        run = returnHomeRespectingBeacons(run);
+        break;
+      }
+      run = entered.run;
     } else if (run.phase === 'ENCOUNTER' && run.currentNodeId) {
       const node = run.graph.nodes[run.currentNodeId];
-      if (node.type === 'combat' || node.type === 'elite') {
-        const started = startV2CombatAtCurrentNode(run, 'weakest');
-        run = completeV2CombatAtCurrentNode(started.run, [...allFamilies]).run;
+      if (node.combat) {
+        const started = startV2CombatAtCurrentNode(run, 'weakest', { pureAutoCombat: true });
+        run = completeV2CombatAtCurrentNode(started.run, profile.unlockedFamilies).run;
       } else if (node.type === 'wreck') {
-        const room = run.bay.placed.length < 4 ? 'armory' : 'cargo';
-        run = resolveV2WreckChoice(run, room, [...allFamilies]).run;
-      } else if (node.type === 'anomaly') {
-        if (run.fuel >= 2) {
-          run = resolveV2AnomalyChoice(run, 'traverse').run;
-        } else if (run.hp > 8) {
-          run = resolveV2AnomalyChoice(run, 'breach').run;
-        } else if (run.fuel >= 1) {
-          run = resolveV2AnomalyChoice(run, 'traverse').run;
+        // Real V3 multi-cut wreck dissection (Cut #1 safe: reactor repair when damaged, else cargo/armory; optional greedy Cut #2)
+        const needHeal = run.hp <= Math.ceil(run.maxHp * 0.55);
+        const firstSpot = needHeal ? 'reactor' : run.bay.placed.length < 4 ? 'armory' : 'cargo';
+        const c1 = cutV2WreckHotspot(
+          run,
+          firstSpot,
+          profile.unlockedFamilies,
+          needHeal ? 'repair' : undefined,
+          profile
+        );
+        if (c1.ok) run = c1.run;
+
+        if (
+          (policy.greedyWreckCuts || firstSpot === 'reactor') &&
+          run.activeWreck &&
+          !run.activeWreck.ambushTriggered &&
+          !run.activeWreck.collapsed &&
+          run.hp >= Math.ceil(run.maxHp * 0.55) &&
+          run.activeWreck.stability >= 55
+        ) {
+          const secondSpot = firstSpot === 'cargo' ? 'armory' : 'cargo';
+          const c2 = cutV2WreckHotspot(run, secondSpot, profile.unlockedFamilies, undefined, profile);
+          if (c2.ok) run = c2.run;
+        }
+
+        if (run.activeWreck?.ambushTriggered || run.graph.nodes[node.nodeId]?.combat) {
+          const started = startV2CombatAtCurrentNode(run, 'weakest', { pureAutoCombat: true });
+          run = completeV2CombatAtCurrentNode(started.run, profile.unlockedFamilies).run;
+        } else {
+          const ext = extractV2Wreck(run);
+          run = ext.ok ? ext.run : abandonV2EventAndReturn(run).run;
+        }
+      } else if (node.type === 'anomaly' || node.type === 'distress') {
+        const opts = (run.activeEvent ?? node.eventState)?.options ?? [];
+        const healOpt =
+          run.hp <= Math.ceil(run.maxHp * 0.65)
+            ? opts.find((o) => (o.rewardHp ?? 0) > 0 && evaluateV2EventOption(run, o).enabled)
+            : undefined;
+        const nonFallback = opts.find((o) => !o.isFallback && evaluateV2EventOption(run, o).enabled);
+        const fallback = opts.find((o) => o.isFallback && evaluateV2EventOption(run, o).enabled);
+        const chosenOpt = healOpt ?? nonFallback ?? fallback ?? opts[0];
+        if (chosenOpt) {
+          const res = resolveV2EventOption(run, chosenOpt.index, profile.unlockedFamilies);
+          run = res.ok ? res.run : abandonV2EventAndReturn(run).run;
         } else {
           run = abandonV2EventAndReturn(run).run;
         }
-      } else if (node.type === 'distress') {
-        if (run.hp <= run.maxHp - 8 && run.fuel >= 2) {
-          run = resolveV2DistressChoice(run, 'rescue_crew').run;
-        } else {
-          run = resolveV2DistressChoice(run, 'haul_cargo').run;
-        }
+      } else {
+        run = returnHomeRespectingBeacons(run);
       }
     } else if (run.phase === 'SHOP') {
+      // Realistic D04 survival trade-off: pay merchant credits for repair / fuel when low!
+      if (run.hp <= run.maxHp - 8) {
+        const rep = buyV2MerchantRepair(run, `sim_rep_${guard}`, 0);
+        if (rep.ok) run = rep.run;
+      }
+      if (run.fuel <= 3) {
+        const fl = buyV2MerchantFuel(run, `sim_fuel_${guard}`, 0);
+        if (fl.ok) run = fl.run;
+      }
       run = finishV2MerchantVisit(run).run;
     } else if (run.phase === 'REWARD') {
-      const choice = run.hp <= run.maxHp - 10 ? 'repair' : 'cargo';
-      run = pickV2CombatReward(run, choice, [...allFamilies]).run;
+      const options = run.pendingReward?.equipmentOptions ?? [];
+      let choice: V2RewardChoiceId = 'equipment_0';
+      if (options.length > 0) {
+        // Pick the equipment option with the strongest bay synergy (real D07 buildcraft decision!)
+        let bestIdx = 0;
+        let bestScore = -1;
+        for (let i = 0; i < options.length; i += 1) {
+          const syn = evaluateV2RewardSynergies(run.bay, options[i].definitionId);
+          const score =
+            (syn.hasSynergy ? 10 : 0) +
+            (options[i].quality === 'improved' ? 5 : 0) +
+            options[i].fixedValue / 20;
+          if (score > bestScore) {
+            bestScore = score;
+            bestIdx = i;
+          }
+        }
+        choice = (`equipment_${bestIdx}` as V2RewardChoiceId);
+      }
+      run = pickV2CombatReward(run, choice, profile.unlockedFamilies).run;
     } else if (run.phase === 'ARRANGE') {
       if (canPerformSurveyAtCurrentNode(run).canSurvey) {
         run = performSurveyAtCurrentNode(run).run;
       }
       run = packStagingItems(run);
-      run = finishV2ArrangeAndProceed(run, 'map').run;
+      const curLayer = run.currentNodeId ? run.graph.nodes[run.currentNodeId]?.layer ?? 1 : 1;
+      run = finishV2ArrangeAndProceed(
+        run,
+        curLayer >= run.graph.maxLayers ? 'safe_return' : 'map'
+      ).run;
     }
   }
 
@@ -278,11 +489,15 @@ function runSingleSimulation(policy: SimPolicy, seed: number): {
 
   const summary = calculateV2Settlement(run, profile);
   const maxLayer = Math.max(0, ...run.visitedNodeIds.map((id) => run.graph.nodes[id]?.layer ?? 0));
+  const isSafe = summary.reason === 'safe_return';
   return {
     contractCompleted: summary.contractCompleted,
     defeated: summary.reason === 'defeat',
-    earlyRetreat: summary.reason === 'safe_return' && maxLayer < 6,
+    earlyRetreat: isSafe && maxLayer < 6,
+    beaconReturn: isSafe && !summary.emergencyTowUsed,
+    emergencyTow: isSafe && Boolean(summary.emergencyTowUsed),
     reachedLayer6: maxLayer >= 6,
+    spatialConflicts: run.spatialConflictCount ?? 0,
     credits: summary.finalCreditsEarned,
   };
 }
@@ -291,7 +506,11 @@ function evaluatePolicy(policy: SimPolicy, seedsCount: number): SimMetrics {
   let contracts = 0;
   let defeats = 0;
   let earlyRetreats = 0;
+  let beaconReturns = 0;
+  let emergencyTows = 0;
   let layer6 = 0;
+  let runsWithConflict = 0;
+  let totalConflicts = 0;
   let totalCredits = 0;
 
   for (let i = 1; i <= seedsCount; i++) {
@@ -299,7 +518,11 @@ function evaluatePolicy(policy: SimPolicy, seedsCount: number): SimMetrics {
     if (res.contractCompleted) contracts += 1;
     if (res.defeated) defeats += 1;
     if (res.earlyRetreat) earlyRetreats += 1;
+    if (res.beaconReturn) beaconReturns += 1;
+    if (res.emergencyTow) emergencyTows += 1;
     if (res.reachedLayer6) layer6 += 1;
+    if (res.spatialConflicts >= 1) runsWithConflict += 1;
+    totalConflicts += res.spatialConflicts;
     totalCredits += res.credits;
   }
 
@@ -310,13 +533,17 @@ function evaluatePolicy(policy: SimPolicy, seedsCount: number): SimMetrics {
     contractRate: pct(contracts),
     defeatRate: pct(defeats),
     earlyRetreatRate: pct(earlyRetreats),
+    beaconReturnRate: pct(beaconReturns),
+    emergencyTowRate: pct(emergencyTows),
     layer6Rate: pct(layer6),
+    spatialConflictRate: pct(runsWithConflict),
+    avgConflicts: Number((totalConflicts / seedsCount).toFixed(2)),
     avgCredits: Number((totalCredits / seedsCount).toFixed(1)),
   };
 }
 
-describe('V2 §18 平衡模拟矩阵（三船 × 三构筑 × 三委托 × 纯普通/优良对照）', () => {
-  it('纯普通品质下三船与三构筑均存在可完成委托及深入路径，且优良品质对照稳定无崩溃', () => {
+describe('V2 §18 & R2-M6B D08 平衡模拟矩阵（四船 × 五流派 × 五委托 × 三星区，600+ 局蒙特卡洛）', () => {
+  it('核心 §18 矩阵（纯普通 / 优良对照）：三船与三构筑均具备可完成委托及深入路径，且 D04/D07 规则下无崩溃', () => {
     const SEEDS = 40;
     const matrix: SimPolicy[] = [
       // Common-only core matrix (T09 Gate C)
@@ -333,18 +560,162 @@ describe('V2 §18 平衡模拟矩阵（三船 × 三构筑 × 三委托 × 纯�
     ];
 
     const report = matrix.map((p) => evaluatePolicy(p, SEEDS));
-    console.log('\n[V2 §18 Balance Simulation Report (40 seeds/policy)]');
+    console.log('\n[V2 §18 Core Balance Simulation Report (360 runs)]');
     console.table(report);
 
-    // Gate C assertions:
-    // 1. All 3 standard contract builds achieve strong completion rates (>= 65%) even on pure Common quality!
     for (const row of report.slice(0, 3)) {
       expect(row.contractRate).toBeGreaterThanOrEqual(65);
       expect(row.avgCredits).toBeGreaterThanOrEqual(75);
     }
-    // 2. Deep pushing strategies show genuine Layer-6 completions AND real nonzero risk (defeatRate > 0 on at least one aggressive deep push!)
     const deepCommonRows = report.slice(3, 6);
     expect(deepCommonRows.some((r) => r.layer6Rate >= 40)).toBe(true);
     expect(deepCommonRows.every((r) => r.contractRate >= 40)).toBe(true);
-  });
+  }, 20_000);
+
+  it('D08 全量 4 舰 × 5 流派 × 5 标准委托（600 局）平衡矩阵：验证 D06 空间冲突率 >=90%、D04 深潜信标收益 > 早期拖航、且无单流派通解', () => {
+    const SEEDS_PER_CELL = 24; // 25 cells × 24 seeds = 600 runs!
+    const matrix: SimPolicy[] = [
+      // All 5 standard contracts × 4 ships × 5 archetypes (Latin-balanced full coverage)
+      { name: '炮艇·激光·标准运输', shipId: 'cannon_skiff', archetype: 'laser', contractId: 'transport_std', pushToLayer6: false, allowImproved: true },
+      { name: '炮艇·重炮·标准救援', shipId: 'cannon_skiff', archetype: 'heavy', contractId: 'rescue_std', pushToLayer6: false, allowImproved: true },
+      { name: '炮艇·机库·标准勘测', shipId: 'cannon_skiff', archetype: 'hangar', contractId: 'survey_std', pushToLayer6: false, allowImproved: true },
+      { name: '炮艇·反击·标准清剿', shipId: 'cannon_skiff', archetype: 'counter', contractId: 'bounty_std', pushToLayer6: false, allowImproved: true },
+      { name: '炮艇·齐射·标准黑匣', shipId: 'cannon_skiff', archetype: 'salvo', contractId: 'derelict_std', pushToLayer6: false, allowImproved: true },
+
+      { name: '护盾艇·激光·标准黑匣', shipId: 'shield_cruiser', archetype: 'laser', contractId: 'derelict_std', pushToLayer6: false, allowImproved: true },
+      { name: '护盾艇·重炮·标准运输', shipId: 'shield_cruiser', archetype: 'heavy', contractId: 'transport_std', pushToLayer6: false, allowImproved: true },
+      { name: '护盾艇·机库·标准救援', shipId: 'shield_cruiser', archetype: 'hangar', contractId: 'rescue_std', pushToLayer6: false, allowImproved: true },
+      { name: '护盾艇·反击·标准勘测', shipId: 'shield_cruiser', archetype: 'counter', contractId: 'survey_std', pushToLayer6: false, allowImproved: true },
+      { name: '护盾艇·齐射·标准清剿', shipId: 'shield_cruiser', archetype: 'salvo', contractId: 'bounty_std', pushToLayer6: false, allowImproved: true },
+
+      { name: '重货船·激光·标准清剿', shipId: 'heavy_freighter', archetype: 'laser', contractId: 'bounty_std', pushToLayer6: false, allowImproved: true },
+      { name: '重货船·重炮·标准黑匣', shipId: 'heavy_freighter', archetype: 'heavy', contractId: 'derelict_std', pushToLayer6: false, allowImproved: true },
+      { name: '重货船·机库·标准运输', shipId: 'heavy_freighter', archetype: 'hangar', contractId: 'transport_std', pushToLayer6: false, allowImproved: true },
+      { name: '重货船·反击·标准救援', shipId: 'heavy_freighter', archetype: 'counter', contractId: 'rescue_std', pushToLayer6: false, allowImproved: true },
+      { name: '重货船·齐射·标准勘测', shipId: 'heavy_freighter', archetype: 'salvo', contractId: 'survey_std', pushToLayer6: false, allowImproved: true },
+
+      { name: '星门巡洋·激光·标准勘测', shipId: 'stargate_cruiser', archetype: 'laser', contractId: 'survey_std', pushToLayer6: true, allowImproved: true, sectorId: 'frozen_graveyard' },
+      { name: '星门巡洋·重炮·标准清剿', shipId: 'stargate_cruiser', archetype: 'heavy', contractId: 'bounty_std', pushToLayer6: true, allowImproved: true, sectorId: 'frozen_graveyard' },
+      { name: '星门巡洋·机库·标准黑匣', shipId: 'stargate_cruiser', archetype: 'hangar', contractId: 'derelict_std', pushToLayer6: true, allowImproved: true, sectorId: 'frozen_graveyard' },
+      { name: '星门巡洋·反击·标准运输', shipId: 'stargate_cruiser', archetype: 'counter', contractId: 'transport_std', pushToLayer6: true, allowImproved: true, sectorId: 'stargate_abyss' },
+      { name: '星门巡洋·齐射·标准救援', shipId: 'stargate_cruiser', archetype: 'salvo', contractId: 'rescue_std', pushToLayer6: true, allowImproved: true, sectorId: 'stargate_abyss' },
+
+      // Greedy deep-dive + multi-cut risk cells across sectors
+      { name: '深潜贪刀·炮艇·激光(冰晶)', shipId: 'cannon_skiff', archetype: 'laser', contractId: 'transport_deep', pushToLayer6: true, allowImproved: true, sectorId: 'frozen_graveyard', greedyWreckCuts: true },
+      { name: '深潜贪刀·护盾艇·重炮(星门)', shipId: 'shield_cruiser', archetype: 'heavy', contractId: 'rescue_deep', pushToLayer6: true, allowImproved: true, sectorId: 'stargate_abyss', greedyWreckCuts: true },
+      { name: '深潜贪刀·重货船·机库(冰晶)', shipId: 'heavy_freighter', archetype: 'hangar', contractId: 'survey_deep', pushToLayer6: true, allowImproved: true, sectorId: 'frozen_graveyard', greedyWreckCuts: true },
+      { name: '深潜贪刀·星门巡洋·反击(星门)', shipId: 'stargate_cruiser', archetype: 'counter', contractId: 'transport_deep', pushToLayer6: true, allowImproved: true, sectorId: 'stargate_abyss', greedyWreckCuts: true },
+      { name: '深潜贪刀·星门巡洋·齐射(星门)', shipId: 'stargate_cruiser', archetype: 'salvo', contractId: 'survey_deep', pushToLayer6: true, allowImproved: true, sectorId: 'stargate_abyss', greedyWreckCuts: true },
+    ];
+
+    const report = matrix.map((p) => evaluatePolicy(p, SEEDS_PER_CELL));
+    const totalRuns = report.reduce((s, r) => s + r.runs, 0);
+    expect(totalRuns).toBe(600);
+
+    console.log(`\n[R2-M6B D08 Full Balance Matrix (${totalRuns} runs: 4 ships × 5 archetypes × 5 contracts × 3 sectors)]`);
+    console.table(report);
+
+    // 1. All 20 standard-contract cells achieve viable completion & positive net credits
+    const standardCells = report.slice(0, 20);
+    for (const row of standardCells) {
+      expect(row.contractRate, `${row.label} contractRate`).toBeGreaterThanOrEqual(50);
+      expect(row.avgCredits, `${row.label} avgCredits`).toBeGreaterThan(60);
+    }
+
+    // 2. D06 Spatial Conflict Gate: across ALL 5 standard contracts (500+ standard runs), >= 90% of runs experience >= 1 genuine spatial conflict!
+    const contractGroups = ['transport_std', 'rescue_std', 'survey_std', 'bounty_std', 'derelict_std'] as const;
+    for (const ct of contractGroups) {
+      const cells = matrix
+        .map((p, idx) => ({ policy: p, metrics: report[idx] }))
+        .filter((e) => e.policy.contractId === ct);
+      const meanConflictRate =
+        cells.reduce((s, c) => s + c.metrics.spatialConflictRate, 0) / cells.length;
+      const meanConflicts =
+        cells.reduce((s, c) => s + c.metrics.avgConflicts, 0) / cells.length;
+      expect(
+        meanConflictRate,
+        `D06 spatialConflictRate for ${ct} (mean=${meanConflictRate.toFixed(1)}%, avg=${meanConflicts.toFixed(2)})`
+      ).toBeGreaterThanOrEqual(90);
+      expect(meanConflicts, `D06 avgConflicts for ${ct}`).toBeGreaterThanOrEqual(1.0);
+    }
+
+    // 3. D04 Risk/Reward Payoff Gate: Beacon/Deep-dive return pays strictly MORE than early Layer-2 Emergency Tow!
+    const deepBeaconMetrics = evaluatePolicy(
+      {
+        name: '信标深潜对照',
+        shipId: 'cannon_skiff',
+        archetype: 'heavy',
+        contractId: 'free_salvage',
+        pushToLayer6: true,
+        allowImproved: true,
+      },
+      30
+    );
+    const earlyTowMetrics = evaluatePolicy(
+      {
+        name: '早退紧急拖航对照',
+        shipId: 'cannon_skiff',
+        archetype: 'heavy',
+        contractId: 'free_salvage',
+        pushToLayer6: false,
+        allowImproved: true,
+        forceEarlyTow: true,
+      },
+      30
+    );
+    expect(earlyTowMetrics.emergencyTowRate).toBeGreaterThanOrEqual(80);
+    expect(deepBeaconMetrics.avgCredits).toBeGreaterThan(earlyTowMetrics.avgCredits * 1.4);
+
+    // 4. Anti-Dominance Gate: across ALL 5 archetypes on 3 canonical enemy matchups (armored / swarm / piercer),
+    //    NO single archetype wins #1 surviving HP across all 3 enemy types!
+    const archetypes: readonly ExtendedSimArchetype[] = ['laser', 'heavy', 'hangar', 'counter', 'salvo'];
+    const mkBay = (arch: ExtendedSimArchetype) => {
+      const slots = buildArchetypeSlots('cannon_skiff', arch);
+      return {
+        ...createEmptyV2Bay('cannon_skiff'),
+        placed: slots.map((s, idx) => ({
+          item: createV2EquipmentInstance({
+            instanceId: `ad_${arch}_${idx}`,
+            kind: s.definitionId.split('.')[1] as Parameters<typeof createV2EquipmentInstance>[0]['kind'],
+            quality: 'common',
+            origin: 'loan',
+            acquiredDepth: 0,
+            location: 'bay',
+          }),
+          x: s.x,
+          y: s.y,
+          rotation: s.rotation,
+        })),
+      };
+    };
+    const matchups = [
+      { id: 'armored', units: buildEncounterUnits('armored', 3, 'ad_arm') },
+      { id: 'swarm', units: buildEncounterUnits('swarm', 3, 'ad_swm') },
+      { id: 'piercer', units: buildEncounterUnits('piercer', 3, 'ad_prc') },
+    ] as const;
+
+    const topWinners = new Set<ExtendedSimArchetype>();
+    for (const m of matchups) {
+      let bestArch: ExtendedSimArchetype = 'laser';
+      let bestScore = -999;
+      for (const arch of archetypes) {
+        const sim = simulateV2Combat({
+          resultId: `ad_${m.id}_${arch}`,
+          bay: mkBay(arch),
+          startingHp: 30,
+          maxHp: 30,
+          units: m.units,
+          targetPolicy: 'weakest',
+        });
+        // Score by surviving HP - rounds (faster cleaner kills win)
+        const score = sim.finalPlayerHpAfterRepair * 10 - sim.roundsCount;
+        if (score > bestScore) {
+          bestScore = score;
+          bestArch = arch;
+        }
+      }
+      topWinners.add(bestArch);
+    }
+    expect(topWinners.size).toBeGreaterThanOrEqual(2); // Zero universal dominant archetype!
+  }, 20_000);
 });

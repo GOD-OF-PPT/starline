@@ -256,6 +256,7 @@ export function createV2ShowcaseRun(
     sectorBg: 5,
     nextNodeIds: ['L4A', 'L4B'],
     contractMarker: true,
+    isBeacon: true,
     wreck: {
       armoryItem: createV2EquipmentInstance({
         instanceId: `${runId}_l3_eq`,
@@ -357,6 +358,7 @@ export function createV2ShowcaseRun(
     sectorBg: 6,
     nextNodeIds: [],
     contractMarker: false,
+    isBeacon: true,
     distress: {
       rescueFuelCost: 1,
       repairAmount: 10,
@@ -438,5 +440,6 @@ export function createV2ShowcaseRun(
     salvagePartsEarned: 0,
     isFinalCampaignRun: false,
     lockedEnemyId: null,
+    spatialConflictCount: 0,
   };
 }

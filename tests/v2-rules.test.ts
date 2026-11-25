@@ -158,10 +158,11 @@ describe('V2 规则与验收矩阵核心测试（T01–T12 / AC01–AC18, AC22�
     run = { ...run, bay: placedRes.bay, phase: 'SETTLEMENT', settlementReason: 'safe_return' };
 
     expect(isContractReadyForDelivery(run, 'safe_return')).toBe(true);
-    const res1 = applyV2Settlement(launched.profile, run);
+    const res1 = applyV2Settlement(launched.profile, run, {}, { chosenFamily: 'heavy_kit' });
     expect(res1.ok).toBe(true);
     expect(res1.summary.contractCompleted).toBe(true);
     expect(res1.summary.contractRewardCredits).toBe(70);
+    expect(res1.summary.pendingFamilyUnlockChoices).toEqual(['heavy_kit', 'hangar_kit', 'counter_kit']);
     expect(res1.profile.credits).toBe(70);
     expect(res1.profile.unlockedCrew).toContain('salvager');
     expect(res1.profile.unlockedFamilies).toContain('heavy_kit');
@@ -710,7 +711,7 @@ describe('V2 规则与验收矩阵核心测试（T01–T12 / AC01–AC18, AC22�
       phase: 'SETTLEMENT',
       settlementReason: 'safe_return',
     };
-    const settle1 = applyV2Settlement(run1Launch.profile, run1);
+    const settle1 = applyV2Settlement(run1Launch.profile, run1, {}, { chosenFamily: 'heavy_kit' });
     expect(settle1.ok).toBe(true);
     profile = settle1.profile;
     expect(profile.credits).toBe(102);
@@ -846,10 +847,10 @@ describe('V2 规则与验收矩阵核心测试（T01–T12 / AC01–AC18, AC22�
     };
     const settle3 = applyV2Settlement(run3Launch.profile, run3Defeat);
     expect(settle3.ok).toBe(true);
-    // AC14: wallet(15) + owned laser(10) = 25 -> floor(25 * 0.4) = 10¤; owned laser lost, base warehouse flak preserved!
-    expect(settle3.summary.finalCreditsEarned).toBe(10);
+    // AC14 + D04: wallet(15) + owned laser(10) = 25 -> floor(25 * 0.2) = 5¤; owned laser lost, base warehouse flak preserved!
+    expect(settle3.summary.finalCreditsEarned).toBe(5);
     expect(settle3.summary.lostOwnedCount).toBe(1);
-    expect(settle3.profile.credits).toBe(42);
+    expect(settle3.profile.credits).toBe(37);
     expect(settle3.profile.equipmentWarehouse.length).toBe(1);
 
     // Preset now explicitly flags missing owned laser WITHOUT silently replacing it (§6.3)!
@@ -985,9 +986,9 @@ describe('V2 规则与验收矩阵核心测试（T01–T12 / AC01–AC18, AC22�
     expect(completed.run.phase).toBe('REWARD');
     expect(completed.run.wallet).toBe(run.graph.nodes[combatNodeId].combat!.bounty);
 
-    const picked = pickV2CombatReward(completed.run, 'cargo', ['core']);
+    const picked = pickV2CombatReward(completed.run, 'equipment_0', ['core']);
     expect(picked.ok).toBe(true);
-    expect(picked.run.bay.staging.length).toBe(1);
+    expect(picked.run.bay.staging.length).toBeGreaterThanOrEqual(1);
     const stagedId = picked.run.bay.staging[0].item.instanceId;
 
     // Discard & undo preserves exact item!

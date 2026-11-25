@@ -14,6 +14,7 @@ import { V2_SHIP_ORDER, isCellValidForShip, type V2ShipId } from '../data/ships'
 import { getV2OccupiedCells, type V2Rotation } from '../data/shapes';
 import { isV2SynergyTypeId, V2_SYNERGY_ORDER } from './buildStatsV2';
 import { getAnyV2ItemDef } from './itemCatalog';
+import { backfillBeaconsForLegacyGraph } from './routeGenerator';
 import { MAX_UINT32 } from './seedParam';
 import {
   V2_BACKUP_KEY,
@@ -134,6 +135,27 @@ const VALID_WRECK_SPOT_IDS: ReadonlySet<V2WreckSpotId> = new Set([
   'armory',
   'cargo',
   'reactor',
+  'vault',
+  'aux_bay',
+]);
+const VALID_REWARD_CHOICES: ReadonlySet<string> = new Set([
+  'equipment_0',
+  'equipment_1',
+  'equipment_2',
+  'skip',
+  'equipment',
+  'cargo',
+  'repair',
+]);
+const VALID_RETURN_MODES: ReadonlySet<string> = new Set([
+  'beacon_free',
+  'emergency_tow',
+  'stranded_tow',
+]);
+const VALID_UNLOCKABLE_FAMILIES: ReadonlySet<V2UnlockFamilyId> = new Set([
+  'heavy_kit',
+  'hangar_kit',
+  'counter_kit',
 ]);
 const VALID_ACTS: ReadonlySet<CampaignActId> = new Set([
   'prologue',
@@ -740,6 +762,15 @@ function validateV2WreckState(
   if (w.stabilizerActive !== undefined && typeof w.stabilizerActive !== 'boolean') {
     return { ok: false, error: `${label}.stabilizerActive 非法` };
   }
+  if (w.collapsed !== undefined && typeof w.collapsed !== 'boolean') {
+    return { ok: false, error: `${label}.collapsed 非法` };
+  }
+  if (
+    w.wreckLootInstanceIds !== undefined &&
+    !isDenseArrayOf(w.wreckLootInstanceIds, isString)
+  ) {
+    return { ok: false, error: `${label}.wreckLootInstanceIds 非法` };
+  }
   if (w.stashedItems !== undefined) {
     if (!Array.isArray(w.stashedItems)) {
       return { ok: false, error: `${label}.stashedItems 非法` };
@@ -1087,6 +1118,9 @@ function validateV2RunCore(
     if (n.relicSignalDefId !== undefined && typeof n.relicSignalDefId !== 'string') {
       return { ok: false, error: `activeRun.graph.nodes.${nodeKey}.relicSignalDefId 非法` };
     }
+    if (n.isBeacon !== undefined && typeof n.isBeacon !== 'boolean') {
+      return { ok: false, error: `activeRun.graph.nodes.${nodeKey}.isBeacon 非法` };
+    }
     if (n.eventId !== undefined && typeof n.eventId !== 'string') {
       return { ok: false, error: `activeRun.graph.nodes.${nodeKey}.eventId 非法` };
     }
@@ -1204,6 +1238,36 @@ function validateV2RunCore(
     if (typeof pr.nodeId !== 'string' || pr.nodeId.length === 0) {
       return { ok: false, error: 'activeRun.pendingReward.nodeId 无效' };
     }
+    if (pr.equipmentOptions !== undefined) {
+      if (!Array.isArray(pr.equipmentOptions) || pr.equipmentOptions.length < 1 || pr.equipmentOptions.length > 3) {
+        return { ok: false, error: 'activeRun.pendingReward.equipmentOptions 非法' };
+      }
+      for (let i = 0; i < pr.equipmentOptions.length; i += 1) {
+        if (!hasOwn(pr.equipmentOptions, i)) {
+          return { ok: false, error: `activeRun.pendingReward.equipmentOptions[${i}] 稀疏缺失` };
+        }
+        const eqiChk = validateV2Item(
+          pr.equipmentOptions[i],
+          `activeRun.pendingReward.equipmentOptions[${i}]`
+        );
+        if (!eqiChk.ok) return eqiChk;
+      }
+    }
+    if (pr.bonusLootItems !== undefined) {
+      if (!Array.isArray(pr.bonusLootItems)) {
+        return { ok: false, error: 'activeRun.pendingReward.bonusLootItems 非法' };
+      }
+      for (let i = 0; i < pr.bonusLootItems.length; i += 1) {
+        if (!hasOwn(pr.bonusLootItems, i)) {
+          return { ok: false, error: `activeRun.pendingReward.bonusLootItems[${i}] 稀疏缺失` };
+        }
+        const bChk = validateV2Item(
+          pr.bonusLootItems[i],
+          `activeRun.pendingReward.bonusLootItems[${i}]`
+        );
+        if (!bChk.ok) return bChk;
+      }
+    }
     const eqChk = validateV2Item(pr.equipmentOption, 'activeRun.pendingReward.equipmentOption');
     if (!eqChk.ok) return eqChk;
     const cgChk = validateV2Item(pr.cargoOption, 'activeRun.pendingReward.cargoOption');
@@ -1213,9 +1277,7 @@ function validateV2RunCore(
     }
     if (
       pr.chosen !== null &&
-      pr.chosen !== 'equipment' &&
-      pr.chosen !== 'cargo' &&
-      pr.chosen !== 'repair'
+      (typeof pr.chosen !== 'string' || !VALID_REWARD_CHOICES.has(pr.chosen))
     ) {
       return { ok: false, error: 'activeRun.pendingReward.chosen 非法' };
     }
@@ -1478,6 +1540,19 @@ function validateV2RunCore(
       typeof run.lockedEnemyId !== 'string'
     ) {
       return { ok: false, error: 'activeRun.lockedEnemyId 非法' };
+    }
+    if (run.emergencyTowUsed !== undefined && typeof run.emergencyTowUsed !== 'boolean') {
+      return { ok: false, error: 'activeRun.emergencyTowUsed 非法' };
+    }
+    if (
+      run.returnMode !== undefined &&
+      run.returnMode !== null &&
+      (typeof run.returnMode !== 'string' || !VALID_RETURN_MODES.has(run.returnMode))
+    ) {
+      return { ok: false, error: 'activeRun.returnMode 非法' };
+    }
+    if (run.spatialConflictCount !== undefined && !isNonNegInt(run.spatialConflictCount)) {
+      return { ok: false, error: 'activeRun.spatialConflictCount 非法' };
     }
     if (run.factionRepEarnedThisRun !== undefined) {
       if (!isPlainObject(run.factionRepEarnedThisRun)) {
@@ -1852,6 +1927,19 @@ function validateSaveDataCore(
     ) {
       return { ok: false, error: 'profile.discoveredSynergies 非法' };
     }
+    if (p.pendingFamilyUnlockChoices !== undefined) {
+      if (
+        !isDenseArrayOf(
+          p.pendingFamilyUnlockChoices,
+          (f) => isString(f) && VALID_UNLOCKABLE_FAMILIES.has(f as V2UnlockFamilyId)
+        )
+      ) {
+        return { ok: false, error: 'profile.pendingFamilyUnlockChoices 非法' };
+      }
+      if (new Set(p.pendingFamilyUnlockChoices).size !== p.pendingFamilyUnlockChoices.length) {
+        return { ok: false, error: 'profile.pendingFamilyUnlockChoices 包含重复项' };
+      }
+    }
   }
 
   if (d.activeRun !== null) {
@@ -1946,7 +2034,15 @@ export function migrateV3_0ToV3_1SaveData(rawV3_0: unknown): {
     discoveredSynergies: rawDiscoveredSynergies,
   };
   const migratedRun: V2RunState | null =
-    src.activeRun !== null ? rewindLegacyActiveCombatForRulesUpgrade(src.activeRun) : null;
+    src.activeRun !== null
+      ? (() => {
+          const rewound = rewindLegacyActiveCombatForRulesUpgrade(src.activeRun);
+          return {
+            ...rewound,
+            graph: backfillBeaconsForLegacyGraph(rewound.graph, rewound.isTutorial),
+          };
+        })()
+      : null;
 
   const migrated: V2SaveData = {
     schemaVersion: V2_SCHEMA_VERSION,
@@ -2135,7 +2231,7 @@ export function migrateV2ToV3SaveData(rawV2: unknown): {
 
   let migratedRun: V2RunState | null = null;
   if (src.activeRun !== null) {
-    migratedRun = rewindLegacyActiveCombatForRulesUpgrade({
+    const rewound = rewindLegacyActiveCombatForRulesUpgrade({
       ...src.activeRun,
       schemaVersion: V2_SCHEMA_VERSION,
       rulesVersion: V2_RULES_VERSION,
@@ -2149,7 +2245,12 @@ export function migrateV2ToV3SaveData(rawV2: unknown): {
       salvagePartsEarned: 0,
       isFinalCampaignRun: false,
       lockedEnemyId: null,
+      spatialConflictCount: 0,
     });
+    migratedRun = {
+      ...rewound,
+      graph: backfillBeaconsForLegacyGraph(rewound.graph, rewound.isTutorial),
+    };
   }
 
   const migrated: V2SaveData = {
@@ -2512,6 +2613,22 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
   );
   const discoveredSynergies = V2_SYNERGY_ORDER.filter((id) => discoveredSynergySet.has(id));
 
+  // D07: Explicitly preserve & sanitize pendingFamilyUnlockChoices (strip invalid, 'core', dupes, and already-unlocked)
+  let pendingFamilyUnlockChoices: V2UnlockFamilyId[] | undefined;
+  if (Array.isArray(rawProfile.pendingFamilyUnlockChoices)) {
+    const cleaned = Array.from(
+      new Set(
+        rawProfile.pendingFamilyUnlockChoices.filter(
+          (f): f is V2UnlockFamilyId =>
+            typeof f === 'string' &&
+            VALID_UNLOCKABLE_FAMILIES.has(f as V2UnlockFamilyId) &&
+            !unlockedFamilies.includes(f as V2UnlockFamilyId)
+        )
+      )
+    );
+    pendingFamilyUnlockChoices = cleaned.length > 0 ? cleaned : undefined;
+  }
+
   let activeRun: V2RunState | null = null;
   if (raw.activeRun !== null && isPlainObject(raw.activeRun)) {
     const rawRun = raw.activeRun;
@@ -2632,6 +2749,7 @@ export function normalizeV2SaveData(raw: V2SaveData): V2SaveData {
       career,
       hullTuning,
       discoveredSynergies,
+      ...(pendingFamilyUnlockChoices !== undefined ? { pendingFamilyUnlockChoices } : {}),
     },
     activeRun,
     settings: sanitizeSettings(raw?.settings),

@@ -1,6 +1,6 @@
 import { V2_CREW } from '../../data/crew';
 import { getV3SectorDef } from '../../data/sectors';
-import { areAllEventOptionsUnaffordable } from '../../domain/encounter';
+import { areAllEventOptionsUnaffordable, isAtTerminalLayer } from '../../domain/encounter';
 import {
   buildFallbackEventStateFromLegacyNode,
   evaluateV2EventOption,
@@ -189,6 +189,7 @@ export class EventPhaseView implements PhaseView<EventViewProps, EventViewAction
         : node.eventState ?? buildFallbackEventStateFromLegacyNode(run, node);
 
     const unaffordable = areAllEventOptionsUnaffordable(run);
+    const isFreeBeacon = Boolean(node.isBeacon) || isAtTerminalLayer(run);
 
     if (activeEvent) {
       // Detach legacy branch first so zero duplicate event-choice-* testids exist
@@ -305,7 +306,7 @@ export class EventPhaseView implements PhaseView<EventViewProps, EventViewAction
         }
       });
 
-      this.syncAbandonFooter(unaffordable, readOnly, false);
+      this.syncAbandonFooter(unaffordable, readOnly, false, isFreeBeacon);
       return;
     }
 
@@ -404,19 +405,26 @@ export class EventPhaseView implements PhaseView<EventViewProps, EventViewAction
       if (hBtn) syncButtonDisabled(hBtn, readOnly);
     }
 
-    this.syncAbandonFooter(unaffordable, readOnly, true);
+    this.syncAbandonFooter(unaffordable, readOnly, true, isFreeBeacon);
   }
 
-  private syncAbandonFooter(unaffordable: boolean, readOnly: boolean, isLegacy: boolean): void {
+  private syncAbandonFooter(
+    unaffordable: boolean,
+    readOnly: boolean,
+    isLegacy: boolean,
+    isFreeBeacon: boolean
+  ): void {
     if (!this.abandonWrapEl || !this.abandonMsgEl || !this.abandonBtnEl) return;
     if (unaffordable) {
       this.abandonWrapEl.className = 'system-banner banner-warn';
       this.abandonWrapEl.style.marginTop = isLegacy ? '10px' : '8px';
       this.abandonWrapEl.style.display = '';
       this.abandonWrapEl.style.justifyContent = '';
-      const msg = isLegacy
-        ? '当前资源不足以支付任何选项，可放弃事件并免费返航。'
-        : '当前资源不足以执行任何分支，可放弃事件并免费安全返航。';
+      const msg = isFreeBeacon
+        ? isLegacy
+          ? '当前资源不足以支付任何选项，可放弃事件并免费返航。'
+          : '当前资源不足以执行任何分支，可放弃事件并免费安全返航。'
+        : '当前资源不足以执行任何分支，可放弃事件并呼叫紧急拖航返航（-35% 拖航费）。';
       if (this.abandonMsgEl.textContent !== msg) this.abandonMsgEl.textContent = msg;
       if (this.abandonMsgEl.parentElement !== this.abandonWrapEl) {
         this.abandonWrapEl.insertBefore(this.abandonMsgEl, this.abandonBtnEl);
@@ -424,8 +432,9 @@ export class EventPhaseView implements PhaseView<EventViewProps, EventViewAction
       if (this.abandonBtnEl.className !== 'btn btn-sm btn-primary') {
         this.abandonBtnEl.className = 'btn btn-sm btn-primary';
       }
-      if (this.abandonBtnEl.textContent !== '放弃并安全返航') {
-        this.abandonBtnEl.textContent = '放弃并安全返航';
+      const btnText = isFreeBeacon ? '放弃并安全返航' : '紧急拖航撤离（-35% 费用）';
+      if (this.abandonBtnEl.textContent !== btnText) {
+        this.abandonBtnEl.textContent = btnText;
       }
     } else {
       this.abandonWrapEl.className = '';
@@ -436,10 +445,14 @@ export class EventPhaseView implements PhaseView<EventViewProps, EventViewAction
       if (this.abandonBtnEl.className !== 'btn btn-sm btn-ghost') {
         this.abandonBtnEl.className = 'btn btn-sm btn-ghost';
       }
-      if (this.abandonBtnEl.textContent !== '放弃事件并免费返航') {
-        this.abandonBtnEl.textContent = '放弃事件并免费返航';
+      const btnText = isFreeBeacon ? '放弃事件并免费返航' : '紧急拖航撤离（-35% 费用）';
+      if (this.abandonBtnEl.textContent !== btnText) {
+        this.abandonBtnEl.textContent = btnText;
       }
     }
+    this.abandonBtnEl.title = isFreeBeacon
+      ? '当前位于回收信标，可免费安全返航'
+      : '非信标节点放弃事件将呼叫紧急拖航（扣除 35% 拖航费、无深潜升值与额外加赏）';
     syncButtonDisabled(this.abandonBtnEl, readOnly);
   }
 

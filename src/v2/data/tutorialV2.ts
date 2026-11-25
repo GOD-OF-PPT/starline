@@ -189,6 +189,7 @@ export function createV2TutorialRun(runId: string): V2RunState {
     sectorBg: 1,
     nextNodeIds: [],
     contractMarker: false,
+    isBeacon: true,
     eventId: 'tutorial_safe_beacon',
     eventState: {
       nodeId: 'L4A',
@@ -363,5 +364,6 @@ export function createV2TutorialRun(runId: string): V2RunState {
     salvagePartsEarned: 0,
     isFinalCampaignRun: false,
     lockedEnemyId: null,
+    spatialConflictCount: 0,
   };
 }

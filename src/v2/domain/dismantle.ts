@@ -1,11 +1,14 @@
 import {
   V2_EQUIPMENT_DEFS,
+  getUnlockedEquipmentKinds,
   getV2EquipmentDefByKind,
   type V2EquipmentDef,
   type V2EquipmentKind,
 } from '../data/equipment';
 import { V3_FACTION_MAX_REP } from '../data/factions';
 import { V2_SHIPS, type V2ShipId } from '../data/ships';
+import { computeV2CargoPrice } from '../data/cargo';
+import { getV3SectorDef } from '../data/sectors';
 import { calculateV2BuildStats } from './buildStatsV2';
 import {
   getAntiArbitragePartsCraftFloor,
@@ -13,7 +16,11 @@ import {
   getEffectiveWorkshopCost,
   getWreckFactionStabilityBonus,
 } from './factions';
-import { createV2EquipmentInstance, getAnyV2ItemDef } from './itemCatalog';
+import {
+  createV2CargoInstance,
+  createV2EquipmentInstance,
+  getAnyV2ItemDef,
+} from './itemCatalog';
 import {
   getActiveRelicPassives,
   getEffectiveWarehouseCapacity,
@@ -475,19 +482,34 @@ export interface V3WreckCutEvaluation {
   readonly effectiveFuelCost: number;
   readonly effectiveAmbushRisk: boolean;
   readonly stabilityCost: number;
+  /** Disclosed structural collapse chance (0..100%) on greedy cuts (D05) */
+  readonly collapseRiskPct?: number;
+  /** True when nextStability <= 0 on an unprotected greedy cut (guaranteed collapse) */
+  readonly willGuaranteedCollapse?: boolean;
   readonly disabledReason?: string;
 }
+
+const VAULT_CARGO_POOL: readonly string[] = [
+  'cargo.old_engine',
+  'cargo.coolant_tank',
+  'cargo.folding_antenna',
+];
 
 /**
  * Builds or preserves the active multi-cut wreck state for a wreck node.
  * NEVER overwrites an already-existing `run.activeWreck` matching `node.nodeId`
  * (guarantees seeded E2E fixtures & reload state survive intact!).
+ *
+ * D05 compartment count:
+ * - L1-L2, Tutorial, and Showcase: 3 compartments (`armory`, `cargo`, `reactor`)
+ * - L3-L4 formal runs: 4 compartments (`+vault`)
+ * - L5-L6 formal runs: 4-5 compartments (`+vault`, plus `events`-stream optional `+aux_bay`)
  */
 export function buildActiveWreckStateForNode(
   run: V2RunState,
   node: V2MapNode,
   profile?: Pick<V2ProfileState, 'factionRep' | 'hullTuning'> &
-    Partial<Pick<V2ProfileState, 'buildings' | 'facilityTiers'>>
+    Partial<Pick<V2ProfileState, 'buildings' | 'facilityTiers' | 'unlockedFamilies'>>
 ): { readonly wreck: V2WreckState; readonly nextStreams: V2RngStreams } {
   if (run.activeWreck && run.activeWreck.nodeId === node.nodeId) {
     return { wreck: run.activeWreck, nextStreams: run.rngStreams };
@@ -506,6 +528,8 @@ export function buildActiveWreckStateForNode(
       : 0;
   const workbenchBonus = wbTier >= 3 ? 10 : 0;
   const maxStability = 100 + salvageLevel * 15 + factionBonus + grappleBonus + workbenchBonus;
+  const sector = getV3SectorDef(run.sectorId);
+  const allowExtraSpots = !run.isTutorial && !run.isShowcase;
 
   const draw = withV2Stream(run.rngStreams, 'events', (rng) => {
     const armoryAmbush = node.layer >= 3 && rng.nextFloat() < 0.32;
@@ -542,9 +566,66 @@ export function buildActiveWreckStateForNode(
         riskAmbush: false,
         rewardParts: 8 + node.layer * 2,
         reactorFuelGain: w?.reactorFuelGain ?? 2,
-        reactorRepairGain: w?.reactorRepairGain ?? 8,
+        reactorRepairGain: run.isShowcase ? (w?.reactorRepairGain ?? 8) : 5,
       },
     ];
+
+    // D05: L3-L6 formal wrecks add a 4th sealed Vault compartment (high-value cargo + parts + credits)
+    if (allowExtraSpots && node.layer >= 3) {
+      const vaultCargoDefId = rng.pick(VAULT_CARGO_POOL);
+      const vaultVal =
+        sector.cargoPriceMult === 1
+          ? undefined
+          : Math.max(1, Math.round(computeV2CargoPrice(vaultCargoDefId, node.layer) * sector.cargoPriceMult));
+      const vaultItem = createV2CargoInstance({
+        instanceId: `${run.runId}_wrk_vault_${node.nodeId}`,
+        defId: vaultCargoDefId,
+        origin: 'loot',
+        acquiredDepth: node.layer,
+        location: 'staging',
+        fixedValueOverride: vaultVal,
+      });
+      hotspots.push({
+        spotId: 'vault',
+        label: '密封金库',
+        cut: false,
+        riskHullDamage: 4 + Math.floor(node.layer / 3),
+        riskFuelCost: 0,
+        riskAmbush: rng.nextFloat() < 0.28,
+        rewardItem: vaultItem,
+        rewardItems: [vaultItem],
+        rewardParts: 7 + node.layer * 2,
+        rewardCredits: 8 + node.layer * 2,
+      });
+    }
+
+    // D05: L5-L6 formal wrecks can spawn a 5th Auxiliary Bay compartment via deterministic events stream
+    if (allowExtraSpots && node.layer >= 5 && rng.nextFloat() < 0.65) {
+      const unlockedKinds = getUnlockedEquipmentKinds(profile?.unlockedFamilies ?? ['core']);
+      const auxKind = rng.pick(unlockedKinds);
+      const auxQuality =
+        run.allowImproved && rng.nextFloat() < Math.min(0.65, 0.22 + node.layer * 0.06)
+          ? 'improved'
+          : 'common';
+      const auxItem = createV2EquipmentInstance({
+        instanceId: `${run.runId}_wrk_aux_${node.nodeId}`,
+        kind: auxKind,
+        quality: auxQuality,
+        origin: 'loot',
+        acquiredDepth: node.layer,
+        location: 'staging',
+      });
+      hotspots.push({
+        spotId: 'aux_bay',
+        label: '副舱设备间',
+        cut: false,
+        riskHullDamage: 4,
+        riskFuelCost: 0,
+        riskAmbush: rng.nextFloat() < 0.34,
+        rewardItem: auxItem,
+        rewardParts: 9 + node.layer,
+      });
+    }
 
     const state: V2WreckState = {
       nodeId: node.nodeId,
@@ -552,6 +633,8 @@ export function buildActiveWreckStateForNode(
       maxStability,
       cutsMade: 0,
       extracted: false,
+      collapsed: false,
+      wreckLootInstanceIds: [],
       hotspots,
     };
     return state;
@@ -578,6 +661,8 @@ export function evaluateWreckHotspotCut(
       effectiveFuelCost: 0,
       effectiveAmbushRisk: false,
       stabilityCost,
+      collapseRiskPct: 0,
+      willGuaranteedCollapse: false,
       disabledReason: '未找到目标残骸舱室',
     };
   }
@@ -591,7 +676,24 @@ export function evaluateWreckHotspotCut(
       effectiveFuelCost: 0,
       effectiveAmbushRisk: false,
       stabilityCost,
+      collapseRiskPct: 0,
+      willGuaranteedCollapse: false,
       disabledReason: '已完成残骸撤离',
+    };
+  }
+
+  if (wreck.collapsed) {
+    return {
+      canCut: false,
+      isFirstSafeCut,
+      isLethal: false,
+      effectiveHullDamage: 0,
+      effectiveFuelCost: 0,
+      effectiveAmbushRisk: false,
+      stabilityCost,
+      collapseRiskPct: 100,
+      willGuaranteedCollapse: true,
+      disabledReason: '残骸已发生结构坍塌，剩余舱室封锁，请立即撤离',
     };
   }
 
@@ -604,6 +706,8 @@ export function evaluateWreckHotspotCut(
       effectiveFuelCost: 0,
       effectiveAmbushRisk: false,
       stabilityCost,
+      collapseRiskPct: 0,
+      willGuaranteedCollapse: false,
       disabledReason: '警报已触发伏击敌舰，请先应对战斗',
     };
   }
@@ -617,6 +721,8 @@ export function evaluateWreckHotspotCut(
       effectiveFuelCost: 0,
       effectiveAmbushRisk: false,
       stabilityCost,
+      collapseRiskPct: 0,
+      willGuaranteedCollapse: false,
       disabledReason: '该舱室已切开',
     };
   }
@@ -630,6 +736,8 @@ export function evaluateWreckHotspotCut(
       effectiveFuelCost: 0,
       effectiveAmbushRisk: false,
       stabilityCost,
+      collapseRiskPct: 0,
+      willGuaranteedCollapse: false,
       disabledReason: '船体已损毁，无法继续切割（请撤离结算）',
     };
   }
@@ -643,11 +751,13 @@ export function evaluateWreckHotspotCut(
       effectiveFuelCost: spot.riskFuelCost,
       effectiveAmbushRisk: spot.riskAmbush,
       stabilityCost,
+      collapseRiskPct: 100,
+      willGuaranteedCollapse: true,
       disabledReason: '结构稳定度归零，无法继续切割',
     };
   }
 
-  // Cut #1 is ALWAYS SAFE; Cut Stabilizer protects the next risky cut (0 hull / 0 fuel / 0 ambush)
+  // Cut #1 is ALWAYS SAFE; Cut Stabilizer protects the next risky cut (0 hull / 0 fuel / 0 ambush / 0 collapse)
   const stabilizerProtects = !isFirstSafeCut && Boolean(wreck.stabilizerActive);
   const grappleReduction = run.bay ? calculateV2BuildStats(run.bay).wreckHullDamageReduction : 0;
   const effectiveHullDamage =
@@ -657,6 +767,18 @@ export function evaluateWreckHotspotCut(
   const effectiveFuelCost = isFirstSafeCut || stabilizerProtects ? 0 : Math.max(0, spot.riskFuelCost);
   const effectiveAmbushRisk =
     isFirstSafeCut || stabilizerProtects ? false : Boolean(spot.riskAmbush);
+
+  const nextStability = Math.max(0, wreck.stability - stabilityCost);
+  let collapseRiskPct = 0;
+  let willGuaranteedCollapse = false;
+  if (!isFirstSafeCut && !stabilizerProtects) {
+    if (nextStability <= 0) {
+      collapseRiskPct = 100;
+      willGuaranteedCollapse = true;
+    } else if (nextStability < 30) {
+      collapseRiskPct = Math.max(10, Math.min(75, Math.round(((30 - nextStability) / 30) * 60)));
+    }
+  }
 
   // Strict lethal-cut guard: never allow a cut that drops HP <= 0!
   if (effectiveHullDamage > 0 && run.hp <= effectiveHullDamage) {
@@ -668,6 +790,8 @@ export function evaluateWreckHotspotCut(
       effectiveFuelCost,
       effectiveAmbushRisk,
       stabilityCost,
+      collapseRiskPct,
+      willGuaranteedCollapse,
       disabledReason: '致命风险：船体不足，切割将损毁舰体（无法切割）',
     };
   }
@@ -681,6 +805,8 @@ export function evaluateWreckHotspotCut(
       effectiveFuelCost,
       effectiveAmbushRisk,
       stabilityCost,
+      collapseRiskPct,
+      willGuaranteedCollapse,
       disabledReason: `燃料不足（需 ${effectiveFuelCost} 燃料，当前 ${run.fuel}）`,
     };
   }
@@ -693,5 +819,7 @@ export function evaluateWreckHotspotCut(
     effectiveFuelCost,
     effectiveAmbushRisk,
     stabilityCost,
+    collapseRiskPct,
+    willGuaranteedCollapse,
   };
 }

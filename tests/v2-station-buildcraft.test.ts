@@ -48,6 +48,7 @@ import {
   canUseV3GadgetInRun,
   cutV2WreckHotspot,
   extractV2Wreck,
+  initiateV2EmergencyTowReturn,
   initiateV2SafeReturnFromMap,
   resolveV2EventOption,
   sellV2ItemToMerchant,
@@ -834,7 +835,7 @@ describe('M5 F15 & F16: 6-Dept T1-T3 Upgrades, stargate_relay, Relic Passives, 4
       activeWreck: builtWreck.wreck,
     });
     expect(extractedZeroCut.ok).toBe(true);
-    const afterWreckReturn = initiateV2SafeReturnFromMap(extractedZeroCut.run);
+    const afterWreckReturn = initiateV2EmergencyTowReturn(extractedZeroCut.run);
     expect(afterWreckReturn.ok).toBe(true);
     const wreckRetSum = calculateV2Settlement(afterWreckReturn.run, prof);
     expect(wreckRetSum.walletCredits).toBe(0);
@@ -955,11 +956,11 @@ describe('M5 F15 & F16: 6-Dept T1-T3 Upgrades, stargate_relay, Relic Passives, 4
     );
     expect(merchDefeatSum.walletCredits).toBe(expectedWalletAfterMerchant);
     expect(merchDefeatSum.defeatRecoverableBase).toBe(expectedWalletAfterMerchant);
-    expect(merchDefeatSum.finalCreditsEarned).toBe(Math.floor(expectedWalletAfterMerchant * 0.4));
+    expect(merchDefeatSum.finalCreditsEarned).toBe(Math.floor(expectedWalletAfterMerchant * 0.2));
 
     // 6) Stipend-first spend accounting across Merchant + Wallet-Cost Event (resolveV2EventOption):
-    //    Spend 47¤ of 50¤ stipend (12¤ fuel + 15¤ repair + 20¤ event) + earn +46¤ combat bounties ->
-    //    wallet = 49¤, unspentStipend = 3¤ -> Safe Return walletCredits === 46, Defeat base === 46, payout === 18!
+    //    Spend 47¤ of 50¤ stipend (12¤ fuel + 18¤ repair + 17¤ event) + earn +46¤ combat bounties ->
+    //    wallet = 49¤, unspentStipend = 3¤ -> Safe Return walletCredits === 46, Defeat base === 46, payout === 9!
     const eventNode = Object.values(merchantSeedRun.graph.nodes).find(
       (n) => n.nodeId !== merchantNode.nodeId && !n.resolved
     )!;
@@ -980,8 +981,8 @@ describe('M5 F15 & F16: 6-Dept T1-T3 Upgrades, stargate_relay, Relic Passives, 4
       0
     );
     expect(afterServices.ok).toBe(true);
-    expect(afterServices.run.wallet).toBe(23); // 50 - 12 - 15
-    expect(afterServices.run.stipendSpentCredits).toBe(27);
+    expect(afterServices.run.wallet).toBe(20); // 50 - 12 - 18
+    expect(afterServices.run.stipendSpentCredits).toBe(30);
 
     const walletEventRun: V2RunState = {
       ...afterServices.run,
@@ -991,17 +992,17 @@ describe('M5 F15 & F16: 6-Dept T1-T3 Upgrades, stargate_relay, Relic Passives, 4
         nodeId: eventNode.nodeId,
         eventId: 'evt_stipend_wallet_check',
         title: '星港补给交易',
-        description: '支付 20¤ 获取应急导航校准。',
+        description: '支付 17¤ 获取应急导航校准。',
         resolved: false,
         chosenIndex: null,
         flavorTag: '事件测试',
         options: [
           {
             index: 0,
-            label: '支付 20¤ 校准航线',
-            costSummary: '消耗 20¤',
+            label: '支付 17¤ 校准航线',
+            costSummary: '消耗 17¤',
             rewardSummary: '补给 +1 燃料',
-            walletCost: 20,
+            walletCost: 17,
             rewardFuel: 1,
           },
           {
@@ -1016,8 +1017,8 @@ describe('M5 F15 & F16: 6-Dept T1-T3 Upgrades, stargate_relay, Relic Passives, 4
     };
     const afterWalletEvent = resolveV2EventOption(walletEventRun, 0, prof.unlockedFamilies);
     expect(afterWalletEvent.ok).toBe(true);
-    expect(afterWalletEvent.run.wallet).toBe(3); // 23 - 20
-    expect(afterWalletEvent.run.stipendSpentCredits).toBe(47); // 27 + 20
+    expect(afterWalletEvent.run.wallet).toBe(3); // 20 - 17
+    expect(afterWalletEvent.run.stipendSpentCredits).toBe(47); // 30 + 17
 
     const withRealBounties: V2RunState = {
       ...afterWalletEvent.run,
@@ -1036,7 +1037,7 @@ describe('M5 F15 & F16: 6-Dept T1-T3 Upgrades, stargate_relay, Relic Passives, 4
     );
     expect(evDefeatSum.walletCredits).toBe(46);
     expect(evDefeatSum.defeatRecoverableBase).toBe(46);
-    expect(evDefeatSum.finalCreditsEarned).toBe(18); // Math.floor(46 * 0.4) = 18¤
+    expect(evDefeatSum.finalCreditsEarned).toBe(9); // Math.floor(46 * 0.2) = 9¤
 
     // 7) startingStipendCredits & stipendSpentCredits persistence round-trip, validation & normalization
     const stipendStorage = new MemoryStorage();

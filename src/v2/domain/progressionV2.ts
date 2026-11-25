@@ -1,9 +1,11 @@
 import {
+  V2_CONTRACT_FAMILY_UNLOCK_ORDER,
   V2_EQUIPMENT_DEFS,
   V2_RESEARCH_COST_CREDITS,
   V2_WAREHOUSE_CAPACITY,
   getV2EquipmentDefByKind,
   type V2EquipmentKind,
+  type V2UnlockFamilyId,
 } from '../data/equipment';
 import {
   V2_FACILITIES,
@@ -718,4 +720,118 @@ export function getV2RelicSummary(profile: V2ProfileState): {
     restorableIds,
   };
 }
+
+/**
+ * Returns the unlockable (non-'core') equipment families not yet unlocked on `profile` (D07).
+ */
+export function getLockedUnlockableFamilies(
+  profile: Pick<V2ProfileState, 'unlockedFamilies'>
+): readonly V2UnlockFamilyId[] {
+  return V2_CONTRACT_FAMILY_UNLOCK_ORDER.map((u) => u.family).filter(
+    (family) => !profile.unlockedFamilies.includes(family)
+  );
+}
+
+/**
+ * Pure helper applying all 3 canonical equipment family unlock rewards:
+ * 1. Adds `family` to `unlockedFamilies`
+ * 2. Grants `freeBlueprintKind` in `blueprints`
+ * 3. Enqueues deterministic starter equipment gift in `pendingGiftQueue`
+ * Also clears `pendingFamilyUnlockChoices`.
+ */
+export function unlockV2EquipmentFamily(
+  profile: V2ProfileState,
+  family: V2UnlockFamilyId,
+  uniqueKey: string
+): {
+  readonly ok: boolean;
+  readonly profile: V2ProfileState;
+  readonly unlockedFamilyName?: string;
+  readonly error?: string;
+} {
+  const spec = V2_CONTRACT_FAMILY_UNLOCK_ORDER.find((u) => u.family === family);
+  if (!spec) {
+    return { ok: false, profile, error: '无效的装备体系' };
+  }
+  if (profile.unlockedFamilies.includes(family)) {
+    const remainingPending = (profile.pendingFamilyUnlockChoices ?? []).filter(
+      (f) => f !== family && !profile.unlockedFamilies.includes(f)
+    );
+    return {
+      ok: false,
+      profile: {
+        ...profile,
+        pendingFamilyUnlockChoices: remainingPending.length > 0 ? remainingPending : undefined,
+      },
+      error: `「${spec.name}」体系已经解锁`,
+    };
+  }
+
+  const nextFamilies: V2UnlockFamilyId[] = [...profile.unlockedFamilies, spec.family];
+  const nextBlueprints: V2EquipmentKind[] = profile.blueprints.includes(spec.freeBlueprintKind)
+    ? [...profile.blueprints]
+    : [...profile.blueprints, spec.freeBlueprintKind];
+
+  const baseGiftId = `gift_${spec.family}_${uniqueKey}`;
+  const existingIds = new Set([
+    ...profile.equipmentWarehouse.map((i) => i.instanceId),
+    ...profile.pendingGiftQueue.map((i) => i.instanceId),
+  ]);
+  let giftInstanceId = baseGiftId;
+  let suffix = 2;
+  while (existingIds.has(giftInstanceId)) {
+    giftInstanceId = `${baseGiftId}_${suffix++}`;
+  }
+
+  const giftItem = createV2EquipmentInstance({
+    instanceId: giftInstanceId,
+    kind: spec.giftMainKind,
+    quality: 'common',
+    origin: 'owned',
+    acquiredDepth: 0,
+    location: 'gift_queue',
+  });
+
+  const nextProfile: V2ProfileState = {
+    ...profile,
+    unlockedFamilies: nextFamilies,
+    blueprints: nextBlueprints,
+    pendingGiftQueue: [...profile.pendingGiftQueue, giftItem],
+    pendingFamilyUnlockChoices: undefined,
+  };
+
+  return {
+    ok: true,
+    profile: nextProfile,
+    unlockedFamilyName: spec.name,
+  };
+}
+
+/**
+ * Claims one family from `profile.pendingFamilyUnlockChoices` (idempotent & reload-safe, D07).
+ */
+export function choosePendingV2FamilyUnlock(
+  profile: V2ProfileState,
+  family: V2UnlockFamilyId,
+  uniqueKey?: string
+): {
+  readonly ok: boolean;
+  readonly profile: V2ProfileState;
+  readonly unlockedFamilyName?: string;
+  readonly error?: string;
+} {
+  const pending = profile.pendingFamilyUnlockChoices ?? [];
+  if (pending.length === 0) {
+    return { ok: false, profile, error: '当前没有待选择的装备体系解锁项' };
+  }
+  if (!pending.includes(family)) {
+    return { ok: false, profile, error: '所选体系不在本次可选列表中' };
+  }
+  if (profile.unlockedFamilies.includes(family)) {
+    return { ok: false, profile, error: '该装备体系已解锁（不可重复领取）' };
+  }
+  const key = uniqueKey ?? `pick_run_${profile.totalRuns}`;
+  return unlockV2EquipmentFamily(profile, family, key);
+}
+
 
