@@ -8,7 +8,10 @@
 export const STORAGE_KEYS = {
   V2_SAVE: 'starline_save_v2',
   V2_BACKUP: 'starline_save_backup_v2',
+  V3_BACKUP: 'starline_save_backup_v3',
+  V3_0_BACKUP: 'starline_save_backup_v3_0',
   V2_TAB_LOCK: 'starline_active_tab_lock_v2',
+  PLAYTEST_LOG: 'starline_playtest_log',
   V1_SAVE: 'starline_save_v1',
   V1_BACKUP: 'starline_save_backup_v1',
   V1_TAB_LOCK: 'starline_active_tab_lock_v1',
@@ -24,7 +27,8 @@ export const V1_RULES_VERSION = 'v1.0.0' as const;
 export const V2_SCHEMA_VERSION = 2 as const;
 export const V2_RULES_VERSION = '2.0.0' as const;
 export const V3_SCHEMA_VERSION = 3 as const;
-export const V3_RULES_VERSION = '3.0.0' as const;
+export const V3_0_RULES_VERSION = '3.0.0' as const;
+export const V3_RULES_VERSION = '3.1.0' as const;
 
 export const MAX_FUEL = 10;
 export const STARTING_FUEL = 9;
@@ -119,6 +123,8 @@ export type V2TargetPolicy = 'weakest' | 'highest_threat';
 
 export type V2EncounterKind =
   | 'patrol'
+  | 'patrol_tutorial'
+  | 'tutorial_raider'
   | 'swarm'
   | 'armored'
   | 'piercer'
@@ -351,11 +357,14 @@ export interface V2MapNode {
   nextNodeIds: string[];
   contractMarker: boolean;
   hasSupportGuarantee?: boolean;
+  isBeacon?: boolean;
+  relicSignalDefId?: string;
   combat?: V2CombatPayload;
   wreck?: V2WreckPayload;
   merchant?: V2MerchantPayload;
   anomaly?: V2AnomalyPayload;
   distress?: V2DistressPayload;
+  eventState?: V2EventState;
   resolved: boolean;
   abandoned?: boolean;
   // Optional additive V3 / E2E metadata
@@ -423,7 +432,31 @@ export type V2EliteTacticChoice =
   | 'overload'
   | 'emergency_defense'
   | 'emergency_shield'
-  | 'focus_calibrate';
+  | 'focus_calibrate'
+  | 'signature_cannon_skiff'
+  | 'signature_shield_cruiser'
+  | 'signature_heavy_freighter'
+  | 'signature_stargate_cruiser';
+
+export type V2TacticalCommandId = V2EliteTacticChoice;
+
+export type V2InterventionKind = 'tactical_command' | 'overload_module' | 'target_lock';
+
+export interface V2CombatIntervention {
+  interventionId: string;
+  roundNumber: number;
+  kind: V2InterventionKind;
+  commandId?: V2TacticalCommandId;
+  moduleInstanceId?: string;
+  moduleKind?: V3EquipmentKind;
+  targetEnemyId?: string | null;
+}
+
+export interface V2AppliedTacticalCommand {
+  decisionId: string;
+  roundNumber: number;
+  choice: V2TacticalCommandId;
+}
 
 export interface V2EliteTacticOptionPreview {
   choice: V2EliteTacticChoice;
@@ -461,6 +494,8 @@ export interface V2CombatSimulation {
   initialEnemies: V2CombatUnitSnapshot[];
   rounds: unknown[];
   appliedTactic?: V2EliteTacticChoice;
+  lockedEnemyId?: string | null;
+  appliedInterventions?: V2CombatIntervention[];
 }
 
 export interface V2ActiveCombatState {
@@ -469,14 +504,30 @@ export interface V2ActiveCombatState {
   targetPolicy: V2TargetPolicy;
   simulation: V2CombatSimulation;
   pendingDecision?: V2EliteTacticDecision | null;
+  committedCommands?: V2AppliedTacticalCommand[];
+  resumeFromRound?: number;
+  pausedAtDecisionId?: string | null;
+  lockedEnemyId?: string | null;
+  interventions?: V2CombatIntervention[];
 }
+
+export type V2RewardChoiceId =
+  | 'equipment_0'
+  | 'equipment_1'
+  | 'equipment_2'
+  | 'skip'
+  | 'equipment'
+  | 'cargo'
+  | 'repair';
 
 export interface V2CombatRewardBundle {
   nodeId: string;
+  equipmentOptions?: V2CargoItemInstance[];
+  bonusLootItems?: V2CargoItemInstance[];
   equipmentOption: V2CargoItemInstance;
   cargoOption: V2CargoItemInstance;
   repairAmount: number;
-  chosen: 'equipment' | 'cargo' | 'repair' | null;
+  chosen: V2RewardChoiceId | null;
 }
 
 export interface V2EngineerSwapOffer {
@@ -485,16 +536,21 @@ export interface V2EngineerSwapOffer {
   used: boolean;
 }
 
+export type V2WreckSpotId = 'armory' | 'cargo' | 'reactor' | 'vault' | 'aux_bay';
+
 export interface V2WreckHotspot {
-  spotId: 'armory' | 'cargo' | 'reactor';
+  spotId: V2WreckSpotId;
   label: string;
   cut: boolean;
   riskHullDamage: number;
   riskFuelCost: number;
   riskAmbush: boolean;
   rewardItem?: V2CargoItemInstance;
+  rewardItems?: V2CargoItemInstance[];
   rewardParts?: number;
   rewardCredits?: number;
+  reactorFuelGain?: number;
+  reactorRepairGain?: number;
 }
 
 export interface V2WreckState {
@@ -504,6 +560,12 @@ export interface V2WreckState {
   cutsMade: number;
   extracted: boolean;
   hotspots: V2WreckHotspot[];
+  lastCutSummary?: string;
+  ambushTriggered?: boolean;
+  stashedItems?: V2CargoItemInstance[];
+  stabilizerActive?: boolean;
+  collapsed?: boolean;
+  wreckLootInstanceIds?: string[];
 }
 
 export interface V2EventOptionState {
@@ -598,6 +660,12 @@ export interface V3RunHistoryEntry {
   seed?: number;
 }
 
+export interface V3HullTuningState {
+  hpLevel: number;
+  salvageLevel: number;
+  budgetLevel: number;
+}
+
 export interface V3ProfileState extends V2ProfileState {
   salvageParts: number;
   facilityTiers: Record<V3FacilityId, number>;
@@ -605,9 +673,13 @@ export interface V3ProfileState extends V2ProfileState {
   factionRep: Record<FactionId, number>;
   crewMastery: Record<V2CrewId, number>;
   achievementsUnlocked: string[];
+  achievementsClaimed?: string[];
   defeatedEnemyKinds: string[];
   runHistory: V3RunHistoryEntry[];
   career: V3CareerStats;
+  hullTuning?: Record<string, V3HullTuningState>;
+  discoveredSynergies?: string[];
+  pendingFamilyUnlockChoices?: V2UnlockFamilyId[];
 }
 
 export interface V2RunState {
@@ -658,6 +730,13 @@ export interface V3RunState extends V2RunState {
   tacticalChargesUsed: number;
   salvagePartsEarned: number;
   isFinalCampaignRun?: boolean;
+  startingStipendCredits?: number;
+  stipendSpentCredits?: number;
+  overchargeCellActive?: boolean;
+  lockedEnemyId?: string | null;
+  emergencyTowUsed?: boolean;
+  returnMode?: 'beacon_free' | 'emergency_tow' | 'stranded_tow' | null;
+  spatialConflictCount?: number;
 }
 
 export interface V2SaveData {
@@ -666,6 +745,15 @@ export interface V2SaveData {
   savedAt: string;
   profile: V2ProfileState;
   activeRun: V2RunState | null;
+  settings: GameSettings;
+}
+
+export interface V3_0SaveData {
+  schemaVersion: typeof V3_SCHEMA_VERSION;
+  rulesVersion: typeof V3_0_RULES_VERSION;
+  savedAt: string;
+  profile: V3ProfileState;
+  activeRun: V3RunState | null;
   settings: GameSettings;
 }
 
@@ -970,6 +1058,12 @@ export const ENDING_NAMES: Record<EndingId, string> = {
  * Contracted `data-testid` anchors from PROJECT.md § Interface Contracts #2.
  */
 export const TEST_IDS = {
+  // Stage regions (S03)
+  SHIP_STAGE: 'ship-stage',
+  CONTEXT_DOCK: 'context-dock',
+  HOLD_VIEW: 'hold-view',
+  BTN_TOGGLE_MOBILE_HOLD: 'btn-toggle-mobile-hold',
+
   // Title & Secondary Modes Drawer
   TITLE_SCREEN: 'title-screen',
   BTN_ENTER_STATION: 'btn-enter-station',
@@ -980,6 +1074,7 @@ export const TEST_IDS = {
   // Base
   BASE_SCREEN: 'base-screen',
   CAMPAIGN_BANNER: 'campaign-banner',
+  BASE_FAMILY_UNLOCK_CARD: 'base-family-unlock-card',
   BTN_OPEN_CAMPAIGN: 'btn-open-campaign',
   BTN_OPEN_CONTRACTS: 'btn-open-contracts',
   BTN_OPEN_FACILITIES: 'btn-open-facilities',
@@ -989,6 +1084,7 @@ export const TEST_IDS = {
   BTN_OPEN_CAREER: 'btn-open-career',
   BTN_START_TUTORIAL: 'btn-start-tutorial',
   BTN_START_RECOMMENDED: 'btn-start-recommended',
+  btnPickFamily: (fam: V2UnlockFamilyId | string) => `btn-pick-family-${fam}`,
 
   // Prepare
   PREPARE_SCREEN: 'prepare-screen',
@@ -1002,34 +1098,67 @@ export const TEST_IDS = {
   BTN_JUMP_NODE: 'btn-jump-node',
   BTN_SAFE_RETURN: 'btn-safe-return',
   mapNode: (id: string) => `map-node-${id}`,
+  beaconBadge: (id: string) => `beacon-badge-${id}`,
 
-  // Combat
+  // Combat (S05 / S06 / D01 / D02)
   COMBAT_SCREEN: 'combat-screen',
   BTN_START_COMBAT: 'btn-start-combat',
+  BTN_PAUSE_AUTO_COMBAT: 'btn-pause-auto-combat',
+  COMBAT_THREAT_TIER: 'combat-threat-tier',
+  BTN_TOGGLE_FORECAST_DETAILS: 'btn-toggle-forecast-details',
+  FORECAST_DETAILS_DRAWER: 'forecast-details-drawer',
   COMBAT_TACTICAL_BAR: 'combat-tactical-bar',
+  COMBAT_TACTICAL_CHARGES: 'combat-tactical-charges',
+  COMBAT_OVERLOAD_SECTION: 'combat-overload-section',
   BTN_COMBAT_SKIP: 'btn-combat-skip',
   tacticalOrder: (id: string) => `tactical-order-${id}`,
+  overloadModule: (instanceId: string) => `overload-module-${instanceId}`,
+  enemyLock: (enemyId: string) => `enemy-lock-${enemyId}`,
+  enemyIntent: (enemyId: string) => `enemy-intent-${enemyId}`,
 
-  // Wreck
+  // Wreck (S08 / D05)
   WRECK_SCREEN: 'wreck-screen',
   WRECK_STABILITY: 'wreck-stability',
   BTN_WRECK_EXTRACT: 'btn-wreck-extract',
+  BTN_SKIP_WRECK_CUT: 'btn-skip-wreck-cut',
+  BTN_SKIP_WRECK_CUT_PANEL: 'btn-skip-wreck-cut-panel',
+  WRECK_FLIP_GHOST: 'wreck-flip-ghost',
   wreckCut: (spot: string) => `wreck-cut-${spot}`,
+  wreckSpot: (spot: string) => `wreck-spot-${spot}`,
 
   // Event
   EVENT_SCREEN: 'event-screen',
   eventChoice: (index: number) => `event-choice-${index}`,
 
-  // Shop / Reward / Arrange
+  // Shop / Reward / Arrange (D07 / S06)
   SHOP_SCREEN: 'shop-screen',
   ENGINEER_SWAP_BANNER: 'engineer-swap-banner',
   REWARD_SCREEN: 'reward-screen',
+  REWARD_RELIC_BONUS: 'reward-relic-bonus',
+  BTN_REWARD_SKIP: 'btn-reward-skip',
+  rewardChoice: (index: number) => `reward-choice-${index}`,
+  rewardSynergyBadge: (index: number) => `reward-synergy-badge-${index}`,
   ARRANGE_SCREEN: 'arrange-screen',
   BTN_LEAVE_ARRANGE: 'btn-leave-arrange',
+  CARGO_COMPACT_STATS: 'cargo-compact-stats',
+  SYNERGY_DISCOVERY_TOAST: 'synergy-discovery-toast',
+  CODEX_SYNERGY_SECTION: 'codex-synergy-section',
 
-  // Settlement / Ending
+  // Playtest Telemetry (T01)
+  PLAYTEST_TELEMETRY_ROW: 'playtest-telemetry-row',
+  BTN_EXPORT_PLAYTEST_LOG: 'btn-export-playtest-log',
+  BTN_CLEAR_PLAYTEST_LOG: 'btn-clear-playtest-log',
+
+  // Settlement / Ending (S09 / D07)
   SETTLEMENT_SCREEN: 'settlement-screen',
+  SETTLEMENT_TOTAL_CREDITS: 'settlement-total-credits',
+  SETTLEMENT_FAMILY_UNLOCK: 'settlement-family-unlock',
+  SETTLEMENT_AUTO_RESOLVED: 'settlement-auto-resolved',
+  SETTLEMENT_LOAN_SUMMARY: 'settlement-loan-summary',
   BTN_CONFIRM_SETTLEMENT: 'btn-confirm-settlement',
+  familyUnlockOption: (fam: V2UnlockFamilyId | string) => `family-unlock-option-${fam}`,
+  btnDismantle: (instanceId: string) => `btn-dismantle-${instanceId}`,
+  btnStore: (instanceId: string) => `btn-store-${instanceId}`,
   ENDING_SCREEN: 'ending-screen',
   BTN_ENDING_CONTINUE: 'btn-ending-continue',
   endingChoice: (id: EndingId | string) => `ending-choice-${id}`,

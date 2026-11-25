@@ -7,14 +7,20 @@ import type {
   StarlineInspectSnapshot,
   V1SaveData,
   V2CrewId,
+  V2RewardChoiceId,
   V2SaveData,
+  V2WreckSpotId,
+  V3_0SaveData,
   V3SaveData,
   V3ShipId,
 } from './contracts';
 
 export interface SeedStorageOptions {
-  v2Save?: V2SaveData | V3SaveData | string | null;
-  v2Backup?: V2SaveData | V3SaveData | string | null;
+  v2Save?: V2SaveData | V3SaveData | V3_0SaveData | string | null;
+  v2Backup?: V2SaveData | V3SaveData | V3_0SaveData | string | null;
+  v3Backup?: V3SaveData | string | null;
+  v3_0Backup?: V3_0SaveData | string | null;
+  playtestLog?: string | null;
   v1Save?: V1SaveData | string | null;
   v1Backup?: V1SaveData | string | null;
   tabLock?: { tabId: string; updatedAt: number } | string | null;
@@ -26,6 +32,7 @@ export interface SeedStorageOptions {
 export interface BootOptions {
   seed?: number | string;
   mode?: 'v1' | 'v2';
+  playtest?: boolean;
   enterStation?: boolean;
   path?: string;
   timeoutMs?: number;
@@ -51,48 +58,22 @@ export class StarlineAppDriver {
    * do NOT overwrite localStorage mutations made by the game.
    */
   async seedStorage(options: SeedStorageOptions = {}): Promise<void> {
+    const serializeOpt = (val: unknown): string | null | undefined => {
+      if (val === undefined) return undefined;
+      if (val === null) return null;
+      return typeof val === 'string' ? val : JSON.stringify(val);
+    };
+
     const payload = {
       clearAll: options.clearAll ?? true,
-      v2Save:
-        options.v2Save === undefined
-          ? undefined
-          : options.v2Save === null
-            ? null
-            : typeof options.v2Save === 'string'
-              ? options.v2Save
-              : JSON.stringify(options.v2Save),
-      v2Backup:
-        options.v2Backup === undefined
-          ? undefined
-          : options.v2Backup === null
-            ? null
-            : typeof options.v2Backup === 'string'
-              ? options.v2Backup
-              : JSON.stringify(options.v2Backup),
-      v1Save:
-        options.v1Save === undefined
-          ? undefined
-          : options.v1Save === null
-            ? null
-            : typeof options.v1Save === 'string'
-              ? options.v1Save
-              : JSON.stringify(options.v1Save),
-      v1Backup:
-        options.v1Backup === undefined
-          ? undefined
-          : options.v1Backup === null
-            ? null
-            : typeof options.v1Backup === 'string'
-              ? options.v1Backup
-              : JSON.stringify(options.v1Backup),
-      tabLock:
-        options.tabLock === undefined
-          ? undefined
-          : options.tabLock === null
-            ? null
-            : typeof options.tabLock === 'string'
-              ? options.tabLock
-              : JSON.stringify(options.tabLock),
+      v2Save: serializeOpt(options.v2Save),
+      v2Backup: serializeOpt(options.v2Backup),
+      v3Backup: serializeOpt(options.v3Backup),
+      v3_0Backup: serializeOpt(options.v3_0Backup),
+      playtestLog: serializeOpt(options.playtestLog),
+      v1Save: serializeOpt(options.v1Save),
+      v1Backup: serializeOpt(options.v1Backup),
+      tabLock: serializeOpt(options.tabLock),
       sessionMode: options.sessionMode,
       skipTitleScreen: options.skipTitleScreen ?? false,
       keys: STORAGE_KEYS,
@@ -114,6 +95,9 @@ export class StarlineAppDriver {
 
       setOrRemove(arg.keys.V2_SAVE, arg.v2Save);
       setOrRemove(arg.keys.V2_BACKUP, arg.v2Backup);
+      setOrRemove(arg.keys.V3_BACKUP, arg.v3Backup);
+      setOrRemove(arg.keys.V3_0_BACKUP, arg.v3_0Backup);
+      setOrRemove(arg.keys.PLAYTEST_LOG, arg.playtestLog);
       setOrRemove(arg.keys.V1_SAVE, arg.v1Save);
       setOrRemove(arg.keys.V1_BACKUP, arg.v1Backup);
       setOrRemove(arg.keys.V2_TAB_LOCK, arg.tabLock);
@@ -158,6 +142,9 @@ export class StarlineAppDriver {
 
       setOrRemove(arg.keys.V2_SAVE, arg.v2Save);
       setOrRemove(arg.keys.V2_BACKUP, arg.v2Backup);
+      setOrRemove(arg.keys.V3_BACKUP, arg.v3Backup);
+      setOrRemove(arg.keys.V3_0_BACKUP, arg.v3_0Backup);
+      setOrRemove(arg.keys.PLAYTEST_LOG, arg.playtestLog);
       setOrRemove(arg.keys.V1_SAVE, arg.v1Save);
       setOrRemove(arg.keys.V1_BACKUP, arg.v1Backup);
       setOrRemove(arg.keys.V2_TAB_LOCK, arg.tabLock);
@@ -177,7 +164,7 @@ export class StarlineAppDriver {
   }
 
   /**
-   * Navigates to the game with optional deterministic `?seed=` and `?mode=` query params.
+   * Navigates to the game with optional deterministic `?seed=`, `?mode=`, and `?playtest=1` query params.
    */
   async boot(options: BootOptions = {}): Promise<void> {
     const params = new URLSearchParams();
@@ -186,6 +173,9 @@ export class StarlineAppDriver {
     }
     if (options.seed !== undefined) {
       params.set('seed', String(options.seed));
+    }
+    if (options.playtest) {
+      params.set('playtest', '1');
     }
     const basePath = options.path ?? '/';
     const qs = params.toString();
@@ -395,13 +385,10 @@ export class StarlineAppDriver {
   }
 
   async jumpToNode(nodeId: string): Promise<void> {
-    const node = this.byTestId(TEST_IDS.mapNode(nodeId));
-    await expect(node).toBeVisible();
-    await node.click();
-    const jumpBtn = this.byTestId(TEST_IDS.BTN_JUMP_NODE);
-    await expect(jumpBtn).toBeVisible();
-    await expect(jumpBtn).toBeEnabled();
-    await jumpBtn.click();
+    // S04: Unified destination cards expose an inline 1-click `[data-jump-node="<id>"]` button;
+    // MapView's click handler transitions phase synchronously before click() resolves.
+    const directJumpBtn = this.page.locator(`[data-jump-node="${nodeId}"]`).first();
+    await directJumpBtn.click();
   }
 
   async safeReturn(): Promise<void> {
@@ -412,11 +399,126 @@ export class StarlineAppDriver {
     await expect(this.byTestId(TEST_IDS.SETTLEMENT_SCREEN)).toBeVisible();
   }
 
+  async pauseAutoCombat(options?: {
+    allowAlreadyPaused?: boolean;
+    timeoutMs?: number;
+  }): Promise<void> {
+    const timeout = options?.timeoutMs ?? 30_000;
+    const btn = this.byTestId(TEST_IDS.BTN_PAUSE_AUTO_COMBAT);
+    if (options?.allowAlreadyPaused) {
+      const alreadyPaused = await btn.evaluate(
+        (el) => el.getAttribute('aria-pressed') === 'true',
+        undefined,
+        { timeout },
+      );
+      if (!alreadyPaused) {
+        await btn.click({ timeout });
+      }
+      await expect(btn).toHaveAttribute('aria-pressed', 'true');
+      return;
+    }
+
+    // Single-round-trip opaque-box click targeting the active countdown state:
+    // eliminates pre-click evaluate()/getAttribute() CDP round-trips so S05's 1500ms
+    // countdown cannot drain during heavy Boss/WebGL scene init or post-reload boot,
+    // while failing closed if S05 unexpectedly entered already paused or already engaged.
+    const unpausedBtn = this.page.locator(
+      `[data-testid="${TEST_IDS.BTN_PAUSE_AUTO_COMBAT}"][aria-pressed="false"]`,
+    );
+    await unpausedBtn.click({ timeout });
+    await expect(btn).toHaveAttribute('aria-pressed', 'true');
+  }
+
+  async openForecastDetails(): Promise<Locator> {
+    const drawer = this.byTestId(TEST_IDS.FORECAST_DETAILS_DRAWER);
+    if (!(await drawer.isVisible())) {
+      const toggleBtn = this.byTestId(TEST_IDS.BTN_TOGGLE_FORECAST_DETAILS);
+      await expect(toggleBtn).toBeVisible();
+      await toggleBtn.click();
+    }
+    await expect(drawer).toBeVisible();
+    return drawer;
+  }
+
+  private static isPostCombatState(s: StarlineInspectSnapshot): boolean {
+    return (
+      s.screen === 'ending' ||
+      (s.screen === 'run' && (s.phase === 'REWARD' || s.phase === 'SETTLEMENT'))
+    );
+  }
+
+  private static isCombatEncounterState(s: StarlineInspectSnapshot): boolean {
+    return (
+      s.screen === 'run' &&
+      s.phase === 'ENCOUNTER' &&
+      s.activeRun !== null &&
+      s.activeRun.wreckStability === null
+    );
+  }
+
   async startCombat(): Promise<void> {
+    const hasCombatEngaged = (s: StarlineInspectSnapshot): boolean =>
+      StarlineAppDriver.isPostCombatState(s) ||
+      (StarlineAppDriver.isCombatEncounterState(s) &&
+        (typeof s.activeRun?.combatRound === 'number' ||
+          s.activeRun?.combatWaitingDecision === true));
+
+    const initial = await this.inspect();
+    if (
+      !StarlineAppDriver.isPostCombatState(initial) &&
+      !StarlineAppDriver.isCombatEncounterState(initial)
+    ) {
+      throw new Error(
+        `startCombat() called outside combat encounter (screen=${initial.screen}, phase=${String(initial.phase)}, wreckStability=${String(initial.activeRun?.wreckStability ?? null)})`,
+      );
+    }
+    if (hasCombatEngaged(initial)) {
+      return;
+    }
+
     const btn = this.byTestId(TEST_IDS.BTN_START_COMBAT);
-    await expect(btn).toBeVisible();
-    await expect(btn).toBeEnabled();
-    await btn.click();
+    const pollBox: { state: 'pre' | 'engaged' | 'pending' } = { state: 'pending' };
+    await expect
+      .poll(
+        async () => {
+          const snap = await this.inspect();
+          if (hasCombatEngaged(snap)) {
+            pollBox.state = 'engaged';
+            return true;
+          }
+          if (!StarlineAppDriver.isCombatEncounterState(snap)) {
+            return false;
+          }
+          if ((await btn.isVisible()) && (await btn.isEnabled())) {
+            pollBox.state = 'pre';
+            return true;
+          }
+          return false;
+        },
+        { timeout: 15_000, message: 'Timed out waiting for pre-combat start button or S05 auto-engage' },
+      )
+      .toBe(true);
+
+    if (pollBox.state === 'engaged') {
+      return;
+    }
+
+    try {
+      await btn.click({ timeout: 5_000 });
+    } catch (err) {
+      // S05 1.5s auto-engage may have fired and unmounted btn-start-combat mid-click
+      const afterErr = await this.inspect();
+      if (!hasCombatEngaged(afterErr)) {
+        throw err;
+      }
+      return;
+    }
+
+    await this.waitForInspect(
+      hasCombatEngaged,
+      15_000,
+      'combat engaged after clicking startCombat',
+    );
   }
 
   async issueTacticalOrder(orderId: string): Promise<void> {
@@ -428,14 +530,93 @@ export class StarlineAppDriver {
     await btn.click();
   }
 
-  async skipCombat(): Promise<void> {
-    const btn = this.byTestId(TEST_IDS.BTN_COMBAT_SKIP);
+  async overloadModule(instanceId: string): Promise<void> {
+    const bar = this.byTestId(TEST_IDS.COMBAT_TACTICAL_BAR);
+    await expect(bar).toBeVisible();
+    const section = this.byTestId(TEST_IDS.COMBAT_OVERLOAD_SECTION);
+    await expect(section).toBeVisible();
+    const btn = this.byTestId(TEST_IDS.overloadModule(instanceId));
     await expect(btn).toBeVisible();
     await expect(btn).toBeEnabled();
     await btn.click();
   }
 
-  async cutWreckSpot(spot: string): Promise<void> {
+  async lockEnemy(enemyId: string): Promise<void> {
+    const btn = this.byTestId(TEST_IDS.enemyLock(enemyId));
+    await expect(btn).toBeVisible();
+    if ((await btn.getAttribute('aria-pressed')) !== 'true') {
+      await expect(btn).toBeEnabled();
+      await btn.click();
+    }
+    await expect(btn).toHaveAttribute('aria-pressed', 'true');
+  }
+
+  async skipCombat(): Promise<void> {
+    const isCombatDoneOrPaused = (s: StarlineInspectSnapshot): boolean =>
+      StarlineAppDriver.isPostCombatState(s) ||
+      (StarlineAppDriver.isCombatEncounterState(s) && s.activeRun?.combatWaitingDecision === true);
+
+    const initial = await this.inspect();
+    if (
+      !StarlineAppDriver.isPostCombatState(initial) &&
+      !StarlineAppDriver.isCombatEncounterState(initial)
+    ) {
+      throw new Error(
+        `skipCombat() called outside combat encounter (screen=${initial.screen}, phase=${String(initial.phase)}, wreckStability=${String(initial.activeRun?.wreckStability ?? null)})`,
+      );
+    }
+    if (isCombatDoneOrPaused(initial)) {
+      return;
+    }
+
+    const btn = this.byTestId(TEST_IDS.BTN_COMBAT_SKIP);
+    const pollBox: { state: 'skip' | 'done' | 'pending' } = { state: 'pending' };
+    await expect
+      .poll(
+        async () => {
+          const snap = await this.inspect();
+          if (isCombatDoneOrPaused(snap)) {
+            pollBox.state = 'done';
+            return true;
+          }
+          if (!StarlineAppDriver.isCombatEncounterState(snap)) {
+            return false;
+          }
+          if ((await btn.isVisible()) && (await btn.isEnabled())) {
+            pollBox.state = 'skip';
+            return true;
+          }
+          return false;
+        },
+        { timeout: 15_000, message: 'Timed out waiting for combat skip button or combat completion' },
+      )
+      .toBe(true);
+
+    if (pollBox.state === 'done') {
+      return;
+    }
+
+    try {
+      await btn.click({ timeout: 5_000 });
+    } catch (err) {
+      const afterErr = await this.inspect();
+      if (!isCombatDoneOrPaused(afterErr)) {
+        throw err;
+      }
+      return;
+    }
+
+    await this.waitForInspect(
+      isCombatDoneOrPaused,
+      15_000,
+      'combat skipped to completion or tactical decision',
+    );
+  }
+
+  async cutWreckSpot(
+    spot: V2WreckSpotId | string,
+    options?: { waitForCommit?: boolean },
+  ): Promise<void> {
     const hotspotKey = spot.startsWith('reactor') ? 'reactor' : spot;
     const cutSelector =
       spot === 'reactor'
@@ -443,18 +624,71 @@ export class StarlineAppDriver {
         : `[data-testid="${TEST_IDS.wreckCut(spot)}"]`;
     const btn = this.page.locator(cutSelector).first();
 
+    // Only select a non-direct-cut left-panel card if needed (never click S08 direct-cut stage pins here)
     if (!(await btn.isVisible())) {
-      const spotTab = this.page
-        .locator(`[data-testid="wreck-spot-${hotspotKey}"], [data-wreck-spot="${hotspotKey}"]`)
-        .first();
-      if (await spotTab.isVisible()) {
-        await spotTab.click();
+      const card = this.page.locator(`[data-wreck-card="${hotspotKey}"]`).first();
+      if (await card.isVisible()) {
+        await card.click();
       }
     }
 
     await expect(btn).toBeVisible();
     await expect(btn).toBeEnabled();
+    const beforeStability = (await this.inspect()).activeRun?.wreckStability ?? null;
     await btn.click();
+
+    if (options?.waitForCommit !== false) {
+      await expect
+        .poll(
+          async () =>
+            this.page.evaluate(
+              ({ sel, skipOverlayTid, skipPanelTid, extractTid, prevStability }) => {
+                const inspectFn = (
+                  window as unknown as { __STARLINE_INSPECT__?: () => StarlineInspectSnapshot }
+                ).__STARLINE_INSPECT__;
+                const snap = inspectFn ? inspectFn() : null;
+                if (!snap) return false;
+                // Ambush combat or phase exit completes the cut immediately
+                if (
+                  snap.screen !== 'run' ||
+                  snap.phase !== 'ENCOUNTER' ||
+                  snap.activeRun === null ||
+                  snap.activeRun.wreckStability === null
+                ) {
+                  return true;
+                }
+                const isShown = (el: Element | null): boolean => {
+                  if (!el) return false;
+                  const rect = el.getBoundingClientRect();
+                  return rect.width > 0 && rect.height > 0;
+                };
+                const skipOverlay = document.querySelector(`[data-testid="${skipOverlayTid}"]`);
+                const skipPanel = document.querySelector(`[data-testid="${skipPanelTid}"]`);
+                if (isShown(skipOverlay) || isShown(skipPanel)) {
+                  return false;
+                }
+                const cutEl = document.querySelector(sel) as HTMLButtonElement | null;
+                const extractEl = document.querySelector(
+                  `[data-testid="${extractTid}"]`,
+                ) as HTMLButtonElement | null;
+                const stabilityChanged =
+                  prevStability !== null && snap.activeRun.wreckStability !== prevStability;
+                const cutDisabled = Boolean(cutEl && cutEl.disabled === true);
+                const extractEnabled = Boolean(extractEl && extractEl.disabled === false);
+                return extractEnabled && (stabilityChanged || cutDisabled);
+              },
+              {
+                sel: cutSelector,
+                skipOverlayTid: TEST_IDS.BTN_SKIP_WRECK_CUT,
+                skipPanelTid: TEST_IDS.BTN_SKIP_WRECK_CUT_PANEL,
+                extractTid: TEST_IDS.BTN_WRECK_EXTRACT,
+                prevStability: beforeStability,
+              },
+            ),
+          { timeout: 15_000, message: `Timed out waiting for S08 wreck cut commit on "${spot}"` },
+        )
+        .toBe(true);
+    }
   }
 
   async extractWreck(): Promise<void> {
@@ -471,9 +705,18 @@ export class StarlineAppDriver {
     await btn.click();
   }
 
-  async pickReward(choice?: 'equipment' | 'cargo' | 'repair'): Promise<void> {
+  async pickReward(choice?: V2RewardChoiceId): Promise<void> {
+    const selectorByChoice: Record<V2RewardChoiceId, string> = {
+      equipment_0: `button[data-pick-reward="equipment_0"], [data-testid="${TEST_IDS.rewardChoice(0)}"]`,
+      equipment_1: `button[data-pick-reward="equipment_1"], [data-testid="${TEST_IDS.rewardChoice(1)}"]`,
+      equipment_2: `button[data-pick-reward="equipment_2"], [data-testid="${TEST_IDS.rewardChoice(2)}"]`,
+      skip: `[data-testid="${TEST_IDS.BTN_REWARD_SKIP}"], button[data-pick-reward="skip"]`,
+      equipment: `button[data-pick-reward="equipment"], button[data-pick-reward="equipment_0"], [data-testid="${TEST_IDS.rewardChoice(0)}"]`,
+      cargo: `button[data-pick-reward="cargo"], [data-testid="reward-choice-cargo"]`,
+      repair: `button[data-pick-reward="repair"], [data-testid="reward-choice-repair"]`,
+    };
     const selector = choice
-      ? `button[data-pick-reward="${choice}"], [data-testid="reward-choice-${choice}"]`
+      ? selectorByChoice[choice]
       : 'button[data-pick-reward], .v2-reward-card, button[data-reward-choice], [data-testid^="reward-choice-"]';
     const btn = this.page.locator(selector).first();
     await expect(btn).toBeVisible();

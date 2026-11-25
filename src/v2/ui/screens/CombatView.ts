@@ -80,6 +80,8 @@ export interface PreCombatAutoEngageOptions {
   readonly now?: () => number;
   readonly setTimeoutFn?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   readonly clearTimeoutFn?: (handle: ReturnType<typeof setTimeout>) => void;
+  readonly requestAnimationFrameFn?: ((cb: () => void) => number) | null;
+  readonly cancelAnimationFrameFn?: ((handle: number) => void) | null;
   readonly setIntervalFn?: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
   readonly clearIntervalFn?: (handle: ReturnType<typeof setInterval>) => void;
 }
@@ -96,9 +98,14 @@ function syncButtonDisabled(btn: HTMLButtonElement, disabled: boolean): void {
 }
 
 /**
- * Deterministic, RAF-free pre-combat 1.5s auto-engage state machine (S05).
- * Strictly idempotent against timer vs manual click races, safe under `vi.useFakeTimers()`,
- * and auto-pauses cleanly on pause click, policy/gadget/details/modal/hidden/readonly events.
+ * Deterministic, paint-gated pre-combat 1.5s auto-engage state machine (S05).
+ * Uses a parallel `setTimeout` + `requestAnimationFrame` paint-gate barrier in browser
+ * environments so low-FPS rendering advances at most one clamped tick per painted frame
+ * (>= 10 visible frames even at 1.7 FPS) while preserving exact 1500ms timing at >= 10 FPS
+ * and under `vi.useFakeTimers()`, with automatic `setTimeout`-only fallback when
+ * `requestAnimationFrame` is unavailable or custom `setTimeoutFn` is injected.
+ * Strictly idempotent against timer vs manual click races, and auto-pauses cleanly on
+ * pause click, policy/gadget/details/modal/hidden/readonly events.
  */
 export class PreCombatAutoEngageController {
   private readonly durationMs: number;
@@ -109,17 +116,23 @@ export class PreCombatAutoEngageController {
   private readonly now: () => number;
   private readonly setTimeoutFn: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   private readonly clearTimeoutFn: (handle: ReturnType<typeof setTimeout>) => void;
-  private readonly setIntervalFn: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
-  private readonly clearIntervalFn: (handle: ReturnType<typeof setInterval>) => void;
+  private readonly useGlobalRaf: boolean;
+  private readonly customRafFn: ((cb: () => void) => number) | null;
+  private readonly customCancelRafFn: ((handle: number) => void) | null;
 
   private status: PreCombatAutoEngageStatus = 'idle';
   private nodeKey: string | null = null;
   private engagedNodeKey: string | null = null;
   private pauseReason: PreCombatPauseReason | null = null;
-  private startedAtMs = 0;
+  private lastTickAtMs = 0;
+  private pendingTickDelayMs = 0;
   private remainingMs: number;
   private timeoutHandle: ReturnType<typeof setTimeout> | null = null;
-  private intervalHandle: ReturnType<typeof setInterval> | null = null;
+  private rafHandle: number | null = null;
+  private activeCancelRafFn: ((handle: number) => void) | null = null;
+  private framePaintedForCurrentTick = false;
+  private timerReadyForCurrentTick = false;
+  private tickGeneration = 0;
 
   constructor(options: PreCombatAutoEngageOptions) {
     this.durationMs = Math.max(50, Math.floor(options.durationMs ?? PRE_COMBAT_AUTO_ENGAGE_MS));
@@ -131,8 +144,21 @@ export class PreCombatAutoEngageController {
     this.now = options.now ?? (() => Date.now());
     this.setTimeoutFn = options.setTimeoutFn ?? ((fn, ms) => globalThis.setTimeout(fn, ms));
     this.clearTimeoutFn = options.clearTimeoutFn ?? ((h) => globalThis.clearTimeout(h));
-    this.setIntervalFn = options.setIntervalFn ?? ((fn, ms) => globalThis.setInterval(fn, ms));
-    this.clearIntervalFn = options.clearIntervalFn ?? ((h) => globalThis.clearInterval(h));
+
+    if (options.requestAnimationFrameFn !== undefined) {
+      this.useGlobalRaf = false;
+      this.customRafFn = options.requestAnimationFrameFn;
+      this.customCancelRafFn = options.cancelAnimationFrameFn ?? null;
+    } else if (options.setTimeoutFn !== undefined) {
+      // Caller injected a custom timer clock without a custom RAF clock: stay pure setTimeout.
+      this.useGlobalRaf = false;
+      this.customRafFn = null;
+      this.customCancelRafFn = null;
+    } else {
+      this.useGlobalRaf = true;
+      this.customRafFn = null;
+      this.customCancelRafFn = null;
+    }
   }
 
   getSnapshot(): PreCombatAutoEngageSnapshot {
@@ -145,15 +171,37 @@ export class PreCombatAutoEngageController {
     };
   }
 
+  private resolveRafFn(): ((cb: () => void) => number) | null {
+    if (!this.useGlobalRaf) return this.customRafFn;
+    return typeof globalThis.requestAnimationFrame === 'function'
+      ? (cb) => globalThis.requestAnimationFrame(cb)
+      : null;
+  }
+
+  private resolveCancelRafFn(): ((handle: number) => void) | null {
+    if (!this.useGlobalRaf) return this.customCancelRafFn;
+    return typeof globalThis.cancelAnimationFrame === 'function'
+      ? (handle) => globalThis.cancelAnimationFrame(handle)
+      : null;
+  }
+
   private clearTimers(): void {
+    this.tickGeneration += 1;
     if (this.timeoutHandle !== null) {
       this.clearTimeoutFn(this.timeoutHandle);
       this.timeoutHandle = null;
     }
-    if (this.intervalHandle !== null) {
-      this.clearIntervalFn(this.intervalHandle);
-      this.intervalHandle = null;
+    if (this.rafHandle !== null) {
+      const handle = this.rafHandle;
+      const cancelFn = this.activeCancelRafFn;
+      this.rafHandle = null;
+      this.activeCancelRafFn = null;
+      cancelFn?.(handle);
     }
+    this.activeCancelRafFn = null;
+    this.pendingTickDelayMs = 0;
+    this.framePaintedForCurrentTick = false;
+    this.timerReadyForCurrentTick = false;
   }
 
   private resolveBlockReason(ctx: {
@@ -166,35 +214,124 @@ export class PreCombatAutoEngageController {
     return 'readonly';
   }
 
-  private startCountdown(): void {
-    this.clearTimers();
-    this.status = 'countdown';
-    this.pauseReason = null;
-    this.startedAtMs = this.now();
-    this.remainingMs = this.durationMs;
-    this.timeoutHandle = this.setTimeoutFn(() => this.handleTimerDone(), this.durationMs);
-    this.intervalHandle = this.setIntervalFn(() => this.handleTick(), this.tickMs);
-  }
-
-  private handleTick(): void {
+  private checkLiveEligibilityGuard(): boolean {
     if (this.status !== 'countdown' || !this.nodeKey) {
       this.clearTimers();
-      return;
+      return false;
     }
     if (this.isLiveEligible) {
       const live = this.isLiveEligible(this.nodeKey);
       if (!live.eligible) {
         this.reset();
         this.onChange?.(this.getSnapshot());
-        return;
+        return false;
       }
       if (!live.canMutate || live.modalOpen || live.hidden) {
         this.pause(this.resolveBlockReason(live));
-        return;
+        return false;
       }
     }
-    this.remainingMs = Math.max(0, this.durationMs - (this.now() - this.startedAtMs));
+    return true;
+  }
+
+  private scheduleNextTick(): void {
+    this.clearTimers();
+    if (this.status !== 'countdown' || !this.nodeKey || this.remainingMs <= 0) {
+      return;
+    }
+    const gen = ++this.tickGeneration;
+    const delay = Math.max(1, Math.min(this.tickMs, this.remainingMs));
+    this.pendingTickDelayMs = delay;
+    this.lastTickAtMs = this.now();
+    this.timerReadyForCurrentTick = false;
+
+    const rafFn = this.resolveRafFn();
+    if (rafFn) {
+      this.framePaintedForCurrentTick = false;
+      this.activeCancelRafFn = this.resolveCancelRafFn();
+      const handle = rafFn(() => {
+        if (gen !== this.tickGeneration) return;
+        this.rafHandle = null;
+        this.activeCancelRafFn = null;
+        this.framePaintedForCurrentTick = true;
+        if (this.timerReadyForCurrentTick) {
+          this.handleTick(gen);
+        }
+      });
+      // Guard against synchronous RAF stubs that already invoked the callback inline
+      if (gen === this.tickGeneration && !this.framePaintedForCurrentTick) {
+        this.rafHandle = handle;
+      } else {
+        this.activeCancelRafFn = null;
+      }
+    } else {
+      this.framePaintedForCurrentTick = true;
+    }
+
+    if (gen !== this.tickGeneration || this.status !== 'countdown') {
+      return;
+    }
+
+    const timerHandle = this.setTimeoutFn(() => {
+      if (gen !== this.tickGeneration) return;
+      this.timeoutHandle = null;
+      if (this.framePaintedForCurrentTick) {
+        this.timerReadyForCurrentTick = true;
+        this.handleTick(gen);
+        return;
+      }
+      // Timer fired before the current frame painted: validate live eligibility now so
+      // hidden/modal/readonly transitions never leave a dangling RAF handle, then wait for RAF.
+      if (!this.checkLiveEligibilityGuard()) {
+        return;
+      }
+      this.timerReadyForCurrentTick = true;
+    }, delay);
+
+    if (gen === this.tickGeneration && !this.timerReadyForCurrentTick) {
+      this.timeoutHandle = timerHandle;
+    }
+  }
+
+  private startCountdown(): void {
+    this.clearTimers();
+    this.status = 'countdown';
+    this.pauseReason = null;
+    this.remainingMs = this.durationMs;
+    this.scheduleNextTick();
+  }
+
+  private handleTick(gen: number): void {
+    if (gen !== this.tickGeneration) {
+      return;
+    }
+    const scheduledDelay = this.pendingTickDelayMs || this.tickMs;
+    this.timeoutHandle = null;
+    this.rafHandle = null;
+    this.activeCancelRafFn = null;
+    this.pendingTickDelayMs = 0;
+    this.framePaintedForCurrentTick = false;
+    this.timerReadyForCurrentTick = false;
+
+    if (!this.checkLiveEligibilityGuard()) {
+      return;
+    }
+    const nowMs = this.now();
+    const rawDt = Math.max(0, nowMs - this.lastTickAtMs);
+    // Clamp per-tick delta so a single main-thread WebGL/scene-init stall OR a slow
+    // painted frame never consumes more than (scheduledDelay + 50)ms per painted frame.
+    const clampedDt = Math.min(rawDt, scheduledDelay + 50);
+    this.remainingMs = Math.max(0, this.remainingMs - clampedDt);
+    this.lastTickAtMs = nowMs;
+    if (this.remainingMs <= 0) {
+      this.handleTimerDone();
+      return;
+    }
     this.onChange?.(this.getSnapshot());
+    if (gen !== this.tickGeneration) {
+      return;
+    }
+    this.scheduleNextTick();
   }
 
   private handleTimerDone(): void {
@@ -259,8 +396,6 @@ export class PreCombatAutoEngageController {
         this.clearTimers();
         this.status = 'paused';
         this.pauseReason = this.resolveBlockReason(ctx);
-      } else {
-        this.remainingMs = Math.max(0, this.durationMs - (this.now() - this.startedAtMs));
       }
     }
     return this.getSnapshot();

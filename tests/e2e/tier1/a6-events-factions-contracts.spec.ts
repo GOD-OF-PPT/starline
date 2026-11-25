@@ -8,6 +8,8 @@ import {
   createContractInstance,
   presetAct2V3,
   presetEventEncounterV3,
+  presetMidRunMapV3,
+  presetPostTutorialV3,
   presetSettlementV3,
   presetShopEncounterV3,
 } from '../helpers';
@@ -232,5 +234,63 @@ test.describe('Tier 1 · A6: Sector Event Deck, Merchants, 3 Factions & Expanded
     expect(postSnap.credits).toBeGreaterThanOrEqual(baseCredits + 85 + 21 + 10);
 
     monitor.assertClean(postSnap);
+  });
+
+  test('T1-A6-07 @p1-mid S10 post-tutorial recommended contract differs from transport_std and D07 combat reward tags 3 equipment synergies with zero-heal skip', async ({
+    page,
+  }) => {
+    const monitor = attachZeroErrorMonitors(page);
+    const app = createAppDriver(page);
+
+    // Part A (S10): Post-tutorial Base recommends a distinct non-transport contract (rescue_std)
+    await app.seedStorage({
+      v2Save: presetPostTutorialV3({
+        completedContractIds: [],
+        completedContractTypes: [],
+      }),
+      skipTitleScreen: true,
+    });
+    await app.boot({ seed: 6007, enterStation: true });
+
+    const cmdCard = page.locator('.v2-base-cmd-card').first();
+    await expect(cmdCard).toBeVisible();
+    await expect(cmdCard).not.toContainText(/密封反应堆/);
+    await expect(cmdCard).toContainText(/失联救援|救生舱/);
+
+    await app.openPrepareFromBase();
+    await expect(app.byTestId(TEST_IDS.PREPARE_SCREEN)).toContainText(/失联救援|救生舱/);
+
+    // Part B (D07): 3-equipment synergy-tagged combat reward + zero-heal skip
+    const rewardSave = presetMidRunMapV3({
+      phase: 'REWARD',
+      currentNodeId: 'L1B',
+      hp: 20,
+      maxHp: 30,
+      overrides: { visitedNodeIds: ['L1B'] },
+    });
+    await app.seedStorage({ v2Save: rewardSave, skipTitleScreen: true });
+    await app.boot({ seed: 6008 });
+
+    await expect(app.byTestId(TEST_IDS.REWARD_SCREEN)).toBeVisible();
+    const synStates: (string | null)[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      await expect(app.byTestId(TEST_IDS.rewardChoice(i))).toBeVisible();
+      const badge = app.byTestId(TEST_IDS.rewardSynergyBadge(i));
+      await expect(badge).toBeVisible();
+      synStates.push(await badge.getAttribute('data-synergy-state'));
+    }
+    // Starter combat bay (laser + battery + shield) vs deterministic reward options [laser, battery, shield]
+    expect(synStates).toEqual(['capped', 'matched', 'unmatched']);
+
+    const skipBtn = app.byTestId(TEST_IDS.BTN_REWARD_SKIP);
+    await expect(skipBtn).toBeVisible();
+    await app.pickReward('skip');
+
+    await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toBeVisible();
+    const afterSkip = await app.inspect();
+    expect(afterSkip.phase).toBe('MAP');
+    expect(afterSkip.activeRun?.hp).toBe(20);
+
+    monitor.assertClean(afterSkip);
   });
 });

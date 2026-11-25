@@ -12,6 +12,7 @@ import {
   V1_SCHEMA_VERSION,
   V2_RULES_VERSION,
   V2_SCHEMA_VERSION,
+  V3_0_RULES_VERSION,
   V3_RULES_VERSION,
   V3_SCHEMA_VERSION,
   WAREHOUSE_BASE_CAPACITY,
@@ -21,6 +22,7 @@ import type {
   GameSettings,
   SectorId,
   V1SaveData,
+  V2ActiveCombatState,
   V2AnomalyPayload,
   V2CargoBayState,
   V2CargoItemInstance,
@@ -52,6 +54,7 @@ import type {
   V2SaveData,
   V2StagingItem,
   V2WreckPayload,
+  V3_0SaveData,
   V3CampaignState,
   V3CareerStats,
   V3FacilityId,
@@ -799,6 +802,32 @@ export function createCombatNodePayload(
         },
       ];
       break;
+    case 'patrol_tutorial':
+      units = [
+        {
+          enemyId: `${nodeId}_patrol_tut_1`,
+          name: '教学靶舰',
+          spriteArchetype: 'scout',
+          maxHp: 14,
+          damagePerRound: 2,
+          armor: 0,
+          pierceRatio: 0,
+        },
+      ];
+      break;
+    case 'tutorial_raider':
+      units = [
+        {
+          enemyId: `${nodeId}_tut_raider_1`,
+          name: '封锁拦截艇',
+          spriteArchetype: 'interceptor',
+          maxHp: 7,
+          damagePerRound: 4,
+          armor: 2,
+          pierceRatio: 0.5,
+        },
+      ];
+      break;
     case 'patrol':
     default:
       units = [
@@ -951,6 +980,8 @@ export interface CreateMapGraphOptions {
   bossId?: string;
   layer6Type?: V2NodeType;
   skipDefaultPayloads?: boolean;
+  /** When true, omits `isBeacon` from generated nodes (used for legacy '3.0.0' migration fixtures). */
+  omitBeacons?: boolean;
 }
 
 export function createMapGraph(options: CreateMapGraphOptions = {}): V2MapGraph {
@@ -958,6 +989,10 @@ export function createMapGraph(options: CreateMapGraphOptions = {}): V2MapGraph 
   const nodes: Record<string, V2MapNode> = {};
   const guaranteedPathNodeIds: string[] = [];
   const layer6NodeType: V2NodeType = options.layer6Type ?? 'elite';
+
+  const defaultBeaconLayers = new Set<number>(
+    maxLayers >= 6 ? [3, 5] : maxLayers >= 4 ? [3] : maxLayers >= 2 ? [maxLayers - 1] : [],
+  );
 
   const defaultLayerTypes: [V2NodeType, V2NodeType][] = [
     ['wreck', 'combat'],
@@ -990,6 +1025,7 @@ export function createMapGraph(options: CreateMapGraphOptions = {}): V2MapGraph 
     const finalBossId =
       override?.bossId ?? (isFinalLayer && options.bossId ? options.bossId : undefined);
     const sectorBg = LAYER_SECTOR_BGS[Math.min(5, Math.max(0, layer - 1))];
+    const defaultIsBeacon = lane === 0 && defaultBeaconLayers.has(layer);
 
     const base: V2MapNode = {
       nodeId,
@@ -999,6 +1035,7 @@ export function createMapGraph(options: CreateMapGraphOptions = {}): V2MapGraph 
       sectorBg,
       nextNodeIds: [...nextIds],
       contractMarker: Boolean(override?.contractMarker ?? override?.isContractTarget ?? false),
+      ...(!options.omitBeacons ? { isBeacon: defaultIsBeacon } : {}),
       fuelCost: 1,
       visited: false,
       resolved: false,
@@ -1489,19 +1526,28 @@ export function createV3ProfileFixture(
       ...overrides?.crewMastery,
     },
     achievementsUnlocked: overrides?.achievementsUnlocked ? [...overrides.achievementsUnlocked] : [],
+    ...(overrides?.achievementsClaimed ? { achievementsClaimed: [...overrides.achievementsClaimed] } : {}),
     defeatedEnemyKinds: overrides?.defeatedEnemyKinds ? [...overrides.defeatedEnemyKinds] : [],
     runHistory: overrides?.runHistory ? overrides.runHistory.map((h) => ({ ...h })) : [],
     career: createDefaultCareerStats(overrides?.career),
+    ...(overrides?.hullTuning ? { hullTuning: { ...overrides.hullTuning } } : {}),
+    ...(overrides?.discoveredSynergies ? { discoveredSynergies: [...overrides.discoveredSynergies] } : {}),
+    ...(overrides?.pendingFamilyUnlockChoices
+      ? { pendingFamilyUnlockChoices: [...overrides.pendingFamilyUnlockChoices] }
+      : {}),
   };
 
   validateV3ProfileInvariant(profile);
   return profile;
 }
 
-export function validateV3RunInvariant(run: V3RunState): void {
-  if (run.schemaVersion !== V3_SCHEMA_VERSION || run.rulesVersion !== V3_RULES_VERSION) {
+export function validateV3RunInvariant(
+  run: V3RunState,
+  expectedRulesVersion: string = V3_RULES_VERSION,
+): void {
+  if (run.schemaVersion !== V3_SCHEMA_VERSION || run.rulesVersion !== expectedRulesVersion) {
     throw new Error(
-      `Fixture invariant violation: run version mismatch (expected ${V3_SCHEMA_VERSION}/${V3_RULES_VERSION}, got ${run.schemaVersion}/${run.rulesVersion}).`,
+      `Fixture invariant violation: run version mismatch (expected ${V3_SCHEMA_VERSION}/${expectedRulesVersion}, got ${run.schemaVersion}/${run.rulesVersion}).`,
     );
   }
   if (!(run.shipId in SHIP_SPECS)) {
@@ -1694,17 +1740,39 @@ export function createV3RunFixture(options: CreateV3RunOptions = {}): V3RunState
   const bay = options.bay ?? createStarterCombatBay(shipId);
   const contract = options.contract ?? createContractInstance('transport_std', { runId });
 
-  const defaultPendingReward: V2CombatRewardBundle | null =
+  const defaultRewardEqOptions =
     phase === 'REWARD'
-      ? {
-          nodeId: currentNodeId ?? 'L1B',
-          equipmentOption: createCargoItem({
-            instanceId: `${runId}_rew_laser`,
+      ? [
+          createCargoItem({
+            instanceId: `${runId}_rew_eq_0`,
             definitionId: 'equipment.laser.common',
             origin: 'loot',
             acquiredDepth: 1,
             location: 'staging',
           }),
+          createCargoItem({
+            instanceId: `${runId}_rew_eq_1`,
+            definitionId: 'equipment.battery.common',
+            origin: 'loot',
+            acquiredDepth: 1,
+            location: 'staging',
+          }),
+          createCargoItem({
+            instanceId: `${runId}_rew_eq_2`,
+            definitionId: 'equipment.shield.common',
+            origin: 'loot',
+            acquiredDepth: 1,
+            location: 'staging',
+          }),
+        ]
+      : null;
+
+  const defaultPendingReward: V2CombatRewardBundle | null =
+    phase === 'REWARD' && defaultRewardEqOptions
+      ? {
+          nodeId: currentNodeId ?? 'L1B',
+          equipmentOptions: defaultRewardEqOptions,
+          equipmentOption: defaultRewardEqOptions[0],
           cargoOption: createCargoItem({
             instanceId: `${runId}_rew_alloy`,
             definitionId: 'cargo.alloy_bar',
@@ -1712,7 +1780,7 @@ export function createV3RunFixture(options: CreateV3RunOptions = {}): V3RunState
             acquiredDepth: 1,
             location: 'staging',
           }),
-          repairAmount: 6,
+          repairAmount: 0,
           chosen: null,
         }
       : null;
@@ -1757,6 +1825,8 @@ export function createV3RunFixture(options: CreateV3RunOptions = {}): V3RunState
     tacticalChargesUsed: 0,
     salvagePartsEarned: 0,
     isFinalCampaignRun: false,
+    lockedEnemyId: null,
+    spatialConflictCount: 0,
     ...options.overrides,
   };
 
@@ -1828,6 +1898,132 @@ export function createV3SaveFixture(
   }
 
   return save;
+}
+
+export interface CreateV3_0SaveOptions {
+  profile?: Partial<V3ProfileState>;
+  settings?: Partial<GameSettings>;
+  savedAt?: string;
+  /** When true, seeds a schema-valid '3.0.0' activeRun (without `isBeacon` flags). */
+  withActiveRun?: boolean;
+  /** When true, attaches an in-flight '3.0.0' activeCombat on L1B to verify Contract #9 rewind. */
+  withInFlightCombat?: boolean;
+  runStartingHp?: number;
+  runCurrentHp?: number;
+}
+
+export function createV3_0SaveFixture(options: CreateV3_0SaveOptions = {}): V3_0SaveData {
+  const includeRun = Boolean(options.withActiveRun || options.withInFlightCombat);
+  const runId = 'run_v3_0_mig_1';
+  const startingHp = options.runStartingHp ?? 28;
+  const currentHp = options.runCurrentHp ?? 21;
+
+  let activeRun: V3RunState | null = null;
+  if (includeRun) {
+    const legacyGraph = createMapGraph({
+      maxLayers: 6,
+      omitBeacons: true,
+      nodeOverrides: {
+        L1B: {
+          type: 'combat',
+          encounterKind: 'patrol',
+          visited: true,
+          resolved: false,
+        },
+      },
+    });
+    const combatUnits = legacyGraph.nodes.L1B.combat?.units ?? [];
+    const activeCombat: V2ActiveCombatState | null = options.withInFlightCombat
+      ? {
+          nodeId: 'L1B',
+          startingHp,
+          targetPolicy: 'weakest',
+          simulation: {
+            resultId: 'sim_v3_0_legacy_1',
+            outcome: 'victory',
+            stalemate: false,
+            targetPolicy: 'weakest',
+            roundsCount: 2,
+            startingPlayerHp: startingHp,
+            startingPlayerShield: 4,
+            finalPlayerHp: 24,
+            repairApplied: 0,
+            finalPlayerHpAfterRepair: 24,
+            initialEnemies: combatUnits.map((u) => ({
+              enemyId: u.enemyId,
+              name: u.name,
+              spriteArchetype: u.spriteArchetype,
+              hp: u.maxHp,
+              maxHp: u.maxHp,
+              damagePerRound: u.damagePerRound,
+              armor: u.armor,
+              pierceRatio: u.pierceRatio,
+              ...(u.isBoss ? { isBoss: true } : {}),
+            })),
+            rounds: [{ round: 1 }],
+          },
+          committedCommands: [
+            {
+              decisionId: `tactic_${runId}_L1B_1`,
+              roundNumber: 1,
+              choice: 'overload',
+            },
+          ],
+          resumeFromRound: 1,
+        }
+      : null;
+
+    activeRun = createV3RunFixture({
+      runId,
+      phase: options.withInFlightCombat ? 'ENCOUNTER' : 'MAP',
+      currentNodeId: options.withInFlightCombat ? 'L1B' : 'L1A',
+      graph: legacyGraph,
+      hp: currentHp,
+      maxHp: 30,
+      fuel: 7,
+      wallet: 33,
+      overrides: {
+        rulesVersion: V3_0_RULES_VERSION,
+        visitedNodeIds: options.withInFlightCombat ? ['L1B'] : ['L1A'],
+        tacticalChargesMax: 1,
+        tacticalChargesUsed: options.withInFlightCombat ? 1 : 0,
+        claimedEventIds: options.withInFlightCombat ? [`tactic_commit_tactic_${runId}_L1B_1`] : [],
+        activeCombat,
+      },
+      skipValidation: true,
+    });
+    validateV3RunInvariant(activeRun, V3_0_RULES_VERSION);
+  }
+
+  return {
+    schemaVersion: V3_SCHEMA_VERSION,
+    rulesVersion: V3_0_RULES_VERSION,
+    savedAt: options.savedAt ?? DEFAULT_SAVED_AT,
+    profile: createV3ProfileFixture({
+      credits: 185,
+      salvageParts: 35,
+      tutorialCompleted: true,
+      tutorialBonusClaimed: true,
+      totalRuns: 2,
+      deepestLayerReached: 3,
+      buildings: {
+        workbench: true,
+        contract_hub: true,
+        drydock: false,
+        research_lab: false,
+        display: false,
+        drydock_tier2: false,
+      },
+      campaign: createDefaultCampaignState({
+        currentAct: 'act1',
+        unlockedSectors: ['near_orbit'],
+        completedMilestones: ['tutorial_complete'],
+      }),
+      ...options.profile,
+    }),
+    activeRun,
+    settings: createDefaultSettings(options.settings),
+  };
 }
 
 export function createV1SaveFixture(
@@ -2323,6 +2519,8 @@ export function presetWreckEncounterV3(
         maxStability: 100,
         cutsMade: 0,
         extracted: false,
+        collapsed: false,
+        wreckLootInstanceIds: [],
         hotspots: [
           {
             spotId: 'armory',

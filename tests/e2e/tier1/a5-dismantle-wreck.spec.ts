@@ -5,7 +5,10 @@ import {
   attachZeroErrorMonitors,
   createAppDriver,
   createCargoItem,
+  createContractInstance,
+  createMapGraph,
   presetAct1V3,
+  presetMidRunMapV3,
   presetSettlementV3,
   presetWreckEncounterV3,
 } from '../helpers';
@@ -82,7 +85,7 @@ test.describe('Tier 1 · A5: True Dismantling Loop — Multi-Cut Derelicts & Scr
     monitor.assertClean(await app.inspect());
   });
 
-  test('T1-A5-03 @p1-mid Settlement Dismantle disposition converts looted equipment into Salvage Parts', async ({
+  test('T1-A5-03 @p1-mid S09 Settlement 3-option segmented radiogroup dismantles looted equipment into Salvage Parts with 0 extra buttons', async ({
     page,
   }) => {
     const monitor = attachZeroErrorMonitors(page);
@@ -97,9 +100,15 @@ test.describe('Tier 1 · A5: True Dismantling Loop — Multi-Cut Derelicts & Scr
     const settleScreen = app.byTestId(TEST_IDS.SETTLEMENT_SCREEN);
     await expect(settleScreen).toBeVisible();
 
-    const dismantleBtn = settleScreen.getByRole('button', { name: /拆解/ }).first();
-    await expect(dismantleBtn).toBeVisible();
-    await dismantleBtn.click();
+    // S09: 3-option equipment row (settle_loot_eq) uses a 0-<button> segmented radiogroup
+    const eqRadiogroup = settleScreen.locator('[role="radiogroup"]').first();
+    await expect(eqRadiogroup).toBeVisible();
+    await expect(eqRadiogroup.locator('button')).toHaveCount(0);
+
+    const dismantleOpt = app.byTestId(TEST_IDS.btnDismantle('settle_loot_eq'));
+    await expect(dismantleOpt).toBeVisible();
+    await dismantleOpt.click();
+    await expect(dismantleOpt).toHaveClass(/is-selected/);
 
     await expect(settleScreen).toContainText(/精密零件/);
     await app.confirmSettlement();
@@ -206,5 +215,193 @@ test.describe('Tier 1 · A5: True Dismantling Loop — Multi-Cut Derelicts & Scr
     expect(reloadedSnap.credits).toBe(afterSnap.credits);
 
     monitor.assertClean(reloadedSnap);
+  });
+
+  test('T1-A5-06 @p1-mid S08 direct stage clamp cut & skip + D05 L3+ vault low-stability Structural Collapse forfeits wreck loot while preserving bay gear', async ({
+    page,
+  }) => {
+    const monitor = attachZeroErrorMonitors(page);
+    const app = createAppDriver(page);
+
+    const armoryItem = createCargoItem({
+      instanceId: 'd05_armory_eq',
+      definitionId: 'equipment.laser.common',
+      origin: 'loot',
+      acquiredDepth: 3,
+      location: 'staging',
+    });
+    const cargoItem = createCargoItem({
+      instanceId: 'd05_cargo_bar',
+      definitionId: 'cargo.alloy_bar',
+      origin: 'loot',
+      acquiredDepth: 3,
+      location: 'staging',
+    });
+    const vaultItem = createCargoItem({
+      instanceId: 'd05_vault_engine',
+      definitionId: 'cargo.old_engine',
+      origin: 'loot',
+      acquiredDepth: 3,
+      location: 'staging',
+    });
+
+    const graph = createMapGraph({
+      nodeOverrides: {
+        L3A: {
+          type: 'wreck',
+          isBeacon: true,
+          visited: true,
+          resolved: false,
+          wreck: {
+            armoryItem,
+            cargoItems: [cargoItem],
+            armorySizeRange: '1×2',
+            armoryValueRange: '10¤',
+            cargoSizeRange: '1×2',
+            cargoValueRange: '15¤',
+            reactorFuelGain: 2,
+            reactorRepairGain: 5,
+            chosenRoom: null,
+          },
+        },
+      },
+    });
+
+    const save = presetMidRunMapV3({
+      phase: 'ENCOUNTER',
+      currentNodeId: 'L3A',
+      graph,
+      contract: createContractInstance('free_salvage'),
+      hp: 26,
+      maxHp: 30,
+      fuel: 8,
+      overrides: {
+        visitedNodeIds: ['L1A', 'L2A', 'L3A'],
+        activeWreck: {
+          nodeId: 'L3A',
+          stability: 55,
+          maxStability: 100,
+          cutsMade: 0,
+          extracted: false,
+          collapsed: false,
+          wreckLootInstanceIds: [],
+          hotspots: [
+            {
+              spotId: 'armory',
+              label: '军械舱',
+              cut: false,
+              riskHullDamage: 4,
+              riskFuelCost: 0,
+              riskAmbush: false,
+              rewardItem: armoryItem,
+              rewardParts: 6,
+            },
+            {
+              spotId: 'cargo',
+              label: '主货舱',
+              cut: false,
+              riskHullDamage: 4,
+              riskFuelCost: 0,
+              riskAmbush: false,
+              rewardItem: cargoItem,
+              rewardParts: 7,
+            },
+            {
+              spotId: 'reactor',
+              label: '反应堆舱',
+              cut: false,
+              riskHullDamage: 5,
+              riskFuelCost: 1,
+              riskAmbush: false,
+              rewardParts: 10,
+              reactorFuelGain: 2,
+              reactorRepairGain: 5,
+            },
+            {
+              spotId: 'vault',
+              label: '密封金库',
+              cut: false,
+              riskHullDamage: 4,
+              riskFuelCost: 0,
+              riskAmbush: false,
+              rewardItem: vaultItem,
+              rewardItems: [vaultItem],
+              rewardParts: 11,
+              rewardCredits: 14,
+            },
+          ],
+        },
+      },
+    });
+    save.settings.reducedMotion = false;
+
+    await app.seedStorage({ v2Save: save, skipTitleScreen: true });
+    await app.boot({ seed: 5006 });
+
+    await expect(app.byTestId(TEST_IDS.WRECK_SCREEN)).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.wreckCut('vault'))).toBeVisible();
+
+    // S08: Direct stage clamp click triggers skippable plasma cut FX on armory (55 -> 15 stability, 0 HP loss)
+    const armoryClamp = app.byTestId(TEST_IDS.wreckSpot('armory'));
+    await expect(armoryClamp).toBeVisible();
+    await expect(armoryClamp).toHaveAttribute('data-can-direct-cut', 'true');
+    const stabilityBeforeCut1 = (await app.inspect()).activeRun?.wreckStability ?? null;
+    expect(stabilityBeforeCut1).toBe(55);
+    await armoryClamp.click();
+
+    const skipOverlayBtn = app.byTestId(TEST_IDS.BTN_SKIP_WRECK_CUT);
+    try {
+      await skipOverlayBtn.click({ timeout: 2_000 });
+    } catch (err) {
+      // Only tolerate skip button detaching if the 600ms S08 cut VFX already completed and committed stability 55 -> 15
+      const snapAfterSkipErr = await app.inspect();
+      if (snapAfterSkipErr.activeRun?.wreckStability !== 15) {
+        throw err;
+      }
+    }
+
+    const afterCut1 = await app.waitForInspect(
+      (s) => s.activeRun?.wreckStability === 15,
+      10_000,
+      'first safe clamp cut committed',
+    );
+    expect(afterCut1.activeRun?.wreckStability).toBeLessThan(stabilityBeforeCut1!);
+    expect(afterCut1.activeRun?.hp).toBe(26);
+
+    const savedAfterCut1 = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(savedAfterCut1?.activeRun?.activeWreck?.cutsMade).toBe(1);
+    expect(savedAfterCut1?.activeRun?.activeWreck?.hotspots.find((h) => h.spotId === 'armory')?.cut).toBe(true);
+    expect(savedAfterCut1?.activeRun?.bay.staging.some((s) => s.item.instanceId === 'd05_armory_eq')).toBe(true);
+    expect(savedAfterCut1?.activeRun?.activeWreck?.wreckLootInstanceIds).toContain('d05_armory_eq');
+    const placedBeforeCollapse = savedAfterCut1?.activeRun?.bay.placed.length ?? 0;
+    expect(placedBeforeCollapse).toBe(3);
+
+    // D05: Remaining stability 15 - 35 <= 0 discloses guaranteed Structural Collapse on vault
+    await expect(app.byTestId(TEST_IDS.WRECK_SCREEN)).toContainText(/结构坍塌警告/);
+
+    await app.cutWreckSpot('vault');
+
+    const afterCollapse = await app.waitForInspect(
+      (s) => s.activeRun?.wreckStability === 0,
+      10_000,
+      'greedy vault cut triggers structural collapse',
+    );
+    expect(afterCollapse.activeRun?.hp ?? 0).toBeGreaterThanOrEqual(1);
+
+    const savedAfterCollapse = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(savedAfterCollapse?.activeRun?.activeWreck?.collapsed).toBe(true);
+    // THIS wreck's staged loot forfeited while placed ship bay gear stays 100% intact
+    expect(savedAfterCollapse?.activeRun?.bay.staging).toHaveLength(0);
+    expect(savedAfterCollapse?.activeRun?.bay.placed).toHaveLength(placedBeforeCollapse);
+
+    // Remaining uncut compartments locked, but Extract stays enabled (zero softlock)
+    await expect(app.byTestId(TEST_IDS.wreckCut('cargo'))).toBeDisabled();
+    await expect(app.byTestId(TEST_IDS.wreckCut('reactor'))).toBeDisabled();
+    await expect(app.byTestId(TEST_IDS.BTN_WRECK_EXTRACT)).toBeEnabled();
+
+    await app.extractWreck();
+    await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toBeVisible();
+
+    monitor.assertClean(await app.inspect());
   });
 });

@@ -9,6 +9,7 @@ import {
   presetAct1V3,
   presetAct2V3,
   presetAct3ClimaxV3,
+  presetPostTutorialV3,
 } from '../helpers';
 import type { V3SaveData } from '../helpers';
 
@@ -232,6 +233,50 @@ test.describe('Tier 1 · A8: Station Upgrades (T1-T3), Stargate Relay, Relic Pas
 
     const stored = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
     expect(stored?.profile.selectedShipId).toBe('stargate_cruiser');
+
+    monitor.assertClean(await app.inspect());
+  });
+
+  test('T1-A8-06 @p1-mid D07 Base pending equipment family unlock card survives reload, commits choice, detaches cleanly, and persists', async ({
+    page,
+  }) => {
+    const monitor = attachZeroErrorMonitors(page);
+    const app = createAppDriver(page);
+
+    const save = presetPostTutorialV3({
+      unlockedFamilies: ['core'],
+      pendingFamilyUnlockChoices: ['heavy_kit', 'hangar_kit', 'counter_kit'],
+    });
+
+    await app.seedStorage({ v2Save: save, skipTitleScreen: true });
+    await app.boot({ seed: 8006, enterStation: true });
+
+    const unlockCard = app.byTestId(TEST_IDS.BASE_FAMILY_UNLOCK_CARD);
+    await expect(unlockCard).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.btnPickFamily('heavy_kit'))).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.btnPickFamily('hangar_kit'))).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.btnPickFamily('counter_kit'))).toBeVisible();
+
+    // Reload BEFORE choosing: pending choices MUST survive reload
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await app.waitForInspect((s) => s.screen === 'base', 30_000, 'base after pre-pick reload');
+    await expect(app.byTestId(TEST_IDS.BASE_FAMILY_UNLOCK_CARD)).toBeVisible();
+
+    // Pick hangar_kit -> card detaches and family + blueprint persist
+    await app.byTestId(TEST_IDS.btnPickFamily('hangar_kit')).click();
+    await expect(app.byTestId(TEST_IDS.BASE_FAMILY_UNLOCK_CARD)).toHaveCount(0);
+
+    const storedAfterPick = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(storedAfterPick?.profile.unlockedFamilies).toContain('hangar_kit');
+    expect(storedAfterPick?.profile.pendingFamilyUnlockChoices ?? []).toEqual([]);
+
+    // Reload AFTER choosing: card stays gone and unlocked family persists
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await app.waitForInspect((s) => s.screen === 'base', 30_000, 'base after post-pick reload');
+    await expect(app.byTestId(TEST_IDS.BASE_FAMILY_UNLOCK_CARD)).toHaveCount(0);
+
+    const storedAfterReload = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(storedAfterReload?.profile.unlockedFamilies).toContain('hangar_kit');
 
     monitor.assertClean(await app.inspect());
   });

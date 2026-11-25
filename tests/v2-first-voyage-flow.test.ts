@@ -517,7 +517,16 @@ import {
   summarizeV2DiscardedSacrifices,
   summarizeV2MissionSacrificeOptions,
 } from '../src/v2/domain/tacticalDelta';
-import { V2_TAB_LOCK_KEY, type V2MapNode, type V2RunState, type V2SaveData } from '../src/v2/domain/types';
+import {
+  V2_RULES_VERSION,
+  V2_SAVE_KEY,
+  V2_TAB_LOCK_KEY,
+  V3_0_BACKUP_KEY,
+  V3_0_RULES_VERSION,
+  type V2MapNode,
+  type V2RunState,
+  type V2SaveData,
+} from '../src/v2/domain/types';
 import { V2CombatScene } from '../src/v2/scenes/V2CombatScene';
 import { CargoGridV2Component } from '../src/v2/ui/CargoGridV2';
 import { ArrangePhaseView } from '../src/v2/ui/screens/ArrangeView';
@@ -1029,9 +1038,20 @@ class MiniWindow extends MiniNode {
   clearInterval(id?: ReturnType<typeof setInterval>): void {
     globalThis.clearInterval(id);
   }
-  private nextRafId = 1;
-  requestAnimationFrame = (_cb: () => void): number => this.nextRafId++;
-  cancelAnimationFrame = (_id: number): void => {};
+  readonly activeRafTimers = new Set<ReturnType<typeof setTimeout>>();
+  requestAnimationFrame = (cb: (t: number) => void): number => {
+    const h = globalThis.setTimeout(() => {
+      this.activeRafTimers.delete(h);
+      cb(Date.now());
+    }, 16);
+    this.activeRafTimers.add(h);
+    return h as unknown as number;
+  };
+  cancelAnimationFrame = (id: number): void => {
+    const h = id as unknown as ReturnType<typeof setTimeout>;
+    this.activeRafTimers.delete(h);
+    globalThis.clearTimeout(h);
+  };
 }
 
 function installMiniDom(): { window: MiniWindow; document: MiniDocument; restore: () => void } {
@@ -1066,6 +1086,10 @@ function installMiniDom(): { window: MiniWindow; document: MiniDocument; restore
     window: win,
     document: doc,
     restore: () => {
+      for (const h of win.activeRafTimers) {
+        globalThis.clearTimeout(h);
+      }
+      win.activeRafTimers.clear();
       g.window = prev.window;
       g.document = prev.document;
       g.localStorage = prev.localStorage;
@@ -2359,6 +2383,362 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       vi.advanceTimersByTime(5000);
       expect(startSpy).toHaveBeenCalledTimes(0);
       expect(showStageSpy).toHaveBeenCalledTimes(0);
+    });
+
+    it('pauses S05 auto-engage on Rules 3.0.0 -> 3.1.0 migration boot after rewinding in-flight combat while still allowing manual engage', async () => {
+      vi.useFakeTimers();
+      const rawTut = createV2TutorialRun('tut_s05_v30_mig');
+      const batId = rawTut.bay.staging[0].item.instanceId;
+      const wired = placeV2FromStaging(rawTut.bay, batId, 1, 0, 0);
+      const entered = selectV2MapNode({ ...rawTut, phase: 'MAP', bay: wired.bay }, 'L1A');
+      expect(entered.ok).toBe(true);
+      const started = combatV2.startV2CombatAtCurrentNode(entered.run, 'weakest');
+      expect(started.ok).toBe(true);
+
+      const fresh = createFreshV2SaveData();
+      const { discoveredSynergies: _omitSyn, ...legacyProfile } = fresh.profile;
+      const legacyV3_0Raw = JSON.stringify({
+        ...fresh,
+        rulesVersion: V3_0_RULES_VERSION,
+        profile: legacyProfile,
+        activeRun: {
+          ...started.run,
+          rulesVersion: V3_0_RULES_VERSION,
+          hp: 21,
+          activeCombat: {
+            ...started.run.activeCombat!,
+            startingHp: 28,
+          },
+        },
+      });
+      dom.window.localStorage.setItem(V2_SAVE_KEY, legacyV3_0Raw);
+      dom.window.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+      const startSpy = vi.spyOn(combatV2, 'startV2CombatAtCurrentNode');
+      const mountEl = dom.document.createElement('div');
+      dom.document.body.appendChild(mountEl);
+      const controller = new V2AppController(mountEl as unknown as HTMLElement, {
+        onSwitchToV1: () => {},
+      });
+      controller.init();
+      await flushMicrotasks();
+
+      // Migration rewound activeCombat -> null, restored startingHp 28, persisted 3.1.0 + write-once backup, and paused S05
+      const pauseBtn = mountEl.querySelector('[data-testid="btn-pause-auto-combat"]')!;
+      const startBtn = mountEl.querySelector('[data-testid="btn-start-combat"]')!;
+      expect(pauseBtn).not.toBeNull();
+      expect(pauseBtn.getAttribute('aria-pressed')).toBe('true');
+      expect(pauseBtn.textContent).toContain('继续自动交火');
+      expect(startBtn.getAttribute('data-auto-engage-status')).toBe('paused');
+
+      vi.advanceTimersByTime(5000);
+      expect(startSpy).toHaveBeenCalledTimes(0);
+
+      const stored = JSON.parse(dom.window.localStorage.getItem(V2_SAVE_KEY)!) as V2SaveData;
+      expect(stored.rulesVersion).toBe(V2_RULES_VERSION);
+      expect(stored.activeRun?.activeCombat).toBeNull();
+      expect(stored.activeRun?.hp).toBe(28);
+      expect(dom.window.localStorage.getItem(V3_0_BACKUP_KEY)).toBe(legacyV3_0Raw);
+
+      // Manual click on start-combat still engages cleanly after migration pause
+      startBtn.click();
+      expect(startSpy).toHaveBeenCalledTimes(1);
+      controller.destroy();
+    });
+
+    it('clamps single-tick main-thread stalls in PreCombatAutoEngageController so WebGL init stalls never ambush players in 0 frames', () => {
+      let fakeNow = 0;
+      let nextHandle = 1;
+      const pending = new Map<number, () => void>();
+      const onEngage = vi.fn(() => true);
+      const ctrl = new PreCombatAutoEngageController({
+        durationMs: PRE_COMBAT_AUTO_ENGAGE_MS,
+        tickMs: 100,
+        now: () => fakeNow,
+        setTimeoutFn: (fn) => {
+          const h = nextHandle++;
+          pending.set(h, fn);
+          return h as unknown as ReturnType<typeof setTimeout>;
+        },
+        clearTimeoutFn: (h) => {
+          pending.delete(h as unknown as number);
+        },
+        onEngage,
+      });
+
+      ctrl.sync({ eligible: true, nodeKey: 'run1:L6A', canMutate: true, modalOpen: false, hidden: false });
+      expect(ctrl.getSnapshot().remainingMs).toBe(1500);
+      expect(pending.size).toBe(1);
+
+      // Simulate a 2500ms main-thread WebGL/boss-scene stall before the first tick fires
+      fakeNow += 2500;
+      const firstTick = [...pending.values()][0];
+      pending.clear();
+      firstTick();
+
+      // Must clamp the stall to at most 150ms (100ms delay + 50ms jitter), leaving >= 1350ms interactive window
+      expect(onEngage).toHaveBeenCalledTimes(0);
+      expect(ctrl.getSnapshot().status).toBe('countdown');
+      expect(ctrl.getSnapshot().remainingMs).toBe(1350);
+
+      // Subsequent normal 100ms ticks finish the remaining 1350ms cleanly (13×100 + 1×50 = 14 ticks)
+      for (let i = 0; i < 13; i += 1) {
+        fakeNow += 100;
+        const cb = [...pending.values()][0];
+        pending.clear();
+        cb();
+        expect(onEngage).toHaveBeenCalledTimes(0);
+      }
+      expect(ctrl.getSnapshot().remainingMs).toBe(50);
+
+      fakeNow += 50;
+      const finalCb = [...pending.values()][0];
+      pending.clear();
+      finalCb();
+      expect(onEngage).toHaveBeenCalledTimes(1);
+      expect(ctrl.getSnapshot().status).toBe('engaged');
+      expect(pending.size).toBe(0);
+    });
+
+    it('gates pre-combat countdown ticks on painted RAF frames at 1.7 FPS (578ms/frame) with 0 unpainted chained ticks and 10 painted frames to engage', () => {
+      let fakeNow = 0;
+      let nextTimeoutHandle = 1;
+      let nextRafHandle = 1;
+      const pendingTimeouts = new Map<number, () => void>();
+      const pendingRafs = new Map<number, () => void>();
+      const onEngage = vi.fn(() => true);
+
+      const ctrl = new PreCombatAutoEngageController({
+        durationMs: PRE_COMBAT_AUTO_ENGAGE_MS,
+        tickMs: 100,
+        now: () => fakeNow,
+        setTimeoutFn: (fn) => {
+          const h = nextTimeoutHandle++;
+          pendingTimeouts.set(h, fn);
+          return h as unknown as ReturnType<typeof setTimeout>;
+        },
+        clearTimeoutFn: (h) => {
+          pendingTimeouts.delete(h as unknown as number);
+        },
+        requestAnimationFrameFn: (cb) => {
+          const h = nextRafHandle++;
+          pendingRafs.set(h, cb);
+          return h;
+        },
+        cancelAnimationFrameFn: (h) => {
+          pendingRafs.delete(h);
+        },
+        onEngage,
+      });
+
+      ctrl.sync({ eligible: true, nodeKey: 'run1:L6A', canMutate: true, modalOpen: false, hidden: false });
+      expect(pendingTimeouts.size).toBe(1);
+      expect(pendingRafs.size).toBe(1);
+      expect(ctrl.getSnapshot().remainingMs).toBe(1500);
+
+      // Frame 1: setTimeout(100) fires at +100ms BEFORE RAF paints -> 0 chained unpainted ticks!
+      fakeNow += 100;
+      const t0 = [...pendingTimeouts.values()][0];
+      pendingTimeouts.clear();
+      t0();
+      expect(pendingTimeouts.size).toBe(0);
+      expect(pendingRafs.size).toBe(1);
+      expect(ctrl.getSnapshot().remainingMs).toBe(1500);
+      expect(onEngage).toHaveBeenCalledTimes(0);
+
+      // RAF paints at +578ms (478ms later) -> advances strictly 1 clamped tick (150ms)
+      fakeNow += 478;
+      const r0 = [...pendingRafs.values()][0];
+      pendingRafs.clear();
+      r0();
+      expect(ctrl.getSnapshot().remainingMs).toBe(1350);
+      expect(onEngage).toHaveBeenCalledTimes(0);
+      expect(pendingTimeouts.size).toBe(1);
+      expect(pendingRafs.size).toBe(1);
+
+      // Repeat 8 more slow 578ms frames -> after 9 painted frames total, remainingMs === 150
+      for (let frame = 2; frame <= 9; frame += 1) {
+        fakeNow += 100;
+        const timerCb = [...pendingTimeouts.values()][0];
+        pendingTimeouts.clear();
+        timerCb();
+        expect(pendingTimeouts.size).toBe(0);
+        expect(pendingRafs.size).toBe(1);
+
+        fakeNow += 478;
+        const rafCb = [...pendingRafs.values()][0];
+        pendingRafs.clear();
+        rafCb();
+        expect(onEngage).toHaveBeenCalledTimes(0);
+        expect(ctrl.getSnapshot().remainingMs).toBe(1500 - frame * 150);
+        expect(pendingTimeouts.size).toBe(1);
+        expect(pendingRafs.size).toBe(1);
+      }
+      expect(ctrl.getSnapshot().remainingMs).toBe(150);
+
+      // 10th painted frame engages cleanly with 0 leaked timers/RAFs
+      fakeNow += 100;
+      const lastTimer = [...pendingTimeouts.values()][0];
+      pendingTimeouts.clear();
+      lastTimer();
+      expect(pendingTimeouts.size).toBe(0);
+      expect(pendingRafs.size).toBe(1);
+
+      fakeNow += 478;
+      const lastRaf = [...pendingRafs.values()][0];
+      pendingRafs.clear();
+      lastRaf();
+      expect(ctrl.getSnapshot().remainingMs).toBe(0);
+      expect(ctrl.getSnapshot().status).toBe('engaged');
+      expect(onEngage).toHaveBeenCalledTimes(1);
+      expect(onEngage).toHaveBeenCalledWith('run1:L6A', 'timer');
+      expect(pendingTimeouts.size).toBe(0);
+      expect(pendingRafs.size).toBe(0);
+    });
+
+    it('cancels pending RAF handles across pause/engageNow/reset/destroy/hidden-on-timer and ignores stale RAF callbacks', () => {
+      let fakeNow = 0;
+      let nextTimeoutHandle = 1;
+      let nextRafHandle = 1;
+      let liveState = { eligible: true, canMutate: true, modalOpen: false, hidden: false };
+      const pendingTimeouts = new Map<number, () => void>();
+      const pendingRafs = new Map<number, () => void>();
+      const cancelRafSpy = vi.fn((h: number) => {
+        pendingRafs.delete(h);
+      });
+      const onEngage = vi.fn(() => true);
+
+      const ctrl = new PreCombatAutoEngageController({
+        durationMs: PRE_COMBAT_AUTO_ENGAGE_MS,
+        tickMs: 100,
+        now: () => fakeNow,
+        isLiveEligible: () => liveState,
+        setTimeoutFn: (fn) => {
+          const h = nextTimeoutHandle++;
+          pendingTimeouts.set(h, fn);
+          return h as unknown as ReturnType<typeof setTimeout>;
+        },
+        clearTimeoutFn: (h) => {
+          pendingTimeouts.delete(h as unknown as number);
+        },
+        requestAnimationFrameFn: (cb) => {
+          const h = nextRafHandle++;
+          pendingRafs.set(h, cb);
+          return h;
+        },
+        cancelAnimationFrameFn: cancelRafSpy,
+        onEngage,
+      });
+
+      // (1) pause('manual') while awaiting paint cancels exact RAF handle AND stale RAF callback is ignored
+      ctrl.sync({ eligible: true, nodeKey: 'run1:n_pause', canMutate: true, modalOpen: false, hidden: false });
+      const [[pauseRafHandle, staleRafCb]] = [...pendingRafs.entries()];
+      // Let setTimeout fire first so timerReadyForCurrentTick === true while waiting on RAF
+      fakeNow += 100;
+      const pauseTimerCb = [...pendingTimeouts.values()][0];
+      pendingTimeouts.clear();
+      pauseTimerCb();
+      expect(pendingRafs.size).toBe(1);
+
+      expect(ctrl.pause('manual')).toBe(true);
+      expect(cancelRafSpy).toHaveBeenCalledWith(pauseRafHandle);
+      expect(pendingRafs.size).toBe(0);
+      expect(pendingTimeouts.size).toBe(0);
+
+      // Invoke saved stale RAF callback -> tickGeneration guard rejects it
+      const remBeforeStale = ctrl.getSnapshot().remainingMs;
+      fakeNow += 500;
+      staleRafCb();
+      expect(ctrl.getSnapshot().status).toBe('paused');
+      expect(ctrl.getSnapshot().remainingMs).toBe(remBeforeStale);
+      expect(onEngage).toHaveBeenCalledTimes(0);
+
+      // (2) engageNow() cancels pending RAF & timeout
+      cancelRafSpy.mockClear();
+      ctrl.sync({ eligible: true, nodeKey: 'run1:n_engage', canMutate: true, modalOpen: false, hidden: false });
+      const [engageRafHandle] = [...pendingRafs.keys()];
+      expect(ctrl.engageNow()).toBe(true);
+      expect(cancelRafSpy).toHaveBeenCalledWith(engageRafHandle);
+      expect(pendingRafs.size).toBe(0);
+      expect(pendingTimeouts.size).toBe(0);
+      expect(onEngage).toHaveBeenCalledTimes(1);
+
+      // (3) reset() cancels pending RAF & timeout
+      cancelRafSpy.mockClear();
+      ctrl.sync({ eligible: true, nodeKey: 'run1:n_reset', canMutate: true, modalOpen: false, hidden: false });
+      const [resetRafHandle] = [...pendingRafs.keys()];
+      ctrl.reset();
+      expect(cancelRafSpy).toHaveBeenCalledWith(resetRafHandle);
+      expect(pendingRafs.size).toBe(0);
+      expect(pendingTimeouts.size).toBe(0);
+
+      // (4) destroy() cancels pending RAF & timeout
+      cancelRafSpy.mockClear();
+      ctrl.sync({ eligible: true, nodeKey: 'run1:n_destroy', canMutate: true, modalOpen: false, hidden: false });
+      const [destroyRafHandle] = [...pendingRafs.keys()];
+      ctrl.destroy();
+      expect(cancelRafSpy).toHaveBeenCalledWith(destroyRafHandle);
+      expect(pendingRafs.size).toBe(0);
+      expect(pendingTimeouts.size).toBe(0);
+
+      // (5) hidden === true observed when setTimeout fires while awaiting paint cancels dangling RAF immediately
+      cancelRafSpy.mockClear();
+      onEngage.mockClear();
+      liveState = { eligible: true, canMutate: true, modalOpen: false, hidden: false };
+      ctrl.sync({ eligible: true, nodeKey: 'run1:n_hidden', canMutate: true, modalOpen: false, hidden: false });
+      const [hiddenRafHandle] = [...pendingRafs.keys()];
+      liveState = { eligible: true, canMutate: true, modalOpen: false, hidden: true };
+      fakeNow += 100;
+      const hiddenTimerCb = [...pendingTimeouts.values()][0];
+      pendingTimeouts.clear();
+      hiddenTimerCb();
+      expect(ctrl.getSnapshot().status).toBe('paused');
+      expect(ctrl.getSnapshot().pauseReason).toBe('hidden');
+      expect(cancelRafSpy).toHaveBeenCalledWith(hiddenRafHandle);
+      expect(pendingRafs.size).toBe(0);
+      expect(pendingTimeouts.size).toBe(0);
+      expect(onEngage).toHaveBeenCalledTimes(0);
+    });
+
+    it('supports pure-Node requestAnimationFrameFn: null fallback and synchronous RAF stubs with exact 1500ms timing and 0 leaked timers', () => {
+      vi.useFakeTimers();
+
+      // (a) Pure-Node fallback (requestAnimationFrameFn: null)
+      const onEngageNull = vi.fn(() => true);
+      const ctrlNull = new PreCombatAutoEngageController({
+        requestAnimationFrameFn: null,
+        onEngage: onEngageNull,
+      });
+      ctrlNull.sync({ eligible: true, nodeKey: 'run1:null_raf', canMutate: true, modalOpen: false, hidden: false });
+      vi.advanceTimersByTime(1499);
+      expect(onEngageNull).toHaveBeenCalledTimes(0);
+      vi.advanceTimersByTime(1);
+      expect(onEngageNull).toHaveBeenCalledTimes(1);
+      expect(onEngageNull).toHaveBeenCalledWith('run1:null_raf', 'timer');
+      expect(vi.getTimerCount()).toBe(0);
+      ctrlNull.destroy();
+
+      // (b) Synchronous RAF stub invoking cb() inline never stores or cancels already-fired handle
+      const onEngageSync = vi.fn(() => true);
+      const cancelSyncSpy = vi.fn();
+      const ctrlSync = new PreCombatAutoEngageController({
+        requestAnimationFrameFn: (cb) => {
+          cb();
+          return 1;
+        },
+        cancelAnimationFrameFn: cancelSyncSpy,
+        onEngage: onEngageSync,
+      });
+      ctrlSync.sync({ eligible: true, nodeKey: 'run1:sync_raf', canMutate: true, modalOpen: false, hidden: false });
+      vi.advanceTimersByTime(1499);
+      expect(onEngageSync).toHaveBeenCalledTimes(0);
+      vi.advanceTimersByTime(1);
+      expect(onEngageSync).toHaveBeenCalledTimes(1);
+      expect(onEngageSync).toHaveBeenCalledWith('run1:sync_raf', 'timer');
+      expect(cancelSyncSpy).toHaveBeenCalledTimes(0);
+      expect(vi.getTimerCount()).toBe(0);
+      ctrlSync.destroy();
+      expect(cancelSyncSpy).toHaveBeenCalledTimes(0);
     });
   });
 
