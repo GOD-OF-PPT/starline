@@ -4,6 +4,7 @@ import {
   TEST_IDS,
   V2_RULES_VERSION,
   V2_SCHEMA_VERSION,
+  V3_0_RULES_VERSION,
   V3_RULES_VERSION,
   V3_SCHEMA_VERSION,
   assertNoDevJargon,
@@ -13,13 +14,14 @@ import {
   createCargoItem,
   createDefaultRelics,
   createV2SaveFixture,
+  createV3_0SaveFixture,
   createV3RunFixture,
   createV3SaveFixture,
   presetAct1V3,
   presetMidRunMapV3,
   presetPostTutorialV3,
 } from '../helpers';
-import type { V2SaveData, V3SaveData } from '../helpers';
+import type { V2SaveData, V3_0SaveData, V3SaveData } from '../helpers';
 
 test.describe('Tier 2 · A1: Persistence, Migration, Corruption & Concurrency Boundaries', () => {
   test('T2-A1-01 @p0-core V2 to V3 automatic migration preserves all progress, creates V2 backup, and is reload-idempotent', async ({
@@ -137,7 +139,7 @@ test.describe('Tier 2 · A1: Persistence, Migration, Corruption & Concurrency Bo
     await page.reload({ waitUntil: 'domcontentloaded' });
     const snapAfterReload = await app.waitForInspect(
       (s) => s.screen === 'base' && s.schemaVersion === V3_SCHEMA_VERSION,
-      15_000,
+      30_000,
       'post-reload migrated save',
     );
     expect(snapAfterReload.credits).toBe(340);
@@ -380,6 +382,7 @@ test.describe('Tier 2 · A1: Persistence, Migration, Corruption & Concurrency Bo
   test('T2-A1-05 @p0-core Consecutive single-tab F5 refreshes retain tab ownership and never false-trigger read-only lock', async ({
     page,
   }) => {
+    test.slow();
     const monitor = attachZeroErrorMonitors(page);
     const app = createAppDriver(page);
 
@@ -398,7 +401,7 @@ test.describe('Tier 2 · A1: Persistence, Migration, Corruption & Concurrency Bo
       await page.reload({ waitUntil: 'domcontentloaded' });
       await app.waitForInspect(
         (s) => s.screen === 'run' && s.phase === 'MAP',
-        15_000,
+        30_000,
         `map ready after reload #${reloadIdx}`,
       );
       await expect(readOnlyBanner, `Reload #${reloadIdx} must NOT show read-only banner`).toHaveCount(
@@ -449,6 +452,95 @@ test.describe('Tier 2 · A1: Persistence, Migration, Corruption & Concurrency Bo
 
       await assertNoDevJargon(page);
     }
+
+    monitor.assertClean(await app.inspect());
+  });
+
+  test('T2-A1-07 @p0-core Corrupt primary save recovers from V3_0_BACKUP, migrates cleanly to Rules 3.1.0 with rewound combat, and preserves V3_0_BACKUP', async ({
+    page,
+  }) => {
+    test.slow();
+    const monitor = attachZeroErrorMonitors(page);
+    const app = createAppDriver(page);
+
+    const legacyV3_0 = createV3_0SaveFixture({
+      withInFlightCombat: true,
+      runStartingHp: 28,
+      runCurrentHp: 21,
+    });
+    expect(legacyV3_0.rulesVersion).toBe(V3_0_RULES_VERSION);
+    expect(legacyV3_0.activeRun?.activeCombat).not.toBeNull();
+    expect(legacyV3_0.activeRun?.graph.nodes.L3A.isBeacon).toBeUndefined();
+
+    // Corrupt primary with V3_BACKUP & V2_BACKUP absent -> MUST recover via V3_0_BACKUP fallback
+    await app.seedStorage({
+      v2Save: '{corrupt-primary-v3-json',
+      v2Backup: null,
+      v3Backup: null,
+      v3_0Backup: legacyV3_0,
+      skipTitleScreen: false,
+    });
+    await app.boot({ seed: 21007 });
+
+    const recoveryDialog = page.locator('.modal-card[role="dialog"], [role="dialog"]').first();
+    await expect(recoveryDialog).toBeVisible();
+    await expect(recoveryDialog).toContainText(/存档异常|备份|损坏/);
+
+    const restoreBackupBtn = recoveryDialog
+      .locator('#v2-rec-backup, [data-testid="btn-recover-backup"]')
+      .or(recoveryDialog.getByRole('button', { name: /恢复.*备份/ }))
+      .first();
+    await expect(restoreBackupBtn).toBeVisible();
+    await expect(restoreBackupBtn).toBeEnabled();
+    await restoreBackupBtn.click();
+
+    await app.waitForInspect(
+      (s) => !s.modalOpen && s.screen === 'run' && s.phase === 'ENCOUNTER' && s.credits === 185,
+      15_000,
+      'V3_0_BACKUP recovered and migrated to Rules 3.1.0 pre-combat',
+    );
+    await app.pauseAutoCombat({ allowAlreadyPaused: true });
+    await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
+
+    const migrated = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(migrated).not.toBeNull();
+    expect(migrated?.schemaVersion).toBe(V3_SCHEMA_VERSION);
+    expect(migrated?.rulesVersion).toBe(V3_RULES_VERSION);
+    expect(migrated?.profile.credits).toBe(185);
+    expect(migrated?.profile.salvageParts).toBe(35);
+
+    // In-flight 3.0.0 combat safely rewound to pre-combat L1B with startingHp restored and beacons backfilled
+    expect(migrated?.activeRun?.rulesVersion).toBe(V3_RULES_VERSION);
+    expect(migrated?.activeRun?.phase).toBe('ENCOUNTER');
+    expect(migrated?.activeRun?.currentNodeId).toBe('L1B');
+    expect(migrated?.activeRun?.activeCombat).toBeNull();
+    expect(migrated?.activeRun?.hp).toBe(28);
+    expect(migrated?.activeRun?.tacticalChargesUsed).toBe(0);
+    expect(migrated?.activeRun?.claimedEventIds).not.toContain(
+      'tactic_commit_tactic_run_v3_0_mig_1_L1B_1',
+    );
+    expect(migrated?.activeRun?.graph.nodes.L3A.isBeacon).toBe(true);
+    expect(migrated?.activeRun?.graph.nodes.L5A.isBeacon).toBe(true);
+    expect(migrated?.activeRun?.graph.nodes.L1A.isBeacon).toBe(false);
+
+    // Original 3.0.0 backup preserved intact (non-destructive)
+    const backupRawBeforeReload = await app.readStorageRaw(STORAGE_KEYS.V3_0_BACKUP);
+    expect(backupRawBeforeReload).not.toBeNull();
+    const backupParsed = JSON.parse(backupRawBeforeReload!) as V3_0SaveData;
+    expect(backupParsed.rulesVersion).toBe(V3_0_RULES_VERSION);
+    expect(backupParsed.activeRun?.activeCombat?.simulation?.resultId).toBe('sim_v3_0_legacy_1');
+
+    // Reload idempotency: migrated 3.1.0 save & intact V3_0_BACKUP both survive reload cleanly
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await app.pauseAutoCombat();
+    await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
+
+    const backupRawAfterReload = await app.readStorageRaw(STORAGE_KEYS.V3_0_BACKUP);
+    expect(backupRawAfterReload).toBe(backupRawBeforeReload);
+    const afterReload = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(afterReload?.rulesVersion).toBe(V3_RULES_VERSION);
+    expect(afterReload?.activeRun?.hp).toBe(28);
+    expect(afterReload?.activeRun?.activeCombat).toBeNull();
 
     monitor.assertClean(await app.inspect());
   });

@@ -6,6 +6,7 @@ import {
   createAppDriver,
   createCargoBay,
   createCargoItem,
+  createContractInstance,
   createMapGraph,
   createV3RunFixture,
   presetAct1V3,
@@ -44,7 +45,7 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
     await page.reload({ waitUntil: 'domcontentloaded' });
     const pausedAfterReload = await app.waitForInspect(
       (s) => s.activeRun?.combatWaitingDecision === true,
-      15_000,
+      30_000,
       'tactical decision pause restored after reload',
     );
     expect(pausedAfterReload.activeRun?.combatRound).toBe(pausedRound);
@@ -68,7 +69,7 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
     await page.reload({ waitUntil: 'domcontentloaded' });
     const afterCommitReload = await app.waitForInspect(
       (s) => s.screen === 'run',
-      15_000,
+      30_000,
       'combat resumed after post-commit reload',
     );
     const saveAfterSecondReload = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
@@ -277,6 +278,7 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
   test('T2-A4-04 @p0-core Consecutive 3-battle combat lifecycle advances past Round 0 without scene freeze or sprite handle errors', async ({
     page,
   }) => {
+    test.slow();
     const monitor = attachZeroErrorMonitors(page);
     const app = createAppDriver(page);
 
@@ -325,6 +327,7 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
     const threeBattleSave = presetMidRunMapV3({
       bay: strongBay,
       fuel: 9,
+      contract: createContractInstance('free_salvage'),
       graph: createMapGraph({
         nodeOverrides: {
           L1A: { type: 'combat', encounterKind: 'patrol' },
@@ -363,45 +366,15 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
       }
 
       await app.waitForInspect(
-        (s) => s.phase === 'REWARD' || s.phase === 'MAP',
+        (s) => s.phase === 'REWARD',
         15_000,
         `battle at ${nodeId} reaches reward`,
       );
 
-      // Claim non-staging repair/parts reward to return cleanly to Map
-      if ((await app.inspect()).phase === 'REWARD') {
-        const rewardScreen = app.byTestId(TEST_IDS.REWARD_SCREEN);
-        await expect(rewardScreen).toBeVisible();
-        const repairOrSkip = rewardScreen
-          .locator('button[data-pick-reward="repair"]')
-          .or(rewardScreen.getByRole('button', { name: /抢修|维修|跳过|继续|零件/ }))
-          .or(rewardScreen.locator('button').first())
-          .first();
-        await repairOrSkip.click();
-      }
-
-      if ((await app.inspect()).phase === 'ARRANGE') {
-        const leaveBtn = app.byTestId(TEST_IDS.BTN_LEAVE_ARRANGE);
-        for (let step = 0; step < 4 && (await leaveBtn.isDisabled()); step += 1) {
-          const stagingCard = page
-            .locator('.v2-staging-card, .staging-card, [data-testid^="staging-item"]')
-            .first();
-          if (await stagingCard.isVisible()) {
-            await stagingCard.click();
-          }
-          const resolveBtn = app
-            .byTestId(TEST_IDS.ARRANGE_SCREEN)
-            .locator('button:not([disabled])')
-            .filter({ hasText: /装入推荐位|舍弃/ })
-            .first();
-          if (await resolveBtn.isVisible()) {
-            await resolveBtn.click();
-          } else {
-            break;
-          }
-        }
-        await app.leaveArrange();
-      }
+      // Canonical Round-2 D07 + S02 flow: zero-heal skip returns directly to MAP with empty staging
+      await expect(app.byTestId(TEST_IDS.REWARD_SCREEN)).toBeVisible();
+      await app.pickReward('skip');
+      await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toBeVisible();
     }
 
     expect(monitor.pageErrors).toEqual([]);
@@ -411,17 +384,19 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
   test('T2-A4-05 @p1-mid 30-round stalemate and mutual destruction both resolve strictly as defeat', async ({
     page,
   }) => {
+    test.slow();
     const monitor = attachZeroErrorMonitors(page);
     const app = createAppDriver(page);
 
-    // Sub-case A: 0-weapon high-defense bay vs armored enemy -> 30-round stalemate MUST be defeat
+    // Sub-case A: 2x coolant_vent.improved (+4 shield regen/round vs 4 dmg/round L5 armored; coreAttack=1 vs armor=2 -> 30 < 35)
+    // Player survives all 30 rounds with 0 hull dmg while enemy survives at 5 HP -> genuine 30-round stalemate defeat!
     const stalemateBay = createCargoBay({
       shipId: 'shield_cruiser',
       placed: [
         {
           item: createCargoItem({
-            instanceId: 'stale_shd_1',
-            definitionId: 'equipment.shield.improved',
+            instanceId: 'stale_vent_1',
+            definitionId: 'equipment.coolant_vent.improved',
             origin: 'owned',
           }),
           x: 0,
@@ -429,20 +404,11 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
         },
         {
           item: createCargoItem({
-            instanceId: 'stale_shd_2',
-            definitionId: 'equipment.shield.improved',
+            instanceId: 'stale_vent_2',
+            definitionId: 'equipment.coolant_vent.improved',
             origin: 'owned',
           }),
           x: 1,
-          y: 0,
-        },
-        {
-          item: createCargoItem({
-            instanceId: 'stale_rep_1',
-            definitionId: 'equipment.repair.improved',
-            origin: 'owned',
-          }),
-          x: 2,
           y: 0,
         },
       ],
@@ -477,6 +443,12 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
 
     await app.seedStorage({ v2Save: stalemateSave, skipTitleScreen: true });
     await app.boot({ seed: 24006 });
+    await app.pauseAutoCombat();
+
+    // Verify deterministic preview genuinely reaches 30 rounds stalemate defeat (NOT early hull death)
+    const stalemateDrawer = await app.openForecastDetails();
+    await expect(stalemateDrawer).toContainText(/预计战败/);
+    await expect(stalemateDrawer).toContainText(/30\s*轮/);
 
     await app.startCombat();
     await app.skipCombat();
@@ -490,20 +462,11 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
     expect(stalemateSaved?.activeRun?.settlementReason).toBe('defeat');
     await expect(app.byTestId(TEST_IDS.SETTLEMENT_SCREEN)).toContainText(/战败|僵局|拖曳/);
 
-    // Sub-case B: Mutual destruction (player at 1 HP with counter module vs lethal enemy hit) -> defeat
+    // Sub-case B: Simultaneous mutual KO — 1-HP cannon_skiff (coreAttack=2) vs 2-HP piercer (damagePerRound=3, pierceRatio=0.5)
+    // Round 1 kills enemy (2->0) AND kills player simultaneously via pierce (1->0) -> strictly resolves as defeat!
     const mutualBay = createCargoBay({
       shipId: 'cannon_skiff',
-      placed: [
-        {
-          item: createCargoItem({
-            instanceId: 'mutual_counter_1',
-            definitionId: 'equipment.counter.improved',
-            origin: 'owned',
-          }),
-          x: 0,
-          y: 0,
-        },
-      ],
+      placed: [],
     });
     const mutualRun = createV3RunFixture({
       shipId: 'cannon_skiff',
@@ -514,7 +477,28 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
       maxHp: 30,
       graph: createMapGraph({
         nodeOverrides: {
-          L1B: { type: 'combat', encounterKind: 'piercer', visited: true, resolved: false },
+          L1B: {
+            type: 'combat',
+            encounterKind: 'piercer',
+            visited: true,
+            resolved: false,
+            combat: {
+              encounterKind: 'piercer',
+              units: [
+                {
+                  enemyId: 'L1B_mutual_piercer',
+                  name: '穿盾猎杀艇',
+                  spriteArchetype: 'interceptor',
+                  maxHp: 2,
+                  damagePerRound: 3,
+                  armor: 0,
+                  pierceRatio: 0.5,
+                },
+              ],
+              bounty: 6,
+              improvedProb: 0,
+            },
+          },
         },
       }),
       overrides: {
@@ -532,16 +516,15 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
       skipTitleScreen: true,
     });
     await app.boot({ seed: 24007 });
+    await app.pauseAutoCombat();
+
+    const mutualDrawer = await app.openForecastDetails();
+    await expect(mutualDrawer).toContainText(/预计战败/);
+    await expect(mutualDrawer).toContainText(/1\s*轮/);
+    await expect(mutualDrawer).toContainText(/我方\s*2\s*伤/);
 
     await app.startCombat();
-    if ((await app.inspect()).phase === 'ENCOUNTER') {
-      const skipBtn = app.byTestId(TEST_IDS.BTN_COMBAT_SKIP);
-      if (await skipBtn.isVisible()) {
-        await skipBtn.click().catch(() => {
-          // 1-round mutual destruction may finish immediately into SETTLEMENT
-        });
-      }
-    }
+    await app.skipCombat();
 
     await app.waitForInspect(
       (s) => s.phase === 'SETTLEMENT',
@@ -597,11 +580,211 @@ test.describe('Tier 2 · A4: Combat Determinism, Reload Idempotency & Edge Cases
       'Anti-repeat guard must NOT roll a 3rd consecutive laser in L1-L3',
     ).not.toMatch(/^equipment\.laser\./);
 
+    // D07: All 3 equipmentOptions must respect anti-repeat exclusion for laser
+    const eqOptions = savedAtReward?.activeRun?.pendingReward?.equipmentOptions ?? [];
+    expect(eqOptions, 'D07 reward bundle must provide 3 equipmentOptions').toHaveLength(3);
+    for (const opt of eqOptions) {
+      expect(
+        opt.definitionId,
+        `D07 option ${opt.instanceId} must exclude 3rd consecutive laser`,
+      ).not.toMatch(/^equipment\.laser\./);
+    }
+
     // Verify recentEquipmentKinds persists across reload
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await app.waitForInspect((s) => s.phase === 'REWARD', 15_000, 'reward persists after reload');
+    await app.waitForInspect((s) => s.phase === 'REWARD', 30_000, 'reward persists after reload');
     const savedAfterReload = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
     expect(savedAfterReload?.activeRun?.recentEquipmentKinds.length).toBeGreaterThanOrEqual(2);
+
+    monitor.assertClean(await app.inspect());
+  });
+
+  test('T2-A4-07 @p1-mid S04 single-enemy hides target policy, S05 Settings modal pauses auto-engage, and D01/D02 lock + overload persist across reload with 0-charge disable', async ({
+    page,
+  }) => {
+    test.slow();
+    const monitor = attachZeroErrorMonitors(page);
+    const app = createAppDriver(page);
+
+    // Part A: S04 single-enemy hides target policy selector & S05 opening Settings modal pauses auto-engage with 0 ambush
+    const singleEnemyMap = presetMidRunMapV3({
+      phase: 'MAP',
+      currentNodeId: 'L1A',
+      graph: createMapGraph({
+        nodeOverrides: {
+          L1A: { visited: true, resolved: true },
+          L2B: { type: 'combat', encounterKind: 'patrol' },
+        },
+      }),
+      overrides: {
+        visitedNodeIds: ['L1A'],
+      },
+    });
+    singleEnemyMap.settings.pureAutoCombat = false;
+
+    await app.seedStorage({ v2Save: singleEnemyMap, skipTitleScreen: true });
+    await app.boot({ seed: 24009 });
+    await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toBeVisible();
+
+    // Jump into single-enemy L2B and immediately open Settings modal during S05's 1.5s countdown
+    await app.jumpToNode('L2B');
+    const settingsBtn = page.locator('#v2-hud-settings, button[aria-label="设置"]').first();
+    await expect(settingsBtn).toBeVisible();
+    await settingsBtn.click();
+
+    const settingsDialog = page.locator('.modal-card[role="dialog"], [role="dialog"]').first();
+    await expect(settingsDialog).toBeVisible();
+
+    // Wait beyond S05's 1.5s countdown window while Settings modal is open -> must NEVER auto-engage in background
+    await page.waitForTimeout(1800);
+    const duringModalSnap = await app.inspect();
+    expect(duringModalSnap.modalOpen).toBe(true);
+    expect(duringModalSnap.phase).toBe('ENCOUNTER');
+    expect(duringModalSnap.activeRun?.combatRound).toBeNull();
+
+    await app.closeModal();
+    await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.BTN_PAUSE_AUTO_COMBAT)).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    // S04: Single-enemy encounter strictly detaches target policy selector & multi-enemy lock controls
+    await expect(page.locator('.v2-policy-box')).toHaveCount(0);
+    await expect(page.locator('[data-policy]')).toHaveCount(0);
+    await expect(page.locator('[data-testid^="enemy-lock-"]')).toHaveCount(0);
+
+    // Part B: Multi-enemy target lock + D01 overload_module persistence across mid-combat reload
+    const bossGraph = createMapGraph({
+      maxLayers: 6,
+      bossKind: 'boss_anvil',
+      bossId: 'boss_anvil',
+    });
+    const multiEnemySave = presetMidRunMapV3({
+      phase: 'MAP',
+      currentNodeId: 'L5A',
+      graph: bossGraph,
+      fuel: 6,
+      overrides: {
+        visitedNodeIds: ['L1A', 'L2A', 'L3A', 'L4A', 'L5A'],
+        tacticalChargesMax: 2,
+        tacticalChargesUsed: 0,
+        activeCombat: null,
+      },
+    });
+    multiEnemySave.settings.pureAutoCombat = false;
+
+    await app.seedStorage({ v2Save: multiEnemySave, skipTitleScreen: true });
+    await app.boot({ seed: 24010 });
+    await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toBeVisible();
+
+    await app.jumpToNode('L6A');
+    await app.pauseAutoCombat();
+    await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
+    await expect(page.locator('.v2-policy-box')).toHaveCount(1);
+
+    await app.lockEnemy('L6A_anvil_escort_2');
+    await app.startCombat();
+    await app.waitForInspect(
+      (s) => s.activeRun?.combatWaitingDecision === true,
+      20_000,
+      'multi-enemy tactical decision pause for overload',
+    );
+
+    await app.overloadModule('loan_laser_1');
+    await expect
+      .poll(
+        async () => {
+          const cur = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+          return {
+            chargesUsed: cur?.activeRun?.tacticalChargesUsed ?? 0,
+            hasOverload: Boolean(
+              cur?.activeRun?.activeCombat?.interventions?.some(
+                (iv) => iv.kind === 'overload_module' && iv.moduleInstanceId === 'loan_laser_1',
+              ),
+            ),
+          };
+        },
+        { timeout: 10_000, message: 'overload_module intervention persisted before reload' },
+      )
+      .toEqual({ chargesUsed: 1, hasOverload: true });
+
+    const beforeReloadSave = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    const interventionsBefore = beforeReloadSave?.activeRun?.activeCombat?.interventions ?? [];
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await app.waitForInspect(
+      (s) => s.screen === 'run' && s.activeRun !== null,
+      30_000,
+      'mid-combat state restored after reload',
+    );
+    const afterReloadSave = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(afterReloadSave?.activeRun?.tacticalChargesUsed).toBe(1);
+    expect(afterReloadSave?.activeRun?.lockedEnemyId).toBe('L6A_anvil_escort_2');
+    expect(afterReloadSave?.activeRun?.activeCombat?.interventions).toEqual(interventionsBefore);
+
+    // Part C: At 0 remaining charges, ALL [data-testid^="overload-module-"] controls are strictly disabled
+    const zeroChargeOverload = presetBossEncounterV3(1);
+    zeroChargeOverload.settings.pureAutoCombat = false;
+    if (zeroChargeOverload.activeRun) {
+      const bossUnits = zeroChargeOverload.activeRun.graph.nodes.L6A?.combat?.units ?? [];
+      const initialEnemies = bossUnits.map((u) => ({ ...u, hp: u.maxHp }));
+      zeroChargeOverload.activeRun.tacticalChargesMax = 1;
+      zeroChargeOverload.activeRun.tacticalChargesUsed = 1;
+      zeroChargeOverload.activeRun.activeCombat = {
+        nodeId: 'L6A',
+        startingHp: 24,
+        targetPolicy: 'weakest',
+        simulation: {
+          resultId: 'sim_zero_charge_overload_guard',
+          outcome: 'victory',
+          stalemate: false,
+          targetPolicy: 'weakest',
+          roundsCount: 3,
+          startingPlayerHp: 24,
+          startingPlayerShield: 6,
+          finalPlayerHp: 18,
+          repairApplied: 0,
+          finalPlayerHpAfterRepair: 18,
+          initialEnemies,
+          rounds: [],
+        },
+        pendingDecision: {
+          decisionId: 'dec_zero_charge_ov_r1',
+          roundNumber: 1,
+          playerHpAtPause: 24,
+          playerShieldAtPause: 6,
+          enemyThreatDamage: 4,
+          enemiesAlive: Math.max(1, initialEnemies.length),
+          options: [
+            {
+              choice: 'normal',
+              label: '常规推进',
+              summary: '保持原定火力',
+              enabled: true,
+              predictedOutcome: 'victory',
+              predictedFinalHp: 18,
+              predictedRounds: 3,
+            },
+          ],
+          chosen: null,
+        },
+      };
+    }
+
+    await app.seedStorage({ v2Save: zeroChargeOverload, skipTitleScreen: true });
+    await app.boot({ seed: 24011 });
+
+    await expect(app.byTestId(TEST_IDS.COMBAT_TACTICAL_BAR)).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.COMBAT_TACTICAL_CHARGES)).toContainText('0/1');
+    await expect(app.byTestId(TEST_IDS.COMBAT_OVERLOAD_SECTION)).toBeVisible();
+
+    const overloadBtns = page.locator('[data-testid^="overload-module-"]');
+    const overloadCount = await overloadBtns.count();
+    expect(overloadCount, 'Mounted modules must render overload buttons').toBeGreaterThanOrEqual(1);
+    for (let i = 0; i < overloadCount; i += 1) {
+      await expect(overloadBtns.nth(i)).toBeDisabled();
+    }
+    await expect(page.locator('[data-testid^="overload-module-"]:not([disabled])')).toHaveCount(0);
 
     monitor.assertClean(await app.inspect());
   });

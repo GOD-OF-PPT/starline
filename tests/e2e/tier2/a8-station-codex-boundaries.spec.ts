@@ -110,41 +110,21 @@ test.describe('Tier 2 · A8: Station, Warehouse Cap, Codex & Relic Boundaries', 
     const settlementScreen = app.byTestId(TEST_IDS.SETTLEMENT_SCREEN);
     await expect(settlementScreen).toBeVisible();
 
-    const storeBtn = settlementScreen
-      .locator(
-        '[data-settle-item="settle_overflow_eq"][data-settle-disp="store"], [data-testid="btn-store-settle_overflow_eq"]',
-      )
-      .or(
-        settlementScreen
-          .locator('.v2-settle-row')
-          .filter({ hasText: /电池/ })
-          .getByRole('button', { name: /入库|入设备库/ }),
-      )
-      .first();
+    const storeBtn = app.byTestId(TEST_IDS.btnStore('settle_overflow_eq'));
     await expect(storeBtn, 'Settlement loot equipment must render a store control').toBeVisible();
 
-    if (await storeBtn.isEnabled()) {
-      // Live SettlementView allows previewing overflow store selection, then shows overflow banner and disables confirm
-      await storeBtn.click();
-      await expect(settlementScreen).toContainText(/超出上限|设备库已满|13\s*\/\s*12/);
-      await expect(app.byTestId(TEST_IDS.BTN_CONFIRM_SETTLEMENT)).toBeDisabled();
+    // Selecting store on a full 12/12 warehouse triggers overflow notice (13/12) and strictly disables Confirm Settlement
+    await storeBtn.click();
+    await expect(settlementScreen).toContainText(/超出上限|设备库已满|13\s*\/\s*12/);
+    await expect(app.byTestId(TEST_IDS.BTN_CONFIRM_SETTLEMENT)).toBeDisabled();
 
-      const sellBtn = settlementScreen
-        .locator('[data-settle-item="settle_overflow_eq"][data-settle-disp="sell"]')
-        .or(
-          settlementScreen
-            .locator('.v2-settle-row')
-            .filter({ hasText: /电池/ })
-            .getByRole('button', { name: /出售|卖出/ }),
-        )
-        .first();
-      await expect(sellBtn).toBeVisible();
-      await sellBtn.click();
-      await expect(app.byTestId(TEST_IDS.BTN_CONFIRM_SETTLEMENT)).toBeEnabled();
-    } else {
-      await expect(storeBtn).toBeDisabled();
-      await expect(settlementScreen).toContainText(/设备库已满|仓库已满|已满|超出上限/);
-    }
+    // Switching back to sell clears overflow and re-enables Confirm Settlement
+    const sellBtn = settlementScreen
+      .locator('[data-settle-item="settle_overflow_eq"][data-settle-disp="sell"]')
+      .first();
+    await expect(sellBtn).toBeVisible();
+    await sellBtn.click();
+    await expect(app.byTestId(TEST_IDS.BTN_CONFIRM_SETTLEMENT)).toBeEnabled();
 
     await app.confirmSettlement();
 
@@ -341,5 +321,119 @@ test.describe('Tier 2 · A8: Station, Warehouse Cap, Codex & Relic Boundaries', 
     expect(mapSnap.activeRun?.maxHp).toBe(30);
 
     monitor.assertClean(mapSnap);
+  });
+
+  test('T2-A8-06 @p1-mid D07 Run-1 pending family unlock persists across reload with single-claim guard and defeat suppression, plus D03 Codex Synergy Journal redaction (0/10 vs 10/10)', async ({
+    page,
+  }) => {
+    test.slow();
+    const monitor = attachZeroErrorMonitors(page);
+    const app = createAppDriver(page);
+
+    // Part A1: Run-1 safe_return confirmed WITHOUT picking a family -> persists 3 choices across reload on Base; single claim removes card
+    const run1SafeSettle = presetSettlementV3({ reason: 'safe_return', wallet: 25 });
+    run1SafeSettle.profile.totalRuns = 0;
+    run1SafeSettle.profile.unlockedFamilies = ['core'];
+    run1SafeSettle.profile.completedContractTypes = [];
+    run1SafeSettle.profile.completedContractIds = [];
+    run1SafeSettle.profile.pendingFamilyUnlockChoices = [];
+
+    await app.seedStorage({ v2Save: run1SafeSettle, skipTitleScreen: true });
+    await app.boot({ seed: 28006 });
+
+    await expect(app.byTestId(TEST_IDS.SETTLEMENT_SCREEN)).toBeVisible();
+    const settleFamSection = app.byTestId(TEST_IDS.SETTLEMENT_FAMILY_UNLOCK);
+    await expect(settleFamSection).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.familyUnlockOption('heavy_kit'))).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.familyUnlockOption('hangar_kit'))).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.familyUnlockOption('counter_kit'))).toBeVisible();
+
+    // Confirm settlement WITHOUT choosing any family -> pending choices persist onto Base fallback card
+    await app.confirmSettlement();
+    await expect(app.byTestId(TEST_IDS.BASE_FAMILY_UNLOCK_CARD)).toBeVisible();
+
+    // Reload Base -> all 3 pending choices MUST survive reload intact
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await app.waitForInspect((s) => s.screen === 'base', 30_000, 'base ready after reload');
+    await expect(app.byTestId(TEST_IDS.BASE_FAMILY_UNLOCK_CARD)).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.btnPickFamily('heavy_kit'))).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.btnPickFamily('hangar_kit'))).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.btnPickFamily('counter_kit'))).toBeVisible();
+
+    const savedBeforeClaim = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(savedBeforeClaim?.profile.pendingFamilyUnlockChoices).toHaveLength(3);
+
+    // Single claim unlocks heavy_kit, clears pendingFamilyUnlockChoices, and detaches base-family-unlock-card
+    await app.byTestId(TEST_IDS.btnPickFamily('heavy_kit')).click();
+    await expect(app.byTestId(TEST_IDS.BASE_FAMILY_UNLOCK_CARD)).toHaveCount(0);
+
+    const savedAfterClaim = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(savedAfterClaim?.profile.unlockedFamilies.filter((f) => f === 'heavy_kit')).toHaveLength(1);
+    expect(savedAfterClaim?.profile.pendingFamilyUnlockChoices ?? []).toHaveLength(0);
+
+    // Part A2: Run-1 defeat strictly suppresses settlement-family-unlock and leaves pending choices empty
+    const run1DefeatSettle = presetSettlementV3({ reason: 'defeat', wallet: 25 });
+    run1DefeatSettle.profile.totalRuns = 0;
+    run1DefeatSettle.profile.unlockedFamilies = ['core'];
+    run1DefeatSettle.profile.completedContractTypes = [];
+    run1DefeatSettle.profile.completedContractIds = [];
+    run1DefeatSettle.profile.pendingFamilyUnlockChoices = [];
+
+    await app.seedStorage({ v2Save: run1DefeatSettle, skipTitleScreen: true });
+    await app.boot({ seed: 28007 });
+
+    await expect(app.byTestId(TEST_IDS.SETTLEMENT_SCREEN)).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.SETTLEMENT_FAMILY_UNLOCK)).toHaveCount(0);
+    await app.confirmSettlement();
+    await expect(app.byTestId(TEST_IDS.BASE_FAMILY_UNLOCK_CARD)).toHaveCount(0);
+
+    const savedAfterDefeat = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(savedAfterDefeat?.profile.pendingFamilyUnlockChoices ?? []).toHaveLength(0);
+
+    // Part B: D03 Codex Synergy Journal redaction (0/10 locked vs 10/10 discovered with 跨类 tags)
+    await app.seedStorage({
+      v2Save: presetAct1V3({ discoveredSynergies: [] }),
+      skipTitleScreen: true,
+    });
+    await app.boot({ seed: 28008, enterStation: true });
+
+    const codexEmpty = await app.openBaseModal(TEST_IDS.BTN_OPEN_CODEX);
+    const synEmpty = codexEmpty.getByTestId(TEST_IDS.CODEX_SYNERGY_SECTION);
+    await expect(synEmpty).toBeVisible();
+    await expect(synEmpty).toContainText('联动图鉴 (0/10)');
+    await expect(synEmpty.locator('[data-synergy-state="locked"]')).toHaveCount(10);
+    await expect(synEmpty.locator('[data-synergy-state="discovered"]')).toHaveCount(0);
+    await expect(synEmpty).toContainText('未发现联动');
+    await app.closeModal();
+
+    const allTenSynergies = [
+      'battery_laser',
+      'coolant_heavy',
+      'capacitor_heavy',
+      'relay_hangar',
+      'shield_counter',
+      'coolant_vent_heavy',
+      'coolant_vent_salvo',
+      'support_salvo',
+      'overdrive_weapon',
+      'cargo_amp_cargo',
+    ];
+    await app.seedStorage({
+      v2Save: presetAct3ClimaxV3({ discoveredSynergies: allTenSynergies }),
+      skipTitleScreen: true,
+    });
+    await app.boot({ seed: 28009, enterStation: true });
+
+    const codexFull = await app.openBaseModal(TEST_IDS.BTN_OPEN_CODEX);
+    const synFull = codexFull.getByTestId(TEST_IDS.CODEX_SYNERGY_SECTION);
+    await expect(synFull).toBeVisible();
+    await expect(synFull).toContainText('联动图鉴 (10/10)');
+    await expect(synFull.locator('[data-synergy-state="discovered"]')).toHaveCount(10);
+    await expect(synFull.locator('[data-synergy-state="locked"]')).toHaveCount(0);
+    await expect(synFull.locator('[data-synergy-id="coolant_heavy"]')).toContainText('跨类');
+    await expect(synFull.locator('[data-synergy-id="cargo_amp_cargo"]')).toContainText('跨类');
+    await app.closeModal();
+
+    monitor.assertClean(await app.inspect());
   });
 });

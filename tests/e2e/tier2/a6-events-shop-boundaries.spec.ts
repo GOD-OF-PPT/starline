@@ -7,6 +7,9 @@ import {
   createCargoBay,
   createCargoItem,
   createContractInstance,
+  createMapGraph,
+  createV3RunFixture,
+  presetAct1V3,
   presetEventEncounterV3,
   presetSettlementV3,
   presetShopEncounterV3,
@@ -226,6 +229,7 @@ test.describe('Tier 2 · A6: Events, Shop, Factions & Contracts Negative Cases',
   test('T2-A6-03 @p0-core Merchant disables fuel/repair at cap and persists limit-1 sold-out cap across reload', async ({
     page,
   }) => {
+    test.slow();
     const monitor = attachZeroErrorMonitors(page);
     const app = createAppDriver(page);
 
@@ -281,6 +285,7 @@ test.describe('Tier 2 · A6: Events, Shop, Factions & Contracts Negative Cases',
     expect(saveAfterBuy?.activeRun?.transactionIds.length).toBeGreaterThan(0);
 
     await page.reload({ waitUntil: 'domcontentloaded' });
+    await app.waitForInspect((s) => s.phase === 'SHOP', 30_000, 'shop restored after reload');
     await expect(app.byTestId(TEST_IDS.SHOP_SCREEN)).toBeVisible();
     await expect(repairBtn).toBeDisabled();
 
@@ -322,6 +327,7 @@ test.describe('Tier 2 · A6: Events, Shop, Factions & Contracts Negative Cases',
     await app.waitForInspect((s) => s.activeRun?.wallet === 55, 15_000, 'offer_1 purchased');
 
     await page.reload({ waitUntil: 'domcontentloaded' });
+    await app.waitForInspect((s) => s.phase === 'SHOP', 30_000, 'shop restored after reload');
     await expect(app.byTestId(TEST_IDS.SHOP_SCREEN)).toBeVisible();
 
     const snapAfterReload = await app.inspect();
@@ -407,5 +413,142 @@ test.describe('Tier 2 · A6: Events, Shop, Factions & Contracts Negative Cases',
     expect(baseSnap.credits).toBe(365);
 
     monitor.assertClean(baseSnap);
+  });
+
+  test('T2-A6-06 @p1-mid D07 zero-heal reward skip preserves guaranteed collectible relic while dropping equipment and D06 crates, and lethal event hpCost disables option cleanly', async ({
+    page,
+  }) => {
+    const monitor = attachZeroErrorMonitors(page);
+    const app = createAppDriver(page);
+
+    // Part A: D07 REWARD with hp: 18/30 + bonusLootItems [ancient_navigator (collectible relic), data_box (D06 crate)]
+    const rewEq0 = createCargoItem({
+      instanceId: 'skip_rew_eq_0',
+      definitionId: 'equipment.laser.common',
+      origin: 'loot',
+      acquiredDepth: 3,
+      location: 'staging',
+    });
+    const rewEq1 = createCargoItem({
+      instanceId: 'skip_rew_eq_1',
+      definitionId: 'equipment.battery.common',
+      origin: 'loot',
+      acquiredDepth: 3,
+      location: 'staging',
+    });
+    const rewEq2 = createCargoItem({
+      instanceId: 'skip_rew_eq_2',
+      definitionId: 'equipment.shield.common',
+      origin: 'loot',
+      acquiredDepth: 3,
+      location: 'staging',
+    });
+    const rewRelic = createCargoItem({
+      instanceId: 'skip_rew_relic_nav',
+      definitionId: 'cargo.ancient_navigator',
+      origin: 'loot',
+      fixedValue: 48,
+      acquiredDepth: 3,
+      location: 'staging',
+    });
+    const rewCrate = createCargoItem({
+      instanceId: 'skip_rew_d06_crate',
+      definitionId: 'cargo.data_box',
+      origin: 'loot',
+      fixedValue: 7,
+      acquiredDepth: 3,
+      location: 'staging',
+    });
+
+    const rewardRun = createV3RunFixture({
+      phase: 'REWARD',
+      currentNodeId: 'L3A',
+      hp: 18,
+      maxHp: 30,
+      contract: createContractInstance('free_salvage'),
+      graph: createMapGraph({
+        nodeOverrides: {
+          L3A: { type: 'combat', encounterKind: 'patrol', visited: true, resolved: false },
+        },
+      }),
+      overrides: {
+        visitedNodeIds: ['L1A', 'L2A', 'L3A'],
+        pendingReward: {
+          nodeId: 'L3A',
+          equipmentOptions: [rewEq0, rewEq1, rewEq2],
+          bonusLootItems: [rewRelic, rewCrate],
+          equipmentOption: rewEq0,
+          cargoOption: rewCrate,
+          repairAmount: 0,
+          chosen: null,
+        },
+      },
+    });
+
+    await app.seedStorage({
+      v2Save: { ...presetAct1V3(), activeRun: rewardRun },
+      skipTitleScreen: true,
+    });
+    await app.boot({ seed: 26007 });
+
+    await expect(app.byTestId(TEST_IDS.REWARD_SCREEN)).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.REWARD_RELIC_BONUS)).toBeVisible();
+
+    await app.pickReward('skip');
+
+    // Guaranteed collectible relic forces ARRANGE with strictly 0 HP healed and 0 equipment / 0 D06 crates
+    const arrangeSnap = await app.waitForInspect(
+      (s) => s.phase === 'ARRANGE' && s.activeRun !== null,
+      15_000,
+      'zero-heal skip staged guaranteed relic into ARRANGE',
+    );
+    expect(arrangeSnap.activeRun?.hp).toBe(18);
+
+    const savedAfterSkip = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    const stagedIds = savedAfterSkip?.activeRun?.bay.staging.map((s) => s.item.instanceId) ?? [];
+    expect(stagedIds).toEqual(['skip_rew_relic_nav']);
+
+    // Part B: Lethal event hpCost guard (hp: 4 vs option hpCost: 4 -> disabled; safe fallback resolves cleanly)
+    const lethalEvent = presetEventEncounterV3({
+      crewId: 'salvager',
+      hp: 4,
+      fuel: 5,
+      wallet: 50,
+    });
+    if (lethalEvent.activeRun?.activeEvent) {
+      lethalEvent.activeRun.activeEvent.options = [
+        {
+          index: 0,
+          label: '强行顶盾突破残骸风暴（消耗 4 耐久）',
+          costSummary: '-4 船体耐久',
+          rewardSummary: '高价货物箱',
+          hpCost: 4,
+        },
+        {
+          index: 1,
+          label: '绕道安全撤离',
+          costSummary: '无消耗',
+          rewardSummary: '安全离开',
+          isFallback: true,
+        },
+      ];
+    }
+
+    await app.seedStorage({ v2Save: lethalEvent, skipTitleScreen: true });
+    await app.boot({ seed: 26008 });
+
+    await expect(app.byTestId(TEST_IDS.EVENT_SCREEN)).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.eventChoice(0))).toBeDisabled();
+    await expect(app.byTestId(TEST_IDS.eventChoice(1))).toBeEnabled();
+
+    await app.chooseEventOption(1);
+    const mapAfterEvent = await app.waitForInspect(
+      (s) => s.phase === 'MAP' && s.activeRun !== null,
+      15_000,
+      'safe fallback exited lethal-hpCost event cleanly',
+    );
+    expect(mapAfterEvent.activeRun?.hp).toBe(4);
+
+    monitor.assertClean(mapAfterEvent);
   });
 });

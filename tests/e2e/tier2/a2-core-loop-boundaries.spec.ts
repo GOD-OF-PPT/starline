@@ -160,20 +160,20 @@ test.describe('Tier 2 · A2: Core Loop, Bankruptcy, Fuel & Loadout Boundaries', 
     monitor.assertClean(await app.inspect());
   });
 
-  test('T2-A2-03 @p0-core Zero fuel does not auto-defeat, rejects insufficient-fuel jumps, and keeps 0-cost safe return enabled', async ({
+  test('T2-A2-03 @p0-core Zero fuel does not auto-defeat, rejects insufficient-fuel jumps, and keeps 0-fuel stranded_tow return enabled', async ({
     page,
   }) => {
     const monitor = attachZeroErrorMonitors(page);
     const app = createAppDriver(page);
 
-    // Sub-case A: fuel === 0 at L1A
+    // Sub-case A: fuel === 0 at non-beacon L1A
     const zeroFuelRun = createV3RunFixture({
       phase: 'MAP',
       currentNodeId: 'L1A',
       fuel: 0,
       graph: createMapGraph({
         nodeOverrides: {
-          L1A: { visited: true, resolved: true },
+          L1A: { visited: true, resolved: true, isBeacon: false },
         },
       }),
     });
@@ -187,14 +187,15 @@ test.describe('Tier 2 · A2: Core Loop, Bankruptcy, Fuel & Loadout Boundaries', 
     expect(snapA.phase).toBe('MAP');
     expect(snapA.activeRun?.fuel).toBe(0);
 
-    await app.byTestId(TEST_IDS.mapNode('L2A')).click();
-    const jumpBtn = app.byTestId(TEST_IDS.BTN_JUMP_NODE);
-    await expect(jumpBtn).toBeDisabled();
+    const l2aJumpBtnA = app.byTestId(TEST_IDS.mapNode('L2A')).locator('[data-testid="btn-jump-node"]');
+    await expect(l2aJumpBtnA).toBeDisabled();
     await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toContainText(/燃料不足|需要\s*1|0/);
     expect((await app.inspect()).activeRun?.fuel).toBe(0);
-    await expect(app.byTestId(TEST_IDS.BTN_SAFE_RETURN)).toBeEnabled();
+    const safeReturnBtnA = app.byTestId(TEST_IDS.BTN_SAFE_RETURN);
+    await expect(safeReturnBtnA).toBeEnabled();
+    await expect(safeReturnBtnA).toHaveAttribute('data-return-mode', 'stranded_tow');
 
-    // Sub-case B: fuel === 1 while carrying Escape Pod (requires 1 + 1 = 2 fuel)
+    // Sub-case B: fuel === 1 while carrying Escape Pod (requires 1 + 1 = 2 fuel) on non-beacon L1A
     const podBay = createCargoBay({
       shipId: 'cannon_skiff',
       placed: [
@@ -217,7 +218,7 @@ test.describe('Tier 2 · A2: Core Loop, Bankruptcy, Fuel & Loadout Boundaries', 
       contract: createContractInstance('rescue_std'),
       graph: createMapGraph({
         nodeOverrides: {
-          L1A: { visited: true, resolved: true },
+          L1A: { visited: true, resolved: true, isBeacon: false },
         },
       }),
     });
@@ -227,19 +228,26 @@ test.describe('Tier 2 · A2: Core Loop, Bankruptcy, Fuel & Loadout Boundaries', 
     });
     await app.boot({ seed: 22004 });
 
-    await app.byTestId(TEST_IDS.mapNode('L2A')).click();
-    await expect(app.byTestId(TEST_IDS.BTN_JUMP_NODE)).toBeDisabled();
+    const l2aJumpBtnB = app.byTestId(TEST_IDS.mapNode('L2A')).locator('[data-testid="btn-jump-node"]');
+    await expect(l2aJumpBtnB).toBeDisabled();
     expect((await app.inspect()).activeRun?.fuel).toBe(1);
 
-    // Safe return at 0 fuel cost must still succeed cleanly
+    const safeReturnBtnB = app.byTestId(TEST_IDS.BTN_SAFE_RETURN);
+    await expect(safeReturnBtnB).toBeEnabled();
+    await expect(safeReturnBtnB).toHaveAttribute('data-return-mode', 'stranded_tow');
+
+    // Non-softlock stranded emergency tow at 0 fuel cost must still succeed cleanly
     await app.safeReturn();
     const settleSnap = await app.inspect();
     expect(settleSnap.phase).toBe('SETTLEMENT');
+    await expect(app.byTestId(TEST_IDS.SETTLEMENT_SCREEN)).toContainText(/紧急拖航/);
+    const savedAtSettle = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(savedAtSettle?.activeRun?.emergencyTowUsed).toBe(true);
 
     monitor.assertClean(settleSnap);
   });
 
-  test('T2-A2-04 @p0-core Defeat tow-back pays exact 40% floor formula Math.floor((15+10+26)*0.4)=20 and protects Base assets', async ({
+  test('T2-A2-04 @p0-core Defeat tow-back pays exact 20% floor formula Math.floor((15+10+26)*0.2)=10 and protects Base assets', async ({
     page,
   }) => {
     const monitor = attachZeroErrorMonitors(page);
@@ -322,8 +330,12 @@ test.describe('Tier 2 · A2: Core Loop, Bankruptcy, Fuel & Loadout Boundaries', 
 
     const settlementScreen = app.byTestId(TEST_IDS.SETTLEMENT_SCREEN);
     await expect(settlementScreen).toBeVisible();
-    await expect(settlementScreen).toContainText(/战败|拖曳|40%/);
-    await expect(settlementScreen).toContainText(/20/);
+    await expect(settlementScreen).toContainText(/战败/);
+    await expect(settlementScreen).toContainText(/20%/);
+
+    const totalCreditsEl = app.byTestId(TEST_IDS.SETTLEMENT_TOTAL_CREDITS);
+    await expect(totalCreditsEl).toHaveAttribute('data-final-credits', '10');
+    await expect(totalCreditsEl).toContainText('+10¤');
 
     await app.confirmSettlement();
 
@@ -333,11 +345,11 @@ test.describe('Tier 2 · A2: Core Loop, Bankruptcy, Fuel & Loadout Boundaries', 
       'returned to base after defeat settlement',
     );
 
-    // 120 base + Math.floor((15 wallet + 10 owned + 26 loot) * 0.4) = 120 + 20 = 140
-    expect(postBaseSnap.credits).toBe(140);
+    // D04: 120 base + Math.floor((15 wallet + 10 owned + 26 loot) * 0.2) = 120 + 10 = 130
+    expect(postBaseSnap.credits).toBe(130);
 
     const saved = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
-    expect(saved?.profile.credits).toBe(140);
+    expect(saved?.profile.credits).toBe(130);
     expect(saved?.profile.buildings.research_lab).toBe(true);
     expect(saved?.profile.relics.ancient_navigator.restored).toBe(true);
     expect(saved?.profile.equipmentWarehouse.map((i) => i.instanceId)).toEqual([
@@ -482,9 +494,12 @@ test.describe('Tier 2 · A2: Core Loop, Bankruptcy, Fuel & Loadout Boundaries', 
     });
     await app.boot({ seed: 22007 });
 
-    await app.byTestId(TEST_IDS.mapNode('L2A')).click();
-    await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toContainText(/2\s*燃料|消耗\s*2/);
-    await app.byTestId(TEST_IDS.BTN_JUMP_NODE).click();
+    const l2aCard = app.byTestId(TEST_IDS.mapNode('L2A'));
+    await expect(l2aCard).toBeVisible();
+    await expect(l2aCard).toContainText(/2\s*油/);
+    await expect(l2aCard).toContainText(/救生舱\+1油/);
+    await expect(l2aCard).not.toContainText(/3\s*油/);
+    await app.jumpToNode('L2A');
 
     const afterJump = await app.waitForInspect(
       (s) => s.activeRun !== null && s.activeRun.fuel === 4,
@@ -554,5 +569,127 @@ test.describe('Tier 2 · A2: Core Loop, Bankruptcy, Fuel & Loadout Boundaries', 
     ).toBe(false);
 
     monitor.assertClean(await app.inspect());
+  });
+
+  test('T2-A2-07 @p0-core D04 non-beacon emergency_tow forfeits depth appreciation and bonus objective while excluding unspent stipend before -35% haircut', async ({
+    page,
+  }) => {
+    const monitor = attachZeroErrorMonitors(page);
+    const app = createAppDriver(page);
+
+    const towBay = createCargoBay({
+      shipId: 'cannon_skiff',
+      placed: [
+        {
+          item: createCargoItem({
+            instanceId: 'tow_loan_laser',
+            definitionId: 'equipment.laser.common',
+            origin: 'loan',
+          }),
+          x: 0,
+          y: 0,
+        },
+        {
+          item: createCargoItem({
+            instanceId: 'tow_deep_alloy',
+            definitionId: 'cargo.alloy_bar',
+            origin: 'loot',
+            fixedValue: 20,
+            acquiredDepth: 1,
+          }),
+          x: 1,
+          y: 0,
+        },
+      ],
+    });
+
+    const metBonusObjective = {
+      id: 'bonus_high_hp',
+      label: '返航时船体耐久 ≥ 60%',
+      completed: true,
+      rewardCredits: 21,
+    };
+
+    const towSave = presetMidRunMapV3(
+      {
+        phase: 'MAP',
+        currentNodeId: 'L3B',
+        fuel: 5,
+        hp: 30,
+        maxHp: 30,
+        wallet: 60,
+        bay: towBay,
+        contract: createContractInstance('bounty_std', {
+          bonusObjective: metBonusObjective,
+          overrides: {
+            status: 'active',
+            completedNodeIds: ['L3A'],
+            requiredCompletions: 1,
+            rewardCredits: 85,
+          },
+        }),
+        graph: createMapGraph({
+          nodeOverrides: {
+            L1A: { visited: true, resolved: true, isBeacon: false },
+            L2A: { visited: true, resolved: true, isBeacon: false },
+            L3B: { visited: true, resolved: true, isBeacon: false },
+          },
+        }),
+        overrides: {
+          visitedNodeIds: ['L1A', 'L2A', 'L3B'],
+          startingStipendCredits: 25,
+          stipendSpentCredits: 5,
+          bonusObjective: metBonusObjective,
+        },
+      },
+      {
+        credits: 260,
+        completedContractTypes: ['transport', 'bounty'],
+      },
+    );
+
+    await app.seedStorage({
+      v2Save: towSave,
+      skipTitleScreen: true,
+    });
+    await app.boot({ seed: 22009 });
+
+    await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toBeVisible();
+    const returnBtn = app.byTestId(TEST_IDS.BTN_SAFE_RETURN);
+    await expect(returnBtn).toBeEnabled();
+    await expect(returnBtn).toHaveAttribute('data-return-mode', 'emergency_tow');
+
+    await app.safeReturn();
+
+    const settlementScreen = app.byTestId(TEST_IDS.SETTLEMENT_SCREEN);
+    await expect(settlementScreen).toBeVisible();
+
+    // Emergency tow forfeits depth appreciation & bonus objective, and excludes unspent stipend (25 - 5 = 20) BEFORE -35% haircut:
+    // cashableWallet = 60 - 20 = 40; soldLoot = 20; contractReward = 85; depthAppreciation = 0; bonus = 0
+    // gross = 145 -> Math.floor(145 * 0.65) = 94 (tow fee = -51¤)
+    await expect(settlementScreen.locator('.v3-depth-bonus-row')).toHaveCount(0);
+    await expect(settlementScreen.locator('.v3-tow-fee-row')).toBeVisible();
+    await expect(settlementScreen.locator('.v3-tow-fee-row')).toContainText('-35%');
+    await expect(settlementScreen.locator('.v3-tow-fee-row')).toContainText('-51¤');
+    await expect(settlementScreen.locator('.v3-bonus-row.is-missed')).toBeVisible();
+    await expect(settlementScreen.locator('.v3-bonus-row.is-missed')).toContainText('+0¤');
+    await expect(settlementScreen).toContainText('40¤');
+
+    const totalCreditsEl = app.byTestId(TEST_IDS.SETTLEMENT_TOTAL_CREDITS);
+    await expect(totalCreditsEl).toHaveAttribute('data-final-credits', '94');
+    await expect(totalCreditsEl).toContainText('+94¤');
+
+    await app.confirmSettlement();
+    const baseSnap = await app.waitForInspect(
+      (s) => s.screen === 'base' && s.activeRun === null,
+      15_000,
+      'settled non-beacon emergency tow to base',
+    );
+    expect(baseSnap.credits).toBe(260 + 94);
+
+    const saved = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(saved?.profile.credits).toBe(354);
+
+    monitor.assertClean(baseSnap);
   });
 });

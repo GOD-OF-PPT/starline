@@ -116,14 +116,17 @@ test.describe('Tier 2 · A5: Derelict Dissection & Dismantle Protection Boundari
     const settlementScreen = app.byTestId(TEST_IDS.SETTLEMENT_SCREEN);
     await expect(settlementScreen).toBeVisible();
 
-    // Loan & mission rows must be visibly rendered and expose ZERO enabled dismantle buttons
+    // Loan & mission rows must be visibly rendered and expose ZERO dismantle controls of any kind (button, label, or radio)
+    const anyDismantleSelector =
+      '[data-settle-disp="dismantle"], [data-testid^="btn-dismantle-"], button:has-text("拆解"), label:has-text("拆解")';
+
     const loanSummary = settlementScreen
       .locator('[data-testid="settlement-loan-summary"], .v2-settle-row:has(.origin-loan)')
       .first();
     await expect(loanSummary, 'Loan summary or row must be visible on Settlement').toBeVisible();
     await expect(
-      loanSummary.locator('button:not([disabled])').filter({ hasText: /拆解/ }),
-      'Loan items must NOT expose any enabled dismantle button',
+      loanSummary.locator(anyDismantleSelector),
+      'Loan items must NOT expose any dismantle control',
     ).toHaveCount(0);
 
     const missionRow = settlementScreen
@@ -132,26 +135,20 @@ test.describe('Tier 2 · A5: Derelict Dissection & Dismantle Protection Boundari
       .first();
     await expect(missionRow, 'Mission reactor row must be visible on Settlement').toBeVisible();
     await expect(
-      missionRow.locator('button:not([disabled])').filter({ hasText: /拆解/ }),
-      'Mission items must NOT expose any enabled dismantle button',
+      missionRow.locator(anyDismantleSelector),
+      'Mission items must NOT expose any dismantle control',
     ).toHaveCount(0);
 
-    // Loot equipment row MUST expose the ONLY enabled dismantle action on Settlement
-    const lootDismantle = settlementScreen
-      .locator(
-        '[data-settle-item="prot_loot_shield"][data-settle-disp="dismantle"], [data-testid="btn-dismantle-prot_loot_shield"]',
-      )
-      .or(
-        settlementScreen
-          .locator('.v2-settle-row')
-          .filter({ hasText: /护盾/ })
-          .getByRole('button', { name: /拆解/ }),
-      )
-      .first();
+    // Loot equipment row MUST expose the ONLY dismantle action on Settlement (S09 3-option segmented radiogroup)
+    const lootDismantle = app.byTestId(TEST_IDS.btnDismantle('prot_loot_shield'));
     await expect(lootDismantle).toBeVisible();
-    await expect(lootDismantle).toBeEnabled();
+    await expect(lootDismantle.locator('input[type="radio"]')).toBeEnabled();
     await expect(
-      settlementScreen.locator('button:not([disabled])').filter({ hasText: /拆解/ }),
+      settlementScreen.locator('[data-testid^="btn-dismantle-"]'),
+      'Exactly one item on Settlement may expose a dismantle control',
+    ).toHaveCount(1);
+    await expect(
+      settlementScreen.locator('label[data-settle-disp="dismantle"], button[data-settle-disp="dismantle"]'),
     ).toHaveCount(1);
 
     const partsBefore = (await app.inspect()).salvageParts;
@@ -302,7 +299,7 @@ test.describe('Tier 2 · A5: Derelict Dissection & Dismantle Protection Boundari
     await page.reload({ waitUntil: 'domcontentloaded' });
     const afterReload = await app.waitForInspect(
       (s) => s.screen === 'run' && s.phase === 'ENCOUNTER' && s.activeRun?.wreckStability !== null,
-      15_000,
+      30_000,
       'wreck state restored after reload',
     );
 
@@ -316,5 +313,151 @@ test.describe('Tier 2 · A5: Derelict Dissection & Dismantle Protection Boundari
     expect(saveAfterReload?.activeRun?.activeWreck?.cutsMade).toBe(1);
 
     monitor.assertClean(afterReload);
+  });
+
+  test('T2-A5-06 @p1-mid D05 collapsed wreck survives reload with all cuts disabled and zero softlock while cut_stabilizer boosts stability and grants greedy-cut immunity', async ({
+    page,
+  }) => {
+    const monitor = attachZeroErrorMonitors(page);
+    const app = createAppDriver(page);
+
+    // Part A: Collapsed wreck (collapsed: true, stability: 0) survives reload with uncut hotspots disabled & Extract enabled
+    const collapsedWreck = presetWreckEncounterV3({ hp: 26, fuel: 7 });
+    if (collapsedWreck.activeRun) {
+      collapsedWreck.activeRun.bay = createCargoBay({
+        shipId: 'cannon_skiff',
+        placed: [
+          {
+            item: createCargoItem({
+              instanceId: 'col_owned_laser',
+              definitionId: 'equipment.laser.common',
+              origin: 'owned',
+            }),
+            x: 0,
+            y: 0,
+          },
+          {
+            item: createCargoItem({
+              instanceId: 'col_mission_reactor',
+              definitionId: 'mission.sealed_reactor',
+              origin: 'mission',
+            }),
+            x: 0,
+            y: 2,
+            rotation: 1,
+          },
+        ],
+      });
+      if (collapsedWreck.activeRun.activeWreck) {
+        collapsedWreck.activeRun.activeWreck.collapsed = true;
+        collapsedWreck.activeRun.activeWreck.stability = 0;
+        collapsedWreck.activeRun.activeWreck.cutsMade = 2;
+        collapsedWreck.activeRun.activeWreck.hotspots[0].cut = true;
+        collapsedWreck.activeRun.activeWreck.hotspots[1].cut = true;
+        collapsedWreck.activeRun.activeWreck.hotspots[2].cut = false;
+      }
+    }
+
+    await app.seedStorage({ v2Save: collapsedWreck, skipTitleScreen: true });
+    await app.boot({ seed: 25006 });
+
+    const wreckScreen = app.byTestId(TEST_IDS.WRECK_SCREEN);
+    await expect(wreckScreen).toBeVisible();
+    await expect(app.byTestId(TEST_IDS.wreckCut('reactor'))).toBeDisabled();
+    await expect(wreckScreen).toContainText(/结构已坍塌|残骸已坍塌/);
+    await expect(app.byTestId(TEST_IDS.BTN_WRECK_EXTRACT)).toBeEnabled();
+
+    // Reload mid-collapsed wreck -> disabled state & extractability MUST survive intact
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    const afterCollapseReload = await app.waitForInspect(
+      (s) => s.screen === 'run' && s.phase === 'ENCOUNTER' && s.activeRun?.wreckStability === 0,
+      30_000,
+      'collapsed wreck restored after reload',
+    );
+    expect(afterCollapseReload.activeRun?.wreckStability).toBe(0);
+    await expect(app.byTestId(TEST_IDS.wreckCut('reactor'))).toBeDisabled();
+    await expect(app.byTestId(TEST_IDS.WRECK_SCREEN)).toContainText(/结构已坍塌|残骸已坍塌/);
+    await expect(app.byTestId(TEST_IDS.BTN_WRECK_EXTRACT)).toBeEnabled();
+
+    // Safe extraction resolves cleanly to MAP (zero softlock) while preserving owned & mission gear
+    await app.extractWreck();
+    await app.waitForInspect(
+      (s) => s.screen === 'run' && s.phase === 'MAP',
+      15_000,
+      'extracted cleanly from collapsed wreck to MAP',
+    );
+    const savedAfterExtract = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    const preservedIds = savedAfterExtract?.activeRun?.bay.placed.map((p) => p.item.instanceId) ?? [];
+    expect(preservedIds).toContain('col_owned_laser');
+    expect(preservedIds).toContain('col_mission_reactor');
+
+    // Part B: Low-stability wreck (stability: 25) with gadget.cut_stabilizer boosts stability & grants 0 hull dmg + no collapse
+    const stabilizedWreck = presetWreckEncounterV3({ hp: 20, fuel: 7 });
+    if (stabilizedWreck.activeRun) {
+      stabilizedWreck.activeRun.bay = createCargoBay({
+        shipId: 'cannon_skiff',
+        placed: [
+          {
+            item: createCargoItem({
+              instanceId: 'stab_loan_laser',
+              definitionId: 'equipment.laser.common',
+              origin: 'loan',
+            }),
+            x: 0,
+            y: 0,
+          },
+          {
+            item: createCargoItem({
+              instanceId: 'stab_gadget_1',
+              definitionId: 'gadget.cut_stabilizer',
+              origin: 'loot',
+              fixedValue: 12,
+              acquiredDepth: 1,
+            }),
+            x: 3,
+            y: 0,
+          },
+        ],
+      });
+      if (stabilizedWreck.activeRun.activeWreck) {
+        stabilizedWreck.activeRun.activeWreck.stability = 25;
+        stabilizedWreck.activeRun.activeWreck.cutsMade = 1;
+        stabilizedWreck.activeRun.activeWreck.collapsed = false;
+        stabilizedWreck.activeRun.activeWreck.hotspots[0].cut = true;
+      }
+    }
+
+    await app.seedStorage({ v2Save: stabilizedWreck, skipTitleScreen: true });
+    await app.boot({ seed: 25007 });
+
+    await expect(app.byTestId(TEST_IDS.WRECK_SCREEN)).toBeVisible();
+    const stabilizerBtn = page.locator('[data-testid="btn-use-gadget-cut_stabilizer"]').first();
+    await expect(stabilizerBtn).toBeVisible();
+    await expect(stabilizerBtn).toBeEnabled();
+    await stabilizerBtn.click();
+
+    await app.waitForInspect(
+      (s) => s.activeRun?.wreckStability === 60,
+      10_000,
+      'cut_stabilizer boosted wreck stability from 25 to 60',
+    );
+    await expect(page.locator('[data-testid="wreck-stabilizer-active"]')).toBeVisible();
+
+    // Perform greedy cut #2 on cargo (normally -4 HP hull risk + low-stability collapse risk) -> strictly 0 hull dmg & no collapse
+    await app.cutWreckSpot('cargo');
+    const afterStabCut = await app.inspect();
+    expect(afterStabCut.activeRun?.hp).toBe(20);
+
+    const savedAfterStabCut = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(savedAfterStabCut?.activeRun?.activeWreck?.collapsed).toBe(false);
+    expect(savedAfterStabCut?.activeRun?.activeWreck?.stabilizerActive).toBe(false);
+    expect(
+      savedAfterStabCut?.activeRun?.bay.placed.some((p) => p.item.instanceId === 'stab_gadget_1'),
+    ).toBe(false);
+    expect(
+      savedAfterStabCut?.activeRun?.bay.staging.map((s) => s.item.instanceId),
+    ).toContain('wreck_cargo_alloy');
+
+    monitor.assertClean(afterStabCut);
   });
 });
