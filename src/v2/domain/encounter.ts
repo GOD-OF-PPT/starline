@@ -183,11 +183,21 @@ export function applyV2EngineerSwap(
   let nextBay = removeV2ItemById(run.bay, orig.instanceId);
   nextBay = addV2ItemToStaging(nextBay, swapped, 0);
 
+  const nextActiveWreck = run.activeWreck?.wreckLootInstanceIds?.includes(orig.instanceId)
+    ? {
+        ...run.activeWreck,
+        wreckLootInstanceIds: run.activeWreck.wreckLootInstanceIds.map((id) =>
+          id === orig.instanceId ? swapped.instanceId : id
+        ),
+      }
+    : run.activeWreck;
+
   return {
     ok: true,
     run: {
       ...run,
       bay: nextBay,
+      activeWreck: nextActiveWreck,
       activeEngineerOffer: { ...offer, used: true },
     },
   };
@@ -270,15 +280,23 @@ export function selectV2MapNode(
     // D06 Hook 1: Dynamically calibrate wreck cargo/armory on node entry (persisted to graph & activeWreck!)
     if (shouldCalibrateConflict && !run.activeWreck) {
       const missionShapes = getUpcomingContractMissionShapes(run, node);
-      const relicExisting =
-        node.hasRelicSignal && node.relicSignalDefId
-          ? node.wreck.cargoItems.filter((c) => c.definitionId === node.relicSignalDefId)
-          : [];
+      const isPreservedRelic = (it: V2ItemInstance): boolean =>
+        Boolean(V2_CARGO_DEFS[it.definitionId]?.isCollectible) ||
+        Boolean(
+          node.hasRelicSignal &&
+            node.relicSignalDefId &&
+            it.definitionId === node.relicSignalDefId
+        );
+      const relicExisting = node.wreck.cargoItems.filter(isPreservedRelic);
       const unlockedKinds = getUnlockedEquipmentKinds(
         options?.profile?.unlockedFamilies ?? ['core']
       );
       const occ = getV2BayOccupancy(run.bay);
       const freeCells = Math.max(0, occ.totalCells - occ.occupiedCells);
+      const wreckMaxItems =
+        node.layer >= 3
+          ? Math.max(3, Math.min(4, Math.ceil((freeCells + 1) / 4)))
+          : 3;
 
       const calibrated = withV2Stream(nextStreams, 'events', (rng) => {
         const cargoBundle = composeConflictCargoBundle({
@@ -288,8 +306,9 @@ export function selectV2MapNode(
           existingItems: relicExisting,
           layer: node.layer,
           sectorPriceMult: sector.cargoPriceMult,
-          maxItems: 3,
+          maxItems: Math.max(wreckMaxItems, relicExisting.length + 1),
           minItems: 2,
+          forceConflict: node.layer >= 3,
           rng,
           idPrefix: `${run.runId}_d06_wrk_${node.nodeId}`,
         });
@@ -347,6 +366,24 @@ export function selectV2MapNode(
     // D06 Hook 2: Dynamically calibrate cargo-granting event options on L2+ entry (reload-safe!)
     if (shouldCalibrateConflict && !run.activeEvent && node.layer >= 2 && baseEvent) {
       const missionShapes = getUpcomingContractMissionShapes(run, node);
+      const isPreservedRelic = (it: V2ItemInstance): boolean =>
+        Boolean(V2_CARGO_DEFS[it.definitionId]?.isCollectible) ||
+        Boolean(
+          node.hasRelicSignal &&
+            node.relicSignalDefId &&
+            it.definitionId === node.relicSignalDefId
+        );
+      const occEvt = getV2BayOccupancy(run.bay);
+      const missionCells = missionShapes.reduce(
+        (sum, sh) => sum + V2_SHAPES[sh].cells.length,
+        0
+      );
+      const freeAfterMission = Math.max(
+        0,
+        occEvt.totalCells - occEvt.occupiedCells - missionCells
+      );
+      const wideMaxItems = Math.max(3, Math.min(4, Math.ceil((freeAfterMission + 1) / 4)));
+
       const calibratedEv = withV2Stream(nextStreams, 'events', (rng) => {
         const nextOptions = baseEvent!.options.map((opt) => {
           const hasCargoReward = Boolean(
@@ -364,10 +401,11 @@ export function selectV2MapNode(
           if (!hasCargoReward && !isMarkedRescueGift) return opt;
 
           const existingRewardItems = opt.rewardItems ?? [];
-          const relicExisting =
-            node.hasRelicSignal && node.relicSignalDefId
-              ? existingRewardItems.filter((it) => it.definitionId === node.relicSignalDefId)
-              : [];
+          const relicExisting = existingRewardItems.filter(isPreservedRelic);
+          const optMaxItems =
+            isMarkedRescueGift || node.layer >= 3
+              ? Math.max(wideMaxItems, relicExisting.length + 1)
+              : Math.max(2, Math.min(3, existingRewardItems.length + 1));
           const bundle = composeConflictCargoBundle({
             shipId: run.bay.shipId,
             placedItems: run.bay.placed,
@@ -375,26 +413,26 @@ export function selectV2MapNode(
             existingItems: relicExisting,
             layer: node.layer,
             sectorPriceMult: sector.cargoPriceMult,
-            maxItems: isMarkedRescueGift
-              ? 3
-              : Math.max(2, Math.min(3, existingRewardItems.length + 1)),
+            maxItems: optMaxItems,
             minItems: Math.max(1, existingRewardItems.length),
-            forceConflict: isMarkedRescueGift,
+            forceConflict: isMarkedRescueGift || node.layer >= 3,
             rng,
             idPrefix: `${run.runId}_d06_evt_${node.nodeId}_${opt.index}`,
           });
+          const nextSummary =
+            isMarkedRescueGift && bundle.items.length > 0
+              ? `${opt.rewardSummary} · 附带打捞货箱 ×${bundle.items.length}`
+              : opt.rewardSummary;
           return {
             ...opt,
             rewardItems: bundle.items,
+            rewardSummary: nextSummary,
           };
         });
 
         let nextAnomaly = node.anomaly;
         if (node.type === 'anomaly' && node.anomaly) {
-          const relicExisting =
-            node.hasRelicSignal && node.relicSignalDefId
-              ? node.anomaly.breachCargoItems.filter((it) => it.definitionId === node.relicSignalDefId)
-              : [];
+          const relicExisting = node.anomaly.breachCargoItems.filter(isPreservedRelic);
           const breachBundle = composeConflictCargoBundle({
             shipId: run.bay.shipId,
             placedItems: run.bay.placed,
@@ -402,8 +440,9 @@ export function selectV2MapNode(
             existingItems: relicExisting,
             layer: node.layer,
             sectorPriceMult: sector.cargoPriceMult,
-            maxItems: 3,
+            maxItems: Math.max(wideMaxItems, relicExisting.length + 1),
             minItems: 2,
+            forceConflict: node.layer >= 3,
             rng,
             idPrefix: `${run.runId}_d06_anom_${node.nodeId}`,
           });
@@ -417,7 +456,7 @@ export function selectV2MapNode(
         if (
           node.type === 'distress' &&
           node.distress &&
-          !(node.hasRelicSignal && node.distress.haulCargoItem.definitionId === node.relicSignalDefId)
+          !isPreservedRelic(node.distress.haulCargoItem)
         ) {
           const haulBundle = composeConflictCargoBundle({
             shipId: run.bay.shipId,
@@ -1677,7 +1716,12 @@ export function generateV2CombatRewardBundle(
         smallestEqShape,
       ]);
       if (fitsEvenSmallest) {
-        const extraSlots = node.layer >= 3 ? 2 : 1;
+        const extraSlots =
+          node.layer >= 3
+            ? Math.min(4, Math.max(2, Math.ceil((freeNow + 1) / 4)))
+            : freeNow >= 11
+            ? 2
+            : 1;
         const salvage = composeConflictCargoBundle({
           shipId: run.bay.shipId,
           placedItems: run.bay.placed,

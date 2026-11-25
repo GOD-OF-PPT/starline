@@ -112,6 +112,8 @@ export function resolvePostEncounterPhase(run: V2RunState): V2RunState {
         bay: cleanBay,
         discardedCountThisRun: nextDiscardedCount,
         lockedEnemyId: null,
+        emergencyTowUsed: false,
+        returnMode: 'beacon_free',
         phase: 'SETTLEMENT',
         settlementReason: 'safe_return',
       },

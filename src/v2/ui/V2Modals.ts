@@ -24,6 +24,10 @@ import {
   getV2RelicSummary,
 } from '../domain/progressionV2';
 import {
+  V2_DEFEAT_SALVAGE_FLOOR_RATE,
+  V2_EMERGENCY_TOW_RETENTION_RATE,
+} from '../domain/settlementV2';
+import {
   isPureAutoCombat,
   type V2CargoBayState,
   type V2DiscardedRecord,
@@ -346,6 +350,8 @@ export function openV2CargoPeekModal(
 }
 
 export function openV2HelpModal(host: HTMLElement): void {
+  const defeatFloorPct = Math.round(V2_DEFEAT_SALVAGE_FLOOR_RATE * 100);
+  const towFeePct = Math.round((1 - V2_EMERGENCY_TOW_RETENTION_RATE) * 100);
   openTitledV2Modal(host, { title: '远航指南', dismissible: true }, (body, modal) => {
     body.innerHTML = `
       <div class="help-section">
@@ -353,8 +359,8 @@ export function openV2HelpModal(host: HTMLElement): void {
         <ul>
           <li><strong>接取委托</strong>：大件运输（2×3 密封反应堆）、失联救援（1×2 救生舱）、航迹勘测（标定星点消耗燃料扫描）。</li>
           <li><strong>试航与配装</strong>：整备期可一键体验重炮破甲、无人机编队、护盾反击三套试航方案，也可自由组合自有设备与永久蓝图。</li>
-          <li><strong>六层分支航路</strong>：初始燃料 9（上限 10），任何节点均可随时<strong>免费安全返航</strong>；废船残骸提供军械舱、反应舱、货舱三处独立切割点。</li>
-          <li><strong>返航结算</strong>：每件战利品可择一出售、入库研究或保留藏品；战败按 40% 折算回收并损失当次携带的自有与拾获实物。</li>
+          <li><strong>六层分支航路</strong>：初始燃料 9（上限 10），在<strong>回收信标（L3/L5）</strong>或末层可<strong>免费安全返航</strong>并享深潜货箱升值；非信标节点仅可触发<strong>紧急拖航（-${towFeePct}% 拖航费）</strong>；废船残骸随深度提供 3–5 处独立切割点，首刀无伤、贪刀存在结构坍塌风险。</li>
+          <li><strong>返航结算</strong>：每件战利品可择一出售、入库研究或保留藏品；战败按 <strong>${defeatFloorPct}%</strong> 折算回收并损失当次携带的自有与拾获实物（0¤ 破产后仍可免费借用整备重新出航）。</li>
         </ul>
       </div>
       <div class="help-section">

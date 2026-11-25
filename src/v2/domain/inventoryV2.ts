@@ -707,34 +707,27 @@ export function detectV2BaySpatialConflict(bay: V2CargoBayState): V2BaySpatialCo
     };
   }
 
-  // Incremental verification via verifyV2SpatialConflict to collect single-item discard choices
-  const feasibleSet = new Set<string>();
-  const prefix = [...placedDescriptors];
-  for (let j = 0; j < stagingDescriptors.length; j += 1) {
-    const incoming = stagingDescriptors[j];
-    const step = verifyV2SpatialConflict(bay.shipId, prefix, incoming.shapeId);
-    if (!step.allFitTogether) {
-      for (const fid of step.feasibleSingleDiscardIds) {
-        feasibleSet.add(fid);
-      }
-      // Also check removing any 1 item from the complete set (placed + staging)
-      for (let i = 0; i < allDescriptors.length; i += 1) {
-        const rest = allDescriptors
-          .filter((_, idx) => idx !== i)
-          .map((d) => d.shapeId);
-        if (canFitAllV2Shapes(bay.shipId, rest)) {
-          feasibleSet.add(allDescriptors[i].id);
-        }
-      }
-      break;
+  // Exact single-item discard check against the FULL (placed + staging) set, cached by shapeId
+  const feasibleSingleDiscardIds: string[] = [];
+  const shapeCanFitWithout = new Map<V2ShapeId, boolean>();
+  const allShapes = allDescriptors.map((d) => d.shapeId);
+  for (let i = 0; i < allDescriptors.length; i += 1) {
+    const sh = allDescriptors[i].shapeId;
+    let ok = shapeCanFitWithout.get(sh);
+    if (ok === undefined) {
+      const rest = allShapes.filter((_, idx) => idx !== i);
+      ok = canFitAllV2Shapes(bay.shipId, rest);
+      shapeCanFitWithout.set(sh, ok);
     }
-    prefix.push(incoming);
+    if (ok) {
+      feasibleSingleDiscardIds.push(allDescriptors[i].id);
+    }
   }
 
   return {
     hasConflict: true,
     allFitTogether: false,
-    feasibleSingleDiscardIds: Array.from(feasibleSet),
+    feasibleSingleDiscardIds,
   };
 }
 
@@ -936,11 +929,15 @@ export function composeConflictCargoBundle(
       shipCap -
         currentDescriptors.reduce((sum, d) => sum + V2_SHAPES[d.shapeId].cells.length, 0)
     );
-    const fillPool =
-      remainingCells >= 7
-        ? ['cargo.old_engine', 'cargo.old_engine', 'cargo.coolant_tank', 'cargo.folding_antenna']
-        : STAGE1_FILL_CARGO_POOL;
-    const pickedDef = rng.pick(fillPool);
+    const slotsLeftAfterThis = Math.max(0, maxItems - results.length - 1);
+    const pickedDef =
+      remainingCells >= 4 && slotsLeftAfterThis * 4 <= remainingCells
+        ? 'cargo.old_engine'
+        : rng.pick(
+            remainingCells >= 7
+              ? ['cargo.old_engine', 'cargo.old_engine', 'cargo.coolant_tank', 'cargo.folding_antenna']
+              : STAGE1_FILL_CARGO_POOL
+          );
     const item = makeCargo(pickedDef, seq++);
     results.push(item);
     currentDescriptors.push({ id: item.instanceId, shapeId: V2_CARGO_DEFS[pickedDef].shapeId });

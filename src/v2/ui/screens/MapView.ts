@@ -172,7 +172,7 @@ function describeNodeForecast(
   }
   if (n.type === 'merchant') {
     return {
-      brief: '补给交易：2 件设备 / +2油 / +10耐久',
+      brief: `补给交易：2 件设备 / +2油 / +${n.merchant?.repairAmount ?? 8}耐久`,
       cls: '',
       detail: '可出售拾获物换取信用点',
     };

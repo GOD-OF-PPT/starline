@@ -1724,4 +1724,48 @@ body.reduced-motion .v2-shell .v3-family-unlock-opt {
   transition: none !important;
 }
 
+/* --- D05 Compact Mobile Wreck Clamp Pins (0 #id, 0 pill radii, 0 clip-path, 0px pairwise overlap on 390x844) --- */
+@media (max-width: 760px) {
+  .v2-shell .v3-wreck-stage-overlay .v3-wreck-compartment-pin {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100px;
+    min-height: 44px;
+    padding: 4px 5px;
+    gap: 2px;
+    font-size: 10px;
+    line-height: 1.15;
+  }
 
+  .v2-shell .v3-wreck-stage-overlay .v3-wreck-compartment-pin .v3-wreck-silhouette-layer {
+    width: 22px;
+    height: 22px;
+  }
+
+  .v2-shell .v3-wreck-stage-overlay .v3-wreck-compartment-pin .v3-wreck-silhouette-img {
+    width: 18px;
+    height: 18px;
+  }
+
+  .v2-shell .v3-wreck-stage-overlay .v3-wreck-compartment-pin .v2-hotspot-tag {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    white-space: normal;
+    text-align: center;
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .v2-shell .v3-wreck-stage-overlay .v3-wreck-compartment-pin .v2-hotspot-tag svg {
+    display: none;
+  }
+
+  .v2-shell .v3-wreck-stage-overlay .v3-wreck-compartment-pin .v2-hotspot-tag em {
+    font-size: 9.5px;
+    line-height: 1.1;
+    white-space: nowrap;
+  }
+}

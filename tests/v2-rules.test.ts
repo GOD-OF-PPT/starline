@@ -641,6 +641,233 @@ describe('V2 规则与验收矩阵核心测试（T01–T12 / AC01–AC18, AC22�
     expect(heavyVsPiercer.startingPlayerHp - heavyVsPiercer.finalPlayerHp).toBeLessThan(
       counterVsPiercer.startingPlayerHp - counterVsPiercer.finalPlayerHp
     );
+
+    // D08 / Gate G3: Full 13-classic-encounter anti-dominance matrix including budget-5 laser-battery-laser sandwich!
+    const sandwichBay = {
+      ...createEmptyV2Bay('cannon_skiff'),
+      placed: [
+        { item: mk('l1', 'laser'), x: 0, y: 0, rotation: 0 as const },
+        { item: mk('b1', 'battery'), x: 1, y: 0, rotation: 0 as const },
+        { item: mk('l2', 'laser'), x: 2, y: 0, rotation: 0 as const },
+      ],
+    };
+    const hangarShieldBay = {
+      ...createEmptyV2Bay('cannon_skiff'),
+      placed: [
+        { item: mk('hg1', 'hangar'), x: 0, y: 0, rotation: 0 as const },
+        { item: mk('rl1', 'relay'), x: 2, y: 0, rotation: 0 as const },
+        { item: mk('s1', 'shield'), x: 2, y: 1, rotation: 0 as const },
+      ],
+    };
+    const salvoBay = {
+      ...createEmptyV2Bay('cannon_skiff'),
+      placed: [
+        { item: mk('sv1', 'salvo_pod'), x: 0, y: 0, rotation: 0 as const },
+        { item: mk('c1', 'capacitor'), x: 2, y: 0, rotation: 0 as const },
+        { item: mk('s1', 'shield'), x: 2, y: 1, rotation: 0 as const },
+      ],
+    };
+    const empBay = {
+      ...createEmptyV2Bay('cannon_skiff'),
+      placed: [
+        { item: mk('em1', 'emp_jammer'), x: 0, y: 0, rotation: 0 as const },
+        { item: mk('l1', 'laser'), x: 1, y: 0, rotation: 0 as const },
+        { item: mk('s1', 'shield'), x: 2, y: 0, rotation: 0 as const },
+      ],
+    };
+    const flakBatBay = {
+      ...createEmptyV2Bay('cannon_skiff'),
+      placed: [
+        { item: mk('fl1', 'flak'), x: 0, y: 0, rotation: 0 as const },
+        { item: mk('b1', 'battery'), x: 2, y: 1, rotation: 0 as const },
+        { item: mk('l1', 'laser'), x: 3, y: 0, rotation: 0 as const },
+      ],
+    };
+
+    const canonicalBuilds = [
+      { name: 'sandwich', hp: 30, bay: sandwichBay },
+      { name: 'heavy_cap_shield', hp: 30, bay: heavyBay },
+      { name: 'hangar_relay_shield', hp: 30, bay: hangarShieldBay },
+      { name: 'shield_counter_laser', hp: 34, bay: counterBay },
+      { name: 'salvo_cap_shield', hp: 30, bay: salvoBay },
+      { name: 'emp_laser_shield', hp: 30, bay: empBay },
+      { name: 'flak_laser_bat', hp: 30, bay: flakBatBay },
+    ] as const;
+
+    const classic13 = [
+      { kind: 'patrol' as const, layer: 1 },
+      { kind: 'swarm' as const, layer: 1 },
+      { kind: 'armored' as const, layer: 1 },
+      { kind: 'piercer' as const, layer: 1 },
+      { kind: 'patrol' as const, layer: 3 },
+      { kind: 'swarm' as const, layer: 3 },
+      { kind: 'armored' as const, layer: 3 },
+      { kind: 'piercer' as const, layer: 3 },
+      { kind: 'patrol' as const, layer: 5 },
+      { kind: 'swarm' as const, layer: 5 },
+      { kind: 'armored' as const, layer: 5 },
+      { kind: 'piercer' as const, layer: 5 },
+      { kind: 'elite' as const, layer: 6 },
+    ];
+
+    const shares: Record<string, number> = {};
+    for (const b of canonicalBuilds) shares[b.name] = 0;
+
+    for (const enc of classic13) {
+      const units = buildEncounterUnits(enc.kind, enc.layer, `t09_${enc.kind}_${enc.layer}`);
+      const scored = canonicalBuilds.map((b) => {
+        const s = simulateV2Combat({
+          resultId: `t09_${b.name}_${enc.kind}_${enc.layer}`,
+          bay: b.bay,
+          startingHp: b.hp,
+          maxHp: b.hp,
+          units,
+          targetPolicy: 'weakest',
+          encounterKind: enc.kind,
+        });
+        const hpLost = b.hp - s.finalPlayerHpAfterRepair;
+        return {
+          name: b.name,
+          score: (s.outcome === 'victory' ? 10_000 : 0) - hpLost * 100 - s.roundsCount * 5,
+        };
+      });
+      scored.sort((a, b) => b.score - a.score);
+      const winners = scored.filter((x) => x.score === scored[0].score);
+      for (const w of winners) shares[w.name] += 1 / winners.length;
+    }
+
+    const maxShare = Math.max(...Object.values(shares)) / classic13.length;
+    const sandwichShare = shares.sandwich / classic13.length;
+    console.log(
+      `[Gate G3 T09 13-Encounter Anti-Dominance] maxShare=${(maxShare * 100).toFixed(1)}%, sandwichShare=${(sandwichShare * 100).toFixed(1)}%`
+    );
+    expect(maxShare).toBeLessThanOrEqual(0.6);
+    expect(sandwichShare).toBeLessThanOrEqual(0.6);
+  });
+
+  it('D08 / Gate G3 决策有效性回归: 150 场标准战中切换目标策略或锁定集火可逆转 >= 10% (>= 15/150) 胜负', () => {
+    const mk = (id: string, kind: Parameters<typeof createV2EquipmentInstance>[0]['kind']) =>
+      createV2EquipmentInstance({
+        instanceId: id,
+        kind,
+        quality: 'common',
+        origin: 'loan',
+        acquiredDepth: 0,
+        location: 'bay',
+      });
+
+    const builds = [
+      {
+        name: 'sandwich',
+        hp: 30,
+        bay: {
+          ...createEmptyV2Bay('cannon_skiff'),
+          placed: [
+            { item: mk('l1', 'laser'), x: 0, y: 0, rotation: 0 as const },
+            { item: mk('b1', 'battery'), x: 1, y: 0, rotation: 0 as const },
+            { item: mk('l2', 'laser'), x: 2, y: 0, rotation: 0 as const },
+          ],
+        },
+      },
+      {
+        name: 'heavy_cap_shield',
+        hp: 30,
+        bay: {
+          ...createEmptyV2Bay('cannon_skiff'),
+          placed: [
+            { item: mk('h1', 'heavy'), x: 0, y: 0, rotation: 0 as const },
+            { item: mk('c1', 'capacitor'), x: 1, y: 0, rotation: 0 as const },
+            { item: mk('s1', 'shield'), x: 2, y: 0, rotation: 0 as const },
+          ],
+        },
+      },
+      {
+        name: 'hangar_relay_repair',
+        hp: 30,
+        bay: {
+          ...createEmptyV2Bay('cannon_skiff'),
+          placed: [
+            { item: mk('hg1', 'hangar'), x: 0, y: 0, rotation: 0 as const },
+            { item: mk('rl1', 'relay'), x: 2, y: 0, rotation: 0 as const },
+            { item: mk('rp1', 'repair'), x: 2, y: 1, rotation: 0 as const },
+          ],
+        },
+      },
+      {
+        name: 'shield_counter_laser',
+        hp: 34,
+        bay: {
+          ...createEmptyV2Bay('shield_cruiser'),
+          placed: [
+            { item: mk('s1', 'shield'), x: 0, y: 0, rotation: 0 as const },
+            { item: mk('ct1', 'counter'), x: 1, y: 0, rotation: 0 as const },
+            { item: mk('l1', 'laser'), x: 2, y: 0, rotation: 0 as const },
+          ],
+        },
+      },
+      {
+        name: 'flak_laser',
+        hp: 30,
+        bay: {
+          ...createEmptyV2Bay('cannon_skiff'),
+          placed: [
+            { item: mk('fl1', 'flak'), x: 0, y: 0, rotation: 0 as const },
+            { item: mk('l1', 'laser'), x: 3, y: 0, rotation: 0 as const },
+          ],
+        },
+      },
+    ] as const;
+
+    const encKinds = ['artillery', 'shield_regen', 'drone_carrier', 'rammer', 'elite'] as const;
+    let totalBattles = 0;
+    let winLossFlips = 0;
+
+    for (const b of builds) {
+      for (let layer = 1; layer <= 6; layer += 1) {
+        for (const kind of encKinds) {
+          totalBattles += 1;
+          const units = buildEncounterUnits(kind, layer, `g3_flip_${kind}_${layer}`);
+          const outcomes = new Set<'victory' | 'defeat'>();
+          for (const pol of ['weakest', 'highest_threat'] as const) {
+            outcomes.add(
+              simulateV2Combat({
+                resultId: 'g3_pol',
+                bay: b.bay,
+                startingHp: b.hp,
+                maxHp: b.hp,
+                units,
+                targetPolicy: pol,
+                encounterKind: kind,
+              }).outcome
+            );
+          }
+          for (const u of units) {
+            outcomes.add(
+              simulateV2Combat({
+                resultId: 'g3_lock',
+                bay: b.bay,
+                startingHp: b.hp,
+                maxHp: b.hp,
+                units,
+                targetPolicy: 'weakest',
+                lockedEnemyId: u.enemyId,
+                encounterKind: kind,
+              }).outcome
+            );
+          }
+          if (outcomes.size > 1) {
+            winLossFlips += 1;
+          }
+        }
+      }
+    }
+
+    console.log(
+      `[Gate G3 Policy/Target-Lock Decisiveness] winLossFlips=${winLossFlips}/${totalBattles} (${((winLossFlips / totalBattles) * 100).toFixed(1)}%)`
+    );
+    expect(totalBattles).toBe(150);
+    expect(winLossFlips / totalBattles).toBeGreaterThanOrEqual(0.1);
+    expect(winLossFlips).toBeGreaterThanOrEqual(15);
   });
 
   it('AC11 / AC12 / AC13 / AC14 / AC15 / AC22: 异形5×4货船禁用格、预算、设备库/研究/制造、预设缺件、两胜一败账实一致', () => {

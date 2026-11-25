@@ -43,11 +43,11 @@ export const WRECK_SPOT_COORDS: Record<
     readonly icon: V2IconName;
   }
 > = {
-  armory: { normX: 0.22, normY: 0.48, left: '22%', top: '38%', icon: 'cannon' },
-  reactor: { normX: 0.5, normY: 0.45, left: '50%', top: '34%', icon: 'fuel' },
-  cargo: { normX: 0.78, normY: 0.5, left: '78%', top: '39%', icon: 'crate' },
-  vault: { normX: 0.36, normY: 0.64, left: '36%', top: '62%', icon: 'star' },
-  aux_bay: { normX: 0.64, normY: 0.64, left: '64%', top: '62%', icon: 'wrench' },
+  armory: { normX: 0.22, normY: 0.48, left: '18%', top: '20%', icon: 'cannon' },
+  reactor: { normX: 0.5, normY: 0.45, left: '50%', top: '18%', icon: 'fuel' },
+  cargo: { normX: 0.78, normY: 0.5, left: '82%', top: '20%', icon: 'crate' },
+  vault: { normX: 0.36, normY: 0.52, left: '31%', top: '38%', icon: 'star' },
+  aux_bay: { normX: 0.64, normY: 0.52, left: '69%', top: '38%', icon: 'wrench' },
 };
 
 function syncButtonDisabled(btn: HTMLButtonElement, disabled: boolean): void {
@@ -184,7 +184,13 @@ export class WreckOverlayPhaseView
       wreck.maxStability > 0
         ? Math.max(0, Math.min(100, Math.round((wreck.stability / wreck.maxStability) * 100)))
         : 0;
-    const toneCls = pct >= 70 ? 'tone-safe' : pct >= 35 ? 'tone-warn' : 'tone-critical';
+    const toneCls = wreck.collapsed
+      ? 'tone-critical'
+      : pct >= 70
+      ? 'tone-safe'
+      : pct >= 35
+      ? 'tone-warn'
+      : 'tone-critical';
 
     this.rootEl.classList.toggle('is-cutting-active', cuttingSpotId !== null);
 
@@ -194,11 +200,15 @@ export class WreckOverlayPhaseView
       this.stageTagEl.innerHTML = `${svgIcon('wreck', 13)} ${sector.name} · 第 ${node.layer} 层 漂流残骸 · 多刀拆解`;
     }
 
-    const meterKey = `${toneCls}:${wreck.stability}/${wreck.maxStability}:${wreck.cutsMade}`;
+    const meterKey = `${toneCls}:${wreck.stability}/${wreck.maxStability}:${wreck.cutsMade}:${
+      wreck.collapsed ? 1 : 0
+    }`;
     if (this.lastMeterKey !== meterKey) {
       this.lastMeterKey = meterKey;
       this.stageMeterEl.className = `v3-wreck-stage-meter ${toneCls}`;
-      this.stageMeterEl.innerHTML = `${svgIcon('cut', 12)} 稳定度 <strong class="num">${wreck.stability}/${wreck.maxStability}</strong> · 已切 ${wreck.cutsMade} 刀`;
+      this.stageMeterEl.innerHTML = `${svgIcon('cut', 12)} 稳定度 <strong class="num">${wreck.stability}/${wreck.maxStability}</strong> · 已切 ${wreck.cutsMade} 刀${
+        wreck.collapsed ? ' · 已坍塌' : ''
+      }`;
     }
 
     // Prune removed spotIds first
@@ -227,27 +237,36 @@ export class WreckOverlayPhaseView
         : isCuttingThis
         ? 'cutting'
         : 'closed';
+      const isCollapsedLocked = Boolean(wreck.collapsed && !spot.cut);
+      const isNonLethalBlocked = Boolean(
+        !spot.cut && !isCuttingThis && !isCollapsedLocked && !evalRes.isLethal && !evalRes.canCut
+      );
       const stateCls = spot.cut
         ? 'is-cut'
         : isCuttingThis
         ? 'is-cutting'
-        : evalRes.isLethal
+        : isCollapsedLocked || evalRes.isLethal
         ? 'is-lethal'
-        : wreck.cutsMade >= 1
+        : isNonLethalBlocked || wreck.cutsMade >= 1
         ? 'is-risky'
         : '';
       const badgeText = spot.cut
         ? '已切开'
         : isCuttingThis
         ? '切割中…'
+        : isCollapsedLocked
+        ? '已坍塌'
         : evalRes.isLethal
         ? '致命'
+        : isNonLethalBlocked
+        ? '不可切'
         : wreck.cutsMade === 0
         ? '点击切开'
         : '贪刀切开';
 
       const items = getSpotItems(spot);
-      const canDirectCut = !readOnly && !spot.cut && evalRes.canCut && cuttingSpotId === null;
+      const canDirectCut =
+        !readOnly && !spot.cut && !wreck.collapsed && evalRes.canCut && cuttingSpotId === null;
 
       let refs = this.pins.get(spot.spotId);
       if (!refs) {
@@ -296,8 +315,19 @@ export class WreckOverlayPhaseView
       if (refs.btnEl.dataset.canDirectCut !== canCutStr) {
         refs.btnEl.dataset.canDirectCut = canCutStr;
       }
+      const pinTitle = isCollapsedLocked
+        ? evalRes.disabledReason ?? '残骸结构已坍塌，无法继续切割'
+        : !spot.cut && !evalRes.canCut
+        ? evalRes.disabledReason ?? ''
+        : '';
+      if (refs.btnEl.title !== pinTitle) {
+        refs.btnEl.title = pinTitle;
+      }
       refs.btnEl.setAttribute('aria-pressed', sel === spot.spotId ? 'true' : 'false');
-      syncButtonDisabled(refs.btnEl, Boolean(spot.cut && cuttingSpotId === null));
+      syncButtonDisabled(
+        refs.btnEl,
+        Boolean((spot.cut || isCollapsedLocked || isNonLethalBlocked) && cuttingSpotId === null)
+      );
 
       const silState =
         items.length > 0 ? (peek || spot.cut ? 'revealed' : 'masked') : spot.cut ? 'revealed' : 'masked';
@@ -1023,9 +1053,12 @@ export class WreckPhaseView implements PhaseView<WreckLeftPanelProps, WreckLeftP
         this.cards.set(spot.spotId, refs);
       }
 
+      const isCollapsedLocked = Boolean(wreck.collapsed && !spot.cut);
       const cardCls = `v3-wreck-cut-card${isSelected ? ' is-selected' : ''}${
         spot.cut ? ' is-cut' : ''
-      }${isCuttingThis ? ' is-cutting' : ''}${evalRes.isLethal ? ' is-lethal' : ''}`;
+      }${isCuttingThis ? ' is-cutting' : ''}${
+        isCollapsedLocked || evalRes.isLethal ? ' is-lethal' : ''
+      }`;
       if (refs.cardEl.className !== cardCls) refs.cardEl.className = cardCls;
 
       const titleKey = `${pos.icon}:${spot.label}:${bonusPills.join('|')}`;
@@ -1040,8 +1073,10 @@ export class WreckPhaseView implements PhaseView<WreckLeftPanelProps, WreckLeftP
         ? 'done'
         : isCuttingThis
         ? 'warn'
-        : evalRes.isLethal
+        : isCollapsedLocked || evalRes.isLethal
         ? 'lethal'
+        : !evalRes.canCut
+        ? 'warn'
         : evalRes.isFirstSafeCut
         ? 'safe'
         : 'warn';
@@ -1049,8 +1084,12 @@ export class WreckPhaseView implements PhaseView<WreckLeftPanelProps, WreckLeftP
         ? '已切开'
         : isCuttingThis
         ? '切割中'
+        : isCollapsedLocked
+        ? '已坍塌'
         : evalRes.isLethal
         ? '致命风险'
+        : !evalRes.canCut
+        ? '无法切割'
         : evalRes.isFirstSafeCut
         ? '首刀安全'
         : '贪刀风险';

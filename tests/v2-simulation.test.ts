@@ -32,6 +32,7 @@ import {
   resolveV2EventOption,
   selectV2MapNode,
 } from '../src/v2/domain/encounter';
+import { shouldAutoSkipArrange } from '../src/v2/domain/events';
 import {
   createEmptyV2Bay,
   discardV2Item,
@@ -40,11 +41,12 @@ import {
 } from '../src/v2/domain/inventoryV2';
 import { createV2EquipmentInstance } from '../src/v2/domain/itemCatalog';
 import {
+  buildFreeFallbackPrepareSlots,
   launchV2Expedition,
   type V2PrepareSlotEntry,
 } from '../src/v2/domain/loadout';
 import { createFreshV2Profile } from '../src/v2/domain/persistenceV2';
-import { calculateV2Settlement } from '../src/v2/domain/settlementV2';
+import { applyV2Settlement, calculateV2Settlement } from '../src/v2/domain/settlementV2';
 import type { SectorId, V2ProfileState, V2RewardChoiceId, V2RunState } from '../src/v2/domain/types';
 
 /**
@@ -70,6 +72,14 @@ interface SimPolicy {
   readonly sectorId?: SectorId;
   readonly greedyWreckCuts?: boolean;
   readonly forceEarlyTow?: boolean;
+  /** Optional free Beacon exit layer (e.g. 3 for Early Beacon Cash-Out, 5 for Balanced L5) */
+  readonly earlyBeaconExitLayer?: number;
+  /** Disable omniscient exact-defeat combat preview dodging (models realistic player risk) */
+  readonly realisticNoDodge?: boolean;
+  /** Optional explicit starting slots override (e.g. minimal 5-cell wired loadout or 0¤ fallback) */
+  readonly customSlots?: readonly V2PrepareSlotEntry[];
+  /** Optional explicit profile override (e.g. 0¤ bankrupt profile) */
+  readonly customProfile?: V2ProfileState;
 }
 
 interface SimMetrics {
@@ -84,6 +94,8 @@ interface SimMetrics {
   readonly spatialConflictRate: number;
   readonly avgConflicts: number;
   readonly avgCredits: number;
+  readonly stdDevCredits: number;
+  readonly emptyArranges: number;
 }
 
 function toPrimaryArchetype(arch: ExtendedSimArchetype): V2ArchetypeId {
@@ -279,11 +291,17 @@ function runSingleSimulation(policy: SimPolicy, seed: number): {
   readonly emergencyTow: boolean;
   readonly reachedLayer6: boolean;
   readonly spatialConflicts: number;
+  readonly emptyArranges: number;
   readonly credits: number;
+  readonly finalRun: V2RunState;
+  readonly profileUsed: V2ProfileState;
 } {
-  const profile = makeSimProfile();
+  const profile = policy.customProfile ?? makeSimProfile();
   const sectorId = policy.sectorId ?? 'near_orbit';
-  const crewId = policy.contractId.startsWith('survey') ? 'navigator' : 'salvager';
+  const preferredCrew = policy.contractId.startsWith('survey') ? 'navigator' : 'salvager';
+  const crewId = profile.unlockedCrew.includes(preferredCrew)
+    ? preferredCrew
+    : profile.unlockedCrew[0] ?? 'engineer';
 
   const launched = launchV2Expedition({
     profile,
@@ -291,7 +309,7 @@ function runSingleSimulation(policy: SimPolicy, seed: number): {
     shipId: policy.shipId,
     crewId,
     primaryArchetype: toPrimaryArchetype(policy.archetype),
-    slots: buildArchetypeSlots(policy.shipId, policy.archetype),
+    slots: policy.customSlots ?? buildArchetypeSlots(policy.shipId, policy.archetype),
     sectorId,
     seed,
     allowImproved: policy.allowImproved,
@@ -300,8 +318,9 @@ function runSingleSimulation(policy: SimPolicy, seed: number): {
     throw new Error(`Simulation launch failed (${policy.name}, seed=${seed}): ${launched.errors.join('; ')}`);
   }
   let run = launched.run;
+  let emptyArranges = 0;
 
-  for (let guard = 0; guard < 36 && run.phase !== 'SETTLEMENT'; guard++) {
+  for (let guard = 0; guard < 40 && run.phase !== 'SETTLEMENT'; guard++) {
     if (run.phase === 'MAP') {
       const nextIds = getReachableNextNodeIds(run);
       const jumpCost = computeV2JumpFuelCost(run).totalCost;
@@ -323,33 +342,57 @@ function runSingleSimulation(policy: SimPolicy, seed: number): {
       const cDone = isContractReadyForDelivery(run, 'safe_return');
       const retStatus = getV2SafeReturnStatus(run);
 
-      // Smart D04 Beacon-aware return: if contract complete and not pushing Layer 6, extract FREE on Beacon!
-      if (cDone && !policy.pushToLayer6 && retStatus.isFreeBeacon && curLayer >= 3) {
+      // Explicit Early/Balanced Beacon Cash-Out policy (exits FREE at target Beacon layer)
+      if (
+        policy.earlyBeaconExitLayer !== undefined &&
+        retStatus.isFreeBeacon &&
+        curLayer >= policy.earlyBeaconExitLayer
+      ) {
         run = initiateV2SafeReturnFromMap(run).run;
         break;
       }
 
-      // Pick next node: prioritize contract backbone, then Beacon if contract already done, else best survival node
+      // Smart D04 Beacon-aware return: if contract complete and not pushing Layer 6, extract FREE on Beacon!
+      if (
+        policy.earlyBeaconExitLayer === undefined &&
+        cDone &&
+        !policy.pushToLayer6 &&
+        retStatus.isFreeBeacon &&
+        curLayer >= 3
+      ) {
+        run = initiateV2SafeReturnFromMap(run).run;
+        break;
+      }
+
+      // Pick next node: prioritize contract backbone, then Beacon if exiting early or contract done
       const gSet = new Set(run.graph.guaranteedPathNodeIds);
       let chosenId = nextIds[0];
       const onGuaranteed = nextIds.find((id) => gSet.has(id));
       const nextBeacon = nextIds.find((id) => run.graph.nodes[id]?.isBeacon);
+      const wantsBeaconNext =
+        Boolean(nextBeacon) &&
+        ((policy.earlyBeaconExitLayer !== undefined && curLayer + 1 >= policy.earlyBeaconExitLayer) ||
+          (policy.earlyBeaconExitLayer === undefined && cDone && !policy.pushToLayer6));
 
-      if (cDone && !policy.pushToLayer6 && nextBeacon) {
+      if (wantsBeaconNext && nextBeacon) {
         chosenId = nextBeacon;
       } else if (!cDone && onGuaranteed) {
-        const gNode = run.graph.nodes[onGuaranteed];
-        const gPreview = previewV2CombatNode(run, onGuaranteed);
-        const altId = nextIds.find((id) => id !== onGuaranteed);
-        if (
-          !gNode?.contractMarker &&
-          gPreview?.outcome === 'defeat' &&
-          altId &&
-          previewV2CombatNode(run, altId)?.outcome !== 'defeat'
-        ) {
-          chosenId = altId;
-        } else {
+        if (policy.realisticNoDodge) {
           chosenId = onGuaranteed;
+        } else {
+          const gNode = run.graph.nodes[onGuaranteed];
+          const gPreview = previewV2CombatNode(run, onGuaranteed);
+          const altId = nextIds.find((id) => id !== onGuaranteed);
+          if (
+            !gNode?.contractMarker &&
+            gPreview?.outcome === 'defeat' &&
+            altId &&
+            previewV2CombatNode(run, altId)?.outcome !== 'defeat'
+          ) {
+            chosenId = altId;
+          } else {
+            chosenId = onGuaranteed;
+          }
         }
       } else {
         const nonCombat = nextIds.find((id) => {
@@ -358,6 +401,8 @@ function runSingleSimulation(policy: SimPolicy, seed: number): {
         });
         if (nonCombat && !policy.pushToLayer6) {
           chosenId = nonCombat;
+        } else if (policy.realisticNoDodge) {
+          chosenId = onGuaranteed ?? nextIds[0];
         } else {
           chosenId = [...nextIds].sort((a, b) => {
             const pa = previewV2CombatNode(run, a);
@@ -369,11 +414,13 @@ function runSingleSimulation(policy: SimPolicy, seed: number): {
         }
       }
 
-      // If non-pushing strategy sees guaranteed lethal on ALL reachable options, extract early (Beacon or Tow)
-      const chosenPreview = previewV2CombatNode(run, chosenId);
-      if (chosenPreview && chosenPreview.outcome === 'defeat' && !policy.pushToLayer6) {
-        run = returnHomeRespectingBeacons(run);
-        break;
+      // Non-pushing omniscient-preview strategies bail out on guaranteed lethal; realisticNoDodge faces normal risk!
+      if (!policy.realisticNoDodge && !policy.pushToLayer6) {
+        const chosenPreview = previewV2CombatNode(run, chosenId);
+        if (chosenPreview && chosenPreview.outcome === 'defeat') {
+          run = returnHomeRespectingBeacons(run);
+          break;
+        }
       }
 
       const entered = selectV2MapNode(run, chosenId, { profile });
@@ -471,6 +518,9 @@ function runSingleSimulation(policy: SimPolicy, seed: number): {
       }
       run = pickV2CombatReward(run, choice, profile.unlockedFamilies).run;
     } else if (run.phase === 'ARRANGE') {
+      if (shouldAutoSkipArrange(run)) {
+        emptyArranges += 1;
+      }
       if (canPerformSurveyAtCurrentNode(run).canSurvey) {
         run = performSurveyAtCurrentNode(run).run;
       }
@@ -483,11 +533,11 @@ function runSingleSimulation(policy: SimPolicy, seed: number): {
     }
   }
 
-  if (run.phase !== 'SETTLEMENT') {
-    run = { ...run, phase: 'SETTLEMENT', settlementReason: 'safe_return' };
-  }
+  expect(run.phase, `Simulation must reach SETTLEMENT cleanly (${policy.name}, seed=${seed})`).toBe(
+    'SETTLEMENT'
+  );
 
-  const summary = calculateV2Settlement(run, profile);
+  const summary = calculateV2Settlement(run, launched.profile);
   const maxLayer = Math.max(0, ...run.visitedNodeIds.map((id) => run.graph.nodes[id]?.layer ?? 0));
   const isSafe = summary.reason === 'safe_return';
   return {
@@ -498,7 +548,10 @@ function runSingleSimulation(policy: SimPolicy, seed: number): {
     emergencyTow: isSafe && Boolean(summary.emergencyTowUsed),
     reachedLayer6: maxLayer >= 6,
     spatialConflicts: run.spatialConflictCount ?? 0,
+    emptyArranges,
     credits: summary.finalCreditsEarned,
+    finalRun: run,
+    profileUsed: launched.profile,
   };
 }
 
@@ -511,7 +564,8 @@ function evaluatePolicy(policy: SimPolicy, seedsCount: number): SimMetrics {
   let layer6 = 0;
   let runsWithConflict = 0;
   let totalConflicts = 0;
-  let totalCredits = 0;
+  let totalEmptyArranges = 0;
+  const creditsSamples: number[] = [];
 
   for (let i = 1; i <= seedsCount; i++) {
     const res = runSingleSimulation(policy, 50000 + i * 7919);
@@ -523,8 +577,15 @@ function evaluatePolicy(policy: SimPolicy, seedsCount: number): SimMetrics {
     if (res.reachedLayer6) layer6 += 1;
     if (res.spatialConflicts >= 1) runsWithConflict += 1;
     totalConflicts += res.spatialConflicts;
-    totalCredits += res.credits;
+    totalEmptyArranges += res.emptyArranges;
+    creditsSamples.push(res.credits);
   }
+
+  const totalCredits = creditsSamples.reduce((s, c) => s + c, 0);
+  const meanCredits = totalCredits / seedsCount;
+  const variance =
+    creditsSamples.reduce((s, c) => s + (c - meanCredits) ** 2, 0) / seedsCount;
+  const stdDevCredits = Math.sqrt(variance);
 
   const pct = (n: number) => Number(((n / seedsCount) * 100).toFixed(1));
   return {
@@ -538,7 +599,9 @@ function evaluatePolicy(policy: SimPolicy, seedsCount: number): SimMetrics {
     layer6Rate: pct(layer6),
     spatialConflictRate: pct(runsWithConflict),
     avgConflicts: Number((totalConflicts / seedsCount).toFixed(2)),
-    avgCredits: Number((totalCredits / seedsCount).toFixed(1)),
+    avgCredits: Number(meanCredits.toFixed(1)),
+    stdDevCredits: Number(stdDevCredits.toFixed(1)),
+    emptyArranges: totalEmptyArranges,
   };
 }
 
@@ -563,6 +626,9 @@ describe('V2 §18 & R2-M6B D08 平衡模拟矩阵（四船 × 五流派 × 五�
     console.log('\n[V2 §18 Core Balance Simulation Report (360 runs)]');
     console.table(report);
 
+    for (const row of report) {
+      expect(row.emptyArranges, `${row.label} emptyArranges (S02)`).toBe(0);
+    }
     for (const row of report.slice(0, 3)) {
       expect(row.contractRate).toBeGreaterThanOrEqual(65);
       expect(row.avgCredits).toBeGreaterThanOrEqual(75);
@@ -615,14 +681,18 @@ describe('V2 §18 & R2-M6B D08 平衡模拟矩阵（四船 × 五流派 × 五�
     console.log(`\n[R2-M6B D08 Full Balance Matrix (${totalRuns} runs: 4 ships × 5 archetypes × 5 contracts × 3 sectors)]`);
     console.table(report);
 
-    // 1. All 20 standard-contract cells achieve viable completion & positive net credits
+    // 1. All 25 cells maintain S02 invariant (0 empty arranges); 20 standard-contract cells achieve viable completion & positive net credits
+    for (const row of report) {
+      expect(row.emptyArranges, `${row.label} emptyArranges (S02)`).toBe(0);
+    }
     const standardCells = report.slice(0, 20);
     for (const row of standardCells) {
       expect(row.contractRate, `${row.label} contractRate`).toBeGreaterThanOrEqual(50);
       expect(row.avgCredits, `${row.label} avgCredits`).toBeGreaterThan(60);
     }
 
-    // 2. D06 Spatial Conflict Gate: across ALL 5 standard contracts (500+ standard runs), >= 90% of runs experience >= 1 genuine spatial conflict!
+    // 2. D06 Spatial Conflict Gate: across ALL 5 standard contracts, >= 90% of runs experience >= 1 genuine spatial conflict
+    //    AND unmasked 18-cell heavy_freighter with minimal 5-cell wired loadout achieves >= 1.0 avgConflicts on EVERY standard contract!
     const contractGroups = ['transport_std', 'rescue_std', 'survey_std', 'bounty_std', 'derelict_std'] as const;
     for (const ct of contractGroups) {
       const cells = matrix
@@ -639,7 +709,89 @@ describe('V2 §18 & R2-M6B D08 平衡模拟矩阵（四船 × 五流派 × 五�
       expect(meanConflicts, `D06 avgConflicts for ${ct}`).toBeGreaterThanOrEqual(1.0);
     }
 
-    // 3. D04 Risk/Reward Payoff Gate: Beacon/Deep-dive return pays strictly MORE than early Layer-2 Emergency Tow!
+    const freighterMinimalSlots: readonly V2PrepareSlotEntry[] = [
+      { slotKey: 'l1', origin: 'loan', definitionId: 'equipment.laser.common', x: 0, y: 0, rotation: 0 },
+      { slotKey: 'b1', origin: 'loan', definitionId: 'equipment.battery.common', x: 1, y: 0, rotation: 0 },
+      { slotKey: 's1', origin: 'loan', definitionId: 'equipment.shield.common', x: 2, y: 0, rotation: 0 },
+    ];
+    for (const ct of contractGroups) {
+      const hfMetrics = evaluatePolicy(
+        {
+          name: `重货船5格最小配装·${ct}`,
+          shipId: 'heavy_freighter',
+          archetype: 'laser',
+          contractId: ct,
+          pushToLayer6: false,
+          allowImproved: true,
+          customSlots: freighterMinimalSlots,
+        },
+        24
+      );
+      console.log(
+        `[Gate G3 D06 Unmasked heavy_freighter/${ct}] conflictRate=${hfMetrics.spatialConflictRate}%, avgConflicts=${hfMetrics.avgConflicts}, emptyArranges=${hfMetrics.emptyArranges}`
+      );
+      expect(hfMetrics.emptyArranges, `heavy_freighter/${ct} emptyArranges`).toBe(0);
+      expect(
+        hfMetrics.avgConflicts,
+        `D06 unmasked heavy_freighter minimal avgConflicts for ${ct} (rate=${hfMetrics.spatialConflictRate}%)`
+      ).toBeGreaterThanOrEqual(1.0);
+    }
+
+    // 3. D04 Risk/Reward Payoff Gate:
+    //    (a) Paired identical-seed comparison of Early Layer-3 Beacon Cash-Out vs Deep Push (L5/L6)
+    //        MUST show BOTH higher expected value (avgCredits) AND higher variance (stdDevCredits)!
+    const pairedScenarios: readonly {
+      readonly label: string;
+      readonly shipId: V2ShipId;
+      readonly archetype: ExtendedSimArchetype;
+      readonly contractId: string;
+    }[] = [
+      { label: 'free_salvage/skiff/heavy', shipId: 'cannon_skiff', archetype: 'heavy', contractId: 'free_salvage' },
+      { label: 'free_salvage/skiff/laser', shipId: 'cannon_skiff', archetype: 'laser', contractId: 'free_salvage' },
+      { label: 'bounty_std/shield/counter', shipId: 'shield_cruiser', archetype: 'counter', contractId: 'bounty_std' },
+    ];
+    for (const sc of pairedScenarios) {
+      const earlyBeacon = evaluatePolicy(
+        {
+          name: `早期L3信标兑现(${sc.label})`,
+          shipId: sc.shipId,
+          archetype: sc.archetype,
+          contractId: sc.contractId,
+          pushToLayer6: false,
+          allowImproved: true,
+          earlyBeaconExitLayer: 3,
+          realisticNoDodge: true,
+        },
+        40
+      );
+      const deepPush = evaluatePolicy(
+        {
+          name: `深潜L6高风险推进(${sc.label})`,
+          shipId: sc.shipId,
+          archetype: sc.archetype,
+          contractId: sc.contractId,
+          pushToLayer6: true,
+          allowImproved: true,
+          realisticNoDodge: true,
+        },
+        40
+      );
+      console.log(
+        `[Gate G3 Paired D04 ${sc.label}] Early L3 Beacon: ${earlyBeacon.avgCredits}¤ ± ${earlyBeacon.stdDevCredits}¤ (beacon=${earlyBeacon.beaconReturnRate}%, defeat=${earlyBeacon.defeatRate}%) | Deep Push: ${deepPush.avgCredits}¤ ± ${deepPush.stdDevCredits}¤ (defeat=${deepPush.defeatRate}%)`
+      );
+      expect(earlyBeacon.emptyArranges).toBe(0);
+      expect(deepPush.emptyArranges).toBe(0);
+      expect(earlyBeacon.beaconReturnRate).toBeGreaterThanOrEqual(85);
+      expect(deepPush.avgCredits, `Deep EV > Early Beacon EV (${sc.label})`).toBeGreaterThan(
+        earlyBeacon.avgCredits
+      );
+      expect(
+        deepPush.stdDevCredits,
+        `Deep stdDev > Early Beacon stdDev (${sc.label})`
+      ).toBeGreaterThan(earlyBeacon.stdDevCredits);
+    }
+
+    //    (b) Additional check: Beacon/Deep-dive return pays strictly MORE than early Layer-2 Emergency Tow!
     const deepBeaconMetrics = evaluatePolicy(
       {
         name: '信标深潜对照',
@@ -665,6 +817,85 @@ describe('V2 §18 & R2-M6B D08 平衡模拟矩阵（四船 × 五流派 × 五�
     );
     expect(earlyTowMetrics.emergencyTowRate).toBeGreaterThanOrEqual(80);
     expect(deepBeaconMetrics.avgCredits).toBeGreaterThan(earlyTowMetrics.avgCredits * 1.4);
+
+    // 4. Gate G3 Realistic Unbiased Mixed-Policy Cohort Defeat Rate (10% - 25%) + 0¤ Bankruptcy Comeback Launch!
+    //    Equal 1/3 mix of cautious Early L3 Beacon, Balanced L5 Beacon, and Deep Push L6 across ships/archetypes/contracts
+    //    WITHOUT omniscient exact-HP defeat dodging (models real player risk under Threat Tiers).
+    const cohortShips: readonly V2ShipId[] = ['cannon_skiff', 'shield_cruiser', 'heavy_freighter'];
+    const cohortArchs: readonly ExtendedSimArchetype[] = ['laser', 'heavy', 'hangar', 'counter'];
+    const cohortTiers: readonly {
+      readonly tag: string;
+      readonly pushToLayer6: boolean;
+      readonly earlyBeaconExitLayer?: number;
+    }[] = [
+      { tag: 'early_beacon_l3', pushToLayer6: false, earlyBeaconExitLayer: 3 },
+      { tag: 'balanced_l5', pushToLayer6: false, earlyBeaconExitLayer: 5 },
+      { tag: 'deep_push_l6', pushToLayer6: true },
+    ];
+    let cohortTotalRuns = 0;
+    let cohortDefeats = 0;
+    let cohortEmptyArranges = 0;
+    for (let tIdx = 0; tIdx < cohortTiers.length; tIdx += 1) {
+      const tier = cohortTiers[tIdx];
+      for (let i = 0; i < 60; i += 1) {
+        const shipId = cohortShips[i % cohortShips.length];
+        const archetype = cohortArchs[Math.floor(i / cohortShips.length) % cohortArchs.length];
+        const contractId = contractGroups[i % contractGroups.length];
+        const res = runSingleSimulation(
+          {
+            name: `realistic_${tier.tag}_${shipId}_${archetype}_${contractId}`,
+            shipId,
+            archetype,
+            contractId,
+            pushToLayer6: tier.pushToLayer6,
+            earlyBeaconExitLayer: tier.earlyBeaconExitLayer,
+            allowImproved: true,
+            realisticNoDodge: true,
+          },
+          70000 + tIdx * 10000 + i * 3571
+        );
+        cohortTotalRuns += 1;
+        if (res.defeated) cohortDefeats += 1;
+        cohortEmptyArranges += res.emptyArranges;
+      }
+    }
+    const cohortDefeatRate = Number(((cohortDefeats / cohortTotalRuns) * 100).toFixed(1));
+    console.log(
+      `[Gate G3 Realistic Unbiased Mixed Cohort] ${cohortDefeats}/${cohortTotalRuns} defeats (${cohortDefeatRate}%), emptyArranges=${cohortEmptyArranges}`
+    );
+    expect(cohortEmptyArranges).toBe(0);
+    expect(cohortDefeatRate).toBeGreaterThanOrEqual(10);
+    expect(cohortDefeatRate).toBeLessThanOrEqual(25);
+
+    // 0¤ Bankruptcy-Proof Comeback Launch after defeat: 0 credits & empty warehouse still launches free and earns > 0¤!
+    const bankruptProfile: V2ProfileState = {
+      ...createFreshV2Profile(),
+      credits: 0,
+      equipmentWarehouse: [],
+      tutorialCompleted: true,
+      totalRuns: 1,
+    };
+    const fallbackSlots = buildFreeFallbackPrepareSlots('cannon_skiff', bankruptProfile.blueprints);
+    const comebackRes = runSingleSimulation(
+      {
+        name: '0¤破产免费借用翻身出航',
+        shipId: 'cannon_skiff',
+        archetype: 'laser',
+        contractId: 'free_salvage',
+        pushToLayer6: false,
+        earlyBeaconExitLayer: 3,
+        allowImproved: false,
+        customSlots: fallbackSlots,
+        customProfile: bankruptProfile,
+      },
+      88001
+    );
+    expect(comebackRes.emptyArranges).toBe(0);
+    expect(comebackRes.defeated).toBe(false);
+    expect(comebackRes.credits).toBeGreaterThan(0);
+    const comebackSettled = applyV2Settlement(comebackRes.profileUsed, comebackRes.finalRun, {});
+    expect(comebackSettled.ok).toBe(true);
+    expect(comebackSettled.profile.credits).toBeGreaterThan(0);
 
     // 4. Anti-Dominance Gate: across ALL 5 archetypes on 3 canonical enemy matchups (armored / swarm / piercer),
     //    NO single archetype wins #1 surviving HP across all 3 enemy types!

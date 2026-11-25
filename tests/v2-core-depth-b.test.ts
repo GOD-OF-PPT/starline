@@ -36,12 +36,14 @@ import {
   initiateV2EmergencyTowReturn,
   initiateV2SafeReturnFromMap,
   pickV2CombatReward,
+  selectV2MapNode,
 } from '../src/v2/domain/encounter';
 import {
   addV2ItemToStaging,
   composeConflictCargoBundle,
   createEmptyV2Bay,
   detectV2BaySpatialConflict,
+  placeV2FromStaging,
 } from '../src/v2/domain/inventoryV2';
 import {
   createV2CargoInstance,
@@ -56,12 +58,14 @@ import {
   createFreshV2SaveData,
   loadV2SaveData,
   migrateV3_0ToV3_1SaveData,
+  normalizeV2SaveData,
   persistV2SaveData,
   validateV2SaveDataDetailed,
   type V2StorageLike,
 } from '../src/v2/domain/persistenceV2';
 import {
   choosePendingV2FamilyUnlock,
+  getActiveRelicPassives,
   getLockedUnlockableFamilies,
   unlockV2EquipmentFamily,
 } from '../src/v2/domain/progressionV2';
@@ -82,10 +86,16 @@ import {
   type V2ProfileState,
   type V2RunState,
 } from '../src/v2/domain/types';
+import { openV2HelpModal } from '../src/v2/ui/V2Modals';
 import { BasePhaseView } from '../src/v2/ui/screens/BaseView';
 import { MapPhaseView } from '../src/v2/ui/screens/MapView';
 import { RewardPhaseView } from '../src/v2/ui/screens/RewardView';
 import { SettlementPhaseView } from '../src/v2/ui/screens/SettlementView';
+import {
+  WRECK_SPOT_COORDS,
+  WreckOverlayPhaseView,
+  WreckPhaseView,
+} from '../src/v2/ui/screens/WreckView';
 
 class MemoryStorage implements V2StorageLike {
   private readonly store = new Map<string, string>();
@@ -112,6 +122,9 @@ class MiniEvent {
   }
   preventDefault(): void {
     this.defaultPrevented = true;
+  }
+  stopPropagation(): void {
+    // no-op for unit test synthetic event
   }
 }
 
@@ -247,6 +260,12 @@ class MiniEl {
     if (k === 'disabled') this.disabled = false;
     if (k === 'checked') this.checked = false;
   }
+  hasAttribute(k: string): boolean {
+    return this.attrs.has(k);
+  }
+  focus(): void {
+    // no-op focus for modal accessibility tests
+  }
   appendChild(child: MiniEl): MiniEl {
     if (child.parentElement) child.remove();
     child.parentElement = this;
@@ -356,16 +375,20 @@ class MiniEl {
 
 function installMiniDom(): { readonly body: MiniEl; readonly restore: () => void } {
   const prevDoc = globalThis.document;
+  const prevHtmlEl = (globalThis as unknown as { HTMLElement?: unknown }).HTMLElement;
   const body = new MiniEl('body');
   const doc = {
     body,
+    activeElement: null,
     createElement: (tag: string) => new MiniEl(tag),
   };
   (globalThis as unknown as { document: unknown }).document = doc;
+  (globalThis as unknown as { HTMLElement: unknown }).HTMLElement = MiniEl;
   return {
     body,
     restore: () => {
       (globalThis as unknown as { document: unknown }).document = prevDoc;
+      (globalThis as unknown as { HTMLElement?: unknown }).HTMLElement = prevHtmlEl;
     },
   };
 }
@@ -410,9 +433,9 @@ afterEach(() => {
 });
 
 describe('R2-M6B D04: Recovery Beacons, Emergency Tow, Depth Appreciation & Restrained Healing', () => {
-  it('places deterministic Recovery Beacons on Layer 3 & Layer 5 with dual incoming edges across 100 seeds', () => {
+  it('places deterministic Recovery Beacons on Layer 3 & Layer 5 with dual incoming edges across 200 seeds', () => {
     const contracts = ['transport_std', 'rescue_std', 'survey_std', 'bounty_std', 'derelict_std', 'free_salvage'];
-    for (let seed = 1; seed <= 100; seed += 1) {
+    for (let seed = 1; seed <= 200; seed += 1) {
       const tplId = contracts[seed % contracts.length];
       const gen = generateV2StarGraph({
         runId: `bcn_${seed}`,
@@ -811,6 +834,83 @@ describe('R2-M6B D05: Multi-Cut Wreck (3-5 Compartments) & Deterministic Structu
     const ext = extractV2Wreck(c3.run);
     expect(ext.ok).toBe(true);
   });
+
+  it('preserves exact D05 probabilistic collapse determinism across JSON save/reload mid-wreck', () => {
+    const profile = makeAllUnlockedProfile({
+      hullTuning: {},
+      factionRep: { starport_guild: 0, deep_institute: 0, free_salvagers: 0 },
+    });
+    let observedProbabilisticCollapse = false;
+    let observedProbabilisticSurvive = false;
+
+    for (let seed = 7201; seed <= 7240; seed += 1) {
+      const launch = launchV2Expedition({
+        profile,
+        contractTemplateId: 'free_salvage',
+        shipId: 'cannon_skiff',
+        crewId: 'engineer',
+        primaryArchetype: 'laser',
+        slots: buildFreeFallbackPrepareSlots('cannon_skiff', profile.blueprints),
+        seed,
+      });
+      const run = launch.run!;
+      const wreckNode = Object.values(run.graph.nodes).find((n) => n.layer === 1 && n.type === 'wreck');
+      if (!wreckNode) continue;
+      const built = buildActiveWreckStateForNode(run, wreckNode, profile).wreck;
+      // Put wreck in probabilistic collapse zone (cutsMade=1, stability=45, cut cargo stabilityCost=35 -> nextStability=10 < 30 -> 50% collapse!)
+      const preProbRun: V2RunState = {
+        ...run,
+        currentNodeId: wreckNode.nodeId,
+        visitedNodeIds: [wreckNode.nodeId],
+        phase: 'ENCOUNTER',
+        hp: 25,
+        fuel: 8,
+        activeWreck: {
+          ...built,
+          cutsMade: 1,
+          stability: 45,
+          stabilizerActive: false,
+          hotspots: built.hotspots.map((h) => ({
+            ...h,
+            cut: h.spotId === 'armory',
+            riskAmbush: false,
+          })),
+        },
+      };
+
+      const storage = new MemoryStorage();
+      const save = { ...createFreshV2SaveData(), profile, activeRun: preProbRun };
+      expect(persistV2SaveData(storage, save).ok).toBe(true);
+      const reloaded = loadV2SaveData(storage);
+      expect(reloaded.status).toBe('loaded');
+      if (reloaded.status !== 'loaded') continue;
+
+      const cutOriginal = cutV2WreckHotspot(preProbRun, 'cargo', profile.unlockedFamilies, undefined, profile);
+      const cutReloaded = cutV2WreckHotspot(
+        reloaded.data.activeRun!,
+        'cargo',
+        profile.unlockedFamilies,
+        undefined,
+        profile
+      );
+      expect(cutOriginal.ok).toBe(true);
+      expect(cutReloaded.ok).toBe(true);
+      expect(cutReloaded.collapsed).toBe(cutOriginal.collapsed);
+      expect(cutReloaded.run.hp).toBe(cutOriginal.run.hp);
+      expect(cutReloaded.run.activeWreck!.stability).toBe(cutOriginal.run.activeWreck!.stability);
+      expect(cutReloaded.run.bay.staging.map((s) => s.item.instanceId)).toEqual(
+        cutOriginal.run.bay.staging.map((s) => s.item.instanceId)
+      );
+      expect(cutReloaded.run.rngStreams).toEqual(cutOriginal.run.rngStreams);
+
+      if (cutOriginal.collapsed) observedProbabilisticCollapse = true;
+      else observedProbabilisticSurvive = true;
+      if (observedProbabilisticCollapse && observedProbabilisticSurvive) break;
+    }
+
+    expect(observedProbabilisticCollapse).toBe(true);
+    expect(observedProbabilisticSurvive).toBe(true);
+  });
 });
 
 describe('R2-M6B D06: Dynamic Spatial Conflict Detector & 2-Stage Calibrator', () => {
@@ -876,6 +976,83 @@ describe('R2-M6B D06: Dynamic Spatial Conflict Detector & 2-Stage Calibrator', (
       expect(V2_NON_COLLECTIBLE_CARGO_DEF_IDS).toContain(item.definitionId);
       expect(V2_CARGO_DEFS[item.definitionId].isCollectible).toBe(false);
     }
+
+    // Exact multi-staging feasibleSingleDiscardIds regression (16-cell ship, 14 placed incl. 1x2 + 8 staged = 22 cells):
+    // Removing 1x2 leaves 20 > 16 (impossible!) so 'p4_small' MUST NOT appear in feasibleSingleDiscardIds!
+    const multiOverflowBay: V2CargoBayState = {
+      shipId: 'cannon_skiff',
+      placed: [
+        { item: createV2CargoInstance({ instanceId: 'p1', defId: 'cargo.old_engine', origin: 'loot', acquiredDepth: 1, location: 'bay' }), x: 0, y: 0, rotation: 0 },
+        { item: createV2CargoInstance({ instanceId: 'p2', defId: 'cargo.old_engine', origin: 'loot', acquiredDepth: 1, location: 'bay' }), x: 2, y: 0, rotation: 0 },
+        { item: createV2CargoInstance({ instanceId: 'p3', defId: 'cargo.old_engine', origin: 'loot', acquiredDepth: 1, location: 'bay' }), x: 0, y: 2, rotation: 0 },
+        { item: createV2CargoInstance({ instanceId: 'p4_small', defId: 'cargo.alloy_bar', origin: 'loot', acquiredDepth: 1, location: 'bay' }), x: 2, y: 2, rotation: 0 },
+      ],
+      staging: [
+        { item: createV2CargoInstance({ instanceId: 's1_2x2', defId: 'cargo.old_engine', origin: 'loot', acquiredDepth: 2, location: 'staging' }), rotation: 0 },
+        { item: createV2CargoInstance({ instanceId: 's2_2x2', defId: 'cargo.old_engine', origin: 'loot', acquiredDepth: 2, location: 'staging' }), rotation: 0 },
+      ],
+      discardedThisArrange: [],
+    };
+    const multiOverflowRes = detectV2BaySpatialConflict(multiOverflowBay);
+    expect(multiOverflowRes.hasConflict).toBe(true);
+    expect(multiOverflowRes.allFitTogether).toBe(false);
+    expect(multiOverflowRes.feasibleSingleDiscardIds).not.toContain('p4_small');
+    expect(multiOverflowRes.feasibleSingleDiscardIds).toEqual([]);
+
+    // Solvable multi-staging bay (10 placed incl. 1x2 + 8 staged = 18 cells): removing 'p4_small' leaves 4x(2x2)=16 -> fits!
+    const multiSolvableBay: V2CargoBayState = {
+      ...multiOverflowBay,
+      placed: [
+        multiOverflowBay.placed[0],
+        multiOverflowBay.placed[1],
+        multiOverflowBay.placed[3],
+      ],
+    };
+    const multiSolvableRes = detectV2BaySpatialConflict(multiSolvableBay);
+    expect(multiSolvableRes.hasConflict).toBe(true);
+    expect(multiSolvableRes.feasibleSingleDiscardIds).toContain('p4_small');
+    expect(multiSolvableRes.feasibleSingleDiscardIds).toContain('s1_2x2');
+  });
+
+  it('strictly isolates S01 tutorial runs from D06 bonus crate injection while preserving L4B ancient_navigator', () => {
+    const tutRun = createV2TutorialRun('tut_d06_iso');
+    const batId = tutRun.bay.staging[0].item.instanceId;
+    const wiredBay = placeV2FromStaging(tutRun.bay, batId, 1, 0, 0).bay;
+    const tutMapRun: V2RunState = {
+      ...tutRun,
+      phase: 'MAP',
+      bay: wiredBay,
+    };
+
+    // L1A combat reward on tutorial injects ZERO D06 bonus crates
+    const l1Bundle = generateV2CombatRewardBundle(
+      tutMapRun,
+      tutMapRun.graph.nodes.L1A,
+      ['core'],
+      []
+    ).bundle;
+    expect(l1Bundle.bonusLootItems ?? []).toHaveLength(0);
+    expect(l1Bundle.repairAmount).toBe(0);
+
+    // L4B tutorial combat preserves ONLY guaranteed ancient_navigator relic with ZERO extra D06 crates
+    const l4bBundle = generateV2CombatRewardBundle(
+      tutMapRun,
+      tutMapRun.graph.nodes.L4B,
+      ['core'],
+      []
+    ).bundle;
+    expect(l4bBundle.bonusLootItems).toHaveLength(1);
+    expect(l4bBundle.bonusLootItems![0].definitionId).toBe('cargo.ancient_navigator');
+    expect(l4bBundle.cargoOption.definitionId).toBe('cargo.ancient_navigator');
+
+    // Entering tutorial wreck L2A does not overwrite its authored cargo list via D06
+    const l2Before = tutMapRun.graph.nodes.L2A.wreck!.cargoItems.map((c) => c.instanceId);
+    const enteredL2 = selectV2MapNode(
+      { ...tutMapRun, currentNodeId: 'L1A', visitedNodeIds: ['L1A'] },
+      'L2A'
+    );
+    expect(enteredL2.ok).toBe(true);
+    expect(enteredL2.run.graph.nodes.L2A.wreck!.cargoItems.map((c) => c.instanceId)).toEqual(l2Before);
   });
 });
 
@@ -1110,9 +1287,234 @@ describe('R2-M6B D07: 3-Equipment Rewards, All 10 Synergy Rules & Run-1 3-Pick-1
     // Direct helper rejects already-unlocked family
     expect(unlockV2EquipmentFamily(claimed.profile, 'counter_kit', 'dup').ok).toBe(false);
     expect(V2_CONTRACT_FAMILY_UNLOCK_ORDER).toHaveLength(3);
+
+    // Path C: Tutorial Run-1 safe return triggers 3-pick-1!
+    const tutRun = createV2TutorialRun('tut_fam_unlock');
+    const tutSettleRun: V2RunState = {
+      ...tutRun,
+      phase: 'SETTLEMENT',
+      settlementReason: 'safe_return',
+      visitedNodeIds: ['L1A', 'L2A', 'L3A', 'L4A'],
+      currentNodeId: 'L4A',
+    };
+    const tutSum = calculateV2Settlement(tutSettleRun, fresh);
+    expect(tutSum.pendingFamilyUnlockChoices).toEqual(['heavy_kit', 'hangar_kit', 'counter_kit']);
+
+    // Path D: Run-1 defeat -> 0 families unlocked -> Run-2 standard contract win STILL triggers 3-pick-1 ->
+    //         Trigger 2 (2nd distinct standard contract) triggers 2-pick-1 -> 3rd distinct standard contract auto-unlocks final family!
+    const run1Defeat: V2RunState = {
+      ...launch1.run!,
+      phase: 'SETTLEMENT',
+      settlementReason: 'defeat',
+      hp: 0,
+    };
+    const afterDefeat = applyV2Settlement(launch1.profile, run1Defeat, {});
+    expect(afterDefeat.ok).toBe(true);
+    expect(afterDefeat.profile.unlockedFamilies).toEqual(['core']);
+    expect(afterDefeat.profile.pendingFamilyUnlockChoices).toBeUndefined();
+
+    // Run 2: Complete 1st standard contract (transport_std) -> offers 3-pick-1 -> pick heavy_kit
+    const mkCompletedContractRun = (
+      prof: V2ProfileState,
+      templateId: 'transport_std' | 'rescue_std' | 'survey_std',
+      seed: number
+    ): { readonly profile: V2ProfileState; readonly run: V2RunState } => {
+      const l = launchV2Expedition({
+        profile: prof,
+        contractTemplateId: templateId,
+        shipId: 'cannon_skiff',
+        crewId: 'engineer',
+        primaryArchetype: 'laser',
+        slots: buildFreeFallbackPrepareSlots('cannon_skiff', prof.blueprints),
+        seed,
+      });
+      const baseRun = l.run!;
+      const missionBay =
+        templateId === 'transport_std'
+          ? {
+              ...baseRun.bay,
+              placed: [
+                {
+                  item: createV2CargoInstance({
+                    instanceId: `m_reactor_${seed}`,
+                    defId: 'mission.sealed_reactor',
+                    origin: 'mission',
+                    acquiredDepth: 1,
+                    location: 'bay',
+                    missionBinding: baseRun.contract.contractId,
+                  }),
+                  x: 0,
+                  y: 0,
+                  rotation: 0 as const,
+                },
+              ],
+            }
+          : templateId === 'rescue_std'
+          ? {
+              ...baseRun.bay,
+              placed: [
+                {
+                  item: createV2CargoInstance({
+                    instanceId: `m_pod_${seed}`,
+                    defId: 'mission.escape_pod',
+                    origin: 'mission',
+                    acquiredDepth: 1,
+                    location: 'bay',
+                    missionBinding: baseRun.contract.contractId,
+                  }),
+                  x: 0,
+                  y: 0,
+                  rotation: 0 as const,
+                },
+              ],
+            }
+          : baseRun.bay;
+      return {
+        profile: l.profile,
+        run: {
+          ...baseRun,
+          phase: 'SETTLEMENT',
+          settlementReason: 'safe_return',
+          bay: missionBay,
+          contract: {
+            ...baseRun.contract,
+            completedNodeIds: [...baseRun.contract.markedNodeIds],
+            missionItemCount: templateId === 'survey_std' ? 0 : 1,
+          },
+        },
+      };
+    };
+
+    const run2 = mkCompletedContractRun(afterDefeat.profile, 'transport_std', 9211);
+    const sum2 = calculateV2Settlement(run2.run, run2.profile);
+    expect(sum2.contractCompleted).toBe(true);
+    expect(sum2.pendingFamilyUnlockChoices).toEqual(['heavy_kit', 'hangar_kit', 'counter_kit']);
+    const afterRun2 = applyV2Settlement(run2.profile, run2.run, {}, { chosenFamily: 'heavy_kit' });
+    expect(afterRun2.ok).toBe(true);
+    expect(afterRun2.profile.unlockedFamilies).toContain('heavy_kit');
+
+    // Run 3: Complete 2nd distinct standard contract (rescue_std) -> Trigger 2 offers 2-pick-1!
+    const run3 = mkCompletedContractRun(afterRun2.profile, 'rescue_std', 9212);
+    const sum3 = calculateV2Settlement(run3.run, run3.profile);
+    expect(sum3.contractCompleted).toBe(true);
+    expect(sum3.pendingFamilyUnlockChoices).toEqual(['hangar_kit', 'counter_kit']);
+    const afterRun3 = applyV2Settlement(run3.profile, run3.run, {}, { chosenFamily: 'hangar_kit' });
+    expect(afterRun3.ok).toBe(true);
+    expect(afterRun3.profile.unlockedFamilies).toContain('hangar_kit');
+    expect(getLockedUnlockableFamilies(afterRun3.profile)).toEqual(['counter_kit']);
+
+    // Run 4: Complete 3rd distinct standard contract (survey_std) -> auto-unlocks final remaining family (counter_kit)!
+    const run4 = mkCompletedContractRun(afterRun3.profile, 'survey_std', 9213);
+    const sum4 = calculateV2Settlement(run4.run, run4.profile);
+    expect(sum4.contractCompleted).toBe(true);
+    expect(sum4.pendingFamilyUnlockChoices ?? []).toEqual([]);
+    const afterRun4 = applyV2Settlement(run4.profile, run4.run, {});
+    expect(afterRun4.ok).toBe(true);
+    expect(afterRun4.profile.unlockedFamilies).toEqual(['core', 'heavy_kit', 'hangar_kit', 'counter_kit']);
+    expect(afterRun4.profile.pendingFamilyUnlockChoices).toBeUndefined();
   });
 
-  it('migrates legacy 3.0.0 active run cleanly by backfilling Recovery Beacons while preserving legacy pendingReward', () => {
+  it('verifies all 4 PR #1 active relic passives remain intact across getActiveRelicPassives, launch, and boss entry', () => {
+    const baseProfile = makeAllUnlockedProfile({
+      relics: {
+        ancient_navigator: { storedCount: 1, restored: false },
+        cryo_amber: { storedCount: 1, restored: false },
+        quantum_core: { storedCount: 1, restored: false },
+        obsidian_crown: { storedCount: 1, restored: false },
+      },
+    });
+    // Stored-but-unrestored relics grant ZERO bonuses
+    expect(getActiveRelicPassives(baseProfile)).toEqual({
+      startingFuelBonus: 0,
+      fullMapReveal: false,
+      maxHpBonus: 0,
+      loadoutBudgetBonus: 0,
+      bossTacticalChargeBonus: 0,
+      activeRelicIds: [],
+    });
+
+    const restoredProfile: V2ProfileState = {
+      ...baseProfile,
+      relics: {
+        ancient_navigator: { storedCount: 1, restored: true },
+        cryo_amber: { storedCount: 1, restored: true },
+        quantum_core: { storedCount: 1, restored: true },
+        obsidian_crown: { storedCount: 1, restored: true },
+      },
+    };
+    const passives = getActiveRelicPassives(restoredProfile);
+    expect(passives).toEqual({
+      startingFuelBonus: 1,
+      fullMapReveal: true,
+      maxHpBonus: 4,
+      loadoutBudgetBonus: 1,
+      bossTacticalChargeBonus: 1,
+      activeRelicIds: ['ancient_navigator', 'cryo_amber', 'quantum_core', 'obsidian_crown'],
+    });
+
+    const baseSlots = buildFreeFallbackPrepareSlots('cannon_skiff', baseProfile.blueprints);
+    const baseLaunch = launchV2Expedition({
+      profile: baseProfile,
+      contractTemplateId: 'free_salvage',
+      shipId: 'cannon_skiff',
+      crewId: 'engineer',
+      primaryArchetype: 'laser',
+      slots: baseSlots,
+      seed: 9250,
+    });
+    expect(baseLaunch.ok).toBe(true);
+
+    // Budget-7 loadout (heavy=3 + laser=2 + shield=2 = 7 > 6 base cannon_skiff budget) succeeds ONLY with quantum_core!
+    const budget7Slots = [
+      { slotKey: 'h1', origin: 'loan' as const, definitionId: 'equipment.heavy.common', x: 0, y: 0, rotation: 0 as const },
+      { slotKey: 'l1', origin: 'loan' as const, definitionId: 'equipment.laser.common', x: 1, y: 0, rotation: 0 as const },
+      { slotKey: 's1', origin: 'loan' as const, definitionId: 'equipment.shield.common', x: 2, y: 0, rotation: 0 as const },
+    ];
+    const withoutQuantum = launchV2Expedition({
+      profile: baseProfile,
+      contractTemplateId: 'free_salvage',
+      shipId: 'cannon_skiff',
+      crewId: 'engineer',
+      primaryArchetype: 'heavy',
+      slots: budget7Slots,
+      seed: 9250,
+    });
+    expect(withoutQuantum.ok).toBe(false);
+
+    const withAll4 = launchV2Expedition({
+      profile: restoredProfile,
+      contractTemplateId: 'free_salvage',
+      shipId: 'cannon_skiff',
+      crewId: 'engineer',
+      primaryArchetype: 'heavy',
+      slots: budget7Slots,
+      seed: 9250,
+    });
+    expect(withAll4.ok).toBe(true);
+    expect(withAll4.run!.fuel).toBe(baseLaunch.run!.fuel + 1); // ancient_navigator (+1 fuel)
+    expect(withAll4.run!.maxHp).toBe(baseLaunch.run!.maxHp + 4); // cryo_amber (+4 maxHp)
+
+    // obsidian_crown (+1 boss tactical charge: 2 -> 3)
+    const l6Node = Object.values(withAll4.run!.graph.nodes).find((n) => n.layer === 6 && n.combat)!;
+    const l5Parent = Object.values(withAll4.run!.graph.nodes).find((n) =>
+      n.nextNodeIds.includes(l6Node.nodeId)
+    )!;
+    const enterBoss = selectV2MapNode(
+      {
+        ...withAll4.run!,
+        currentNodeId: l5Parent.nodeId,
+        visitedNodeIds: [l5Parent.nodeId],
+        phase: 'MAP',
+        fuel: 5,
+      },
+      l6Node.nodeId,
+      { profile: restoredProfile }
+    );
+    expect(enterBoss.ok).toBe(true);
+    expect(enterBoss.run.tacticalChargesMax).toBe(3);
+  });
+
+  it('migrates legacy 3.0.0 active run cleanly by backfilling Recovery Beacons while preserving and resolving legacy pendingReward', () => {
     const profile = makeAllUnlockedProfile();
     const launch = launchV2Expedition({
       profile,
@@ -1124,7 +1526,8 @@ describe('R2-M6B D07: 3-Equipment Rewards, All 10 Synergy Rules & Run-1 3-Pick-1
       seed: 9301,
     });
     const run = launch.run!;
-    // Strip isBeacon from all nodes to emulate a '3.0.0' save
+    const l1Combat = Object.values(run.graph.nodes).find((n) => n.layer === 1 && n.combat)!;
+    // Strip isBeacon from all nodes & attach a REAL legacy 3.0.0 pendingReward (no equipmentOptions, repairAmount: 10, cargoOption)
     const legacyNodes = Object.fromEntries(
       Object.entries(run.graph.nodes).map(([k, n]) => {
         const copy = { ...n } as Record<string, unknown>;
@@ -1132,6 +1535,21 @@ describe('R2-M6B D07: 3-Equipment Rewards, All 10 Synergy Rules & Run-1 3-Pick-1
         return [k, copy];
       })
     );
+    const legacyEq = createV2EquipmentInstance({
+      instanceId: 'leg_rew_eq',
+      kind: 'shield',
+      quality: 'common',
+      origin: 'loot',
+      acquiredDepth: 1,
+      location: 'staging',
+    });
+    const legacyCargo = createV2CargoInstance({
+      instanceId: 'leg_rew_cg',
+      defId: 'cargo.alloy_bar',
+      origin: 'loot',
+      acquiredDepth: 1,
+      location: 'staging',
+    });
     const rawV3_0 = {
       ...createFreshV2SaveData(),
       rulesVersion: V3_0_RULES_VERSION,
@@ -1139,7 +1557,18 @@ describe('R2-M6B D07: 3-Equipment Rewards, All 10 Synergy Rules & Run-1 3-Pick-1
       activeRun: {
         ...run,
         rulesVersion: V3_0_RULES_VERSION,
+        currentNodeId: l1Combat.nodeId,
+        visitedNodeIds: [l1Combat.nodeId],
+        phase: 'REWARD' as const,
+        hp: 15,
         graph: { ...run.graph, nodes: legacyNodes },
+        pendingReward: {
+          nodeId: l1Combat.nodeId,
+          equipmentOption: legacyEq,
+          cargoOption: legacyCargo,
+          repairAmount: 10,
+          chosen: null,
+        },
       },
     };
     const migrated = migrateV3_0ToV3_1SaveData(rawV3_0);
@@ -1147,6 +1576,92 @@ describe('R2-M6B D07: 3-Equipment Rewards, All 10 Synergy Rules & Run-1 3-Pick-1
     const mRun = migrated.data!.activeRun!;
     expect(Object.values(mRun.graph.nodes).some((n) => n.layer === 3 && n.isBeacon)).toBe(true);
     expect(Object.values(mRun.graph.nodes).some((n) => n.layer === 5 && n.isBeacon)).toBe(true);
+    expect(mRun.pendingReward).not.toBeNull();
+    expect(mRun.pendingReward!.equipmentOptions).toBeUndefined();
+    expect(mRun.pendingReward!.repairAmount).toBe(10);
+
+    // Both legacy 'cargo' and legacy 'repair' (+10 HP) choices resolve cleanly on migrated 3.0.0 bundle!
+    const pickedCargo = pickV2CombatReward(mRun, 'cargo', profile.unlockedFamilies);
+    expect(pickedCargo.ok).toBe(true);
+    expect(pickedCargo.run.bay.staging.some((s) => s.item.instanceId === 'leg_rew_cg')).toBe(true);
+
+    const pickedRepair = pickV2CombatReward(mRun, 'repair', profile.unlockedFamilies);
+    expect(pickedRepair.ok).toBe(true);
+    expect(pickedRepair.run.hp).toBe(25);
+
+    // RewardPhaseView renders legacy 3.0.0 fallback cleanly without crashing
+    const dom = installMiniDom();
+    restoreDom = dom.restore;
+    const legHost = new MiniEl('div');
+    dom.body.appendChild(legHost);
+    const rewView = new RewardPhaseView();
+    const onPickReward = vi.fn();
+    rewView.mount(legHost as unknown as HTMLElement);
+    rewView.update({ run: mRun, readOnly: false }, { onPickReward });
+    expect(legHost.querySelector('[data-pick-reward="equipment"]')).not.toBeNull();
+    expect(legHost.querySelector('[data-pick-reward="cargo"]')).not.toBeNull();
+    expect(legHost.querySelector('[data-pick-reward="repair"]')).not.toBeNull();
+    legHost.querySelector('[data-pick-reward="repair"]')!.click();
+    expect(onPickReward).toHaveBeenCalledWith('repair');
+    rewView.unmount();
+  });
+
+  it('validates and normalizes pendingFamilyUnlockChoices strictly (rejects core/dupes/invalid & collapses empty to undefined)', () => {
+    const base = createFreshV2SaveData();
+
+    // Negative validation checks
+    const withCore = {
+      ...base,
+      profile: { ...base.profile, pendingFamilyUnlockChoices: ['core' as V2UnlockFamilyId] },
+    };
+    expect(validateV2SaveDataDetailed(withCore).ok).toBe(false);
+
+    const withDupes = {
+      ...base,
+      profile: {
+        ...base.profile,
+        pendingFamilyUnlockChoices: ['heavy_kit', 'heavy_kit'] as readonly V2UnlockFamilyId[],
+      },
+    };
+    expect(validateV2SaveDataDetailed(withDupes).ok).toBe(false);
+
+    const withUnknown = {
+      ...base,
+      profile: {
+        ...base.profile,
+        pendingFamilyUnlockChoices: ['bogus_kit' as unknown as V2UnlockFamilyId],
+      },
+    };
+    expect(validateV2SaveDataDetailed(withUnknown).ok).toBe(false);
+
+    // normalizeV2SaveData strips 'core', duplicates, invalid & already-unlocked entries, and collapses [] -> undefined
+    const dirtySave = {
+      ...base,
+      profile: {
+        ...base.profile,
+        unlockedFamilies: ['core', 'heavy_kit'] as readonly V2UnlockFamilyId[],
+        pendingFamilyUnlockChoices: [
+          'core',
+          'heavy_kit',
+          'hangar_kit',
+          'hangar_kit',
+          'bogus',
+        ] as unknown as readonly V2UnlockFamilyId[],
+      },
+    };
+    const cleaned = normalizeV2SaveData(dirtySave);
+    expect(cleaned.profile.pendingFamilyUnlockChoices).toEqual(['hangar_kit']);
+
+    const allAlreadyUnlocked = {
+      ...base,
+      profile: {
+        ...base.profile,
+        unlockedFamilies: ['core', 'heavy_kit'] as readonly V2UnlockFamilyId[],
+        pendingFamilyUnlockChoices: ['core', 'heavy_kit'] as readonly V2UnlockFamilyId[],
+      },
+    };
+    const collapsed = normalizeV2SaveData(allAlreadyUnlocked);
+    expect(collapsed.profile.pendingFamilyUnlockChoices).toBeUndefined();
   });
 });
 
@@ -1355,5 +1870,229 @@ describe('R2-M6B UI Views: MapPhaseView, RewardPhaseView, SettlementPhaseView (0
     );
     expect(baseHost.querySelector('[data-testid="base-family-unlock-card"]')).toBeNull();
     baseView.unmount();
+  });
+
+  it('renders WreckPhaseView & WreckOverlayPhaseView cleanly (upper-band 4-5 pins, honest Reactor preview, disabledReason, collapsed badges, non-beacon Emergency Tow), dynamic openV2HelpModal copy & MapPhaseView merchant +8耐久', () => {
+    const dom = installMiniDom();
+    restoreDom = dom.restore;
+
+    // 1. All 5 WRECK_SPOT_COORDS sit strictly in the unobstructed upper stage band (top <= 42%)
+    for (const sid of ['armory', 'reactor', 'cargo', 'vault', 'aux_bay'] as const) {
+      expect(WRECK_SPOT_COORDS[sid]).toBeDefined();
+      expect(parseFloat(WRECK_SPOT_COORDS[sid].top)).toBeLessThanOrEqual(42);
+    }
+
+    // Find an L5 5-spot wreck deterministically
+    const profile = makeAllUnlockedProfile({
+      hullTuning: {},
+      factionRep: { starport_guild: 0, deep_institute: 0, free_salvagers: 0 },
+    });
+    let l5Run: V2RunState | null = null;
+    let l5NodeId = '';
+    for (let seed = 7001; seed <= 7040; seed += 1) {
+      const l = launchV2Expedition({
+        profile,
+        contractTemplateId: 'free_salvage',
+        shipId: 'cannon_skiff',
+        crewId: 'engineer',
+        primaryArchetype: 'laser',
+        slots: buildFreeFallbackPrepareSlots('cannon_skiff', profile.blueprints),
+        seed,
+      });
+      const r = l.run!;
+      const n5 = Object.values(r.graph.nodes).find(
+        (n) => n.layer === 5 && n.type === 'wreck' && n.wreck
+      );
+      if (n5) {
+        const built = buildActiveWreckStateForNode(r, n5, profile).wreck;
+        if (built.hotspots.length === 5) {
+          l5Run = {
+            ...r,
+            currentNodeId: n5.nodeId,
+            visitedNodeIds: [n5.nodeId],
+            phase: 'ENCOUNTER',
+            hp: 25,
+            fuel: 5,
+            maxFuel: 10,
+            activeWreck: built,
+            graph: {
+              ...r.graph,
+              nodes: { ...r.graph.nodes, [n5.nodeId]: { ...n5, isBeacon: false } },
+            },
+          };
+          l5NodeId = n5.nodeId;
+          break;
+        }
+      }
+    }
+    expect(l5Run).not.toBeNull();
+    const l5Node = l5Run!.graph.nodes[l5NodeId]!;
+
+    const overlayHost = new MiniEl('div');
+    const panelHost = new MiniEl('div');
+    dom.body.appendChild(overlayHost);
+    dom.body.appendChild(panelHost);
+
+    const overlayView = new WreckOverlayPhaseView();
+    const panelView = new WreckPhaseView();
+    overlayView.mount(overlayHost as unknown as HTMLElement);
+    panelView.mount(panelHost as unknown as HTMLElement);
+
+    const overlayActions = { onSelectHotspot: vi.fn(), onCutHotspot: vi.fn(), onSkipCut: vi.fn() };
+    const panelActions = {
+      onSelectHotspot: vi.fn(),
+      onCutSpot: vi.fn(),
+      onUseGadget: vi.fn(),
+      onSkipCut: vi.fn(),
+      onExtract: vi.fn(),
+      onAbandon: vi.fn(),
+    };
+
+    // Non-full fuel: 5 pins, 5 cards, honest Reactor preview, non-beacon Emergency Tow abandon copy
+    overlayView.update(
+      { run: l5Run!, node: l5Node, profile, readOnly: false, selectedHotspot: 'armory' },
+      overlayActions
+    );
+    panelView.update(
+      { run: l5Run!, node: l5Node, profile, readOnly: false, selectedHotspot: 'armory' },
+      panelActions
+    );
+
+    for (const sid of ['armory', 'reactor', 'cargo', 'vault', 'aux_bay'] as const) {
+      expect(overlayHost.querySelector(`[data-testid="wreck-spot-${sid}"]`)).not.toBeNull();
+      expect(panelHost.querySelector(`[data-testid="wreck-cut-${sid}"]`)).not.toBeNull();
+    }
+    const reactorCard = panelHost.querySelector('[data-wreck-card="reactor"]')!;
+    expect(reactorCard.textContent).toContain('燃料 +2（满油时转为应急抢修 +5 HP）');
+    const abandonBtn = panelHost.querySelector('#v2-btn-abandon-event')!;
+    expect(abandonBtn.textContent).toContain('紧急拖航撤离（-35% 费用）');
+
+    // Full fuel: Reactor preview switches honestly to emergency repair branch
+    const fullFuelRun: V2RunState = { ...l5Run!, fuel: l5Run!.maxFuel };
+    panelView.update(
+      { run: fullFuelRun, node: l5Node, profile, readOnly: false, selectedHotspot: 'reactor' },
+      panelActions
+    );
+    expect(panelHost.querySelector('[data-wreck-card="reactor"]')!.textContent).toContain(
+      '应急抢修 +5 HP（当前满油）'
+    );
+
+    // Non-lethal blocked state (0 fuel on a greedy cut requiring fuel > 0): specific disabledReason & title on card & pin
+    const fuelShortRun: V2RunState = {
+      ...l5Run!,
+      fuel: 0,
+      activeWreck: {
+        ...l5Run!.activeWreck!,
+        cutsMade: 1,
+        hotspots: l5Run!.activeWreck!.hotspots.map((h) => ({
+          ...h,
+          cut: h.spotId === 'armory',
+          riskFuelCost: h.spotId === 'cargo' ? 2 : h.riskFuelCost,
+        })),
+      },
+    };
+    overlayView.update(
+      { run: fuelShortRun, node: l5Node, profile, readOnly: false, selectedHotspot: 'cargo' },
+      overlayActions
+    );
+    panelView.update(
+      { run: fuelShortRun, node: l5Node, profile, readOnly: false, selectedHotspot: 'cargo' },
+      panelActions
+    );
+    const cargoPin = overlayHost.querySelector('[data-testid="wreck-spot-cargo"]')!;
+    const cargoCutBtn = panelHost.querySelector('[data-testid="wreck-cut-cargo"]')!;
+    expect(cargoPin.disabled).toBe(true);
+    expect(cargoPin.textContent).toContain('不可切');
+    expect(cargoPin.title).toContain('燃料不足');
+    expect(cargoCutBtn.disabled).toBe(true);
+    expect(cargoCutBtn.title).toContain('燃料不足');
+
+    // Collapsed wreck: BOTH overlay pins and left-panel cards show '已坍塌', disabled, ZERO '贪刀切开'/'贪刀风险' contradictions
+    const collapsedRun: V2RunState = {
+      ...l5Run!,
+      activeWreck: {
+        ...l5Run!.activeWreck!,
+        cutsMade: 2,
+        stability: 0,
+        collapsed: true,
+        hotspots: l5Run!.activeWreck!.hotspots.map((h) => ({
+          ...h,
+          cut: h.spotId === 'armory' || h.spotId === 'cargo',
+        })),
+      },
+    };
+    overlayView.update(
+      { run: collapsedRun, node: l5Node, profile, readOnly: false, selectedHotspot: 'vault' },
+      overlayActions
+    );
+    panelView.update(
+      { run: collapsedRun, node: l5Node, profile, readOnly: false, selectedHotspot: 'vault' },
+      panelActions
+    );
+    for (const lockedSpot of ['reactor', 'vault', 'aux_bay'] as const) {
+      const pin = overlayHost.querySelector(`[data-testid="wreck-spot-${lockedSpot}"]`)!;
+      const card = panelHost.querySelector(`[data-wreck-card="${lockedSpot}"]`)!;
+      const cutBtn = panelHost.querySelector(`[data-testid="wreck-cut-${lockedSpot}"]`)!;
+      expect(pin.disabled).toBe(true);
+      expect(pin.dataset.canDirectCut).toBe('false');
+      expect(pin.textContent).toContain('已坍塌');
+      expect(pin.textContent).not.toContain('贪刀切开');
+      expect(pin.title).toContain('坍塌');
+      expect(card.textContent).toContain('已坍塌');
+      expect(card.textContent).not.toContain('贪刀风险');
+      expect(cutBtn.disabled).toBe(true);
+    }
+    expect(panelHost.querySelector('[data-testid="btn-wreck-extract"]')!.disabled).toBe(false);
+    overlayView.unmount();
+    panelView.unmount();
+
+    // 2. openV2HelpModal dynamic D04/D05 rules copy (0 hardcoded '40%', dynamic 20% defeat floor & 35% tow fee, Beacon & 3-5 spots)
+    const modalHost = new MiniEl('div');
+    dom.body.appendChild(modalHost);
+    openV2HelpModal(modalHost as unknown as HTMLElement);
+    const modalHtml = modalHost.innerHTML;
+    expect(modalHtml).not.toContain('40%');
+    expect(modalHtml).toContain(`${Math.round(V2_DEFEAT_SALVAGE_FLOOR_RATE * 100)}%`);
+    expect(modalHtml).toContain(`${Math.round((1 - V2_EMERGENCY_TOW_RETENTION_RATE) * 100)}%`);
+    expect(modalHtml).toContain('回收信标');
+    expect(modalHtml).toContain('紧急拖航');
+    expect(modalHtml).toContain('3–5');
+
+    // 3. MapPhaseView merchant destination forecast displays dynamic +8耐久 (NOT stale +10耐久)
+    const merchNode = Object.values(l5Run!.graph.nodes).find((n) => n.type === 'merchant' && n.merchant)!;
+    const merchParent = Object.values(l5Run!.graph.nodes).find((n) =>
+      n.nextNodeIds.includes(merchNode.nodeId)
+    );
+    const mapHost2 = new MiniEl('div');
+    dom.body.appendChild(mapHost2);
+    const mapView2 = new MapPhaseView();
+    mapView2.mount(mapHost2 as unknown as HTMLElement);
+    mapView2.update(
+      {
+        run: {
+          ...l5Run!,
+          currentNodeId: merchParent ? merchParent.nodeId : null,
+          visitedNodeIds: merchParent ? [merchParent.nodeId] : [],
+          phase: 'MAP',
+          fuel: 6,
+        },
+        readOnly: false,
+        selectedMapNodeId: merchNode.nodeId,
+        isCompactViewport: false,
+        mobileMapShowFull: false,
+        pureAutoCombat: false,
+      },
+      {
+        onToggleMobileMap: vi.fn(),
+        onSelectNode: vi.fn(),
+        onJumpNode: vi.fn(),
+        onSafeReturn: vi.fn(),
+        onAbortContract: vi.fn(),
+      }
+    );
+    const merchCardHtml = mapHost2.querySelector(`[data-testid="map-node-${merchNode.nodeId}"]`)!.innerHTML;
+    expect(merchCardHtml).toContain(`+${merchNode.merchant!.repairAmount}耐久`);
+    expect(merchCardHtml).not.toContain('+10耐久');
+    mapView2.unmount();
   });
 });
