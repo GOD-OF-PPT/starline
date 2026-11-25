@@ -396,7 +396,7 @@ describe('M4 F11: Multi-Cut Derelict Dissection, Ambush Recovery & Persistence',
     expect(done.ok).toBe(true);
     expect(done.run.phase).toBe('REWARD');
 
-    const rewarded = pickV2CombatReward(done.run, 'repair', profile.unlockedFamilies);
+    const rewarded = pickV2CombatReward(done.run, 'equipment_0', profile.unlockedFamilies);
     expect(rewarded.ok).toBe(true);
     expect(rewarded.run.activeWreck).toBeNull();
     expect(rewarded.run.wrecksDissectedThisRun).toBe(1);
@@ -515,14 +515,14 @@ describe('M4 F11: Salvage Parts Dismantling, Refining, Parts Crafting & 3-Track 
     expect(applied.profile.career.totalItemsDismantled).toBe(2);
     expect(applied.profile.career.totalWrecksDissected).toBe(2);
 
-    // Defeat recovers 40% of runSalvagePartsEarned and 0 dismantled items
+    // Defeat recovers 20% of runSalvagePartsEarned (D04) and 0 dismantled items
     const defeatSum = calculateV2Settlement(
       { ...settleRun, settlementReason: 'defeat', hp: 0 },
       profile
     );
-    expect(defeatSum.runSalvagePartsEarned).toBe(Math.floor(25 * 0.4));
+    expect(defeatSum.runSalvagePartsEarned).toBe(Math.floor(25 * 0.2));
     expect(defeatSum.dismantledPartsEarned).toBe(0);
-    expect(defeatSum.totalSalvagePartsEarned).toBe(10);
+    expect(defeatSum.totalSalvagePartsEarned).toBe(5);
 
     // Workshop: Parts crafting (0 credits) -> Refining Common -> Improved (0 credits) -> Dismantling
     const craftCheck = canCraftV2EquipmentWithParts(profile, 'laser');
@@ -1048,7 +1048,7 @@ describe('M4 F13: All 5 Formal Contract Types & Frozen +30% Optional Bonus Objec
     };
     const bStart = startV2CombatAtCurrentNode(atBounty, 'weakest', { pureAutoCombat: true });
     const bDone = completeV2CombatAtCurrentNode(bStart.run, profile.unlockedFamilies);
-    const bPick = pickV2CombatReward(bDone.run, 'repair', profile.unlockedFamilies);
+    const bPick = pickV2CombatReward(bDone.run, 'equipment_0', profile.unlockedFamilies);
     expect(bPick.run.contract.completedNodeIds).toContain(bountyTargetId);
     expect(isContractReadyForDelivery(bPick.run, 'safe_return')).toBe(true);
 

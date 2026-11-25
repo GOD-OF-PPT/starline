@@ -55,6 +55,8 @@ import {
   extractV2Wreck,
   finishV2ArrangeAndProceed,
   finishV2MerchantVisit,
+  getV2SafeReturnStatus,
+  initiateV2EmergencyTowReturn,
   initiateV2SafeReturnFromMap,
   pickV2CombatReward,
   selectV2MapNode,
@@ -1142,15 +1144,25 @@ describe('M6/M7 Multi-Seed Balance Simulation Matrix (Sectors 1-3, 3 Act Bosses,
           if (run.phase === 'MAP') {
             const curNode = run.currentNodeId ? run.graph.nodes[run.currentNodeId] : null;
             const nextIds = curNode ? curNode.nextNodeIds : ['L1A', 'L1B'].filter((id) => Boolean(run.graph.nodes[id]));
-            // Safe return if low HP or low fuel or at max layer
+            // Safe return if low HP or low fuel or at max layer (prefer beacon free return, else emergency tow)
             if (nextIds.length === 0 || run.fuel <= 1 || run.hp <= Math.ceil(run.maxHp * 0.35)) {
-              run = initiateV2SafeReturnFromMap(run).run;
+              const retStatus = getV2SafeReturnStatus(run);
+              run = (
+                retStatus.isFreeBeacon
+                  ? initiateV2SafeReturnFromMap(run)
+                  : initiateV2EmergencyTowReturn(run)
+              ).run;
               continue;
             }
             const targetId = nextIds[0];
             const entered = selectV2MapNode(run, targetId, { profile });
             if (!entered.ok) {
-              run = initiateV2SafeReturnFromMap(run).run;
+              const retStatus = getV2SafeReturnStatus(run);
+              run = (
+                retStatus.isFreeBeacon
+                  ? initiateV2SafeReturnFromMap(run)
+                  : initiateV2EmergencyTowReturn(run)
+              ).run;
               continue;
             }
             run = entered.run;
@@ -1172,13 +1184,17 @@ describe('M6/M7 Multi-Seed Balance Simulation Matrix (Sectors 1-3, 3 Act Bosses,
               const idx = enabledOpt ? enabledOpt.index : Math.max(0, opts.length - 1);
               run = resolveV2EventOption(run, idx, profile.unlockedFamilies).run;
             } else {
-              run = initiateV2SafeReturnFromMap(run).run;
+              const retStatus = getV2SafeReturnStatus(run);
+              run = (
+                retStatus.isFreeBeacon
+                  ? initiateV2SafeReturnFromMap(run)
+                  : initiateV2EmergencyTowReturn(run)
+              ).run;
             }
           } else if (run.phase === 'SHOP') {
             run = finishV2MerchantVisit(run).run;
           } else if (run.phase === 'REWARD') {
-            const rewardChoice = run.hp < run.maxHp - 5 ? 'repair' : 'cargo';
-            run = pickV2CombatReward(run, rewardChoice, profile.unlockedFamilies).run;
+            run = pickV2CombatReward(run, 'equipment_0', profile.unlockedFamilies).run;
           } else if (run.phase === 'ARRANGE') {
             run = autoResolveStaging(run);
             const curLayer = run.currentNodeId ? run.graph.nodes[run.currentNodeId]?.layer ?? 1 : 1;
@@ -1374,7 +1390,7 @@ describe('M6/M7 Multi-Seed Balance Simulation Matrix (Sectors 1-3, 3 Act Bosses,
     });
     expect(launched.ok && launched.run).toBeTruthy();
 
-    // Defeat recovery guarantees 40% credit & 40% parts recovery (zero softlock!)
+    // Defeat recovery guarantees 20% credit & 20% parts recovery (D04 zero softlock!)
     const defeatedRun: V2RunState = {
       ...launched.run!,
       phase: 'SETTLEMENT',
@@ -1384,11 +1400,11 @@ describe('M6/M7 Multi-Seed Balance Simulation Matrix (Sectors 1-3, 3 Act Bosses,
       salvagePartsEarned: 15,
     };
     const defeatSum = calculateV2Settlement(defeatedRun, broke);
-    expect(defeatSum.finalCreditsEarned).toBe(Math.floor(25 * 0.4)); // 10 credits recovered!
-    expect(defeatSum.totalSalvagePartsEarned).toBe(Math.floor(15 * 0.4)); // 6 parts recovered!
+    expect(defeatSum.finalCreditsEarned).toBe(Math.floor(25 * 0.2)); // 5 credits recovered!
+    expect(defeatSum.totalSalvagePartsEarned).toBe(Math.floor(15 * 0.2)); // 3 parts recovered!
     const afterDefeat = applyV2Settlement(broke, defeatedRun).profile;
-    expect(afterDefeat.credits).toBe(10);
-    expect(afterDefeat.salvageParts).toBe(6);
+    expect(afterDefeat.credits).toBe(5);
+    expect(afterDefeat.salvageParts).toBe(3);
 
     // Comeback run from 10 credits launches for free and earns substantial positive income!
     const comeback = launchV2Expedition({
@@ -1467,7 +1483,12 @@ describe('M6/M7 Multi-Seed Balance Simulation Matrix (Sectors 1-3, 3 Act Bosses,
             ? curNode.nextNodeIds
             : r.graph.startNextNodeIds.filter((id) => Boolean(r.graph.nodes[id]));
           if (nextIds.length === 0 || r.fuel <= 1 || r.hp <= Math.ceil(r.maxHp * 0.35)) {
-            r = initiateV2SafeReturnFromMap(r).run;
+            const retStatus = getV2SafeReturnStatus(r);
+            r = (
+              retStatus.isFreeBeacon
+                ? initiateV2SafeReturnFromMap(r)
+                : initiateV2EmergencyTowReturn(r)
+            ).run;
             continue;
           }
           // Prefer marked contract node or wreck/combat node to progress contract & earn loot/parts
@@ -1477,7 +1498,12 @@ describe('M6/M7 Multi-Seed Balance Simulation Matrix (Sectors 1-3, 3 Act Bosses,
             nextIds[0];
           const entered = selectV2MapNode(r, preferred, { profile: runwayProf });
           if (!entered.ok) {
-            r = initiateV2SafeReturnFromMap(r).run;
+            const retStatus = getV2SafeReturnStatus(r);
+            r = (
+              retStatus.isFreeBeacon
+                ? initiateV2SafeReturnFromMap(r)
+                : initiateV2EmergencyTowReturn(r)
+            ).run;
             continue;
           }
           r = entered.run;
@@ -1501,12 +1527,17 @@ describe('M6/M7 Multi-Seed Balance Simulation Matrix (Sectors 1-3, 3 Act Bosses,
               runwayProf.unlockedFamilies
             ).run;
           } else {
-            r = initiateV2SafeReturnFromMap(r).run;
+            const retStatus = getV2SafeReturnStatus(r);
+            r = (
+              retStatus.isFreeBeacon
+                ? initiateV2SafeReturnFromMap(r)
+                : initiateV2EmergencyTowReturn(r)
+            ).run;
           }
         } else if (r.phase === 'SHOP') {
           r = finishV2MerchantVisit(r).run;
         } else if (r.phase === 'REWARD') {
-          const choice = r.hp < r.maxHp - 6 ? 'repair' : 'cargo';
+          const choice = r.hp < r.maxHp - 6 || r.bay.placed.length >= 6 ? 'skip' : 'equipment_0';
           r = pickV2CombatReward(r, choice, runwayProf.unlockedFamilies).run;
         } else if (r.phase === 'ARRANGE') {
           r = autoResolveStaging(r);

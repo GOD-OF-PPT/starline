@@ -15,6 +15,9 @@ import type {
   V2Quality,
   V2UnlockFamilyId,
 } from '../data/equipment';
+
+/** Alias for Contract #9 equipment family unlock choices */
+export type V2EquipmentFamily = V2UnlockFamilyId;
 import type { V2FacilityId } from '../data/facilities';
 import type { SectorEnvModifierId } from '../data/sectors';
 import type { V2Rotation } from '../data/shapes';
@@ -115,7 +118,7 @@ export interface V2ShopEquipmentOffer {
 
 export type V2WreckChoice = 'armory' | 'cargo' | 'reactor_fuel' | 'reactor_repair';
 
-export type V2WreckSpotId = 'armory' | 'cargo' | 'reactor';
+export type V2WreckSpotId = 'armory' | 'cargo' | 'reactor' | 'vault' | 'aux_bay';
 
 export interface V2WreckHotspot {
   readonly spotId: V2WreckSpotId;
@@ -143,6 +146,10 @@ export interface V2WreckState {
   readonly ambushTriggered?: boolean;
   readonly stashedItems?: readonly V2ItemInstance[];
   readonly stabilizerActive?: boolean;
+  /** True once greedy cuts trigger structural collapse, locking remaining uncut compartments (D05) */
+  readonly collapsed?: boolean;
+  /** Instance IDs staged from this wreck so collapse forfeits ONLY this wreck's unextracted loot (D05) */
+  readonly wreckLootInstanceIds?: readonly string[];
 }
 
 export interface V2EventOptionState {
@@ -234,6 +241,8 @@ export interface V2MapNode {
   readonly bossId?: string;
   readonly hasRelicSignal?: boolean;
   readonly relicSignalDefId?: string;
+  /** Recovery Beacon node permitting free full-value safe return (D04 / D2 = b) */
+  readonly isBeacon?: boolean;
   readonly eventId?: string;
   readonly combat?: V2CombatPayload;
   readonly wreck?: V2WreckPayload;
@@ -441,12 +450,28 @@ export interface V2CombatSimulation {
   readonly appliedInterventions?: readonly V2CombatIntervention[];
 }
 
+export type V2RewardChoiceId =
+  | 'equipment_0'
+  | 'equipment_1'
+  | 'equipment_2'
+  | 'skip'
+  | 'equipment'
+  | 'cargo'
+  | 'repair';
+
 export interface V2CombatRewardBundle {
   readonly nodeId: string;
+  /** D07 (Rules 3.1.0): 3 distinct equipment options tagged with live bay synergies */
+  readonly equipmentOptions?: readonly V2ItemInstance[];
+  /** Guaranteed bonus trophies/salvage staged alongside chosen equipment (relic signals / D06 salvage) */
+  readonly bonusLootItems?: readonly V2ItemInstance[];
+  /** Primary equipment option (= equipmentOptions[0] on 3.1.0 bundles) */
   readonly equipmentOption: V2ItemInstance;
+  /** Guaranteed relic mirror on hasRelicSignal nodes (or legacy 3.0.0 cargo option) */
   readonly cargoOption: V2ItemInstance;
+  /** 0 on all new 3.1.0 bundles; >0 only on legacy migrated 3.0.0 bundles */
   readonly repairAmount: number;
-  readonly chosen: 'equipment' | 'cargo' | 'repair' | null;
+  readonly chosen: V2RewardChoiceId | null;
 }
 
 export type V2RunPhase =
@@ -608,6 +633,12 @@ export interface V2RunState {
   readonly overchargeCellActive?: boolean;
   /** Active target-lock enemyId for current combat node (cleared upon leaving node or completing combat) */
   readonly lockedEnemyId?: string | null;
+  /** True if returned via non-beacon Emergency Tow (-35% tow fee, forfeits depth appreciation & bonus, D04) */
+  readonly emergencyTowUsed?: boolean;
+  /** Return extraction mode snapshot for settlement & telemetry (D04) */
+  readonly returnMode?: 'beacon_free' | 'emergency_tow' | 'stranded_tow' | null;
+  /** Count of genuine spatial conflicts detected on entering ARRANGE during this run (D06) */
+  readonly spatialConflictCount?: number;
 }
 
 export interface V2PresetSlot {
@@ -684,6 +715,8 @@ export interface V2ProfileState {
   readonly hullTuning?: Record<string, V3HullTuningState>;
   /** Discovered synergy types recorded permanently into the Codex (D03) */
   readonly discoveredSynergies?: readonly string[];
+  /** Pending 3-pick-1 (or 2-pick-1) equipment family unlock choices persisting across reloads (D07) */
+  readonly pendingFamilyUnlockChoices?: readonly V2UnlockFamilyId[];
 }
 
 export interface V2SaveData {

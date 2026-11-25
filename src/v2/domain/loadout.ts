@@ -606,6 +606,7 @@ export function launchV2Expedition(params: {
     factionRepEarnedThisRun: {},
     overchargeCellActive: false,
     lockedEnemyId: null,
+    spatialConflictCount: 0,
   };
 
   const nextProfile: V2ProfileState = {

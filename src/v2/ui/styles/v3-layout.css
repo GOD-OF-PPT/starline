@@ -1465,3 +1465,307 @@ body.reduced-motion .v2-shell .v2-settle-totals .v2-mig-row.is-rollup-revealed {
   line-height: 1.35;
 }
 
+/* --- D04 Beacon Badges, Emergency Tow CTA & Settlement Rows (0 #id, border-radius <= 2px) --- */
+.v2-shell .v3-badge-beacon {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #9bf3d4;
+  background: rgba(24, 118, 96, 0.28);
+  border: 1px solid rgba(72, 214, 168, 0.7);
+  border-left: 3px solid #48d6a8;
+  white-space: nowrap;
+}
+
+.v2-shell .v3-dag-beacon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  border-radius: 2px;
+  font-size: 9.5px;
+  font-weight: 800;
+  color: #062019;
+  background: #48d6a8;
+  line-height: 1.3;
+}
+
+.v2-shell .v2-dag-node.is-beacon {
+  border-color: rgba(72, 214, 168, 0.78);
+}
+
+.v2-shell .v3-map-dest-card.is-beacon-node {
+  border-color: rgba(72, 214, 168, 0.62);
+}
+
+.v2-shell .v3-btn-emergency-tow {
+  border-color: rgba(245, 158, 11, 0.72);
+  color: #fde68a;
+  background: rgba(92, 52, 12, 0.52);
+  border-radius: 2px;
+}
+
+.v2-shell .v3-btn-emergency-tow.is-stranded {
+  border-color: rgba(242, 117, 100, 0.9);
+  color: #ffe2dc;
+  background: rgba(124, 28, 28, 0.72);
+}
+
+.v2-shell .v3-depth-bonus-row strong {
+  color: #7ae582;
+}
+
+.v2-shell .v3-tow-fee-row strong {
+  color: #ff9c8e;
+}
+
+/* --- D07 3-Equipment Synergy-Tagged Rewards & Run-1 Family Unlock --- */
+.v2-shell .v3-reward-bonus-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  margin-bottom: 8px;
+  border-radius: 2px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #eaf4ff;
+  background: rgba(22, 40, 62, 0.88);
+  border: 1px solid rgba(110, 168, 224, 0.55);
+  border-left: 3px solid #62d6df;
+}
+
+.v2-shell .v3-reward-bonus-banner.is-relic {
+  border-color: rgba(246, 184, 82, 0.75);
+  border-left-color: #f6b852;
+  background: rgba(58, 40, 12, 0.68);
+  color: #ffe9b8;
+}
+
+.v2-shell .v2-reward-card.has-synergy {
+  border-color: rgba(98, 214, 223, 0.78);
+  border-left: 3px solid #62d6df;
+}
+
+.v2-shell .v3-reward-synergy-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  margin: 2px 0;
+  border-radius: 2px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  max-width: 100%;
+}
+
+.v2-shell .v3-reward-synergy-badge.is-matched {
+  color: #9bf3ff;
+  background: rgba(16, 78, 96, 0.45);
+  border: 1px solid rgba(98, 214, 223, 0.75);
+  border-left: 3px solid #62d6df;
+}
+
+.v2-shell .v3-reward-synergy-badge.is-capped {
+  color: #fde68a;
+  background: rgba(92, 58, 12, 0.48);
+  border: 1px dashed rgba(245, 158, 11, 0.8);
+  border-left: 3px solid #f59e0b;
+}
+
+.v2-shell .v3-reward-synergy-badge.is-unmatched {
+  color: #a9bfd6;
+  background: rgba(30, 44, 62, 0.55);
+  border: 1px solid rgba(120, 148, 178, 0.36);
+}
+
+.v2-shell .v3-reward-skip-wrap {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.v2-shell .v3-reward-skip-btn {
+  border-radius: 2px;
+  font-size: 12px;
+}
+
+.v2-shell .v3-settle-family-unlock {
+  margin: 8px 0;
+  padding: 9px 10px;
+  border-radius: 2px;
+  background: rgba(14, 28, 46, 0.88);
+  border: 1px solid rgba(246, 184, 82, 0.62);
+  border-left: 3px solid #f6b852;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.v2-shell .v3-family-unlock-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12.5px;
+  color: #ffe8b8;
+}
+
+.v2-shell .v3-family-unlock-head small {
+  font-size: 11px;
+  color: #a9bfd6;
+}
+
+.v2-shell .v3-family-unlock-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px;
+}
+
+.v2-shell .v3-family-unlock-opt {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: 2px;
+  background: rgba(18, 34, 54, 0.88);
+  border: 1px solid rgba(110, 148, 192, 0.42);
+  color: #e4effb;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.v2-shell .v3-family-unlock-opt:focus-within {
+  outline: 2px solid #62d6df;
+  outline-offset: 2px;
+}
+
+.v2-shell .v3-family-unlock-opt input[type='radio'] {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.v2-shell .v3-family-unlock-opt.is-selected {
+  border-color: #f6b852;
+  border-left: 3px solid #f6b852;
+  background: rgba(84, 58, 16, 0.62);
+  color: #fff3d6;
+}
+
+.v2-shell .v3-family-unlock-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.v2-shell .v3-fu-title {
+  font-size: 12px;
+}
+
+.v2-shell .v3-fu-meta {
+  font-size: 10.5px;
+  color: #b7cde4;
+  line-height: 1.3;
+}
+
+.v2-shell .v3-base-family-unlock-card {
+  padding: 9px 10px;
+  border-radius: 2px;
+  background: rgba(14, 28, 46, 0.92);
+  border: 1px solid rgba(246, 184, 82, 0.68);
+  border-left: 3px solid #f6b852;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.v2-shell .v3-bfu-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #ffe8b8;
+}
+
+.v2-shell .v3-bfu-btns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 6px;
+}
+
+.v2-shell .v3-base-family-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 2px;
+  text-align: left;
+}
+
+.v2-shell .v3-base-family-btn small {
+  font-size: 10.5px;
+  opacity: 0.86;
+}
+
+body.reduced-motion .v2-shell .v3-family-unlock-opt {
+  transition: none !important;
+}
+
+/* --- D05 Compact Mobile Wreck Clamp Pins (0 #id, 0 pill radii, 0 clip-path, 0px pairwise overlap on 390x844) --- */
+@media (max-width: 760px) {
+  .v2-shell .v3-wreck-stage-overlay .v3-wreck-compartment-pin {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100px;
+    min-height: 44px;
+    padding: 4px 5px;
+    gap: 2px;
+    font-size: 10px;
+    line-height: 1.15;
+  }
+
+  .v2-shell .v3-wreck-stage-overlay .v3-wreck-compartment-pin .v3-wreck-silhouette-layer {
+    width: 22px;
+    height: 22px;
+  }
+
+  .v2-shell .v3-wreck-stage-overlay .v3-wreck-compartment-pin .v3-wreck-silhouette-img {
+    width: 18px;
+    height: 18px;
+  }
+
+  .v2-shell .v3-wreck-stage-overlay .v3-wreck-compartment-pin .v2-hotspot-tag {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    white-space: normal;
+    text-align: center;
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .v2-shell .v3-wreck-stage-overlay .v3-wreck-compartment-pin .v2-hotspot-tag svg {
+    display: none;
+  }
+
+  .v2-shell .v3-wreck-stage-overlay .v3-wreck-compartment-pin .v2-hotspot-tag em {
+    font-size: 9.5px;
+    line-height: 1.1;
+    white-space: nowrap;
+  }
+}

@@ -1,5 +1,10 @@
 import { V2_CONTRACT_TEMPLATES } from '../../data/contracts';
-import { V2_ALL_EQUIPMENT_KINDS } from '../../data/equipment';
+import {
+  V2_ALL_EQUIPMENT_KINDS,
+  V2_CONTRACT_FAMILY_UNLOCK_ORDER,
+  getV2EquipmentDefByKind,
+  type V2UnlockFamilyId,
+} from '../../data/equipment';
 import { V3_RELIC_PASSIVES } from '../../data/facilities';
 import { V2_SHIP_ORDER } from '../../data/ships';
 import { getClaimableAchievementCount } from '../../domain/achievements';
@@ -37,6 +42,8 @@ export interface BaseViewActions {
   readonly onOpenRelics: () => void;
   readonly onOpenCodex: () => void;
   readonly onOpenCareer: () => void;
+  /** D07 optional callback when user picks a persisted pending equipment family unlock on Base */
+  readonly onChoosePendingFamilyUnlock?: (family: V2UnlockFamilyId) => void;
 }
 
 type DockingNoticeActions = Pick<BaseViewActions, 'onSkipDocking' | 'onCloseDocking'>;
@@ -97,6 +104,10 @@ export class BasePhaseView implements PhaseView<BaseViewProps, BaseViewActions> 
   private cbProgressFillEl: HTMLSpanElement | null = null;
 
   private relicStripEl: HTMLDivElement | null = null;
+  private familyUnlockCardEl: HTMLDivElement | null = null;
+  private familyUnlockBtnsWrapEl: HTMLDivElement | null = null;
+  private readonly familyUnlockBtns = new Map<V2UnlockFamilyId, HTMLButtonElement>();
+  private lastFamilyUnlockKey: string | null = null;
   private nextGoalBtnEl: HTMLButtonElement | null = null;
   private nextGoalKEl: HTMLSpanElement | null = null;
   private nextGoalTitleEl: HTMLElement | null = null;
@@ -167,6 +178,8 @@ export class BasePhaseView implements PhaseView<BaseViewProps, BaseViewActions> 
       actions.onOpenCodex();
     } else if (btn === this.dockCareerBtnEl || btn.id === 'v2-dock-career') {
       actions.onOpenCareer();
+    } else if (btn.dataset.pickFamily) {
+      actions.onChoosePendingFamilyUnlock?.(btn.dataset.pickFamily as V2UnlockFamilyId);
     }
   };
 
@@ -357,6 +370,18 @@ export class BasePhaseView implements PhaseView<BaseViewProps, BaseViewActions> 
     relicStrip.className = 'v3-relic-passive-strip';
     relicStrip.dataset.testid = 'active-relic-passives';
 
+    // D07 persistent pending equipment family unlock fallback card (detached when empty!)
+    const familyUnlockCard = document.createElement('div');
+    familyUnlockCard.className = 'v3-base-family-unlock-card';
+    familyUnlockCard.dataset.testid = 'base-family-unlock-card';
+    const famCardHead = document.createElement('div');
+    famCardHead.className = 'v3-bfu-head';
+    famCardHead.innerHTML = `${svgIcon('star', 14)} <strong>待选新装备体系（含免费蓝图 + 首件赠品）</strong>`;
+    const famCardBtnsWrap = document.createElement('div');
+    famCardBtnsWrap.className = 'v3-bfu-btns';
+    familyUnlockCard.appendChild(famCardHead);
+    familyUnlockCard.appendChild(famCardBtnsWrap);
+
     // Next goal button (detached during tutorial focus!)
     const nextGoalBtn = document.createElement('button');
     nextGoalBtn.type = 'button';
@@ -445,6 +470,8 @@ export class BasePhaseView implements PhaseView<BaseViewProps, BaseViewActions> 
     this.cbDetailEl = cbDetail;
     this.cbProgressFillEl = cbFill;
     this.relicStripEl = relicStrip;
+    this.familyUnlockCardEl = familyUnlockCard;
+    this.familyUnlockBtnsWrapEl = famCardBtnsWrap;
     this.nextGoalBtnEl = nextGoalBtn;
     this.nextGoalKEl = nextGoalK;
     this.nextGoalTitleEl = nextGoalTitle;
@@ -738,6 +765,63 @@ export class BasePhaseView implements PhaseView<BaseViewProps, BaseViewActions> 
       }
     }
 
+    // D07 pending equipment family unlock fallback card (strictly detached when empty!)
+    if (
+      this.utilityColEl &&
+      this.familyUnlockCardEl &&
+      this.familyUnlockBtnsWrapEl &&
+      this.stationDockEl
+    ) {
+      const pendingChoices = (p.pendingFamilyUnlockChoices ?? []).filter(
+        (f) => !p.unlockedFamilies.includes(f)
+      );
+      if (pendingChoices.length > 0) {
+        const famKey = `${pendingChoices.join(',')}|${readOnly ? 1 : 0}`;
+        if (this.lastFamilyUnlockKey !== famKey) {
+          this.lastFamilyUnlockKey = famKey;
+          const validSet = new Set<V2UnlockFamilyId>(pendingChoices);
+          for (const [fKey, btn] of this.familyUnlockBtns.entries()) {
+            if (!validSet.has(fKey)) {
+              btn.remove();
+              this.familyUnlockBtns.delete(fKey);
+            }
+          }
+          pendingChoices.forEach((fam, idx) => {
+            const spec = V2_CONTRACT_FAMILY_UNLOCK_ORDER.find((u) => u.family === fam);
+            let btn = this.familyUnlockBtns.get(fam);
+            if (!btn) {
+              btn = document.createElement('button');
+              btn.type = 'button';
+              btn.className = 'btn btn-sm btn-secondary v3-base-family-btn';
+              btn.dataset.pickFamily = fam;
+              btn.dataset.testid = `btn-pick-family-${fam}`;
+              const giftName = spec
+                ? getV2EquipmentDefByKind(spec.giftMainKind, 'common').name
+                : fam;
+              const bpName = spec
+                ? getV2EquipmentDefByKind(spec.freeBlueprintKind, 'common').name
+                : '';
+              btn.innerHTML = `<strong>${spec?.name ?? fam}</strong><small>赠 ${giftName} · 蓝图 ${bpName}</small>`;
+              this.familyUnlockBtns.set(fam, btn);
+            }
+            syncButtonDisabled(btn, readOnly);
+            const curAtIdx = this.familyUnlockBtnsWrapEl!.children[idx];
+            if (curAtIdx !== btn) {
+              this.familyUnlockBtnsWrapEl!.insertBefore(btn, curAtIdx ?? null);
+            }
+          });
+        }
+        if (this.familyUnlockCardEl.parentElement !== this.utilityColEl) {
+          this.utilityColEl.insertBefore(this.familyUnlockCardEl, this.stationDockEl);
+        }
+      } else {
+        this.lastFamilyUnlockKey = null;
+        if (this.familyUnlockCardEl.parentElement) {
+          this.familyUnlockCardEl.remove();
+        }
+      }
+    }
+
     // Next goal button (strictly detached during Step-0 tutorial focus)
     if (
       this.utilityColEl &&
@@ -872,6 +956,10 @@ export class BasePhaseView implements PhaseView<BaseViewProps, BaseViewActions> 
     this.cbDetailEl = null;
     this.cbProgressFillEl = null;
     this.relicStripEl = null;
+    this.familyUnlockCardEl = null;
+    this.familyUnlockBtnsWrapEl = null;
+    this.familyUnlockBtns.clear();
+    this.lastFamilyUnlockKey = null;
     this.nextGoalBtnEl = null;
     this.nextGoalKEl = null;
     this.nextGoalTitleEl = null;

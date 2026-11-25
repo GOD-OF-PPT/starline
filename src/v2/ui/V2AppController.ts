@@ -12,6 +12,7 @@ import {
   V2_EQUIPMENT_DEFS,
   getV2EquipmentDefByKind,
   type V2EquipmentKind,
+  type V2UnlockFamilyId,
 } from '../data/equipment';
 import {
   V2_RELICS,
@@ -83,6 +84,8 @@ import {
   extractV2Wreck,
   finishV2ArrangeAndProceed,
   finishV2MerchantVisit,
+  getV2SafeReturnStatus,
+  initiateV2EmergencyTowReturn,
   initiateV2SafeReturnFromMap,
   pickV2CombatReward,
   resolveV2AnomalyChoice,
@@ -124,6 +127,7 @@ import {
   canResearchV2Instance,
   canRestoreV2Relic,
   canUpgradeV3Facility,
+  choosePendingV2FamilyUnlock,
   claimV2PendingGiftToWarehouse,
   craftV2CommonEquipment,
   craftV3GadgetWithParts,
@@ -377,6 +381,7 @@ export class V2AppController {
   private leftPanelEl!: HTMLElement;
   private rightPanelEl!: HTMLElement;
   private modalHostEl!: HTMLElement;
+  private selectedSettlementFamilyUnlock: V2UnlockFamilyId | null = null;
 
   constructor(mountEl: HTMLElement, options: V2ControllerOptions) {
     this.mountEl = mountEl;
@@ -1358,7 +1363,7 @@ export class V2AppController {
             activeRun: null,
           };
           this.selectedEndingId = null;
-          this.settlementDispositions = {};
+          this.resetSettlementUiState();
           this.activeDockingNotice = null;
           this.titleEntered = true;
           this.writeTitleSession(true);
@@ -1382,7 +1387,7 @@ export class V2AppController {
     this.endingGalleryId = null;
     this.activeDockingNotice = null;
     this.activeCommBanner = null;
-    this.settlementDispositions = {};
+    this.resetSettlementUiState();
     this.selectedMapNodeId = null;
     this.selectedWreckHotspot = 'armory';
     this.awaitingEliteDecision = false;
@@ -2300,6 +2305,21 @@ export class V2AppController {
           soundEngine.play('click');
           this.openCareerModal('overview');
         },
+        onChoosePendingFamilyUnlock: (family) => {
+          if (!this.canMutate()) return;
+          const res = choosePendingV2FamilyUnlock(this.save.profile, family);
+          if (!res.ok) {
+            this.showToast(res.error ?? '解锁体系失败');
+            return;
+          }
+          this.save = { ...this.save, profile: res.profile };
+          this.persist();
+          soundEngine.play('relicRestore');
+          this.showToast(
+            `已解锁新流派体系：${res.unlockedFamilyName ?? family}（蓝图与首件赠品已发放）`
+          );
+          this.syncAll();
+        },
       }
     );
   }
@@ -2401,8 +2421,20 @@ export class V2AppController {
     return wreck.hotspots.map((spot) => {
       const coords = WRECK_SPOT_COORDS[spot.spotId] ?? { normX: 0.5, normY: 0.45 };
       const evalRes = evaluateWreckHotspotCut(run, wreck, spot.spotId);
+      const visualSpotId: WreckCompartmentVisualState['spotId'] =
+        spot.spotId === 'armory' || spot.spotId === 'aux_bay'
+          ? 'armory'
+          : spot.spotId === 'reactor'
+          ? 'reactor'
+          : 'cargo';
+      const silhouetteKind: WreckCompartmentVisualState['silhouetteKind'] =
+        spot.spotId === 'armory' || spot.spotId === 'aux_bay'
+          ? 'equipment'
+          : spot.spotId === 'reactor'
+          ? 'reactor'
+          : 'cargo';
       return {
-        spotId: spot.spotId,
+        spotId: visualSpotId,
         normX: coords.normX,
         normY: coords.normY,
         cut: spot.cut,
@@ -2410,8 +2442,7 @@ export class V2AppController {
         canCut: evalRes.canCut,
         isLethal: evalRes.isLethal,
         isRisky: !evalRes.isFirstSafeCut && !wreck.stabilizerActive,
-        silhouetteKind:
-          spot.spotId === 'armory' ? 'equipment' : spot.spotId === 'cargo' ? 'cargo' : 'reactor',
+        silhouetteKind,
       };
     });
   }
@@ -2689,6 +2720,9 @@ export class V2AppController {
     if (res.ambushTriggered) {
       soundEngine.play('bossAlarm');
       this.showToast('残骸警报触发！敌舰伏击来袭，战利品已暂封待战后返还！');
+    } else if (res.collapsed) {
+      soundEngine.play('hullHit');
+      this.showToast(res.summaryText ?? '残骸结构坍塌！本船未撤离物资已损失，剩余舱室封锁。');
     } else if (res.tookHazard) {
       soundEngine.play('hullHit');
       if (res.summaryText) this.showToast(res.summaryText);
@@ -2944,7 +2978,7 @@ export class V2AppController {
     };
     this.preferredSectorId = res.run.sectorId;
     this.prepareDraft = null;
-    this.settlementDispositions = {};
+    this.resetSettlementUiState();
     this.selectedMapNodeId = null;
     this.showCombatLogDetails = false;
     this.cargoGrid?.collapseDetailsDrawer();
@@ -3542,10 +3576,13 @@ export class V2AppController {
             if (!this.canMutate()) return;
             const cur = this.getCurrentRun();
             if (!cur || cur.phase !== 'MAP') return;
-            const res = initiateV2SafeReturnFromMap(cur);
+            const status = getV2SafeReturnStatus(cur);
+            const res = status.isFreeBeacon
+              ? initiateV2SafeReturnFromMap(cur)
+              : initiateV2EmergencyTowReturn(cur);
             if (!res.ok) return this.showToast(res.error ?? '当前无法返航');
             this.playtestTelemetry.recordBranchChoice(cur.currentNodeId, 'safe_return');
-            this.settlementDispositions = {};
+            this.resetSettlementUiState();
             this.setCurrentRun(res.run);
             soundEngine.play('returnDock');
             this.syncAll();
@@ -3749,7 +3786,7 @@ export class V2AppController {
             const res = extractV2Wreck(latest);
             if (!res.ok) return this.showToast(res.error ?? '无法撤离残骸');
             if (res.run.phase === 'SETTLEMENT') {
-              this.settlementDispositions = {};
+              this.resetSettlementUiState();
             }
             this.setCurrentRun(res.run);
             soundEngine.play(res.run.phase === 'SETTLEMENT' ? 'returnDock' : 'pickup');
@@ -3761,7 +3798,7 @@ export class V2AppController {
             if (!latest || latest.phase !== 'ENCOUNTER') return;
             const res = abandonV2EventAndReturn(latest);
             if (!res.ok) return this.showToast(res.error ?? '无法放弃返航');
-            this.settlementDispositions = {};
+            this.resetSettlementUiState();
             this.setCurrentRun(res.run);
             soundEngine.play('returnDock');
             this.syncAll();
@@ -3788,7 +3825,7 @@ export class V2AppController {
           );
           if (!res.ok) return this.showToast(res.error ?? '操作失败');
           if (res.run.phase === 'SETTLEMENT') {
-            this.settlementDispositions = {};
+            this.resetSettlementUiState();
           }
           this.setCurrentRun(res.run);
           if (res.hadDamage) soundEngine.play('hullHit');
@@ -3804,7 +3841,7 @@ export class V2AppController {
           const res = resolveV2AnomalyChoice(latest, choice);
           if (!res.ok) return this.showToast(res.error ?? '操作失败');
           if (res.run.phase === 'SETTLEMENT') {
-            this.settlementDispositions = {};
+            this.resetSettlementUiState();
           }
           this.setCurrentRun(res.run);
           soundEngine.play('place');
@@ -3817,7 +3854,7 @@ export class V2AppController {
           const res = resolveV2DistressChoice(latest, choice);
           if (!res.ok) return this.showToast(res.error ?? '操作失败');
           if (res.run.phase === 'SETTLEMENT') {
-            this.settlementDispositions = {};
+            this.resetSettlementUiState();
           }
           this.setCurrentRun(res.run);
           soundEngine.play('place');
@@ -3829,7 +3866,7 @@ export class V2AppController {
           if (!latest || latest.phase !== 'ENCOUNTER') return;
           const res = abandonV2EventAndReturn(latest);
           if (!res.ok) return this.showToast(res.error ?? '无法放弃返航');
-          this.settlementDispositions = {};
+          this.resetSettlementUiState();
           this.setCurrentRun(res.run);
           soundEngine.play('returnDock');
           this.syncAll();
@@ -3937,7 +3974,7 @@ export class V2AppController {
             const res = finishV2MerchantVisit(cur);
             if (!res.ok) return this.showToast(res.error ?? '无法离开商人节点');
             if (res.run.phase === 'SETTLEMENT') {
-              this.settlementDispositions = {};
+              this.resetSettlementUiState();
             }
             this.setCurrentRun(res.run);
             soundEngine.play(res.run.phase === 'SETTLEMENT' ? 'returnDock' : 'warpJump');
@@ -4002,10 +4039,12 @@ export class V2AppController {
           const res = pickV2CombatReward(latest, choice, this.save.profile.unlockedFamilies);
           if (!res.ok) return this.showToast(res.error ?? '领取奖励失败');
           if (res.run.phase === 'SETTLEMENT') {
-            this.settlementDispositions = {};
+            this.resetSettlementUiState();
           }
           this.setCurrentRun(res.run);
-          soundEngine.play(choice === 'repair' ? 'repairPulse' : 'rewardRare');
+          soundEngine.play(
+            choice === 'skip' ? 'click' : choice === 'repair' ? 'repairPulse' : 'rewardRare'
+          );
           this.syncAll();
         },
       }
@@ -4070,7 +4109,7 @@ export class V2AppController {
             const res = finishV2ArrangeAndProceed(cur, terminal ? 'safe_return' : 'map');
             if (!res.ok) return this.showToast(res.error ?? '当前无法离开整理');
             if (res.run.phase === 'SETTLEMENT') {
-              this.settlementDispositions = {};
+              this.resetSettlementUiState();
             }
             this.setCurrentRun(res.run);
             soundEngine.play(res.run.phase === 'SETTLEMENT' ? 'returnDock' : 'tacticalOrder');
@@ -4164,6 +4203,11 @@ export class V2AppController {
     }));
   }
 
+  private resetSettlementUiState(): void {
+    this.settlementDispositions = {};
+    this.selectedSettlementFamilyUnlock = null;
+  }
+
   private renderSettlementPhase(run: V2RunState): void {
     if (this.settlementRollup.isActive() && this.settledRollupRunId === run.runId) {
       this.settlementRollup.skip({ silentCashRegister: true });
@@ -4174,6 +4218,13 @@ export class V2AppController {
     const p = this.save.profile;
     const readOnly = this.isReadOnlyTab && !run.isShowcase;
     const summary = calculateV2Settlement(run, p, this.settlementDispositions);
+    const validChoices = summary.pendingFamilyUnlockChoices ?? [];
+    if (
+      this.selectedSettlementFamilyUnlock !== null &&
+      !validChoices.includes(this.selectedSettlementFamilyUnlock)
+    ) {
+      this.selectedSettlementFamilyUnlock = null;
+    }
     const isSafe = summary.reason === 'safe_return';
     const projectedCredits = p.credits + summary.finalCreditsEarned;
     const nextGoal = this.computeNextBaseGoal(p, projectedCredits);
@@ -4181,7 +4232,14 @@ export class V2AppController {
     this.leftViewSlot.sync(
       'SETTLEMENT',
       this.settlementPhaseView,
-      { run, profile: p, summary, nextGoal, readOnly },
+      {
+        run,
+        profile: p,
+        summary,
+        nextGoal,
+        readOnly,
+        selectedFamilyUnlock: this.selectedSettlementFamilyUnlock,
+      },
       {
         onChangeDisposition: (iid, disp) => {
           if (!this.canMutate()) return;
@@ -4199,6 +4257,13 @@ export class V2AppController {
           this.renderTopHud();
           this.renderSettlementPhase(curRun);
         },
+        onSelectFamilyUnlock: (family) => {
+          if (!this.canMutate()) return;
+          const curRun = this.getCurrentRun() ?? run;
+          this.selectedSettlementFamilyUnlock = family;
+          soundEngine.play('click');
+          this.renderSettlementPhase(curRun);
+        },
         onSkipRollup: () => {
           this.settlementRollup.skip();
           window.removeEventListener('keydown', this.handleSettlementRollupKey);
@@ -4212,7 +4277,7 @@ export class V2AppController {
           this.cancelSettlementRollup();
           soundEngine.play('returnDock');
           this.showcaseRun = null;
-          this.settlementDispositions = {};
+          this.resetSettlementUiState();
           this.syncAll();
         },
         onConfirmSettlement: () => {
@@ -4225,7 +4290,8 @@ export class V2AppController {
           const result = applyV2Settlement(
             this.save.profile,
             this.save.activeRun,
-            this.settlementDispositions
+            this.settlementDispositions,
+            { chosenFamily: this.selectedSettlementFamilyUnlock }
           );
           if (!result.ok) {
             this.showToast(result.error ?? '结算失败');
@@ -4242,7 +4308,7 @@ export class V2AppController {
           if (!wasTutorialCompleted && result.profile.tutorialCompleted) {
             this.campaignBannerCollapsed = false;
           }
-          this.settlementDispositions = {};
+          this.resetSettlementUiState();
           this.settledRunsCountInSession += 1;
           this.persist();
 

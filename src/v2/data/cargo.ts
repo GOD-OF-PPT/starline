@@ -200,3 +200,75 @@ export function computeV2CargoPrice(defId: string, depthLayer: number): number {
 export function getV2ItemDef(defId: string) {
   return V2_CARGO_DEFS[defId];
 }
+
+/** Non-collectible regular cargo defIds used for D06 dynamic spatial conflict calibration */
+export const V2_NON_COLLECTIBLE_CARGO_DEF_IDS: readonly string[] = [
+  'cargo.old_engine',
+  'cargo.coolant_tank',
+  'cargo.folding_antenna',
+  'cargo.alloy_bar',
+  'cargo.data_box',
+];
+
+/** D04: Cargo carried across layers appreciates +12% per extra layer + deep extraction premium on Beacon/Terminal return */
+export const V2_CARGO_TRANSIT_APPRECIATION_PER_LAYER = 0.12;
+
+export const V2_DEEP_EXTRACTION_PREMIUM_BY_LAYER: Readonly<Record<number, number>> = {
+  1: 0,
+  2: 0,
+  3: 0,
+  4: 0.15,
+  5: 0.3,
+  6: 0.45,
+};
+
+export interface V2CargoDepthAppreciationResult {
+  readonly layersCarried: number;
+  readonly multiplier: number;
+  readonly bonusCredits: number;
+  readonly appreciatedValue: number;
+}
+
+/**
+ * Pure D04 depth-scaled cargo appreciation calculator.
+ * Applies ONLY to loot cargo (`category === 'cargo' && origin === 'loot'`) extracted at depth >= 2.
+ */
+export function computeV2CargoDepthAppreciation(
+  item: {
+    readonly category: 'equipment' | 'cargo' | 'mission' | 'gadget';
+    readonly origin: 'loan' | 'owned' | 'loot' | 'mission';
+    readonly fixedValue: number;
+    readonly acquiredDepth: number;
+  },
+  extractionDepth: number
+): V2CargoDepthAppreciationResult {
+  if (
+    item.category !== 'cargo' ||
+    item.origin !== 'loot' ||
+    item.fixedValue <= 0 ||
+    !Number.isFinite(extractionDepth) ||
+    extractionDepth < 2
+  ) {
+    return {
+      layersCarried: 0,
+      multiplier: 1,
+      bonusCredits: 0,
+      appreciatedValue: item.fixedValue,
+    };
+  }
+  const acq = Math.max(1, Math.floor(item.acquiredDepth || 1));
+  const clampedExt = Math.max(1, Math.min(6, Math.floor(extractionDepth)));
+  const layersCarried = Math.max(0, clampedExt - acq);
+  const deepPremium = V2_DEEP_EXTRACTION_PREMIUM_BY_LAYER[clampedExt] ?? 0;
+  const multiplier = Number(
+    (1 + layersCarried * V2_CARGO_TRANSIT_APPRECIATION_PER_LAYER + deepPremium).toFixed(2)
+  );
+  const bonusCredits = Math.round(item.fixedValue * (multiplier - 1));
+  return {
+    layersCarried,
+    multiplier,
+    bonusCredits,
+    appreciatedValue: item.fixedValue + bonusCredits,
+  };
+}
+

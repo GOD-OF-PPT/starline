@@ -3030,16 +3030,16 @@ describe('Suite B — M5-4 Stateful PhaseView Lifecycle Across All 12 Upgraded V
     rewView.mount(rewHost as unknown as HTMLElement);
     rewView.update({ run: rewRun, readOnly: false }, rewA1);
     const rewRoot = rewHost.querySelector('[data-testid="reward-screen"]')!;
-    const eqCard = rewHost.querySelector('[data-pick-reward="equipment"]')!;
+    const eqCard = rewHost.querySelector('[data-pick-reward="equipment_0"]')!;
     eqCard.focus();
     rewView.update({ run: rewRun, readOnly: false }, rewA2);
     expect(rewHost.querySelector('[data-testid="reward-screen"]')).toBe(rewRoot);
-    expect(rewHost.querySelector('[data-pick-reward="equipment"]')).toBe(eqCard);
+    expect(rewHost.querySelector('[data-pick-reward="equipment_0"]')).toBe(eqCard);
     expect(env.doc.activeElement).toBe(eqCard);
     eqCard.click();
     expect(rewA1.onPickReward).toHaveBeenCalledTimes(0);
     expect(rewA2.onPickReward).toHaveBeenCalledTimes(1);
-    expect(rewA2.onPickReward).toHaveBeenCalledWith('equipment');
+    expect(rewA2.onPickReward).toHaveBeenCalledWith('equipment_0');
     rewView.unmount();
     expect(rewHost.children.length).toBe(0);
     expect(rewRoot.getListenerCount('click')).toBe(0);
@@ -4075,8 +4075,8 @@ describe('Suite C — V2AppController Unified 4-Slot PhaseView Lifecycle Integra
     expect(liveCombatUnmount).toHaveBeenCalledTimes(1);
     expect(rewardMount).toHaveBeenCalledTimes(1);
 
-    // 7. Pick repair reward -> S02 fast-path returns straight to MAP (0 staging friction!) -> Safe Return -> SETTLEMENT -> BASE
-    env.mountEl.querySelector('[data-pick-reward="repair"]')!.click();
+    // 7. Pick skip reward -> S02 fast-path returns straight to MAP (0 staging friction!) -> Safe Return -> SETTLEMENT -> BASE
+    env.mountEl.querySelector('[data-pick-reward="skip"]')!.click();
     expect(rewardUnmount).toHaveBeenCalledTimes(1);
     expect(arrangeMount).toHaveBeenCalledTimes(0);
     expect(arrangeUnmount).toHaveBeenCalledTimes(0);

@@ -500,7 +500,7 @@ describe('M7 Phase 2 · Tier 5 White-Box Adversarial Hardening Suite', () => {
       },
       profile,
     );
-    expect(defeatSummary.finalCreditsEarned).toBeGreaterThanOrEqual(20);
-    expect(defeatSummary.totalSalvagePartsEarned).toBe(Math.floor(8 * 0.4));
+    expect(defeatSummary.finalCreditsEarned).toBeGreaterThanOrEqual(10);
+    expect(defeatSummary.totalSalvagePartsEarned).toBe(Math.floor(8 * 0.2));
   });
 });

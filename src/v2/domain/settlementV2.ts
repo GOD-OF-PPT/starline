@@ -1,10 +1,8 @@
 import type { RelicProgress } from '../../domain/progression';
+import { computeV2CargoDepthAppreciation } from '../data/cargo';
 import { V2_CONTRACT_TEMPLATES } from '../data/contracts';
 import { V2_CREW, type V2CrewId } from '../data/crew';
-import {
-  V2_CONTRACT_FAMILY_UNLOCK_ORDER,
-  type V2EquipmentKind,
-} from '../data/equipment';
+import type { V2UnlockFamilyId } from '../data/equipment';
 import { V2_TUTORIAL_SUCCESS_BONUS } from '../data/facilities';
 import { syncUnlockedAchievements } from './achievements';
 import { advanceCampaignAfterRun, recordCampaignEndingChoice } from './campaign';
@@ -15,9 +13,14 @@ import {
   getGuildContractBonusCredits,
   getSurveyInstituteBonusParts,
 } from './factions';
-import { createV2EquipmentInstance, getAnyV2ItemDef } from './itemCatalog';
+import { getAnyV2ItemDef } from './itemCatalog';
 import { V3_MAX_RUN_HISTORY, V3_MAX_SETTLED_RUN_IDS } from './persistenceV2';
-import { getEffectiveWarehouseCapacity, getFacilityTier } from './progressionV2';
+import {
+  getEffectiveWarehouseCapacity,
+  getFacilityTier,
+  getLockedUnlockableFamilies,
+  unlockV2EquipmentFamily,
+} from './progressionV2';
 import type {
   CampaignActId,
   EndingId,
@@ -31,6 +34,70 @@ import type {
   V3RunHistoryEntry,
 } from './types';
 
+/** D04: Lowered defeat salvage floor (20%, down from 40%) */
+export const V2_DEFEAT_SALVAGE_FLOOR_RATE = 0.2;
+
+/** D04: Non-beacon Emergency Tow retains 65% of gross cashable payout (-35% tow fee) */
+export const V2_EMERGENCY_TOW_RETENTION_RATE = 0.65;
+
+/**
+ * Pure helper computing the deepest map layer reached during a run
+ * (max across visitedNodeIds and currentNodeId; 0 if none visited).
+ */
+export function getRunDeepestLayerReached(run: V2RunState): number {
+  let maxLayer = 0;
+  for (const nid of run.visitedNodeIds) {
+    const layer = run.graph.nodes[nid]?.layer ?? 0;
+    if (layer > maxLayer) maxLayer = layer;
+  }
+  if (run.currentNodeId) {
+    const curLayer = run.graph.nodes[run.currentNodeId]?.layer ?? 0;
+    if (curLayer > maxLayer) maxLayer = curLayer;
+  }
+  return maxLayer;
+}
+
+/**
+ * Pure D07 helper computing the 3-pick-1 (Run 1) or 2-pick-1 (Run 2) equipment family
+ * unlock choices earned on settling this run.
+ */
+export function computePendingFamilyUnlockChoicesForRun(
+  run: V2RunState,
+  profile: V2ProfileState,
+  reason: 'safe_return' | 'defeat',
+  contractCompleted: boolean
+): readonly V2UnlockFamilyId[] {
+  if (run.isShowcase) return [];
+  if (profile.settledRunIds.includes(run.runId)) return [];
+  if ((profile.pendingFamilyUnlockChoices?.length ?? 0) > 0) return [];
+
+  const locked = getLockedUnlockableFamilies(profile);
+  if (locked.length === 0) return [];
+
+  // Trigger 1: First-run safe return (including first-voyage tutorial) offers 3-pick-1!
+  if (
+    reason === 'safe_return' &&
+    locked.length === 3 &&
+    (profile.totalRuns === 0 || (run.isTutorial && !profile.tutorialCompleted))
+  ) {
+    return [...locked];
+  }
+
+  // Trigger 2: Subsequent distinct standard contract completion offers remaining choices (if >= 2 locked; 1 auto-unlocks)
+  if (
+    contractCompleted &&
+    !run.isTutorial &&
+    run.contract.type !== 'free' &&
+    run.contract.tier === 'standard' &&
+    !profile.completedContractTypes.includes(run.contract.type) &&
+    locked.length >= 2
+  ) {
+    return [...locked];
+  }
+
+  return [];
+}
+
 export interface V2SettlementItemLine {
   readonly item: V2ItemInstance;
   readonly name: string;
@@ -39,6 +106,10 @@ export interface V2SettlementItemLine {
   readonly creditsPayout: number;
   readonly partsPayout?: number;
   readonly relicId?: string;
+  /** D04 depth-scaled cargo appreciation bonus credits for this item (0 unless loot cargo on Beacon/Terminal free return) */
+  readonly depthBonusCredits?: number;
+  /** Effective sell value including D04 depth appreciation */
+  readonly effectiveSellValue?: number;
 }
 
 export interface V2SettlementSummary {
@@ -48,6 +119,14 @@ export interface V2SettlementSummary {
   readonly contractRewardCredits: number;
   readonly tutorialBonusCredits: number;
   readonly soldItemsCredits: number;
+  /** D04: Deepest extraction layer reached during this run */
+  readonly extractionDepth?: number;
+  /** D04: Total depth-scaled cargo appreciation bonus credits (0 on emergency tow, defeat, or tutorial) */
+  readonly depthAppreciationCredits?: number;
+  /** D04: True when returned via non-beacon Emergency Tow (-35% tow fee) */
+  readonly emergencyTowUsed?: boolean;
+  /** D04: Exact credits deducted as Emergency Tow fee */
+  readonly emergencyTowFeeCredits?: number;
   /** Optional Salvager Mastery T1+ cargo appraisal bonus credits (0 at Tier 0) */
   readonly crewMasteryBonusCredits?: number;
   /** Optional Bonus Objective state & credits paid (F13) */
@@ -64,7 +143,7 @@ export interface V2SettlementSummary {
   readonly dismantledItemsCount: number;
   /** Faction reputation deltas credited on settlement confirmation */
   readonly factionRepGains?: Partial<Record<FactionId, number>>;
-  /** Defeat 40% recoverable total before 0.4 floor */
+  /** Defeat recoverable total before V2_DEFEAT_SALVAGE_FLOOR_RATE (20%) floor */
   readonly defeatRecoverableBase: number;
   /** Exact final delta added to profile.credits (single source of truth for HUD & receipt, AC13!) */
   readonly finalCreditsEarned: number;
@@ -76,6 +155,8 @@ export interface V2SettlementSummary {
   readonly lostOwnedCount: number;
   readonly lostLootCount: number;
   readonly discoveredDefIds: readonly string[];
+  /** D07: Pending 3-pick-1 (or 2-pick-1) equipment family unlock choices earned by this run */
+  readonly pendingFamilyUnlockChoices?: readonly V2UnlockFamilyId[];
 }
 
 export function getDefaultDispositionForItem(
@@ -194,8 +275,11 @@ export function calculateV2Settlement(
     });
 
     const defeatRecoverableBase = cashableWallet + nonLoanRecoverable;
-    const finalCreditsEarned = Math.floor(defeatRecoverableBase * 0.4);
-    const runSalvagePartsEarned = Math.floor(Math.max(0, Math.floor(run.salvagePartsEarned ?? 0)) * 0.4);
+    const finalCreditsEarned = Math.floor(defeatRecoverableBase * V2_DEFEAT_SALVAGE_FLOOR_RATE);
+    const runSalvagePartsEarned = Math.floor(
+      Math.max(0, Math.floor(run.salvagePartsEarned ?? 0)) * V2_DEFEAT_SALVAGE_FLOOR_RATE
+    );
+    const extractionDepth = getRunDeepestLayerReached(run);
 
     return {
       reason: 'defeat',
@@ -204,6 +288,10 @@ export function calculateV2Settlement(
       contractRewardCredits: 0,
       tutorialBonusCredits: 0,
       soldItemsCredits: 0,
+      extractionDepth,
+      depthAppreciationCredits: 0,
+      emergencyTowUsed: false,
+      emergencyTowFeeCredits: 0,
       bonusObjective: activeBonus ? { ...activeBonus, completed: false } : null,
       bonusObjectiveCredits: 0,
       factionContractBonusCredits: 0,
@@ -222,12 +310,19 @@ export function calculateV2Settlement(
       lostOwnedCount,
       lostLootCount,
       discoveredDefIds: Array.from(discoveredSet),
+      pendingFamilyUnlockChoices: [],
     };
   }
 
-  // Safe Return (§10.3 + F11 + F13)
+  // Safe Return (§10.3 + F11 + F13 + D04 Depth Appreciation & Emergency Tow + D07 Family Unlock)
+  const emergencyTowUsed = Boolean(run.emergencyTowUsed);
+  const extractionDepth = getRunDeepestLayerReached(run);
+  const eligibleForDepthAppreciation =
+    !emergencyTowUsed && !run.isTutorial && extractionDepth >= 2;
+
   let soldItemsCredits = 0;
   let soldLootCargoCredits = 0;
+  let depthAppreciationCredits = 0;
   let dismantledPartsEarned = 0;
   let dismantledItemsCount = 0;
   const storedToWarehouseItems: V2ItemInstance[] = [];
@@ -242,6 +337,12 @@ export function calculateV2Settlement(
         ? requested
         : getDefaultDispositionForItem(item, 'safe_return', contractCompleted, profile);
 
+    const appreciation = eligibleForDepthAppreciation
+      ? computeV2CargoDepthAppreciation(item, extractionDepth)
+      : { layersCarried: 0, multiplier: 1, bonusCredits: 0, appreciatedValue: item.fixedValue };
+    const effectiveSellValue = appreciation.appreciatedValue;
+    const itemDepthBonus = appreciation.bonusCredits;
+
     let creditsPayout = 0;
     let partsPayout = 0;
     if (selected === 'sell') {
@@ -249,6 +350,7 @@ export function calculateV2Settlement(
       soldItemsCredits += creditsPayout;
       if (item.category === 'cargo' && item.origin === 'loot') {
         soldLootCargoCredits += creditsPayout;
+        depthAppreciationCredits += itemDepthBonus;
       }
     } else if (selected === 'dismantle') {
       partsPayout = getDismantleSalvagePartsYield(item, profile, run.shipId);
@@ -268,6 +370,8 @@ export function calculateV2Settlement(
       creditsPayout,
       partsPayout,
       relicId: def?.relicId,
+      depthBonusCredits: selected === 'sell' ? itemDepthBonus : 0,
+      effectiveSellValue,
     };
   });
 
@@ -296,11 +400,16 @@ export function calculateV2Settlement(
       ? V2_TUTORIAL_SUCCESS_BONUS
       : 0;
 
-  // Optional Bonus Objective (F13): trust frozen `activeBonus.completed` — NEVER clobber pre-seeded false!
+  // Optional Bonus Objective (F13): trust frozen `activeBonus.completed`, forfeited on Emergency Tow (D04)!
   const hubBonusMult = hubTier >= 3 ? 1.1 : 1;
+  const effectiveBonusObj = activeBonus
+    ? emergencyTowUsed
+      ? { ...activeBonus, completed: false }
+      : activeBonus
+    : null;
   const bonusObjectiveCredits =
-    contractCompleted && !run.isTutorial && activeBonus?.completed === true
-      ? Math.round(activeBonus.rewardCredits * hubBonusMult)
+    !emergencyTowUsed && contractCompleted && !run.isTutorial && effectiveBonusObj?.completed === true
+      ? Math.round(effectiveBonusObj.rewardCredits * hubBonusMult)
       : 0;
 
   // Faction Perks (F13): Starport Guild Lv3 +10% guild contract bonus; Deep Institute Lv3 +6 survey parts
@@ -319,8 +428,11 @@ export function calculateV2Settlement(
       ? getSurveyInstituteBonusParts(run.contract, profile.factionRep.deep_institute)
       : 0;
 
-  const runSalvagePartsEarned =
+  const rawRunSalvageParts =
     Math.max(0, Math.floor(run.salvagePartsEarned ?? 0)) + surveyBonusParts;
+  const runSalvagePartsEarned = emergencyTowUsed
+    ? Math.floor(rawRunSalvageParts * V2_EMERGENCY_TOW_RETENTION_RATE)
+    : rawRunSalvageParts;
   const totalSalvagePartsEarned = runSalvagePartsEarned + dismantledPartsEarned;
 
   // Faction reputation gains (event rep + completed formal contract rep; contract_hub T3 +15%)
@@ -336,7 +448,7 @@ export function calculateV2Settlement(
     }
     if (contractCompleted && !run.isTutorial && effectiveFactionId) {
       const baseRep = run.contract.factionRepReward ?? tplFallback?.factionRepReward ?? 35;
-      const bonusRep = activeBonus?.completed === true ? 10 : 0;
+      const bonusRep = effectiveBonusObj?.completed === true ? 10 : 0;
       const totalRep = Math.round((baseRep + bonusRep) * hubRepMult);
       if (totalRep > 0) {
         factionRepGains[effectiveFactionId] =
@@ -345,19 +457,35 @@ export function calculateV2Settlement(
     }
   }
 
-  const finalCreditsEarned =
+  // Note: cashableWallet ALREADY excludes unspentStipend BEFORE Emergency Tow haircut (anti-credit-printer!)
+  const grossCredits =
     cashableWallet +
     soldItemsCredits +
+    depthAppreciationCredits +
     crewMasteryBonusCredits +
     contractRewardCredits +
     bonusObjectiveCredits +
     factionContractBonusCredits +
     tutorialBonusCredits;
 
+  const finalCreditsEarned = emergencyTowUsed
+    ? Math.floor(grossCredits * V2_EMERGENCY_TOW_RETENTION_RATE)
+    : grossCredits;
+  const emergencyTowFeeCredits = emergencyTowUsed
+    ? Math.max(0, grossCredits - finalCreditsEarned)
+    : 0;
+
   const warehouseCapacity = getEffectiveWarehouseCapacity(profile);
   const warehouseProjectedCount =
     profile.equipmentWarehouse.length + storedToWarehouseItems.length;
   const warehouseOverflow = warehouseProjectedCount > warehouseCapacity;
+
+  const pendingFamilyUnlockChoices = computePendingFamilyUnlockChoicesForRun(
+    run,
+    profile,
+    'safe_return',
+    contractCompleted
+  );
 
   return {
     reason: 'safe_return',
@@ -366,8 +494,12 @@ export function calculateV2Settlement(
     contractRewardCredits,
     tutorialBonusCredits,
     soldItemsCredits,
+    extractionDepth,
+    depthAppreciationCredits,
+    emergencyTowUsed,
+    emergencyTowFeeCredits,
     crewMasteryBonusCredits,
-    bonusObjective: activeBonus,
+    bonusObjective: effectiveBonusObj,
     bonusObjectiveCredits,
     factionContractBonusCredits,
     runSalvagePartsEarned,
@@ -385,6 +517,7 @@ export function calculateV2Settlement(
     lostOwnedCount: 0,
     lostLootCount: 0,
     discoveredDefIds: Array.from(discoveredSet),
+    pendingFamilyUnlockChoices,
   };
 }
 
@@ -416,7 +549,8 @@ export interface V2ApplySettlementResult {
 export function applyV2Settlement(
   profile: V2ProfileState,
   run: V2RunState,
-  dispositionOverrides: Record<string, V2SettlementDisposition> = {}
+  dispositionOverrides: Record<string, V2SettlementDisposition> = {},
+  options?: { readonly chosenFamily?: V2UnlockFamilyId | null }
 ): V2ApplySettlementResult {
   const summary = calculateV2Settlement(run, profile, dispositionOverrides);
 
@@ -458,11 +592,7 @@ export function applyV2Settlement(
   );
 
   // Deepest layer reached during this run
-  let maxLayerThisRun = 0;
-  for (const nid of run.visitedNodeIds) {
-    const layer = run.graph.nodes[nid]?.layer ?? 0;
-    if (layer > maxLayerThisRun) maxLayerThisRun = layer;
-  }
+  const maxLayerThisRun = getRunDeepestLayerReached(run);
 
   // Buildings auto-unlocked on tutorial safe return regardless of delivery success (§12),
   // but NOT on tutorial defeat (which keeps campaign in prologue).
@@ -476,16 +606,14 @@ export function applyV2Settlement(
     nextFacilityTiers.contract_hub = Math.max(1, nextFacilityTiers.contract_hub ?? 0);
   }
 
-  // Contract completion unlocks: crew + ordered equipment families (§6.2 & §10.4 + F13)
+  // Contract completion unlocks: crew + D07 3-pick-1 / 2-pick-1 / final equipment family unlock
   const nextCompletedTypes = [...profile.completedContractTypes];
   const nextCompletedIds = [...profile.completedContractIds];
   const nextCrew = [...profile.unlockedCrew];
-  const nextFamilies = [...profile.unlockedFamilies];
-  const nextBlueprints: V2EquipmentKind[] = [...profile.blueprints];
-  const nextGifts: V2ItemInstance[] = [...profile.pendingGiftQueue];
 
   let unlockedFamilyName: string | undefined;
   let unlockedCrewName: string | undefined;
+  let earnedDistinctStandardCompletion = false;
 
   if (summary.contractCompleted && !run.isTutorial && run.contract.type !== 'free') {
     if (!nextCompletedIds.includes(run.contract.templateId)) {
@@ -505,25 +633,7 @@ export function applyV2Settlement(
     // Record completion of any of the 5 formal contract types (transport/rescue/survey/bounty/derelict)
     if (run.contract.tier === 'standard' && !nextCompletedTypes.includes(cType)) {
       nextCompletedTypes.push(cType);
-      const nextUnlock = V2_CONTRACT_FAMILY_UNLOCK_ORDER.find(
-        (u) => !nextFamilies.includes(u.family)
-      );
-      if (nextUnlock) {
-        nextFamilies.push(nextUnlock.family);
-        if (!nextBlueprints.includes(nextUnlock.freeBlueprintKind)) {
-          nextBlueprints.push(nextUnlock.freeBlueprintKind);
-        }
-        const giftItem = createV2EquipmentInstance({
-          instanceId: `gift_${nextUnlock.family}_${run.runId}`,
-          kind: nextUnlock.giftMainKind,
-          quality: 'common',
-          origin: 'owned',
-          acquiredDepth: 0,
-          location: 'gift_queue',
-        });
-        nextGifts.push(giftItem);
-        unlockedFamilyName = nextUnlock.name;
-      }
+      earnedDistinctStandardCompletion = true;
     }
   }
 
@@ -576,20 +686,17 @@ export function applyV2Settlement(
       ? [...profile.achievementsClaimed]
       : [...profile.achievementsUnlocked];
 
-  const baseNextProfile: V2ProfileState = {
+  let baseNextProfile: V2ProfileState = {
     ...profile,
     credits: profile.credits + summary.finalCreditsEarned,
     salvageParts: profile.salvageParts + salvageEarned,
     buildings: nextBuildings,
     facilityTiers: nextFacilityTiers,
     unlockedCrew: nextCrew,
-    unlockedFamilies: nextFamilies,
-    blueprints: nextBlueprints,
     equipmentWarehouse: [
       ...profile.equipmentWarehouse,
       ...summary.storedToWarehouseItems,
     ],
-    pendingGiftQueue: nextGifts,
     relics: nextRelics,
     discoveredItems: nextDiscovered,
     seenItems: nextSeen,
@@ -607,6 +714,32 @@ export function applyV2Settlement(
     runHistory: nextRunHistory,
     career: nextCareer,
   };
+
+  // D07 Family Unlock Resolution (Run-1 3-pick-1, Run-2 2-pick-1, final remaining auto-unlock)
+  const pendingChoices = summary.pendingFamilyUnlockChoices ?? [];
+  if (pendingChoices.length >= 2) {
+    if (options?.chosenFamily && pendingChoices.includes(options.chosenFamily)) {
+      const unlocked = unlockV2EquipmentFamily(baseNextProfile, options.chosenFamily, run.runId);
+      if (unlocked.ok) {
+        baseNextProfile = unlocked.profile;
+        unlockedFamilyName = unlocked.unlockedFamilyName;
+      }
+    } else {
+      baseNextProfile = {
+        ...baseNextProfile,
+        pendingFamilyUnlockChoices: [...pendingChoices],
+      };
+    }
+  } else if (earnedDistinctStandardCompletion && (baseNextProfile.pendingFamilyUnlockChoices?.length ?? 0) === 0) {
+    const locked = getLockedUnlockableFamilies(baseNextProfile);
+    if (locked.length === 1) {
+      const unlocked = unlockV2EquipmentFamily(baseNextProfile, locked[0], run.runId);
+      if (unlocked.ok) {
+        baseNextProfile = unlocked.profile;
+        unlockedFamilyName = unlocked.unlockedFamilyName;
+      }
+    }
+  }
 
   const campaignAdvance = advanceCampaignAfterRun(baseNextProfile, run, summary);
   const achSync = syncUnlockedAchievements(campaignAdvance.profile, baseClaimedAchievements);

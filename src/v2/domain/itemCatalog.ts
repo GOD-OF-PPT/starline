@@ -208,8 +208,19 @@ export function collectVisibleV2DefIdsForRun(run: V2RunState): readonly string[]
   }
 
   if (run.pendingReward) {
-    seen.add(run.pendingReward.equipmentOption.definitionId);
-    seen.add(run.pendingReward.cargoOption.definitionId);
+    if (run.pendingReward.equipmentOptions && run.pendingReward.equipmentOptions.length > 0) {
+      for (const eq of run.pendingReward.equipmentOptions) {
+        seen.add(eq.definitionId);
+      }
+      if (run.pendingReward.bonusLootItems) {
+        for (const bonus of run.pendingReward.bonusLootItems) {
+          seen.add(bonus.definitionId);
+        }
+      }
+    } else {
+      seen.add(run.pendingReward.equipmentOption.definitionId);
+      seen.add(run.pendingReward.cargoOption.definitionId);
+    }
   }
 
   if (run.activeEngineerOffer && !run.activeEngineerOffer.used) {

@@ -10,7 +10,7 @@ import {
   freezeRunBonusObjectiveForSettlement,
   grantContractObjectiveItemsForNode,
 } from './contracts';
-import { addV2ItemToStaging } from './inventoryV2';
+import { addV2ItemToStaging, detectV2BaySpatialConflict } from './inventoryV2';
 import { getAnyV2ItemDef } from './itemCatalog';
 import { withV2Stream } from './rngStreams';
 import type {
@@ -87,7 +87,15 @@ export function resolvePostEncounterPhase(run: V2RunState): V2RunState {
   }
 
   if (!shouldAutoSkipArrange(run)) {
-    return { ...run, lockedEnemyId: null, phase: 'ARRANGE' };
+    const conflictCheck = detectV2BaySpatialConflict(run.bay);
+    const nextConflictCount =
+      (run.spatialConflictCount ?? 0) + (conflictCheck.hasConflict ? 1 : 0);
+    return {
+      ...run,
+      spatialConflictCount: nextConflictCount,
+      lockedEnemyId: null,
+      phase: 'ARRANGE',
+    };
   }
 
   const nextDiscardedCount =
@@ -104,6 +112,8 @@ export function resolvePostEncounterPhase(run: V2RunState): V2RunState {
         bay: cleanBay,
         discardedCountThisRun: nextDiscardedCount,
         lockedEnemyId: null,
+        emergencyTowUsed: false,
+        returnMode: 'beacon_free',
         phase: 'SETTLEMENT',
         settlementReason: 'safe_return',
       },

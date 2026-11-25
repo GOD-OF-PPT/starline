@@ -14,7 +14,11 @@ import {
   evaluateRunBonusObjective,
   isContractReadyForDelivery,
 } from '../../domain/contracts';
-import { canUseV3GadgetInRun, getReachableNextNodeIds } from '../../domain/encounter';
+import {
+  canUseV3GadgetInRun,
+  getReachableNextNodeIds,
+  getV2SafeReturnStatus,
+} from '../../domain/encounter';
 import { getAnyV2ItemDef } from '../../domain/itemCatalog';
 import {
   classifyV2CombatThreat,
@@ -168,7 +172,7 @@ function describeNodeForecast(
   }
   if (n.type === 'merchant') {
     return {
-      brief: '补给交易：2 件设备 / +2油 / +10耐久',
+      brief: `补给交易：2 件设备 / +2油 / +${n.merchant?.repairAmount ?? 8}耐久`,
       cls: '',
       detail: '可出售拾获物换取信用点',
     };
@@ -622,7 +626,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
 
     const nextClass = `v2-dag-node ${meta.cls}${visited ? ' visited' : ''}${
       isCur ? ' current' : ''
-    }`;
+    }${n.isBeacon ? ' is-beacon' : ''}`;
     if (btn.className !== nextClass) {
       btn.className = nextClass;
     }
@@ -633,25 +637,27 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       btn.disabled = true;
     }
 
+    const beaconNote = n.isBeacon ? ' · 回收信标（免费返航）' : '';
     const intelTitle = fullMapReveal
       ? n.combat
-        ? `第${n.layer}层 ${meta.label} · ${getV2EncounterTemplate(n.combat.encounterKind).name}`
+        ? `第${n.layer}层 ${meta.label} · ${getV2EncounterTemplate(n.combat.encounterKind).name}${beaconNote}`
         : n.eventState
-        ? `第${n.layer}层 ${meta.label} · ${n.eventState.title}`
-        : `第${n.layer}层 ${meta.label}`
-      : `第${n.layer}层 ${meta.label}`;
+        ? `第${n.layer}层 ${meta.label} · ${n.eventState.title}${beaconNote}`
+        : `第${n.layer}层 ${meta.label}${beaconNote}`
+      : `第${n.layer}层 ${meta.label}${beaconNote}`;
     if (btn.title !== intelTitle) {
       btn.title = intelTitle;
     }
 
     const innerKey = `${n.type}:${compact ? 1 : 0}:${n.contractMarker ? 1 : 0}:${
       n.hasSupportGuarantee ? 1 : 0
-    }:${n.hasRelicSignal ? 1 : 0}:${run.isTutorial ? 1 : 0}`;
+    }:${n.hasRelicSignal ? 1 : 0}:${n.isBeacon ? 1 : 0}:${run.isTutorial ? 1 : 0}`;
     if (this.overviewNodeInnerKeys.get(n.nodeId) !== innerKey) {
       this.overviewNodeInnerKeys.set(n.nodeId, innerKey);
       btn.innerHTML = `
         <span class="v2-dag-icon">${svgIcon(meta.icon, compact ? 14 : 15)}</span>
         <span class="v2-dag-name">${meta.label}</span>
+        ${n.isBeacon ? `<span class="v3-dag-beacon" title="回收信标：可免费安全返航">标</span>` : ''}
         ${n.contractMarker ? `<span class="v2-dag-star" aria-label="委托目标">${svgIcon('star', 11)}</span>` : ''}
         ${n.hasSupportGuarantee ? `<span class="v2-dag-sup">配</span>` : ''}
         ${n.hasRelicSignal ? `<span class="v3-dag-relic" title="${run.isTutorial ? '稀有遗物信号' : '保底遗物信号'}">遗</span>` : ''}
@@ -672,11 +678,13 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       this.routeWaypoints.set(n.nodeId, wp);
     }
     const isSelected = effectiveSelectedId === n.nodeId;
-    const nextCls = `v3-route-waypoint${isSelected ? ' selected' : ''}`;
+    const nextCls = `v3-route-waypoint${isSelected ? ' selected' : ''}${
+      n.isBeacon ? ' is-beacon' : ''
+    }`;
     if (wp.className !== nextCls) {
       wp.className = nextCls;
     }
-    const label = `${n.lane === 0 ? 'A线' : 'B线'} · 下一跳`;
+    const label = `${n.lane === 0 ? 'A线' : 'B线'} · 下一跳${n.isBeacon ? ' · 信标' : ''}`;
     if (wp.textContent !== label) {
       wp.textContent = label;
     }
@@ -948,13 +956,40 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       !isContractReadyForDelivery(run, 'safe_return');
 
     if (this.safeReturnBtn) {
+      const returnStatus = getV2SafeReturnStatus(run);
+      const towPct = Math.round(returnStatus.towPenaltyRate * 100);
       this.safeReturnBtn.disabled = readOnly || hasStagedItems;
-      this.safeReturnBtn.title = hasStagedItems
-        ? `请先处理暂存区 ${run.bay.staging.length} 件物品再返航`
-        : '免费呼叫回收信标安全返航';
-      const nextSafeLabel = hasStagedItems ? '免费安全返航（需清空暂存区）' : '免费安全返航';
-      if (this.safeReturnLabelEl && this.safeReturnLabelEl.textContent !== nextSafeLabel) {
-        this.safeReturnLabelEl.textContent = nextSafeLabel;
+      this.safeReturnBtn.dataset.returnMode = returnStatus.mode;
+
+      if (returnStatus.isFreeBeacon) {
+        const freeCls = 'btn btn-secondary';
+        if (this.safeReturnBtn.className !== freeCls) this.safeReturnBtn.className = freeCls;
+        this.safeReturnBtn.title = hasStagedItems
+          ? `请先处理暂存区 ${run.bay.staging.length} 件物品再返航`
+          : '当前位于回收信标 · 免费安全返航（保留全额货值与深层升值）';
+        const nextSafeLabel = hasStagedItems ? '免费安全返航（需清空暂存区）' : '免费安全返航';
+        if (this.safeReturnLabelEl && this.safeReturnLabelEl.textContent !== nextSafeLabel) {
+          this.safeReturnLabelEl.textContent = nextSafeLabel;
+        }
+      } else {
+        const towCls = returnStatus.isStranded
+          ? 'btn btn-danger v3-btn-emergency-tow is-stranded'
+          : 'btn btn-secondary v3-btn-emergency-tow';
+        if (this.safeReturnBtn.className !== towCls) this.safeReturnBtn.className = towCls;
+        const beaconHint = returnStatus.nextBeaconLayer
+          ? ` · 下一回收信标：第 ${returnStatus.nextBeaconLayer} 层`
+          : '';
+        this.safeReturnBtn.title = hasStagedItems
+          ? `请先处理暂存区 ${run.bay.staging.length} 件物品再返航`
+          : `非信标节点仅支持紧急拖航（扣除 ${towPct}% 拖航费，无深潜升值与额外加赏，保留自有装备）${beaconHint}`;
+        const nextTowLabel = hasStagedItems
+          ? '紧急拖航返航（需清空暂存区）'
+          : returnStatus.isStranded
+          ? `燃料耗尽 · 紧急拖航返航（-${towPct}% 费用）`
+          : `紧急拖航返航（非信标 · -${towPct}% 费用）`;
+        if (this.safeReturnLabelEl && this.safeReturnLabelEl.textContent !== nextTowLabel) {
+          this.safeReturnLabelEl.textContent = nextTowLabel;
+        }
       }
     }
     if (this.footerEl && this.abortBtn) {
@@ -1110,13 +1145,14 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
       }
 
       const nextCardClass = `v3-map-dest-card ${rm.cls} reachable${active ? ' selected' : ''}${
-        canActuallyJump ? '' : ' is-blocked'
-      }`;
+        rn.isBeacon ? ' is-beacon-node' : ''
+      }${canActuallyJump ? '' : ' is-blocked'}`;
       if (refs.cardEl.className !== nextCardClass) {
         refs.cardEl.className = nextCardClass;
       }
       refs.cardEl.dataset.reachable = 'true';
       refs.cardEl.dataset.canJump = canActuallyJump ? 'true' : 'false';
+      refs.cardEl.dataset.isBeacon = rn.isBeacon ? 'true' : 'false';
       if (rn.combat && fc.previewFinalHp !== undefined) {
         refs.cardEl.dataset.previewFinalHp = String(fc.previewFinalHp);
       } else {
@@ -1136,6 +1172,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
         rn.lane,
         fuelInfo.totalCost,
         canJump ? 1 : 0,
+        rn.isBeacon ? 1 : 0,
         rn.contractMarker ? 1 : 0,
         rn.hasRelicSignal ? 1 : 0,
         run.isTutorial ? 1 : 0,
@@ -1158,6 +1195,12 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
 
       if (refs.bodyKey !== bodyKey) {
         refs.bodyKey = bodyKey;
+        const beaconBadgeHtml = rn.isBeacon
+          ? `<span class="v3-badge-beacon" data-testid="beacon-badge-${rid}">${svgIcon(
+              'beacon',
+              10
+            )} 回收信标 · 免费返航</span>`
+          : '';
         const relicBadgeHtml = rn.hasRelicSignal
           ? `<span class="v3-badge-relic">${svgIcon('museum', 10)} ${
               fc.relicRewardName
@@ -1191,6 +1234,7 @@ export class MapPhaseView implements PhaseView<MapViewProps, MapViewActions> {
             <span class="v2-fuel-tag ${canJump ? '' : 'no-fuel'}" title="本次跃迁消耗 ${fuelInfo.totalCost} 燃料">${svgIcon('fuel', 11)} ${fuelInfo.totalCost} 油</span>
           </div>
           <div class="v2-mc-tags v3-map-intent-tags">
+            ${beaconBadgeHtml}
             ${rn.contractMarker ? `<span class="v2-badge-contract">${svgIcon('star', 10)} 委托目标</span>` : ''}
             ${relicBadgeHtml}
             ${threatBadgeHtml}

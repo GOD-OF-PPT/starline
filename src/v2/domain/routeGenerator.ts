@@ -286,6 +286,30 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
   const supportNodeId = guaranteedPathNodeIds[planDraw.value.supportLayer - 1];
   streams = planDraw.nextStreams;
 
+  // 2b. D04 (D2 = b): Deterministically designate Recovery Beacons on Layer 3 and Layer 5
+  // (or Layer 3 for 4-5 layers, maxLayers-1 for 2-3 layers).
+  const beaconLayers: readonly number[] =
+    maxLayers >= 6 ? [3, 5] : maxLayers >= 4 ? [3] : maxLayers >= 2 ? [maxLayers - 1] : [];
+  const beaconNodeIds = new Set<string>();
+  const beaconNodeByLayer = new Map<number, string>();
+  for (const bLayer of beaconLayers) {
+    const gId = guaranteedPathNodeIds[bLayer - 1];
+    const gLane = backboneLanes[bLayer - 1];
+    const oId = makeNodeId(bLayer, (1 - gLane) as 0 | 1);
+    let chosenBeacon = gId;
+    if (!contractMarkers.has(gId)) {
+      const gType = nodeTypes[gId];
+      const oType = nodeTypes[oId];
+      const gNonCombat = gType !== 'combat' && gType !== 'elite' && gType !== 'boss';
+      const oNonCombat = oType !== 'combat' && oType !== 'elite' && oType !== 'boss';
+      if (!gNonCombat && oNonCombat) {
+        chosenBeacon = oId;
+      }
+    }
+    beaconNodeIds.add(chosenBeacon);
+    beaconNodeByLayer.set(bLayer, chosenBeacon);
+  }
+
   // 3. Build directed edges between layers (always forward, prefer 2 edges, guarantee full reachability)
   const edges: Record<string, string[]> = {};
   const edgeDraw = withV2Stream(streams, 'map', (rng) => {
@@ -335,6 +359,14 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
           setA.add(bossNodeId);
           setB.add(bossNodeId);
         }
+      }
+
+      // D04: Mandatory dual incoming edges into every Recovery Beacon so random cross-edges
+      // can NEVER lock a player out of Layer 3 or Layer 5 Beacons from either lane!
+      const nextBeaconId = beaconNodeByLayer.get(layer + 1);
+      if (nextBeaconId) {
+        setA.add(nextBeaconId);
+        setB.add(nextBeaconId);
       }
 
       out[idA] = Array.from(setA).sort();
@@ -548,8 +580,8 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
             fuelPrice: 12,
             fuelAmount: 2,
             fuelBought: false,
-            repairPrice: 15,
-            repairAmount: 10,
+            repairPrice: 18,
+            repairAmount: 8,
             repairBought: false,
           };
           return payload;
@@ -590,6 +622,7 @@ export function generateV2StarGraph(params: GenerateV2GraphParams): GenerateV2Gr
         ...(isRelicSignalNode
           ? { hasRelicSignal: true, relicSignalDefId: guaranteedRelicDefId! }
           : {}),
+        isBeacon: beaconNodeIds.has(nodeId),
         ...(eventId ? { eventId } : {}),
         combat,
         wreck,
@@ -761,5 +794,80 @@ export function verifyV2GraphInvariants(
     }
   }
 
+  // 6. D04 Beacon invariant: Layer 3 (& Layer 5 for 6-layer graphs) each have >=1 Beacon reachable from BOTH lanes
+  const expectedBeaconLayers =
+    graph.maxLayers >= 6 ? [3, 5] : graph.maxLayers >= 4 ? [3] : [];
+  for (const bLayer of expectedBeaconLayers) {
+    const nA = graph.nodes[makeNodeId(bLayer, 0)];
+    const nB = graph.nodes[makeNodeId(bLayer, 1)];
+    const beacons = [nA, nB].filter((n): n is V2MapNode => Boolean(n?.isBeacon));
+    if (beacons.length === 0) {
+      violations.push(`Layer ${bLayer} missing required Recovery Beacon node`);
+    } else {
+      const prevA = graph.nodes[makeNodeId(bLayer - 1, 0)];
+      const prevB = graph.nodes[makeNodeId(bLayer - 1, 1)];
+      const beaconIds = new Set(beacons.map((b) => b.nodeId));
+      if (prevA && !prevA.nextNodeIds.some((nid) => beaconIds.has(nid))) {
+        violations.push(`${prevA.nodeId} cannot reach Layer ${bLayer} Recovery Beacon`);
+      }
+      if (prevB && !prevB.nextNodeIds.some((nid) => beaconIds.has(nid))) {
+        violations.push(`${prevB.nodeId} cannot reach Layer ${bLayer} Recovery Beacon`);
+      }
+    }
+  }
+
   return { ok: violations.length === 0, violations };
 }
+
+/**
+ * Deterministically backfills `isBeacon` flags on migrated '3.0.0' / legacy V2 star graphs
+ * whose nodes predate D04 (i.e. zero nodes define `isBeacon`).
+ */
+export function backfillBeaconsForLegacyGraph(
+  graph: V2StarGraph,
+  isTutorial = false
+): V2StarGraph {
+  const allNodes = Object.values(graph.nodes);
+  if (allNodes.some((n) => n.isBeacon !== undefined)) {
+    return graph;
+  }
+
+  const beaconIds = new Set<string>();
+  if (isTutorial) {
+    if (graph.nodes['L4A']) beaconIds.add('L4A');
+    else if (graph.guaranteedPathNodeIds.length > 0) {
+      beaconIds.add(graph.guaranteedPathNodeIds[graph.guaranteedPathNodeIds.length - 1]);
+    }
+  } else {
+    const targetLayers =
+      graph.maxLayers >= 6
+        ? [3, 5]
+        : graph.maxLayers >= 4
+        ? [3]
+        : graph.maxLayers >= 2
+        ? [graph.maxLayers - 1]
+        : [];
+    for (const layer of targetLayers) {
+      const gId = graph.guaranteedPathNodeIds[layer - 1];
+      if (gId && graph.nodes[gId]) {
+        beaconIds.add(gId);
+      } else {
+        const fallback = allNodes.find((n) => n.layer === layer);
+        if (fallback) beaconIds.add(fallback.nodeId);
+      }
+    }
+  }
+
+  const nextNodes: Record<string, V2MapNode> = {};
+  for (const [nid, node] of Object.entries(graph.nodes)) {
+    nextNodes[nid] = {
+      ...node,
+      isBeacon: beaconIds.has(nid),
+    };
+  }
+  return {
+    ...graph,
+    nodes: nextNodes,
+  };
+}
+
