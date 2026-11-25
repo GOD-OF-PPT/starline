@@ -385,10 +385,9 @@ export class StarlineAppDriver {
   }
 
   async jumpToNode(nodeId: string): Promise<void> {
-    // S04: Unified destination cards expose an inline 1-click `[data-jump-node="<id>"]` button
+    // S04: Unified destination cards expose an inline 1-click `[data-jump-node="<id>"]` button;
+    // MapView's click handler transitions phase synchronously before click() resolves.
     const directJumpBtn = this.page.locator(`[data-jump-node="${nodeId}"]`).first();
-    await expect(directJumpBtn).toBeVisible();
-    await expect(directJumpBtn).toBeEnabled();
     await directJumpBtn.click();
   }
 
@@ -402,9 +401,14 @@ export class StarlineAppDriver {
 
   async pauseAutoCombat(): Promise<void> {
     const btn = this.byTestId(TEST_IDS.BTN_PAUSE_AUTO_COMBAT);
-    await expect(btn).toBeVisible();
-    if ((await btn.getAttribute('aria-pressed')) !== 'true') {
-      await expect(btn).toBeEnabled();
+    // Avoid redundant pre-click visibility/enabled CDP round-trips so S05's 1500ms
+    // countdown cannot expire mid-pause under SwiftShader WebGL.
+    const alreadyPaused = await btn.evaluate(
+      (el) => el.getAttribute('aria-pressed') === 'true',
+      undefined,
+      { timeout: 30_000 },
+    );
+    if (!alreadyPaused) {
       await btn.click();
     }
     await expect(btn).toHaveAttribute('aria-pressed', 'true');
@@ -421,14 +425,38 @@ export class StarlineAppDriver {
     return drawer;
   }
 
+  private static isPostCombatState(s: StarlineInspectSnapshot): boolean {
+    return (
+      s.screen === 'ending' ||
+      (s.screen === 'run' && (s.phase === 'REWARD' || s.phase === 'SETTLEMENT'))
+    );
+  }
+
+  private static isCombatEncounterState(s: StarlineInspectSnapshot): boolean {
+    return (
+      s.screen === 'run' &&
+      s.phase === 'ENCOUNTER' &&
+      s.activeRun !== null &&
+      s.activeRun.wreckStability === null
+    );
+  }
+
   async startCombat(): Promise<void> {
     const hasCombatEngaged = (s: StarlineInspectSnapshot): boolean =>
-      s.screen === 'ending' ||
-      s.phase !== 'ENCOUNTER' ||
-      s.activeRun?.combatRound !== null ||
-      s.activeRun?.combatWaitingDecision === true;
+      StarlineAppDriver.isPostCombatState(s) ||
+      (StarlineAppDriver.isCombatEncounterState(s) &&
+        (typeof s.activeRun?.combatRound === 'number' ||
+          s.activeRun?.combatWaitingDecision === true));
 
     const initial = await this.inspect();
+    if (
+      !StarlineAppDriver.isPostCombatState(initial) &&
+      !StarlineAppDriver.isCombatEncounterState(initial)
+    ) {
+      throw new Error(
+        `startCombat() called outside combat encounter (screen=${initial.screen}, phase=${String(initial.phase)}, wreckStability=${String(initial.activeRun?.wreckStability ?? null)})`,
+      );
+    }
     if (hasCombatEngaged(initial)) {
       return;
     }
@@ -442,6 +470,9 @@ export class StarlineAppDriver {
           if (hasCombatEngaged(snap)) {
             pollBox.state = 'engaged';
             return true;
+          }
+          if (!StarlineAppDriver.isCombatEncounterState(snap)) {
+            return false;
           }
           if ((await btn.isVisible()) && (await btn.isEnabled())) {
             pollBox.state = 'pre';
@@ -507,11 +538,18 @@ export class StarlineAppDriver {
 
   async skipCombat(): Promise<void> {
     const isCombatDoneOrPaused = (s: StarlineInspectSnapshot): boolean =>
-      s.screen === 'ending' ||
-      s.phase !== 'ENCOUNTER' ||
-      s.activeRun?.combatWaitingDecision === true;
+      StarlineAppDriver.isPostCombatState(s) ||
+      (StarlineAppDriver.isCombatEncounterState(s) && s.activeRun?.combatWaitingDecision === true);
 
     const initial = await this.inspect();
+    if (
+      !StarlineAppDriver.isPostCombatState(initial) &&
+      !StarlineAppDriver.isCombatEncounterState(initial)
+    ) {
+      throw new Error(
+        `skipCombat() called outside combat encounter (screen=${initial.screen}, phase=${String(initial.phase)}, wreckStability=${String(initial.activeRun?.wreckStability ?? null)})`,
+      );
+    }
     if (isCombatDoneOrPaused(initial)) {
       return;
     }
@@ -525,6 +563,9 @@ export class StarlineAppDriver {
           if (isCombatDoneOrPaused(snap)) {
             pollBox.state = 'done';
             return true;
+          }
+          if (!StarlineAppDriver.isCombatEncounterState(snap)) {
+            return false;
           }
           if ((await btn.isVisible()) && (await btn.isEnabled())) {
             pollBox.state = 'skip';
@@ -568,37 +609,68 @@ export class StarlineAppDriver {
         : `[data-testid="${TEST_IDS.wreckCut(spot)}"]`;
     const btn = this.page.locator(cutSelector).first();
 
+    // Only select a non-direct-cut left-panel card if needed (never click S08 direct-cut stage pins here)
     if (!(await btn.isVisible())) {
-      const spotTab = this.page
-        .locator(`[data-testid="wreck-spot-${hotspotKey}"], [data-wreck-spot="${hotspotKey}"]`)
-        .first();
-      if (await spotTab.isVisible()) {
-        await spotTab.click();
+      const card = this.page.locator(`[data-wreck-card="${hotspotKey}"]`).first();
+      if (await card.isVisible()) {
+        await card.click();
       }
     }
 
     await expect(btn).toBeVisible();
     await expect(btn).toBeEnabled();
+    const beforeStability = (await this.inspect()).activeRun?.wreckStability ?? null;
     await btn.click();
 
     if (options?.waitForCommit !== false) {
-      const extractBtn = this.byTestId(TEST_IDS.BTN_WRECK_EXTRACT);
-      const skipPanelBtn = this.byTestId(TEST_IDS.BTN_SKIP_WRECK_CUT_PANEL);
       await expect
         .poll(
-          async () => {
-            const snap = await this.inspect();
-            // Ambush combat or phase exit completes the cut immediately
-            if (snap.phase !== 'ENCOUNTER' || snap.activeRun?.wreckStability === null) {
-              return true;
-            }
-            const skipVisible = await skipPanelBtn.isVisible().catch(() => false);
-            if (skipVisible) return false;
-            const cutDisabled = await btn.isDisabled().catch(() => true);
-            const extractEnabled = await extractBtn.isEnabled().catch(() => false);
-            return cutDisabled && extractEnabled;
-          },
-          { timeout: 10_000, message: `Timed out waiting for S08 wreck cut commit on "${spot}"` },
+          async () =>
+            this.page.evaluate(
+              ({ sel, skipOverlayTid, skipPanelTid, extractTid, prevStability }) => {
+                const inspectFn = (
+                  window as unknown as { __STARLINE_INSPECT__?: () => StarlineInspectSnapshot }
+                ).__STARLINE_INSPECT__;
+                const snap = inspectFn ? inspectFn() : null;
+                if (!snap) return false;
+                // Ambush combat or phase exit completes the cut immediately
+                if (
+                  snap.screen !== 'run' ||
+                  snap.phase !== 'ENCOUNTER' ||
+                  snap.activeRun === null ||
+                  snap.activeRun.wreckStability === null
+                ) {
+                  return true;
+                }
+                const isShown = (el: Element | null): boolean => {
+                  if (!el) return false;
+                  const rect = el.getBoundingClientRect();
+                  return rect.width > 0 && rect.height > 0;
+                };
+                const skipOverlay = document.querySelector(`[data-testid="${skipOverlayTid}"]`);
+                const skipPanel = document.querySelector(`[data-testid="${skipPanelTid}"]`);
+                if (isShown(skipOverlay) || isShown(skipPanel)) {
+                  return false;
+                }
+                const cutEl = document.querySelector(sel) as HTMLButtonElement | null;
+                const extractEl = document.querySelector(
+                  `[data-testid="${extractTid}"]`,
+                ) as HTMLButtonElement | null;
+                const stabilityChanged =
+                  prevStability !== null && snap.activeRun.wreckStability !== prevStability;
+                const cutDisabled = Boolean(cutEl && cutEl.disabled === true);
+                const extractEnabled = Boolean(extractEl && extractEl.disabled === false);
+                return extractEnabled && (stabilityChanged || cutDisabled);
+              },
+              {
+                sel: cutSelector,
+                skipOverlayTid: TEST_IDS.BTN_SKIP_WRECK_CUT,
+                skipPanelTid: TEST_IDS.BTN_SKIP_WRECK_CUT_PANEL,
+                extractTid: TEST_IDS.BTN_WRECK_EXTRACT,
+                prevStability: beforeStability,
+              },
+            ),
+          { timeout: 15_000, message: `Timed out waiting for S08 wreck cut commit on "${spot}"` },
         )
         .toBe(true);
     }

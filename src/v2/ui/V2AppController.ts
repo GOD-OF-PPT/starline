@@ -593,6 +593,15 @@ export class V2AppController {
 
     this.syncAll();
 
+    // Contract #9 + S05: When migrating a Rules 3.0.0 save whose in-flight combat was rewound
+    // to pre-combat, pause auto-engage on boot so the player can review their rewound state
+    // (and Rules 3.1.0 D01/D02 controls) instead of being auto-engaged before first paint.
+    if (loaded.status === 'loaded' && loaded.migratedFromV3_0) {
+      if (this.preCombatAutoEngage.pause('manual')) {
+        this.refreshPreCombatAutoEngageUi();
+      }
+    }
+
     if (
       this.titleEntered &&
       this.shouldOfferMigrationPrompt() &&

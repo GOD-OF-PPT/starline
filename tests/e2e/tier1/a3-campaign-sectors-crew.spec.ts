@@ -105,8 +105,8 @@ test.describe('Tier 1 · A3: Mainline 4-Act Campaign, 3 Star Sectors & Named Cre
     await expect(combatJumpBtn).toBeVisible();
     await combatJumpBtn.click();
 
-    await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
     await app.pauseAutoCombat();
+    await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
     await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toContainText(/引力潮汐|引力/);
 
     monitor.assertClean(await app.inspect());

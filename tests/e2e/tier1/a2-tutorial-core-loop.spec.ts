@@ -56,6 +56,7 @@ test.describe('Tier 1 · A2: Onboarding, Tutorial & Core Expedition Loop', () =>
     expect(mapSnap.activeRun?.fuel).toBe(9);
     const savedAtMap = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
     expect(savedAtMap?.activeRun?.graph.maxLayers).toBe(4);
+    expect(savedAtMap?.activeRun?.graph.nodes.L1A?.combat?.units[0]?.maxHp).toBe(14);
     expect(savedAtMap?.activeRun?.graph.nodes.L4A?.isBeacon).toBe(true);
     expect(savedAtMap?.activeRun?.graph.nodes.L4B?.combat?.encounterKind).toBe('tutorial_raider');
 

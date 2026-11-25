@@ -272,13 +272,15 @@ test.describe('Tier 1 · A6: Sector Event Deck, Merchants, 3 Factions & Expanded
     await app.boot({ seed: 6008 });
 
     await expect(app.byTestId(TEST_IDS.REWARD_SCREEN)).toBeVisible();
+    const synStates: (string | null)[] = [];
     for (let i = 0; i < 3; i += 1) {
       await expect(app.byTestId(TEST_IDS.rewardChoice(i))).toBeVisible();
       const badge = app.byTestId(TEST_IDS.rewardSynergyBadge(i));
       await expect(badge).toBeVisible();
-      const synState = await badge.getAttribute('data-synergy-state');
-      expect(['matched', 'capped', 'unmatched']).toContain(synState);
+      synStates.push(await badge.getAttribute('data-synergy-state'));
     }
+    // Starter combat bay (laser + battery + shield) vs deterministic reward options [laser, battery, shield]
+    expect(synStates).toEqual(['capped', 'matched', 'unmatched']);
 
     const skipBtn = app.byTestId(TEST_IDS.BTN_REWARD_SKIP);
     await expect(skipBtn).toBeVisible();

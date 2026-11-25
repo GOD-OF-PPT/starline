@@ -345,20 +345,32 @@ test.describe('Tier 1 · A5: True Dismantling Loop — Multi-Cut Derelicts & Scr
     const armoryClamp = app.byTestId(TEST_IDS.wreckSpot('armory'));
     await expect(armoryClamp).toBeVisible();
     await expect(armoryClamp).toHaveAttribute('data-can-direct-cut', 'true');
+    const stabilityBeforeCut1 = (await app.inspect()).activeRun?.wreckStability ?? null;
+    expect(stabilityBeforeCut1).toBe(55);
     await armoryClamp.click();
 
     const skipOverlayBtn = app.byTestId(TEST_IDS.BTN_SKIP_WRECK_CUT);
-    await expect(skipOverlayBtn).toBeVisible();
-    await skipOverlayBtn.click();
+    try {
+      await skipOverlayBtn.click({ timeout: 2_000 });
+    } catch (err) {
+      // Only tolerate skip button detaching if the 600ms S08 cut VFX already completed and committed stability 55 -> 15
+      const snapAfterSkipErr = await app.inspect();
+      if (snapAfterSkipErr.activeRun?.wreckStability !== 15) {
+        throw err;
+      }
+    }
 
     const afterCut1 = await app.waitForInspect(
       (s) => s.activeRun?.wreckStability === 15,
       10_000,
-      'first safe clamp cut committed via skip',
+      'first safe clamp cut committed',
     );
+    expect(afterCut1.activeRun?.wreckStability).toBeLessThan(stabilityBeforeCut1!);
     expect(afterCut1.activeRun?.hp).toBe(26);
 
     const savedAfterCut1 = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(savedAfterCut1?.activeRun?.activeWreck?.cutsMade).toBe(1);
+    expect(savedAfterCut1?.activeRun?.activeWreck?.hotspots.find((h) => h.spotId === 'armory')?.cut).toBe(true);
     expect(savedAfterCut1?.activeRun?.bay.staging.some((s) => s.item.instanceId === 'd05_armory_eq')).toBe(true);
     expect(savedAfterCut1?.activeRun?.activeWreck?.wreckLootInstanceIds).toContain('d05_armory_eq');
     const placedBeforeCollapse = savedAfterCut1?.activeRun?.bay.placed.length ?? 0;

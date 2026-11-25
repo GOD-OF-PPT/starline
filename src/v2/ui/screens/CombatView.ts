@@ -109,17 +109,15 @@ export class PreCombatAutoEngageController {
   private readonly now: () => number;
   private readonly setTimeoutFn: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   private readonly clearTimeoutFn: (handle: ReturnType<typeof setTimeout>) => void;
-  private readonly setIntervalFn: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
-  private readonly clearIntervalFn: (handle: ReturnType<typeof setInterval>) => void;
 
   private status: PreCombatAutoEngageStatus = 'idle';
   private nodeKey: string | null = null;
   private engagedNodeKey: string | null = null;
   private pauseReason: PreCombatPauseReason | null = null;
-  private startedAtMs = 0;
+  private lastTickAtMs = 0;
+  private pendingTickDelayMs = 0;
   private remainingMs: number;
   private timeoutHandle: ReturnType<typeof setTimeout> | null = null;
-  private intervalHandle: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: PreCombatAutoEngageOptions) {
     this.durationMs = Math.max(50, Math.floor(options.durationMs ?? PRE_COMBAT_AUTO_ENGAGE_MS));
@@ -131,8 +129,6 @@ export class PreCombatAutoEngageController {
     this.now = options.now ?? (() => Date.now());
     this.setTimeoutFn = options.setTimeoutFn ?? ((fn, ms) => globalThis.setTimeout(fn, ms));
     this.clearTimeoutFn = options.clearTimeoutFn ?? ((h) => globalThis.clearTimeout(h));
-    this.setIntervalFn = options.setIntervalFn ?? ((fn, ms) => globalThis.setInterval(fn, ms));
-    this.clearIntervalFn = options.clearIntervalFn ?? ((h) => globalThis.clearInterval(h));
   }
 
   getSnapshot(): PreCombatAutoEngageSnapshot {
@@ -150,10 +146,7 @@ export class PreCombatAutoEngageController {
       this.clearTimeoutFn(this.timeoutHandle);
       this.timeoutHandle = null;
     }
-    if (this.intervalHandle !== null) {
-      this.clearIntervalFn(this.intervalHandle);
-      this.intervalHandle = null;
-    }
+    this.pendingTickDelayMs = 0;
   }
 
   private resolveBlockReason(ctx: {
@@ -166,17 +159,29 @@ export class PreCombatAutoEngageController {
     return 'readonly';
   }
 
+  private scheduleNextTick(): void {
+    this.clearTimers();
+    if (this.status !== 'countdown' || !this.nodeKey || this.remainingMs <= 0) {
+      return;
+    }
+    const delay = Math.max(1, Math.min(this.tickMs, this.remainingMs));
+    this.pendingTickDelayMs = delay;
+    this.lastTickAtMs = this.now();
+    this.timeoutHandle = this.setTimeoutFn(() => this.handleTick(), delay);
+  }
+
   private startCountdown(): void {
     this.clearTimers();
     this.status = 'countdown';
     this.pauseReason = null;
-    this.startedAtMs = this.now();
     this.remainingMs = this.durationMs;
-    this.timeoutHandle = this.setTimeoutFn(() => this.handleTimerDone(), this.durationMs);
-    this.intervalHandle = this.setIntervalFn(() => this.handleTick(), this.tickMs);
+    this.scheduleNextTick();
   }
 
   private handleTick(): void {
+    const scheduledDelay = this.pendingTickDelayMs || this.tickMs;
+    this.timeoutHandle = null;
+    this.pendingTickDelayMs = 0;
     if (this.status !== 'countdown' || !this.nodeKey) {
       this.clearTimers();
       return;
@@ -193,8 +198,19 @@ export class PreCombatAutoEngageController {
         return;
       }
     }
-    this.remainingMs = Math.max(0, this.durationMs - (this.now() - this.startedAtMs));
+    const nowMs = this.now();
+    const rawDt = Math.max(0, nowMs - this.lastTickAtMs);
+    // Clamp per-tick delta so a single main-thread WebGL/scene-init stall never
+    // consumes the entire 1.5s pre-combat reaction window before the screen paints.
+    const clampedDt = Math.min(rawDt, scheduledDelay + 50);
+    this.remainingMs = Math.max(0, this.remainingMs - clampedDt);
+    this.lastTickAtMs = nowMs;
+    if (this.remainingMs <= 0) {
+      this.handleTimerDone();
+      return;
+    }
     this.onChange?.(this.getSnapshot());
+    this.scheduleNextTick();
   }
 
   private handleTimerDone(): void {
@@ -259,8 +275,6 @@ export class PreCombatAutoEngageController {
         this.clearTimers();
         this.status = 'paused';
         this.pauseReason = this.resolveBlockReason(ctx);
-      } else {
-        this.remainingMs = Math.max(0, this.durationMs - (this.now() - this.startedAtMs));
       }
     }
     return this.getSnapshot();

@@ -238,6 +238,8 @@ test.describe('Tier 1 · A1: Boot, Persistence & Mode Coexistence', () => {
     await app.boot({ seed: 1006 });
 
     await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
+    // Contract #9 + S05: Migration boot pauses auto-engage so rewound pre-combat state is never auto-mutated
+    await expect(app.byTestId(TEST_IDS.BTN_PAUSE_AUTO_COMBAT)).toHaveAttribute('aria-pressed', 'true');
 
     const migrated = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
     expect(migrated).not.toBeNull();
@@ -246,12 +248,12 @@ test.describe('Tier 1 · A1: Boot, Persistence & Mode Coexistence', () => {
     expect(migrated?.profile.credits).toBe(185);
     expect(migrated?.profile.salvageParts).toBe(35);
 
-    // In-flight 3.0.0 activeCombat rewound safely back to L1B with startingHp restored & legacy claim stripped
+    // In-flight 3.0.0 activeCombat rewound safely back to pre-combat L1B with startingHp restored & legacy claim stripped
     expect(migrated?.activeRun).not.toBeNull();
     expect(migrated?.activeRun?.rulesVersion).toBe(V3_RULES_VERSION);
     expect(migrated?.activeRun?.phase).toBe('ENCOUNTER');
     expect(migrated?.activeRun?.currentNodeId).toBe('L1B');
-    expect(migrated?.activeRun?.activeCombat?.simulation?.resultId).not.toBe('sim_v3_0_legacy_1');
+    expect(migrated?.activeRun?.activeCombat).toBeNull();
     expect(migrated?.activeRun?.hp).toBe(28);
     expect(migrated?.activeRun?.wallet).toBe(33);
     expect(migrated?.activeRun?.fuel).toBe(7);
@@ -270,8 +272,9 @@ test.describe('Tier 1 · A1: Boot, Persistence & Mode Coexistence', () => {
     expect(backupParsed.rulesVersion).toBe(V3_0_RULES_VERSION);
     expect(backupParsed.activeRun?.activeCombat?.simulation?.resultId).toBe('sim_v3_0_legacy_1');
 
-    // Reload idempotency: write-once backup is never overwritten and migrated state stays intact
+    // Reload idempotency: pause S05 immediately on reloaded 3.1.0 pre-combat and confirm write-once backup + activeCombat === null survive intact
     await page.reload({ waitUntil: 'domcontentloaded' });
+    await app.pauseAutoCombat();
     await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
 
     const backupRawAfterReload = await app.readStorageRaw(STORAGE_KEYS.V3_0_BACKUP);
@@ -279,10 +282,11 @@ test.describe('Tier 1 · A1: Boot, Persistence & Mode Coexistence', () => {
     const afterReload = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
     expect(afterReload?.rulesVersion).toBe(V3_RULES_VERSION);
     expect(afterReload?.activeRun?.hp).toBe(28);
-    expect(afterReload?.activeRun?.activeCombat?.simulation?.resultId).not.toBe('sim_v3_0_legacy_1');
+    expect(afterReload?.activeRun?.activeCombat).toBeNull();
 
     const snap = await app.inspect();
     expect(snap.activeRun?.hp).toBe(28);
+    expect(snap.activeRun?.combatRound).toBeNull();
 
     monitor.assertClean(snap);
   });

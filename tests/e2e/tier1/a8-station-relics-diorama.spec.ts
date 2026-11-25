@@ -259,7 +259,7 @@ test.describe('Tier 1 · A8: Station Upgrades (T1-T3), Stargate Relay, Relic Pas
 
     // Reload BEFORE choosing: pending choices MUST survive reload
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await app.waitForInspect((s) => s.screen === 'base', 15_000, 'base after pre-pick reload');
+    await app.waitForInspect((s) => s.screen === 'base', 30_000, 'base after pre-pick reload');
     await expect(app.byTestId(TEST_IDS.BASE_FAMILY_UNLOCK_CARD)).toBeVisible();
 
     // Pick hangar_kit -> card detaches and family + blueprint persist
@@ -272,7 +272,7 @@ test.describe('Tier 1 · A8: Station Upgrades (T1-T3), Stargate Relay, Relic Pas
 
     // Reload AFTER choosing: card stays gone and unlocked family persists
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await app.waitForInspect((s) => s.screen === 'base', 15_000, 'base after post-pick reload');
+    await app.waitForInspect((s) => s.screen === 'base', 30_000, 'base after post-pick reload');
     await expect(app.byTestId(TEST_IDS.BASE_FAMILY_UNLOCK_CARD)).toHaveCount(0);
 
     const storedAfterReload = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);

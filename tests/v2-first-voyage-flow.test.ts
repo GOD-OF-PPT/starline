@@ -517,7 +517,16 @@ import {
   summarizeV2DiscardedSacrifices,
   summarizeV2MissionSacrificeOptions,
 } from '../src/v2/domain/tacticalDelta';
-import { V2_TAB_LOCK_KEY, type V2MapNode, type V2RunState, type V2SaveData } from '../src/v2/domain/types';
+import {
+  V2_RULES_VERSION,
+  V2_SAVE_KEY,
+  V2_TAB_LOCK_KEY,
+  V3_0_BACKUP_KEY,
+  V3_0_RULES_VERSION,
+  type V2MapNode,
+  type V2RunState,
+  type V2SaveData,
+} from '../src/v2/domain/types';
 import { V2CombatScene } from '../src/v2/scenes/V2CombatScene';
 import { CargoGridV2Component } from '../src/v2/ui/CargoGridV2';
 import { ArrangePhaseView } from '../src/v2/ui/screens/ArrangeView';
@@ -2359,6 +2368,121 @@ describe('M1A First-Voyage Gameplay & Flow Suite (S01, S02, S04, S05, S10)', () 
       vi.advanceTimersByTime(5000);
       expect(startSpy).toHaveBeenCalledTimes(0);
       expect(showStageSpy).toHaveBeenCalledTimes(0);
+    });
+
+    it('pauses S05 auto-engage on Rules 3.0.0 -> 3.1.0 migration boot after rewinding in-flight combat while still allowing manual engage', async () => {
+      vi.useFakeTimers();
+      const rawTut = createV2TutorialRun('tut_s05_v30_mig');
+      const batId = rawTut.bay.staging[0].item.instanceId;
+      const wired = placeV2FromStaging(rawTut.bay, batId, 1, 0, 0);
+      const entered = selectV2MapNode({ ...rawTut, phase: 'MAP', bay: wired.bay }, 'L1A');
+      expect(entered.ok).toBe(true);
+      const started = combatV2.startV2CombatAtCurrentNode(entered.run, 'weakest');
+      expect(started.ok).toBe(true);
+
+      const fresh = createFreshV2SaveData();
+      const { discoveredSynergies: _omitSyn, ...legacyProfile } = fresh.profile;
+      const legacyV3_0Raw = JSON.stringify({
+        ...fresh,
+        rulesVersion: V3_0_RULES_VERSION,
+        profile: legacyProfile,
+        activeRun: {
+          ...started.run,
+          rulesVersion: V3_0_RULES_VERSION,
+          hp: 21,
+          activeCombat: {
+            ...started.run.activeCombat!,
+            startingHp: 28,
+          },
+        },
+      });
+      dom.window.localStorage.setItem(V2_SAVE_KEY, legacyV3_0Raw);
+      dom.window.sessionStorage.setItem('starline_v2_title_entered', '1');
+
+      const startSpy = vi.spyOn(combatV2, 'startV2CombatAtCurrentNode');
+      const mountEl = dom.document.createElement('div');
+      dom.document.body.appendChild(mountEl);
+      const controller = new V2AppController(mountEl as unknown as HTMLElement, {
+        onSwitchToV1: () => {},
+      });
+      controller.init();
+      await flushMicrotasks();
+
+      // Migration rewound activeCombat -> null, restored startingHp 28, persisted 3.1.0 + write-once backup, and paused S05
+      const pauseBtn = mountEl.querySelector('[data-testid="btn-pause-auto-combat"]')!;
+      const startBtn = mountEl.querySelector('[data-testid="btn-start-combat"]')!;
+      expect(pauseBtn).not.toBeNull();
+      expect(pauseBtn.getAttribute('aria-pressed')).toBe('true');
+      expect(pauseBtn.textContent).toContain('继续自动交火');
+      expect(startBtn.getAttribute('data-auto-engage-status')).toBe('paused');
+
+      vi.advanceTimersByTime(5000);
+      expect(startSpy).toHaveBeenCalledTimes(0);
+
+      const stored = JSON.parse(dom.window.localStorage.getItem(V2_SAVE_KEY)!) as V2SaveData;
+      expect(stored.rulesVersion).toBe(V2_RULES_VERSION);
+      expect(stored.activeRun?.activeCombat).toBeNull();
+      expect(stored.activeRun?.hp).toBe(28);
+      expect(dom.window.localStorage.getItem(V3_0_BACKUP_KEY)).toBe(legacyV3_0Raw);
+
+      // Manual click on start-combat still engages cleanly after migration pause
+      startBtn.click();
+      expect(startSpy).toHaveBeenCalledTimes(1);
+      controller.destroy();
+    });
+
+    it('clamps single-tick main-thread stalls in PreCombatAutoEngageController so WebGL init stalls never ambush players in 0 frames', () => {
+      let fakeNow = 0;
+      let nextHandle = 1;
+      const pending = new Map<number, () => void>();
+      const onEngage = vi.fn(() => true);
+      const ctrl = new PreCombatAutoEngageController({
+        durationMs: PRE_COMBAT_AUTO_ENGAGE_MS,
+        tickMs: 100,
+        now: () => fakeNow,
+        setTimeoutFn: (fn) => {
+          const h = nextHandle++;
+          pending.set(h, fn);
+          return h as unknown as ReturnType<typeof setTimeout>;
+        },
+        clearTimeoutFn: (h) => {
+          pending.delete(h as unknown as number);
+        },
+        onEngage,
+      });
+
+      ctrl.sync({ eligible: true, nodeKey: 'run1:L6A', canMutate: true, modalOpen: false, hidden: false });
+      expect(ctrl.getSnapshot().remainingMs).toBe(1500);
+      expect(pending.size).toBe(1);
+
+      // Simulate a 2500ms main-thread WebGL/boss-scene stall before the first tick fires
+      fakeNow += 2500;
+      const firstTick = [...pending.values()][0];
+      pending.clear();
+      firstTick();
+
+      // Must clamp the stall to at most 150ms (100ms delay + 50ms jitter), leaving >= 1350ms interactive window
+      expect(onEngage).toHaveBeenCalledTimes(0);
+      expect(ctrl.getSnapshot().status).toBe('countdown');
+      expect(ctrl.getSnapshot().remainingMs).toBe(1350);
+
+      // Subsequent normal 100ms ticks finish the remaining 1350ms cleanly (13×100 + 1×50 = 14 ticks)
+      for (let i = 0; i < 13; i += 1) {
+        fakeNow += 100;
+        const cb = [...pending.values()][0];
+        pending.clear();
+        cb();
+        expect(onEngage).toHaveBeenCalledTimes(0);
+      }
+      expect(ctrl.getSnapshot().remainingMs).toBe(50);
+
+      fakeNow += 50;
+      const finalCb = [...pending.values()][0];
+      pending.clear();
+      finalCb();
+      expect(onEngage).toHaveBeenCalledTimes(1);
+      expect(ctrl.getSnapshot().status).toBe('engaged');
+      expect(pending.size).toBe(0);
     });
   });
 

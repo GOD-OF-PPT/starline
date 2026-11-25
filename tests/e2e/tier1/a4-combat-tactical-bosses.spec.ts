@@ -99,10 +99,10 @@ test.describe('Tier 1 · A4: Active Tactical Combat, Expanded Enemies & 3 Multi-
 
     await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toBeVisible();
     await app.jumpToNode('L1B');
+    await app.pauseAutoCombat();
 
     const combatScreen = app.byTestId(TEST_IDS.COMBAT_SCREEN);
     await expect(combatScreen).toBeVisible();
-    await app.pauseAutoCombat();
 
     // S06 Layer 1: Qualitative Threat Tier pill visible while Details Drawer stays collapsed by default
     const threatTier = app.byTestId(TEST_IDS.COMBAT_THREAT_TIER);
@@ -383,7 +383,7 @@ test.describe('Tier 1 · A4: Active Tactical Combat, Expanded Enemies & 3 Multi-
     const app = createAppDriver(page);
 
     // Seed MAP at L5A -> L6A Act I Boss (3 enemies + 2 tactical charges) so we can verify
-    // D02 Target Lock pre-combat AND D01 Component Overload intervention persistence cleanly
+    // BOTH pre-combat & live mid-combat D02 Target Lock AND D01 Component Overload cleanly
     const bossGraph = createMapGraph({
       maxLayers: 6,
       bossKind: 'boss_anvil',
@@ -408,10 +408,16 @@ test.describe('Tier 1 · A4: Active Tactical Combat, Expanded Enemies & 3 Multi-
 
     await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toBeVisible();
     await app.jumpToNode('L6A');
+    await app.pauseAutoCombat();
 
     await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
 
-    // Start combat (S05-aware) and freeze at 1st active tactical decision pause
+    // D02 (Pre-combat): Lock escort_2 before battle begins and verify lockedEnemyId persists
+    await app.lockEnemy('L6A_anvil_escort_2');
+    const savedPreLock = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(savedPreLock?.activeRun?.lockedEnemyId).toBe('L6A_anvil_escort_2');
+
+    // Start combat and freeze at 1st active tactical decision pause
     await app.startCombat();
     await app.waitForInspect(
       (s) => s.activeRun?.combatWaitingDecision === true,
@@ -419,7 +425,7 @@ test.describe('Tier 1 · A4: Active Tactical Combat, Expanded Enemies & 3 Multi-
       'first tactical pause for target lock and component overload',
     );
 
-    // D02: Lock a specific enemy target at the tactical pause and verify aria-pressed + persisted lockedEnemyId
+    // D02 (Mid-combat): Switch Target Lock to escort_1 at tactical pause & verify aria-pressed + target_lock intervention (0 charge spent)
     await app.lockEnemy('L6A_anvil_escort_1');
     const savedAfterLock = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
     expect(savedAfterLock?.activeRun?.lockedEnemyId).toBe('L6A_anvil_escort_1');
