@@ -70,22 +70,23 @@ test.describe('Tier 1 · A4: Active Tactical Combat, Expanded Enemies & 3 Multi-
     monitor.assertClean(doneSnap);
   });
 
-  test('T1-A4-02 @p0-core Pre-combat preview recalculates on target policy change and matches post-combat HP exactly', async ({
+  test('T1-A4-02 @p0-core S05/S06 Pre-combat Layer-1 threat tier, Details Drawer ("不干预时结果") & policy change match post-combat HP exactly', async ({
     page,
   }) => {
     const monitor = attachZeroErrorMonitors(page);
     const app = createAppDriver(page);
 
+    // Boot into MAP then 1-click jump into L1B swarm so warm page never races S05 cold-boot countdown
     const save = presetMidRunMapV3({
-      phase: 'ENCOUNTER',
-      currentNodeId: 'L1B',
+      phase: 'MAP',
+      currentNodeId: null,
       graph: createMapGraph({
         nodeOverrides: {
-          L1B: { type: 'combat', encounterKind: 'swarm', visited: true, resolved: false },
+          L1B: { type: 'combat', encounterKind: 'swarm', visited: false, resolved: false },
         },
       }),
       overrides: {
-        visitedNodeIds: ['L1B'],
+        visitedNodeIds: [],
         activeCombat: null,
       },
     });
@@ -96,10 +97,20 @@ test.describe('Tier 1 · A4: Active Tactical Combat, Expanded Enemies & 3 Multi-
     await app.seedStorage({ v2Save: save, skipTitleScreen: true });
     await app.boot({ seed: 4002 });
 
+    await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toBeVisible();
+    await app.jumpToNode('L1B');
+
     const combatScreen = app.byTestId(TEST_IDS.COMBAT_SCREEN);
     await expect(combatScreen).toBeVisible();
+    await app.pauseAutoCombat();
 
-    // Toggle target priority and ensure preview panel remains active
+    // S06 Layer 1: Qualitative Threat Tier pill visible while Details Drawer stays collapsed by default
+    const threatTier = app.byTestId(TEST_IDS.COMBAT_THREAT_TIER);
+    await expect(threatTier).toBeVisible();
+    await expect(threatTier).toContainText(/稳|吃力|危险|致命/);
+    await expect(app.byTestId(TEST_IDS.FORECAST_DETAILS_DRAWER)).toHaveCount(0);
+
+    // Toggle target priority (S05 stays paused on policy interaction)
     const threatBtn = combatScreen
       .locator('[data-policy="highest_threat"]')
       .or(combatScreen.getByRole('button', { name: /优先最大威胁|最大威胁优先|威胁优先/ }))
@@ -107,20 +118,18 @@ test.describe('Tier 1 · A4: Active Tactical Combat, Expanded Enemies & 3 Multi-
     await expect(threatBtn).toBeVisible();
     await threatBtn.click();
 
-    // Read predicted post-combat HP from preview text or data attribute
-    const predictedHp = await combatScreen.evaluate((el) => {
-      const attrEl = el.querySelector('[data-preview-final-hp]');
-      if (attrEl) {
-        return Number(attrEl.getAttribute('data-preview-final-hp'));
-      }
-      const text = el.textContent ?? '';
-      const match =
-        text.match(/战后[^\d]*(\d+)/) ??
-        text.match(/(?:预计[^0-9]{0,8}|剩余\s*|余\s*)(\d+)\s*(?:HP|血量|船体)/i) ??
-        text.match(/(?:战后|预计|剩余)\s*(?:HP|血量|船体|耐久)?\s*[:：]?\s*(\d+)/i);
-      return match ? Number(match[1]) : null;
-    });
-    expect(predictedHp, 'Pre-combat preview must display numeric predicted post-combat HP').not.toBeNull();
+    // S06 Layer 2: Open on-demand Details Drawer labeled "不干预时结果"
+    const drawer = await app.openForecastDetails();
+    await expect(drawer).toContainText(/不干预时结果/);
+    await expect(drawer).toContainText(/余\s*\d+\s*HP/i);
+
+    const predictedHpAttr = await combatScreen
+      .locator('[data-preview-final-hp]')
+      .first()
+      .getAttribute('data-preview-final-hp');
+    expect(predictedHpAttr, 'Pre-combat preview card must expose numeric data-preview-final-hp').not.toBeNull();
+    const predictedHp = Number(predictedHpAttr);
+    expect(Number.isFinite(predictedHp)).toBe(true);
 
     await app.startCombat();
     const afterSnap = await app.waitForInspect(
@@ -159,14 +168,14 @@ test.describe('Tier 1 · A4: Active Tactical Combat, Expanded Enemies & 3 Multi-
     await app.openPrepareFromBase();
     await app.launchExpedition();
 
-    // Jump into Layer 1 combat node
-    const combatNode = page
+    // S04 1-click jump into Layer 1 combat node
+    const combatJumpBtn = page
       .locator('[data-testid="map-node-L1A"], [data-testid="map-node-L1B"]')
       .filter({ hasText: /战斗|敌|哨/ })
-      .first();
-    await expect(combatNode).toBeVisible();
-    await combatNode.click();
-    await app.byTestId(TEST_IDS.BTN_JUMP_NODE).click();
+      .first()
+      .locator('[data-jump-node]');
+    await expect(combatJumpBtn).toBeVisible();
+    await combatJumpBtn.click();
 
     await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
     await app.startCombat();
@@ -270,7 +279,7 @@ test.describe('Tier 1 · A4: Active Tactical Combat, Expanded Enemies & 3 Multi-
     // Settle Act I boss victory back to Base so profile.campaign.defeatedBossIds persists live
     let postBossSnap = await app.inspect();
     if (postBossSnap.phase === 'REWARD') {
-      await app.pickReward('repair');
+      await app.pickReward('skip');
       postBossSnap = await app.waitForInspect(
         (s) => s.phase !== 'REWARD',
         15_000,
@@ -365,5 +374,109 @@ test.describe('Tier 1 · A4: Active Tactical Combat, Expanded Enemies & 3 Multi-
     await expect(app.byTestId(TEST_IDS.ENDING_SCREEN)).toBeVisible();
 
     monitor.assertClean(endSnap);
+  });
+
+  test('T1-A4-07 @p1-mid D01 per-module Component Overload and D02 specific-enemy Target Lock consume charge, persist interventions, and resolve multi-enemy combat', async ({
+    page,
+  }) => {
+    const monitor = attachZeroErrorMonitors(page);
+    const app = createAppDriver(page);
+
+    // Seed MAP at L5A -> L6A Act I Boss (3 enemies + 2 tactical charges) so we can verify
+    // D02 Target Lock pre-combat AND D01 Component Overload intervention persistence cleanly
+    const bossGraph = createMapGraph({
+      maxLayers: 6,
+      bossKind: 'boss_anvil',
+      bossId: 'boss_anvil',
+    });
+    const save = presetMidRunMapV3({
+      phase: 'MAP',
+      currentNodeId: 'L5A',
+      graph: bossGraph,
+      fuel: 6,
+      overrides: {
+        visitedNodeIds: ['L1A', 'L2A', 'L3A', 'L4A', 'L5A'],
+        tacticalChargesMax: 2,
+        tacticalChargesUsed: 0,
+        activeCombat: null,
+      },
+    });
+    save.settings.pureAutoCombat = false;
+
+    await app.seedStorage({ v2Save: save, skipTitleScreen: true });
+    await app.boot({ seed: 4008 });
+
+    await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toBeVisible();
+    await app.jumpToNode('L6A');
+
+    await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
+
+    // Start combat (S05-aware) and freeze at 1st active tactical decision pause
+    await app.startCombat();
+    await app.waitForInspect(
+      (s) => s.activeRun?.combatWaitingDecision === true,
+      25_000,
+      'first tactical pause for target lock and component overload',
+    );
+
+    // D02: Lock a specific enemy target at the tactical pause and verify aria-pressed + persisted lockedEnemyId
+    await app.lockEnemy('L6A_anvil_escort_1');
+    const savedAfterLock = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(savedAfterLock?.activeRun?.lockedEnemyId).toBe('L6A_anvil_escort_1');
+    expect(
+      savedAfterLock?.activeRun?.activeCombat?.interventions?.some(
+        (iv) => iv.kind === 'target_lock' && iv.targetEnemyId === 'L6A_anvil_escort_1',
+      ),
+    ).toBe(true);
+
+    await expect(app.byTestId(TEST_IDS.COMBAT_TACTICAL_CHARGES)).toContainText('2/2');
+    await expect(app.byTestId(TEST_IDS.COMBAT_OVERLOAD_SECTION)).toBeVisible();
+
+    // D01: Overload mounted loan_laser_1 module (shares tactical charge pool)
+    await app.overloadModule('loan_laser_1');
+
+    // Verify overload intervention persisted in activeCombat.interventions and consumed 1 charge
+    await expect
+      .poll(
+        async () => {
+          const cur = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+          const hasOverloadIv = Boolean(
+            cur?.activeRun?.activeCombat?.interventions?.some(
+              (iv) => iv.kind === 'overload_module' && iv.moduleInstanceId === 'loan_laser_1',
+            ),
+          );
+          return {
+            chargesUsed: cur?.activeRun?.tacticalChargesUsed ?? 0,
+            hasOverloadIv,
+          };
+        },
+        { timeout: 10_000, message: 'Waiting for D01 overload intervention to persist' },
+      )
+      .toMatchObject({ chargesUsed: 1, hasOverloadIv: true });
+
+    // Resolve remaining tactical pause / combat cleanly
+    for (let step = 0; step < 3; step += 1) {
+      const progressSnap = await app.waitForInspect(
+        (s) =>
+          s.phase === 'REWARD' ||
+          s.phase === 'SETTLEMENT' ||
+          s.activeRun?.combatWaitingDecision === true,
+        25_000,
+        `D01/D02 combat resolution step ${step + 1}`,
+      );
+      if (progressSnap.activeRun?.combatWaitingDecision) {
+        await app.issueTacticalOrder('emergency_shield');
+      } else {
+        break;
+      }
+    }
+
+    const doneSnap = await app.waitForInspect(
+      (s) => s.phase === 'REWARD' || s.phase === 'SETTLEMENT',
+      25_000,
+      'multi-enemy boss combat resolved cleanly',
+    );
+    expect(doneSnap.activeRun?.combatWaitingDecision).toBe(false);
+    monitor.assertClean(doneSnap);
   });
 });

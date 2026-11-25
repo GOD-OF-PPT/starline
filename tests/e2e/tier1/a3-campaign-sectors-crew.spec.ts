@@ -96,16 +96,17 @@ test.describe('Tier 1 · A3: Mainline 4-Act Campaign, 3 Star Sectors & Named Cre
     expect((await app.getRootAttributes()).sector).toBe('stargate_abyss');
     await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toContainText(/引力潮汐|星门禁区|引力/);
 
-    // Jump to a combat node on Layer 1 to verify modifier disclosure in combat preview
-    const combatNode = page
+    // S04 1-click jump to a Layer 1 combat node and pause S05 auto-engage to verify modifier disclosure
+    const combatJumpBtn = page
       .locator('[data-testid="map-node-L1A"], [data-testid="map-node-L1B"]')
       .filter({ hasText: /战斗|敌|哨/ })
-      .first();
-    await expect(combatNode).toBeVisible();
-    await combatNode.click();
-    await app.byTestId(TEST_IDS.BTN_JUMP_NODE).click();
+      .first()
+      .locator('[data-jump-node]');
+    await expect(combatJumpBtn).toBeVisible();
+    await combatJumpBtn.click();
 
     await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
+    await app.pauseAutoCombat();
     await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toContainText(/引力潮汐|引力/);
 
     monitor.assertClean(await app.inspect());

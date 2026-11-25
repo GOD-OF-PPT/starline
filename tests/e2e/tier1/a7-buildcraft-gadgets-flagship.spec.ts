@@ -1,18 +1,21 @@
 import { expect, test } from '@playwright/test';
 import {
   SHIP_SPECS,
+  STORAGE_KEYS,
   TEST_IDS,
   attachZeroErrorMonitors,
   createAppDriver,
   createCargoBay,
   createCargoItem,
   createMapGraph,
+  createStagingItem,
   presetAct1V3,
   presetAct3ClimaxV3,
   presetArrangeV3,
   presetMidRunMapV3,
   presetWreckEncounterV3,
 } from '../helpers';
+import type { V3SaveData } from '../helpers';
 
 test.describe('Tier 1 · A7: Deepened Buildcraft — 16 Modules, 4 Gadgets, 4th Flagship & Power Cells', () => {
   test('T1-A7-01 @p0-core Cargo grid placement, 90° rotation, orthogonal adjacency synergy, and undo discard', async ({
@@ -262,6 +265,133 @@ test.describe('Tier 1 · A7: Deepened Buildcraft — 16 Modules, 4 Gadgets, 4th 
     await returnFreeBtn.click();
 
     await expect(app.byTestId(TEST_IDS.BTN_LAUNCH_EXPEDITION)).toBeEnabled();
+    monitor.assertClean(await app.inspect());
+  });
+
+  test('T1-A7-07 @p1-mid D03 Common battery caps 2nd adjacent laser, coolant_tank<->heavy triggers "新联动！" toast, and Codex Synergy Journal persists across reload', async ({
+    page,
+  }) => {
+    const monitor = attachZeroErrorMonitors(page);
+    const app = createAppDriver(page);
+
+    // 4x4 cannon_skiff bay:
+    // - laser #1 at (0,0)-(0,1) + battery.common at (1,0) + laser #2 at (2,0)-(2,1) => Common battery caps 2nd laser
+    // - heavy.common (1x3 rot=1) at (0,3)-(2,3), plus cargo.coolant_tank (1x3 rot=1) in staging ready to place at (0,2)-(2,2)
+    const d03Bay = createCargoBay({
+      shipId: 'cannon_skiff',
+      placed: [
+        {
+          item: createCargoItem({
+            instanceId: 'd03_laser_1',
+            definitionId: 'equipment.laser.common',
+            origin: 'loan',
+          }),
+          x: 0,
+          y: 0,
+          rotation: 0,
+        },
+        {
+          item: createCargoItem({
+            instanceId: 'd03_bat_common',
+            definitionId: 'equipment.battery.common',
+            origin: 'loan',
+          }),
+          x: 1,
+          y: 0,
+          rotation: 0,
+        },
+        {
+          item: createCargoItem({
+            instanceId: 'd03_laser_2',
+            definitionId: 'equipment.laser.common',
+            origin: 'owned',
+          }),
+          x: 2,
+          y: 0,
+          rotation: 0,
+        },
+        {
+          item: createCargoItem({
+            instanceId: 'd03_heavy_1',
+            definitionId: 'equipment.heavy.common',
+            origin: 'owned',
+          }),
+          x: 0,
+          y: 3,
+          rotation: 1,
+        },
+      ],
+      staging: [
+        createStagingItem(
+          createCargoItem({
+            instanceId: 'd03_coolant_stg',
+            definitionId: 'cargo.coolant_tank',
+            origin: 'loot',
+            acquiredDepth: 2,
+            location: 'staging',
+          }),
+          1,
+        ),
+      ],
+    });
+
+    const save = presetMidRunMapV3(
+      {
+        phase: 'ARRANGE',
+        currentNodeId: 'L3A',
+        bay: d03Bay,
+        overrides: { visitedNodeIds: ['L1A', 'L2A', 'L3A'] },
+      },
+      { discoveredSynergies: [] },
+    );
+
+    await app.seedStorage({ v2Save: save, skipTitleScreen: true });
+    await app.boot({ seed: 7008 });
+
+    await expect(app.byTestId(TEST_IDS.ARRANGE_SCREEN)).toBeVisible();
+
+    // D03 Part 1: Common battery supplies 1st laser and caps 2nd laser
+    expect(await page.locator('[data-link-status="active"]').count()).toBeGreaterThanOrEqual(1);
+    expect(await page.locator('[data-link-status="capped"]').count()).toBeGreaterThanOrEqual(1);
+    await expect(page.locator('.placed-item.battery-capped')).toHaveCount(1);
+
+    // D03 Part 2: Place cargo.coolant_tank (rot=1) at (0,2)-(2,2) orthogonally adjacent to heavy at (0,3)-(2,3)
+    const stagingCoolant = page
+      .locator('.staging-card, .v2-staging-card, [data-testid^="staging-item"]')
+      .first();
+    await expect(stagingCoolant).toBeVisible();
+    await stagingCoolant.click();
+    await app.gridCell(0, 2).click();
+
+    // Cross-category synergy link activates & triggers "新联动！" discovery toast
+    expect(
+      await page.locator('[data-synergy-id="coolant_heavy"][data-link-status="active"]').count(),
+    ).toBeGreaterThanOrEqual(1);
+
+    const discoveryToast = app.byTestId(TEST_IDS.SYNERGY_DISCOVERY_TOAST);
+    await expect(discoveryToast).toBeVisible();
+    await expect(discoveryToast).toContainText(/新联动/);
+    expect(await discoveryToast.getAttribute('data-synergy-ids')).toContain('coolant_heavy');
+
+    const savedAfterDiscovery = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(savedAfterDiscovery?.profile.discoveredSynergies).toContain('coolant_heavy');
+
+    // Return to Base, reload, and verify Codex Synergy Journal persists discovered state
+    await app.leaveArrange();
+    await expect(app.byTestId(TEST_IDS.MAP_SCREEN)).toBeVisible();
+    await app.safeReturn();
+    await app.confirmSettlement();
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await app.waitForInspect((s) => s.screen === 'base', 15_000, 'base ready after reload');
+
+    const codexModal = await app.openBaseModal(TEST_IDS.BTN_OPEN_CODEX);
+    const synergySection = codexModal.getByTestId(TEST_IDS.CODEX_SYNERGY_SECTION);
+    await expect(synergySection).toBeVisible();
+    const coolantCard = synergySection.locator('[data-synergy-id="coolant_heavy"]').first();
+    await expect(coolantCard).toHaveAttribute('data-synergy-state', 'discovered');
+
+    await app.closeModal();
     monitor.assertClean(await app.inspect());
   });
 });
