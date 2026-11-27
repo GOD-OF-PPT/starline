@@ -20,7 +20,9 @@ test.describe('Tier 3 · P5: Endless Abyss Mutators × Seeded Challenge × Caree
   }) => {
     test.slow();
 
-    const launchSeededEndless = async (): Promise<{
+    const launchSeededEndless = async (
+      urlSeed: number,
+    ): Promise<{
       mutators: string[];
       nodeTypes: Record<string, string>;
       l1DrawerText: string;
@@ -34,7 +36,7 @@ test.describe('Tier 3 · P5: Endless Abyss Mutators × Seeded Challenge × Caree
         const app = createAppDriver(page);
 
         await app.seedStorage({ v2Save: presetEndlessReadyV3(), skipTitleScreen: true });
-        await app.boot({ seed: 90001, enterStation: true });
+        await app.boot({ seed: urlSeed, enterStation: true });
         await app.openPrepareFromBase();
 
         // Enable Endless Abyss Threat 1 via stable btn-mode-endless
@@ -45,12 +47,15 @@ test.describe('Tier 3 · P5: Endless Abyss Mutators × Seeded Challenge × Caree
         await expect(page.getByTestId('endless-config-panel')).toBeVisible();
         const mutatorPreview = page.getByTestId('endless-mutator-preview');
         await expect(mutatorPreview).toBeVisible();
+        await expect(mutatorPreview).toContainText(`#${urlSeed}`);
+        await expect(mutatorPreview).not.toContainText('#90001');
 
-        // Unconditionally fill deterministic challenge seed 90001 and verify preview reflects #90001
+        // Unconditionally fill deterministic challenge seed 90001 and verify preview overrides URL seed -> #90001
         const seedInput = page.getByTestId('endless-seed-input');
         await expect(seedInput).toBeVisible();
         await seedInput.fill('90001');
         await expect(mutatorPreview).toContainText('#90001');
+        await expect(mutatorPreview).not.toContainText(`#${urlSeed}`);
 
         await app.launchExpedition();
 
@@ -112,8 +117,8 @@ test.describe('Tier 3 · P5: Endless Abyss Mutators × Seeded Challenge × Caree
       }
     };
 
-    const runA = await launchSeededEndless();
-    const runB = await launchSeededEndless();
+    const runA = await launchSeededEndless(11111);
+    const runB = await launchSeededEndless(22222);
 
     expect(runA.mutators).toEqual(runB.mutators);
     expect(runA.nodeTypes).toEqual(runB.nodeTypes);
@@ -224,8 +229,8 @@ test.describe('Tier 3 · P5: Endless Abyss Mutators × Seeded Challenge × Caree
       skipTitleScreen: true,
     });
 
-    // Phase A: Default Boot (NO ?playtest=1) migrates 3.0.0 -> 3.1.0, writes V3_0_BACKUP once, and writes ZERO playtest telemetry
-    await app.boot({ seed: 90503, enterStation: true });
+    // Phase A: Default Boot (NO ?playtest=1) with distinct URL seed 35003 migrates 3.0.0 -> 3.1.0, writes V3_0_BACKUP once, and writes ZERO playtest telemetry
+    await app.boot({ seed: 35003, enterStation: true });
     await expect(app.byTestId(TEST_IDS.BASE_SCREEN)).toBeVisible();
 
     const migrated = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
@@ -270,13 +275,19 @@ test.describe('Tier 3 · P5: Endless Abyss Mutators × Seeded Challenge × Caree
     await expect(synergySection.locator('[data-synergy-state="locked"]')).toHaveCount(9);
     await app.closeModal();
 
-    // Phase C: Deterministic Seeded Endless Launch (90503) under default mode maintains zero-write T01 isolation
+    // Phase C: Deterministic Seeded Endless Launch (90503 overriding URL seed 35003) under default mode maintains zero-write T01 isolation
     await app.openPrepareFromBase();
     await page.getByTestId('btn-mode-endless').click();
+    const mutatorPreview = page.getByTestId('endless-mutator-preview');
+    await expect(mutatorPreview).toBeVisible();
+    await expect(mutatorPreview).toContainText('#35003');
+    await expect(mutatorPreview).not.toContainText('#90503');
+
     const seedInput = page.getByTestId('endless-seed-input');
     await expect(seedInput).toBeVisible();
     await seedInput.fill('90503');
-    await expect(page.getByTestId('endless-mutator-preview')).toContainText('#90503');
+    await expect(mutatorPreview).toContainText('#90503');
+    await expect(mutatorPreview).not.toContainText('#35003');
 
     await app.launchExpedition();
     const launchedSnap = await app.waitForInspect(
@@ -294,8 +305,8 @@ test.describe('Tier 3 · P5: Endless Abyss Mutators × Seeded Challenge × Caree
     expect(await app.readStorageRaw(STORAGE_KEYS.PLAYTEST_LOG)).toBeNull();
     expect(await app.readStorageRaw(STORAGE_KEYS.V3_0_BACKUP)).toBe(v3_0BackupInitial);
 
-    // Phase D: Opt-In ?playtest=1 re-entry (without re-seeding storage), Export + Clear BEFORE closeModal(), then real reload
-    await app.boot({ seed: 90503, playtest: true });
+    // Phase D: Opt-In ?playtest=1 re-entry with distinct URL seed 35003 (without re-seeding storage), Export + Clear BEFORE closeModal(), then real reload
+    await app.boot({ seed: 35003, playtest: true });
     await app.waitForInspect(
       (s) =>
         s.phase === 'MAP' &&
@@ -350,6 +361,7 @@ test.describe('Tier 3 · P5: Endless Abyss Mutators × Seeded Challenge × Caree
     const afterReloadSave = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
     expect(afterReloadSave?.rulesVersion).toBe(V3_RULES_VERSION);
     expect(afterReloadSave?.activeRun?.runId).toBe(launchedRunId);
+    expect(afterReloadSave?.activeRun?.seed).toBe(90503);
     expect(afterReloadSave?.activeRun?.endlessThreat).toBe(1);
     expect(afterReloadSave?.activeRun?.endlessMutatorIds).toEqual(launchedMutators);
     expect(afterReloadSave?.profile.discoveredSynergies).toContain('battery_laser');

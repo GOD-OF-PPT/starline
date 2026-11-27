@@ -199,9 +199,18 @@ test.describe('Tier 3 · P2: Named Crew Mastery × Multi-Cut Wreck × Cargo Grid
     const mapSnap = await app.waitForInspect((s) => s.phase === 'MAP', 10_000, 'MAP after engineer swap');
 
     const stored = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(stored?.activeRun?.bay.placed).toHaveLength(4);
     expect(
-      stored?.activeRun?.bay.placed.some((p) => p.item.definitionId === `equipment.${chosenKind}.common`),
+      stored?.activeRun?.bay.placed.some(
+        (p) =>
+          p.item.instanceId === 'wreck_armory_laser_eng' &&
+          p.item.definitionId === `equipment.${chosenKind}.common` &&
+          p.item.origin === 'loot',
+      ),
     ).toBe(true);
+    expect(
+      stored?.activeRun?.bay.placed.some((p) => p.item.instanceId === 'wreck_armory_laser'),
+    ).toBe(false);
     expect(stored?.activeRun?.engineerSwapAvailable).toBe(false);
     expect(stored?.activeRun?.activeEngineerOffer?.used).toBe(true);
 

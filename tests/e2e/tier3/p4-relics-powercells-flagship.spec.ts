@@ -435,25 +435,29 @@ test.describe('Tier 3 · P4: Relic Passives × Hull Power Cells × Flagship & Ga
       page.locator('.placed-item[data-instance-id="oc_laser_power"][data-power-boosted="true"]'),
     ).toBeVisible();
 
-    // Read pre-combat forecast before overcharge_cell, activate gadget, verify overcharge banner & boosted preview
+    // Open S06 Details Drawer before overcharge_cell: un-assisted preview is 0 HP (10轮)
     const previewCard = combatScreen.locator('[data-preview-final-hp]').first();
-    const beforeHpAttr = await previewCard.getAttribute('data-preview-final-hp');
-    expect(beforeHpAttr).not.toBeNull();
-    const beforePreviewHp = Number(beforeHpAttr);
+    await expect(previewCard).toHaveAttribute('data-preview-final-hp', '0');
+    const drawerBefore = await app.openForecastDetails();
+    await expect(drawerBefore).toContainText('10轮');
 
     const overchargeBtn = combatScreen.getByTestId('use-gadget-overcharge_cell');
     await expect(overchargeBtn).toBeVisible();
     await overchargeBtn.click();
 
     await expect(combatScreen.getByTestId('overcharge-active-banner')).toBeVisible();
-    const afterHpAttr = await previewCard.getAttribute('data-preview-final-hp');
-    expect(afterHpAttr).not.toBeNull();
-    expect(Number(afterHpAttr)).toBeGreaterThanOrEqual(beforePreviewHp);
-
     const afterGadgetSave = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(
+      afterGadgetSave?.activeRun?.bay.placed.some((p) => p.item.instanceId === 'oc_gadget'),
+    ).toBe(false);
     expect(
       afterGadgetSave?.activeRun?.bay.placed.some((p) => p.item.definitionId === 'gadget.overcharge_cell'),
     ).toBe(false);
+
+    // S06 Details Drawer must reflect real overcharge_cell survival jump: 10轮 -> 14轮
+    const drawerAfter = await app.openForecastDetails();
+    await expect(drawerAfter).toContainText('14轮');
+    await expect(drawerAfter).not.toContainText('10轮');
 
     await app.startCombat();
 
@@ -496,10 +500,11 @@ test.describe('Tier 3 · P4: Relic Passives × Hull Power Cells × Flagship & Ga
       'Act I Boss victory with obsidian_crown + power cell + overcharge_cell',
     );
     expect(doneSnap.phase).toBe('REWARD');
+    expect(doneSnap.activeRun?.hp).toBe(1);
 
     const stored = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
     expect(stored?.activeRun?.tacticalChargesMax).toBe(3);
-    expect(stored?.activeRun?.tacticalChargesUsed).toBeGreaterThanOrEqual(2);
+    expect(stored?.activeRun?.tacticalChargesUsed).toBe(3);
     expect(
       stored?.activeRun?.bay.placed.some((p) => p.item.definitionId === 'gadget.overcharge_cell'),
     ).toBe(false);
@@ -704,6 +709,10 @@ test.describe('Tier 3 · P4: Relic Passives × Hull Power Cells × Flagship & Ga
       30_000,
       'Boss victory enters D07 3-equipment REWARD screen',
     );
+    expect(rewardSnap.activeRun?.hp).toBe(38);
+    const afterWinSave = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(afterWinSave?.activeRun?.tacticalChargesUsed).toBe(1);
+
     await expect(app.byTestId(TEST_IDS.REWARD_SCREEN)).toBeVisible();
     await expect(app.byTestId(TEST_IDS.rewardChoice(0))).toBeVisible();
     await expect(app.byTestId(TEST_IDS.rewardChoice(1))).toBeVisible();
