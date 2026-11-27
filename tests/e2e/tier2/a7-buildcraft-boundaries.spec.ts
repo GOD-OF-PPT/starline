@@ -459,17 +459,19 @@ test.describe('Tier 2 · A7: Grid, Gadgets & Flagship Boundaries', () => {
       skipTitleScreen: true,
     });
     await app.boot({ seed: 27006 });
+    await app.pauseAutoCombat();
 
     const combatScreen = app.byTestId(TEST_IDS.COMBAT_SCREEN);
     await expect(combatScreen).toBeVisible();
 
-    // Preview shield value must be capped at <= 20
-    const shieldText = await combatScreen.innerText();
-    const shieldMatch = shieldText.match(/护盾[^\d]*(\d+)/);
-    expect(shieldMatch, 'Combat preview must display starting shield value').not.toBeNull();
-    if (shieldMatch) {
-      expect(Number(shieldMatch[1])).toBeLessThanOrEqual(MAX_BATTLE_SHIELD);
-    }
+    // S06: Open forecast details drawer and verify starting shield strictly caps at 20 and post-win repair caps at +4
+    const drawer = await app.openForecastDetails();
+    await expect(drawer).toContainText(/护盾[^\d]*20\b/);
+    await expect(drawer).toContainText(/胜后维修\s*\+4\b/);
+    const drawerText = await drawer.innerText();
+    const shieldMatch = drawerText.match(/护盾[^\d]*(\d+)/);
+    expect(shieldMatch, 'Forecast details drawer must display capped starting shield value').not.toBeNull();
+    expect(Number(shieldMatch![1])).toBe(MAX_BATTLE_SHIELD);
 
     await app.startCombat();
     await app.skipCombat();
@@ -479,10 +481,167 @@ test.describe('Tier 2 · A7: Grid, Gadgets & Flagship Boundaries', () => {
       15_000,
       'shield/repair cap battle won',
     );
-    // Starting HP was 20, shield absorbed patrol damage -> post-win repair caps at +4 => HP <= 24
-    expect(afterWin.activeRun?.hp ?? 0).toBeLessThanOrEqual(20 + MAX_POST_WIN_REPAIR);
-    expect(afterWin.activeRun?.hp ?? 0).toBeLessThanOrEqual(34);
+    // Starting HP was 20, shield absorbed 100% of patrol damage (0 hull dmg) -> post-win repair caps at +4 => exact 24 HP
+    expect(afterWin.activeRun?.hp).toBe(20 + MAX_POST_WIN_REPAIR);
 
     monitor.assertClean(afterWin);
+  });
+
+  test('T2-A7-06 @p1-mid D03 Improved battery supply cap (=2 with 3 adjacent lasers) and coolant_tank<->heavy disconnect plus idempotent re-discovery', async ({
+    page,
+  }) => {
+    const monitor = attachZeroErrorMonitors(page);
+    const app = createAppDriver(page);
+
+    // Part A: Improved battery at (1,1) surrounded orthogonally by 3 lasers -> strictly 2 active + 1 capped link & 1 battery-capped tile
+    const impCapBay = createCargoBay({
+      shipId: 'cannon_skiff',
+      placed: [
+        {
+          item: createCargoItem({
+            instanceId: 'imp_bat_1',
+            definitionId: 'equipment.battery.improved',
+            origin: 'owned',
+          }),
+          x: 1,
+          y: 1,
+        },
+        {
+          item: createCargoItem({
+            instanceId: 'imp_laser_1',
+            definitionId: 'equipment.laser.common',
+            origin: 'owned',
+          }),
+          x: 0,
+          y: 0,
+          rotation: 0,
+        },
+        {
+          item: createCargoItem({
+            instanceId: 'imp_laser_2',
+            definitionId: 'equipment.laser.common',
+            origin: 'owned',
+          }),
+          x: 1,
+          y: 0,
+          rotation: 1,
+        },
+        {
+          item: createCargoItem({
+            instanceId: 'imp_laser_3',
+            definitionId: 'equipment.laser.common',
+            origin: 'owned',
+          }),
+          x: 2,
+          y: 1,
+          rotation: 0,
+        },
+      ],
+    });
+
+    const partARun = createV3RunFixture({
+      shipId: 'cannon_skiff',
+      phase: 'ARRANGE',
+      currentNodeId: 'L2A',
+      bay: impCapBay,
+      overrides: { visitedNodeIds: ['L1A', 'L2A'] },
+    });
+
+    await app.seedStorage({
+      v2Save: { ...presetAct1V3(), activeRun: partARun },
+      skipTitleScreen: true,
+    });
+    await app.boot({ seed: 27007 });
+
+    await expect(app.byTestId(TEST_IDS.ARRANGE_SCREEN)).toBeVisible();
+    // Each active link renders either 1 pin (<circle>) or 1 highlighted <line class="energy-link-line">
+    await expect(
+      page.locator(
+        'line.energy-link-line[data-synergy-id="battery_laser"][data-link-status="active"], circle[data-synergy-id="battery_laser"][data-link-status="active"]',
+      ),
+    ).toHaveCount(2);
+    // Each capped link renders 1 <line class="energy-link-capped">
+    await expect(
+      page.locator('line.energy-link-capped[data-synergy-id="battery_laser"][data-link-status="capped"]'),
+    ).toHaveCount(1);
+    await expect(page.locator('.placed-item.battery-capped')).toHaveCount(1);
+
+    // Part B: Cross-category coolant_tank <-> heavy activates without duplicate toast when already discovered, and tears down cleanly on removal
+    const crossBay = createCargoBay({
+      shipId: 'cannon_skiff',
+      placed: [
+        {
+          item: createCargoItem({
+            instanceId: 'd03_heavy_1',
+            definitionId: 'equipment.heavy.common',
+            origin: 'owned',
+          }),
+          x: 0,
+          y: 3,
+          rotation: 1,
+        },
+      ],
+      staging: [
+        createStagingItem(
+          createCargoItem({
+            instanceId: 'd03_coolant_1',
+            definitionId: 'cargo.coolant_tank',
+            origin: 'loot',
+            fixedValue: 27,
+            acquiredDepth: 2,
+            location: 'staging',
+          }),
+          1,
+        ),
+      ],
+    });
+
+    const partBSave = presetMidRunMapV3(
+      {
+        shipId: 'cannon_skiff',
+        phase: 'ARRANGE',
+        currentNodeId: 'L3A',
+        bay: crossBay,
+        overrides: { visitedNodeIds: ['L1A', 'L2A', 'L3A'] },
+      },
+      {
+        discoveredSynergies: ['coolant_heavy'],
+      },
+    );
+
+    await app.seedStorage({ v2Save: partBSave, skipTitleScreen: true });
+    await app.boot({ seed: 27008 });
+    await expect(app.byTestId(TEST_IDS.ARRANGE_SCREEN)).toBeVisible();
+
+    const stagingCoolant = page
+      .locator('.staging-card, .v2-staging-card, [data-testid^="staging-item"]')
+      .first();
+    await expect(stagingCoolant).toBeVisible();
+    await stagingCoolant.click();
+    await app.gridCell(0, 2).click();
+
+    const activeCoolantLink = page.locator(
+      '[data-synergy-id="coolant_heavy"][data-link-status="active"]',
+    );
+    expect(await activeCoolantLink.count()).toBeGreaterThanOrEqual(1);
+    // Already in profile.discoveredSynergies -> MUST NOT fire duplicate discovery toast
+    await expect(app.byTestId(TEST_IDS.SYNERGY_DISCOVERY_TOAST)).toHaveCount(0);
+
+    // Move coolant_tank via grid cells from (0,2) to (0,0) (non-adjacent to heavy at row y=3) -> link MUST disconnect cleanly
+    await app.gridCell(0, 2).click();
+    await app.gridCell(0, 0).click();
+
+    await expect(
+      page.locator('[data-synergy-id="coolant_heavy"][data-link-status="active"]'),
+    ).toHaveCount(0);
+    const savedAfterMove = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    const movedCoolant = savedAfterMove?.activeRun?.bay.placed.find(
+      (p) => p.item.instanceId === 'd03_coolant_1',
+    );
+    expect(movedCoolant).toBeDefined();
+    expect(movedCoolant?.x).toBe(0);
+    expect(movedCoolant?.y).toBe(0);
+
+    monitor.assertClean(await app.inspect());
   });
 });

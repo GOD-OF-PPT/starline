@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import {
+  STORAGE_KEYS,
   TEST_IDS,
   assertAboveFold,
   assertCanvasNonBlank,
@@ -19,6 +20,7 @@ import {
   presetShopEncounterV3,
   presetWreckEncounterV3,
 } from '../helpers';
+import type { V3SaveData } from '../helpers';
 
 test.describe('Tier 2 · A10: Responsive Layout, Staging Bounds & Input Isolation Boundaries', () => {
   test('T2-A10-01 @p0-core @mobile-only Mobile 390x844 enforces zero horizontal overflow across every screen and base modal', async ({
@@ -80,6 +82,7 @@ test.describe('Tier 2 · A10: Responsive Layout, Staging Bounds & Input Isolatio
     });
     await app.seedStorage({ v2Save: combatSave, skipTitleScreen: true });
     await app.boot({ seed: 30002 });
+    await app.pauseAutoCombat();
     await expect(app.byTestId(TEST_IDS.COMBAT_SCREEN)).toBeVisible();
     await assertZeroHorizontalOverflow(page, 390);
 
@@ -248,12 +251,24 @@ test.describe('Tier 2 · A10: Responsive Layout, Staging Bounds & Input Isolatio
     const monitor = attachZeroErrorMonitors(page);
     const app = createAppDriver(page);
 
-    await app.seedStorage({ v2Save: presetArrangeV3(), skipTitleScreen: true });
+    // Seed a 1x2 staging item so rotation changes (0 -> 1) are strictly observable if 'r' leaks through modal
+    const isolationArrange = presetArrangeV3([
+      createCargoItem({
+        instanceId: 'iso_stg_alloy_1x2',
+        definitionId: 'cargo.alloy_bar',
+        origin: 'loot',
+        fixedValue: 15,
+        acquiredDepth: 1,
+        location: 'staging',
+      }),
+    ]);
+
+    await app.seedStorage({ v2Save: isolationArrange, skipTitleScreen: true });
     await app.boot({ seed: 30011 });
 
     await expect(app.byTestId(TEST_IDS.ARRANGE_SCREEN)).toBeVisible();
 
-    // Select a staging item before opening Settings modal
+    // Select the 1x2 staging item before opening Settings modal
     const stagingCard = page
       .locator('.staging-card, .v2-staging-card, [data-testid^="staging-item"]')
       .first();
@@ -261,7 +276,7 @@ test.describe('Tier 2 · A10: Responsive Layout, Staging Bounds & Input Isolatio
 
     // Open Settings modal from topbar
     const settingsBtn = page
-      .locator('[data-testid="btn-open-settings"], button[aria-label*="设置"], button:has-text("设置")')
+      .locator('[data-testid="btn-open-settings"], #v2-hud-settings, button[aria-label*="设置"], button:has-text("设置")')
       .first();
     await expect(settingsBtn).toBeVisible();
     await settingsBtn.click();
@@ -270,14 +285,22 @@ test.describe('Tier 2 · A10: Responsive Layout, Staging Bounds & Input Isolatio
     await expect(dialog).toBeVisible();
     expect((await app.inspect()).modalOpen).toBe(true);
 
-    // Press game-layer shortcuts (R, Space) while modal is open -> must NOT leak through or close phase
+    // Press game-layer shortcuts (R, ArrowRight, Space, Delete) while modal is open -> must NOT leak through to CargoGrid
     const phaseBefore = (await app.inspect()).phase;
     await page.keyboard.press('r');
+    await page.keyboard.press('ArrowRight');
     await page.keyboard.press('Space');
+    await page.keyboard.press('Delete');
 
     const snapDuringModal = await app.inspect();
     expect(snapDuringModal.modalOpen).toBe(true);
     expect(snapDuringModal.phase).toBe(phaseBefore);
+
+    const savedDuringModal = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
+    expect(savedDuringModal?.activeRun?.bay.staging).toHaveLength(1);
+    expect(savedDuringModal?.activeRun?.bay.staging[0]?.item.instanceId).toBe('iso_stg_alloy_1x2');
+    expect(savedDuringModal?.activeRun?.bay.staging[0]?.rotation).toBe(0);
+    expect(savedDuringModal?.activeRun?.bay.placed).toHaveLength(1);
 
     // Escape closes modal cleanly
     await page.keyboard.press('Escape');
@@ -290,6 +313,7 @@ test.describe('Tier 2 · A10: Responsive Layout, Staging Bounds & Input Isolatio
   test('T2-A10-05 @p0-core Dynamic viewport resize transitions (1366x768 <-> 390x844 <-> 844x390) reflow cleanly with non-blank canvas', async ({
     page,
   }) => {
+    test.slow();
     const monitor = attachZeroErrorMonitors(page);
     const app = createAppDriver(page);
 
@@ -319,7 +343,7 @@ test.describe('Tier 2 · A10: Responsive Layout, Staging Bounds & Input Isolatio
       await assertZeroHorizontalOverflow(page, vp.width);
     }
 
-    // Combat screen (M1-valid standard combat encounter)
+    // Combat screen (M1-valid standard combat encounter; pause S05 auto-engage before resize loop)
     const resizeCombatSave = presetMidRunMapV3({
       phase: 'ENCOUNTER',
       currentNodeId: 'L1B',
@@ -335,6 +359,7 @@ test.describe('Tier 2 · A10: Responsive Layout, Staging Bounds & Input Isolatio
     });
     await app.seedStorage({ v2Save: resizeCombatSave, skipTitleScreen: true });
     await app.boot({ seed: 30014 });
+    await app.pauseAutoCombat();
     for (const vp of viewports) {
       await page.setViewportSize(vp);
       await assertZeroHorizontalOverflow(page, vp.width);

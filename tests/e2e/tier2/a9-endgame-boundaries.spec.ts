@@ -37,20 +37,12 @@ test.describe('Tier 2 · A9: Endgame, Endless Abyss & Career Boundaries', () => 
     const prepareScreen = app.byTestId(TEST_IDS.PREPARE_SCREEN);
     await expect(prepareScreen).toBeVisible();
 
-    const endlessToggle = prepareScreen.locator(
-      '[data-testid="btn-mode-endless"], [data-mode="endless"], button:has-text("无尽深渊")',
-    );
-    if ((await endlessToggle.count()) > 0) {
-      await expect(endlessToggle.first()).toBeDisabled();
-      await expect(prepareScreen).toContainText(/通关第三幕|解锁|未解锁/);
-    } else {
-      // If hidden on Prepare until unlocked, verify Campaign modal explicitly displays lock status
-      await app.boot({ seed: 29001, enterStation: true });
-      const campaignDialog = await app.openBaseModal(TEST_IDS.BTN_OPEN_CAMPAIGN);
-      await expect(campaignDialog).toContainText(/无尽深渊|通关第三幕|未解锁/);
-      await app.closeModal();
-      await app.openPrepareFromBase();
-    }
+    const endlessToggle = prepareScreen
+      .locator('[data-testid="btn-mode-endless"], [data-mode="endless"], button:has-text("无尽深渊")')
+      .first();
+    await expect(endlessToggle).toBeVisible();
+    await expect(endlessToggle).toBeDisabled();
+    await expect(prepareScreen).toContainText(/通关第三幕|解锁|未解锁/);
 
     await app.launchExpedition();
     const snap = await app.inspect();
@@ -288,8 +280,7 @@ test.describe('Tier 2 · A9: Endgame, Endless Abyss & Career Boundaries', () => 
 
     // Unconditionally verify a claimable achievement button exists, double-click it, and assert single grant across reload
     const claimBtn = careerDialog
-      .locator('[data-testid^="btn-claim-achievement-"], button')
-      .filter({ hasText: /领取/ })
+      .locator('[data-testid^="btn-claim-achievement-"]')
       .first();
     await expect(
       claimBtn,
@@ -297,32 +288,52 @@ test.describe('Tier 2 · A9: Endgame, Endless Abyss & Career Boundaries', () => 
     ).toBeVisible();
     await expect(claimBtn).toBeEnabled();
 
+    const achId = await claimBtn.getAttribute('data-claim-ach');
+    expect(achId, 'Claim button must expose data-claim-ach ID').toBeTruthy();
+    const claimLabel = await claimBtn.innerText();
+    const rewardMatch = claimLabel.match(/\+(\d+)\s*¤\s*\/\s*\+(\d+)\s*零件/);
+    expect(
+      rewardMatch,
+      `Claim button must disclose exact reward credits/parts (got "${claimLabel}")`,
+    ).not.toBeNull();
+    const expectedCredits = Number(rewardMatch![1]);
+    const expectedParts = Number(rewardMatch![2]);
+
     const creditsBefore = (await app.inspect()).credits;
     const partsBefore = (await app.inspect()).salvageParts;
     await claimBtn.dblclick();
 
     const snapAfterClaim = await app.waitForInspect(
-      (s) => s.credits > creditsBefore || s.salvageParts > partsBefore,
+      (s) => s.credits === creditsBefore + expectedCredits && s.salvageParts === partsBefore + expectedParts,
       10_000,
-      'achievement reward granted after claim',
+      'achievement exact single-grant reward applied after double-click',
     );
     const creditDelta = snapAfterClaim.credits - creditsBefore;
     const partsDelta = snapAfterClaim.salvageParts - partsBefore;
-    expect(creditDelta + partsDelta).toBeGreaterThan(0);
+    expect(creditDelta).toBe(expectedCredits);
+    expect(partsDelta).toBe(expectedParts);
+
+    // Claim button for this achievement must be removed immediately after claiming
+    await expect(
+      careerDialog.locator(`[data-testid="btn-claim-achievement-${achId}"]`),
+    ).toHaveCount(0);
 
     await page.reload({ waitUntil: 'domcontentloaded' });
     const snapAfterReload = await app.waitForInspect(
       (s) => s.screen === 'base',
-      15_000,
+      30_000,
       'reloaded after achievement claim',
     );
-    expect(snapAfterReload.credits).toBe(snapAfterClaim.credits);
-    expect(snapAfterReload.salvageParts).toBe(snapAfterClaim.salvageParts);
+    expect(snapAfterReload.credits).toBe(creditsBefore + expectedCredits);
+    expect(snapAfterReload.salvageParts).toBe(partsBefore + expectedParts);
 
     const saved = await app.readStorageJson<V3SaveData>(STORAGE_KEYS.V2_SAVE);
     const unlocked = saved?.profile.achievementsUnlocked ?? [];
-    expect(unlocked.length).toBeGreaterThanOrEqual(1);
+    const claimed = saved?.profile.achievementsClaimed ?? [];
+    expect(unlocked).toContain(achId);
     expect(new Set(unlocked).size).toBe(unlocked.length);
+    expect(claimed.filter((id) => id === achId)).toHaveLength(1);
+    expect(new Set(claimed).size).toBe(claimed.length);
 
     monitor.assertClean(snapAfterReload);
   });

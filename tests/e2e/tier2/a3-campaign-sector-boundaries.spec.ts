@@ -221,6 +221,7 @@ test.describe('Tier 2 · A3: Campaign & Sector Access Gate Boundaries', () => {
       bay: relicBay,
     });
     settleSave.profile.buildings.display = true;
+    settleSave.profile.facilityTiers.display = 1;
     settleSave.profile.campaign.relicPityCounters = {
       near_orbit: 3,
       frozen_graveyard: 1,
